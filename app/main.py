@@ -35,7 +35,7 @@ ROUTE MAP (every router lives under /api/v1)
 """
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
@@ -135,6 +135,11 @@ app.include_router(attendance_router, prefix=API_PREFIX)
 @app.get("/health", tags=["Health"])
 async def health_check():
     return {"status": "healthy", "app": settings.app_name, "version": "1.0.0"}
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return Response(status_code=204)
 
 
 @app.get("/", tags=["Root"])

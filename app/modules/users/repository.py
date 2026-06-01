@@ -22,7 +22,7 @@ class UserRepository:
         return await self.db.get(User, user_id)
 
     async def get_by_username(self, username: str) -> User | None:
-        res = await self.db.execute(select(User).where(User.username == username))
+        res = await self.db.execute(select(User).where(User.phone == username))
         return res.scalar_one_or_none()
 
     async def get_by_email(self, email: str) -> User | None:
