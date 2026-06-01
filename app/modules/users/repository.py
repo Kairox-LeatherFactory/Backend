@@ -21,8 +21,8 @@ class UserRepository:
     async def get(self, user_id: uuid.UUID) -> User | None:
         return await self.db.get(User, user_id)
 
-    async def get_by_phone(self, phone: str) -> User | None:
-        res = await self.db.execute(select(User).where(User.phone == phone))
+    async def get_by_username(self, username: str) -> User | None:
+        res = await self.db.execute(select(User).where(User.username == username))
         return res.scalar_one_or_none()
 
     async def get_by_email(self, email: str) -> User | None:

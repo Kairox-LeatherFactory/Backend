@@ -26,7 +26,7 @@ class Token(BaseModel):
 class LoginRequest(BaseModel):
     """JSON login (phone + password). The form-based OAuth2 flow is also
     supported on the same endpoint for Swagger's Authorize button."""
-    phone: str
+    username: str
     password: str
 
 

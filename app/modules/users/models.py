@@ -45,7 +45,7 @@ class User(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "app_user"
 
     name: Mapped[str] = mapped_column(String(120), index=True)
-    phone: Mapped[str] = mapped_column(String(30), unique=True, index=True)
+    username: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     email: Mapped[str | None] = mapped_column(String(160), unique=True, index=True)
 
     password_hash: Mapped[str] = mapped_column(String(200))

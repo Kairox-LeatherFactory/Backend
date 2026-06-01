@@ -37,13 +37,10 @@ auth_router = APIRouter(tags=["Authentication"])
 
 @auth_router.post("/login", response_model=schemas.Token)
 async def login(
-    form: OAuth2PasswordRequestForm = Depends(),
+    body: schemas.LoginRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """OAuth2-form login. The 'username' field carries the PHONE number.
-    (Swagger's Authorize dialog posts this form; JSON clients can post the same
-    fields.)"""
-    return await UserService(db).login(form.username, form.password)
+    return await UserService(db).login(body.username, body.password)
 
 
 @auth_router.get("/me", response_model=schemas.UserRead)

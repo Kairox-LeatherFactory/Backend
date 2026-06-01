@@ -41,24 +41,24 @@ class UserService:
         self.repo = UserRepository(db)
 
     # ── Authentication ──────────────────────────────────────────────────────
-    async def authenticate(self, phone: str, password: str) -> User | None:
-        user = await self.repo.get_by_phone(phone)
+    async def authenticate(self, username: str, password: str) -> User | None:
+        user = await self.repo.get_by_username(username)
         if not user or not user.is_active:
             return None
         if not verify_password(password, user.password_hash):
             return None
         return user
 
-    async def login(self, phone: str, password: str) -> schemas.Token:
-        login_attempts_check(phone)            # raises 429 if over budget
-        user = await self.authenticate(phone, password)
+    async def login(self, username: str, password: str) -> schemas.Token:
+        login_attempts_check(username)            # raises 429 if over budget
+        user = await self.authenticate(username, password)
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect phone or password",
+                detail="Incorrect username or password",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        login_attempts_clear(phone)
+        login_attempts_clear(username)
         token = create_access_token(user_id=user.id, role=user.role, name=user.name)
         return schemas.Token(
             access_token=token, role=user.role, name=user.name,
@@ -67,7 +67,7 @@ class UserService:
 
     # ── User management (direct manager) ─────────────────────────────────────
     async def create_user(self, body: schemas.UserCreate) -> User:
-        if await self.repo.get_by_phone(body.phone):
+        if await self.repo.get_by_username(body.name):
             raise HTTPException(status.HTTP_409_CONFLICT, "Phone already registered")
         if body.email and await self.repo.get_by_email(body.email):
             raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
@@ -79,8 +79,8 @@ class UserService:
         )
 
     async def create_client_user(self, body: schemas.ClientUserCreate) -> User:
-        if await self.repo.get_by_phone(body.phone):
-            raise HTTPException(status.HTTP_409_CONFLICT, "Phone already registered")
+        if await self.repo.get_by_username(body.name):
+            raise HTTPException(status.HTTP_409_CONFLICT, "Username already registered")
         raw = body.password or body.phone
         return await self.repo.create(
             name=body.name, phone=body.phone, email=body.email,
