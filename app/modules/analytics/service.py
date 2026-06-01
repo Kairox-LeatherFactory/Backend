@@ -1,0 +1,112 @@
+"""
+================================================================================
+modules/analytics/service.py — Read-only cross-module analytics (async)
+================================================================================
+Powers the live dashboard, the sea-freight risk predictor, and stage-spread
+bottleneck detection — the features that map directly onto the factory's
+money-losing problems (missed sea window -> air freight -> lost margin).
+
+This module is allowed to read across modules' tables (read-only) for
+aggregate reporting. It never writes.
+================================================================================
+"""
+from datetime import date
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.core.enums import ShipMode
+from app.modules.clients.models import SKU, Client, PurchaseOrder, Style
+from app.modules.production.models import Operation, ProductionEvent
+
+
+class AnalyticsService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def factory_overview(self) -> dict:
+        total_ordered = await self.db.scalar(
+            select(func.coalesce(func.sum(SKU.qty_ordered), 0))
+        ) or 0
+        total_produced = await self.db.scalar(
+            select(func.coalesce(func.sum(ProductionEvent.qty), 0))
+        ) or 0
+        clients = await self.db.scalar(select(func.count(Client.id))) or 0
+        styles = await self.db.scalar(select(func.count(Style.id))) or 0
+        return {
+            "clients": int(clients),
+            "styles": int(styles),
+            "total_pieces_ordered": int(total_ordered),
+            "total_operations_logged": int(total_produced),
+        }
+
+    async def stage_spread_alerts(self) -> list[dict]:
+        """Detect bottlenecks: where a downstream stage lags CUTTING badly.
+        We surface the spread; we never 'correct' it (pieces don't conserve)."""
+        alerts: list[dict] = []
+        styles = (await self.db.execute(select(Style))).scalars().all()
+        for style in styles:
+            rows = (await self.db.execute(
+                select(Operation.code, func.coalesce(func.sum(ProductionEvent.qty), 0))
+                .select_from(ProductionEvent)
+                .join(SKU, SKU.id == ProductionEvent.sku_id)
+                .join(Operation, Operation.id == ProductionEvent.operation_id)
+                .where(SKU.style_id == style.id)
+                .group_by(Operation.code)
+            )).all()
+            totals = dict(rows)
+            if not totals:
+                continue
+            first = totals.get("CUTTING", 0)
+            for code, qty in totals.items():
+                if code == "CUTTING":
+                    continue
+                gap = first - int(qty)
+                if first > 0 and gap > 0 and gap / first > 0.5:
+                    alerts.append({
+                        "style": style.name, "stage": code, "cut": first,
+                        "reached_stage": int(qty), "gap": gap,
+                        "severity": "high" if gap / first > 0.75 else "medium",
+                    })
+        return alerts
+
+    async def freight_risk(self, today: date | None = None) -> list[dict]:
+        """Flag POs approaching their sea-freight cutoff while still in production.
+        Missing the sea window forces air freight, which can erase the margin."""
+        today = today or date.today()
+        warn_from = settings.sea_cutoff_warning_days
+        risks: list[dict] = []
+        pos = (await self.db.execute(select(PurchaseOrder))).scalars().all()
+        last_seq = await self.db.scalar(select(func.max(Operation.sequence)))
+        for po in pos:
+            if not po.sea_cutoff_date or po.ship_mode == ShipMode.AIR.value:
+                continue
+            days_left = (po.sea_cutoff_date - today).days
+            if days_left > warn_from:
+                continue
+            ordered = await self.db.scalar(
+                select(func.coalesce(func.sum(SKU.qty_ordered), 0))
+                .join(Style, Style.id == SKU.style_id)
+                .where(Style.purchase_order_id == po.id)
+            ) or 0
+            finished = await self.db.scalar(
+                select(func.coalesce(func.sum(ProductionEvent.qty), 0))
+                .select_from(ProductionEvent)
+                .join(SKU, SKU.id == ProductionEvent.sku_id)
+                .join(Style, Style.id == SKU.style_id)
+                .join(Operation, Operation.id == ProductionEvent.operation_id)
+                .where(Style.purchase_order_id == po.id, Operation.sequence == last_seq)
+            ) or 0
+            pct = (finished / ordered) if ordered else 0
+            risks.append({
+                "po_number": po.po_number,
+                "sea_cutoff": po.sea_cutoff_date.isoformat(),
+                "days_left": days_left,
+                "ordered": int(ordered),
+                "finished": int(finished),
+                "pct_complete": round(pct * 100, 1),
+                "risk": "critical" if days_left <= 2 and pct < 0.9 else
+                        "high" if pct < 0.7 else "watch",
+            })
+        return risks

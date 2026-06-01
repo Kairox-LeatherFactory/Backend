@@ -1,0 +1,23 @@
+[importlinter]
+root_package = app
+
+[importlinter:contract:core-independence]
+name = Core depends on nothing in modules
+type = forbidden
+source_modules = app.core
+forbidden_modules = app.modules
+
+[importlinter:contract:layered-modules]
+name = Within each module, layering is router -> service -> repository -> models
+type = layers
+layers =
+    router
+    service
+    repository
+    models
+containers =
+    app.modules.clients
+    app.modules.employees
+    app.modules.production
+    app.modules.wages
+    app.modules.users

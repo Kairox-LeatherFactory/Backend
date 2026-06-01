@@ -1,0 +1,32 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: factory
+      POSTGRES_PASSWORD: factory
+      POSTGRES_DB: factory
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U factory"]
+      interval: 5s
+      retries: 5
+
+  api:
+    build: .
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      # SYNC URL for Alembic + seed; the app auto-derives the async (asyncpg) URL.
+      DATABASE_URL: postgresql+psycopg2://factory:factory@db:5432/factory
+      SECRET_KEY: dev-only-insecure-change-me
+      DEBUG: "true"
+    ports: ["8000:8000"]
+    command: >
+      sh -c "alembic upgrade head &&
+             python -m scripts.seed &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    volumes: ["./:/app"]
+
+volumes:
+  pgdata:
