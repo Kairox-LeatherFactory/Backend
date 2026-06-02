@@ -1,5 +1,24 @@
+# Python caches / local virtualenv (the image installs its own deps)
 __pycache__/
 *.pyc
-.env
 .venv/
-*.json
+.pytest_cache/
+
+# Secrets — provided at runtime via env_file / environment, never baked in
+.env
+.env.example
+
+# VCS / tooling / docs — not needed inside the image
+.git/
+.github/
+.claude/
+.gitattributes
+.gitignore
+
+# Dev artifacts / large dumps that bloat the build context
+full_project_dump.txt
+openapi.json
+*.md
+
+# NOTE: keep app/, alembic/, scripts/, data/, requirements.txt, entrypoint.sh,
+# alembic.ini — all required for migrate + seed + run.

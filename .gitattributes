@@ -1,0 +1,5 @@
+# Shell scripts MUST keep LF endings — they run inside Linux containers and
+# are bind-mounted from the host. CRLF breaks the shebang ("no such file or
+# directory"). This overrides core.autocrlf on Windows checkouts.
+*.sh text eol=lf
+entrypoint.sh text eol=lf

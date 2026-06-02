@@ -49,9 +49,15 @@ class ShiftConfig(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "shift_config"
 
     # Shift policy
-    shift_start: Mapped[str] = mapped_column(String(5), default="09:00")    # "HH:MM"
+    shift_start: Mapped[str] = mapped_column(String(5), default="09:00")    # "HH:MM" (factory wall-clock)
     shift_length_hours: Mapped[float] = mapped_column(Numeric(4, 2), default=8.0)
     late_grace_minutes: Mapped[int] = mapped_column(default=15)
+
+    # Factory timezone (IANA name, e.g. "Asia/Kolkata"). SINGLE source of truth
+    # for interpreting wall-clock policy (shift_start -> is_late) and for which
+    # calendar day a punch belongs to (work_date). Storage stays UTC; this is
+    # only applied at the business-logic + display boundaries.
+    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Kolkata")
 
     # Geofence (100-meter rule from the spec)
     factory_lat: Mapped[float] = mapped_column(Numeric(10, 7), default=0.0)

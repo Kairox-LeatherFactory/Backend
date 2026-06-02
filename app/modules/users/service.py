@@ -67,11 +67,11 @@ class UserService:
 
     # ── User management (direct manager) ─────────────────────────────────────
     async def create_user(self, body: schemas.UserCreate) -> User:
-        if await self.repo.get_by_username(body.name):
+        if await self.repo.get_by_username(body.phone):
             raise HTTPException(status.HTTP_409_CONFLICT, "Phone already registered")
         if body.email and await self.repo.get_by_email(body.email):
             raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
-        raw = body.password or body.phone          # default password = phone
+        raw = body.password          # default password = phone
         return await self.repo.create(
             name=body.name, phone=body.phone, email=body.email, role=body.role,
             password_hash=get_password_hash(raw), employee_id=body.employee_id,
@@ -79,9 +79,9 @@ class UserService:
         )
 
     async def create_client_user(self, body: schemas.ClientUserCreate) -> User:
-        if await self.repo.get_by_username(body.name):
-            raise HTTPException(status.HTTP_409_CONFLICT, "Username already registered")
-        raw = body.password or body.phone
+        if await self.repo.get_by_username(body.phone):
+            raise HTTPException(status.HTTP_409_CONFLICT, "Phone already registered")
+        raw = body.password
         return await self.repo.create(
             name=body.name, phone=body.phone, email=body.email,
             role=UserRole.CLIENT, password_hash=get_password_hash(raw),

@@ -9,6 +9,7 @@ Endpoints (all mounted under /api/v1):
   POST   /attendance/proxy/check-out     Flow B: supervisor closes them
   POST   /attendance/daily-workers       Flow C: supervisor onboards a daily worker
   GET    /attendance/me                  Own attendance history (calendar view)
+  GET    /attendance/me/status           Live shift status (server-anchored countdown)
   GET    /attendance/today               Today's roster (manager/HR view)
   GET    /attendance/config              Read shift + geofence policy
   PATCH  /attendance/config              Manager/HR updates policy
@@ -79,6 +80,16 @@ async def my_history(
     end = end or date.today()
     start = start or (end - timedelta(days=30))
     return await AttendanceService(db).history(user.employee_id, start, end)
+
+
+@router.get("/me/status", response_model=schemas.ShiftStatus)
+async def my_status(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Server-anchored data for the live shift countdown. Frontend computes a
+    one-time (server_now - device_now) offset and ticks toward shift_end_at."""
+    return await AttendanceService(db).my_status(user)
 
 
 @router.get("/today", response_model=list[schemas.AttendanceRead])

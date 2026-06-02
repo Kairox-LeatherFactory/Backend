@@ -26,6 +26,13 @@ aiosqlite==0.22.1         # async SQLite (tests / local)
 pydantic==2.13.4
 pydantic-settings==2.14.1
 
+# ── Timezone data ──────────────────────────────────────────────────────────
+# zoneinfo (stdlib) reads the OS tz database, which is ABSENT on Windows and on
+# slim/distroless containers. This package ships the IANA tz data so
+# ZoneInfo("Asia/Kolkata") works everywhere — required for attendance's
+# wall-clock logic (is_late / work_date).
+tzdata==2025.2
+
 # ── Auth (self-issued JWT) ─────────────────────────────────────────────────
 python-jose[cryptography]==3.5.0
 bcrypt==5.0.0            # used DIRECTLY in core/security.py. passlib was removed:

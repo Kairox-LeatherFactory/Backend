@@ -2,6 +2,11 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 from alembic import context
 import os
+import sys
+from pathlib import Path
+
+# Add the backend directory to sys.path so alembic can import app modules
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.core.config import get_settings
 from app.core.database import Base
@@ -13,7 +18,10 @@ from app.modules.production import models as _p  # noqa
 from app.modules.wages import models as _w       # noqa
 
 config = context.config
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+db_url = get_settings().database_url
+# Escape % characters in the URL for ConfigParser (it treats % as interpolation)
+db_url = db_url.replace("%", "%%")
+config.set_main_option("sqlalchemy.url", db_url)
 if config.config_file_name:
     fileConfig(config.config_file_name)
 target_metadata = Base.metadata
