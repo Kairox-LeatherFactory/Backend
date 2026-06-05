@@ -9,6 +9,7 @@ Endpoints (all mounted under /api/v1):
   POST   /attendance/proxy/check-out     Flow B: supervisor closes them
   POST   /attendance/daily-workers       Flow C: supervisor onboards a daily worker
   GET    /attendance/me                  Own attendance history (calendar view)
+  GET    /attendance/me/status           Live shift status (server-anchored countdown)
   GET    /attendance/today               Today's roster (manager/HR view)
   GET    /attendance/config              Read shift + geofence policy
   PATCH  /attendance/config              Manager/HR updates policy
@@ -32,8 +33,8 @@ router = APIRouter(prefix="/attendance", tags=["Attendance"])
 
 @router.post("/check-in", response_model=schemas.AttendanceRead, status_code=201)
 async def check_in(body: schemas.CheckInRequest,
-                   db: AsyncSession = Depends(get_db),
-                   user: User = Depends(get_current_user)):
+            db: AsyncSession = Depends(get_db),
+            user: User = Depends(get_current_user)):
     return await AttendanceService(db).self_check_in(user, body)
 
 
@@ -46,8 +47,8 @@ async def check_out(body: schemas.CheckOutRequest,
 
 @router.post("/proxy/check-in", response_model=list[schemas.AttendanceRead], status_code=201)
 async def proxy_check_in(body: schemas.ProxyMarkRequest,
-                         db: AsyncSession = Depends(get_db),
-                         user: User = Depends(get_current_user)):
+                        db: AsyncSession = Depends(get_db),
+                        user: User = Depends(get_current_user)):
     """Spec Flow B. require_roles isn't used here because the SERVICE enforces
     SUPERVISOR/DIRECT_MANAGER and also validates the worker is daily-wage."""
     return await AttendanceService(db).proxy_mark_present(user, body)
@@ -55,15 +56,15 @@ async def proxy_check_in(body: schemas.ProxyMarkRequest,
 
 @router.post("/proxy/check-out", response_model=list[schemas.AttendanceRead])
 async def proxy_check_out(body: schemas.ProxyMarkRequest,
-                          db: AsyncSession = Depends(get_db),
-                          user: User = Depends(get_current_user)):
+                        db: AsyncSession = Depends(get_db),
+                        user: User = Depends(get_current_user)):
     return await AttendanceService(db).proxy_check_out(user, body)
 
 
 @router.post("/daily-workers", status_code=201)
 async def add_daily_worker(body: schemas.AddDailyWorkerRequest,
-                           db: AsyncSession = Depends(get_db),
-                           user: User = Depends(get_current_user)):
+                        db: AsyncSession = Depends(get_db),
+                        user: User = Depends(get_current_user)):
     emp = await AttendanceService(db).add_daily_worker(user, body)
     return {"id": str(emp.id), "name": emp.name, "wage_type": emp.wage_type.value}
 
@@ -79,6 +80,16 @@ async def my_history(
     end = end or date.today()
     start = start or (end - timedelta(days=30))
     return await AttendanceService(db).history(user.employee_id, start, end)
+
+
+@router.get("/me/status", response_model=schemas.ShiftStatus)
+async def my_status(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Server-anchored data for the live shift countdown. Frontend computes a
+    one-time (server_now - device_now) offset and ticks toward shift_end_at."""
+    return await AttendanceService(db).my_status(user)
 
 
 @router.get("/today", response_model=list[schemas.AttendanceRead])

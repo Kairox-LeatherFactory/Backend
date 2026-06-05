@@ -81,9 +81,9 @@ from app.modules.imports.load_to_db import (
 )
 
 # ── Reference data ────────────────────────────────────────────────────────
-GARMENT_FILE = "/mnt/project/GARMENT_ORDERPRODUCTION_DETAILS.xlsx"
-EMPLOYEES_FILE = "/mnt/project/employees_detail.xlsx"
-JOHNPETER_FILE = "/mnt/project/johnpeter.xlsx"
+GARMENT_FILE = "data/GARMENT_ORDERPRODUCTION_DETAILS.xlsx"
+EMPLOYEES_FILE = "data/employees_detail.xlsx"
+JOHNPETER_FILE = "data/johnpeter.xlsx"
 
 OPS = [("CUTTING", "Cutting", 1), ("FUSING", "Fusing", 2), ("PASTING", "Pasting", 3),
        ("SHELL", "Shell stitch", 4), ("LA", "Lining attach", 5),

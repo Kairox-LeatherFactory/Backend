@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,7 +59,7 @@ class AttendanceService:
         """Spec: distance > radius -> block with a clear error."""
         cfg = await self._config()
         ok, dist = within_geofence(lat, lon, float(cfg.factory_lat),
-                                   float(cfg.factory_lon), cfg.radius_m)
+                                float(cfg.factory_lon), cfg.radius_m)
         if not ok:
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
@@ -68,25 +69,71 @@ class AttendanceService:
         return dist
 
     def _now(self) -> datetime:
-        """SERVER timestamp (spec: 'blocking client-side time manipulation')."""
+        """SERVER timestamp in UTC (spec: 'blocking client-side time manipulation').
+
+        UTC is the ONLY thing we store. Wall-clock is derived from cfg.timezone
+        at the two boundaries that need it: is_late and work_date.
+        """
         return datetime.now(timezone.utc)
 
+    @staticmethod
+    def _tz(cfg: ShiftConfig) -> ZoneInfo:
+        """Factory timezone. Falls back to UTC if the configured name is bad
+        (so a typo in config can never crash a check-in)."""
+        try:
+            return ZoneInfo(cfg.timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            return ZoneInfo("UTC")
+
+    @staticmethod
+    def _as_utc(dt: datetime) -> datetime:
+        """Normalize to a tz-aware UTC instant. SQLite returns naive datetimes
+        even for DateTime(timezone=True); we stored UTC, so tag it as UTC."""
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    def _local_now(self, cfg: ShiftConfig) -> datetime:
+        return self._now().astimezone(self._tz(cfg))
+
+    async def _local_today(self) -> date:
+        """The factory's current calendar day. This is the work_date boundary —
+        NOT the server's local date — so a punch lands on the right day
+        regardless of where the server is hosted."""
+        cfg = await self._config()
+        return self._local_now(cfg).date()
+
     def _flags(self, cfg: ShiftConfig, check_in: datetime,
-               check_out: datetime | None) -> tuple[bool, bool, bool]:
-        """Compute (is_late, is_short, is_overtime) from policy + punches."""
-        # Late: check-in past (shift_start + grace).
+            check_out: datetime | None) -> tuple[bool, bool, bool]:
+        """Compute (is_late, is_short, is_overtime) from policy + punches.
+
+        is_late is a WALL-CLOCK comparison, so we convert the (UTC) check-in to
+        factory-local time before building shift_start. is_short/is_overtime are
+        durations, which are timezone-independent.
+        """
+        tz = self._tz(cfg)
+        local_in = self._as_utc(check_in).astimezone(tz)
         h, m = (int(x) for x in cfg.shift_start.split(":"))
-        shift_start_today = check_in.replace(hour=h, minute=m, second=0, microsecond=0)
+        shift_start_today = local_in.replace(hour=h, minute=m, second=0, microsecond=0)
         grace = timedelta(minutes=cfg.late_grace_minutes)
-        is_late = check_in > (shift_start_today + grace)
+        is_late = local_in > (shift_start_today + grace)
 
         is_short = is_ot = False
         if check_out:
-            worked_h = (check_out - check_in).total_seconds() / 3600.0
+            worked_h = (self._as_utc(check_out) - self._as_utc(check_in)).total_seconds() / 3600.0
             std = float(cfg.shift_length_hours)
             is_short = worked_h < std
             is_ot = worked_h > std
         return is_late, is_short, is_ot
+
+    def _shift_end_at(self, cfg: ShiftConfig, check_in: datetime) -> datetime:
+        """When the shift is 'complete' for this punch, as a UTC instant.
+
+        Anchored to check-in + shift_length so it matches the backend's
+        is_short/is_overtime calc EXACTLY — this is the target the frontend
+        live countdown ticks toward, guaranteeing both agree.
+        """
+        return self._as_utc(check_in) + timedelta(hours=float(cfg.shift_length_hours))
 
     # ══════════════════════════════════════════════════════════════════
     # Flow A — Self-service check-in / check-out
@@ -111,7 +158,7 @@ class AttendanceService:
     # Flow B — Supervisor proxy-marks daily-wage workers
     # ══════════════════════════════════════════════════════════════════
     async def proxy_mark_present(self, supervisor: User,
-                                 body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
+                                body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
         # Permission: SUPERVISOR (and DIRECT_MANAGER as superuser) only.
         if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER):
             raise HTTPException(403, "Only a supervisor may proxy-mark attendance.")
@@ -160,14 +207,14 @@ class AttendanceService:
     # Open / close primitives (used by both flows)
     # ══════════════════════════════════════════════════════════════════
     async def _open_or_reject(self, *, employee_id: uuid.UUID, source: AttendanceSource,
-                              recorded_by: uuid.UUID | None, distance_m: float) -> AttendanceLog:
-        today = date.today()
+                            recorded_by: uuid.UUID | None, distance_m: float) -> AttendanceLog:
+        cfg = await self._config()
+        now = self._now()
+        today = now.astimezone(self._tz(cfg)).date()    # factory-local calendar day
         existing = await self.repo.find(employee_id, today)
         if existing:
             # Idempotent + safe: re-tapping check-in same day is a no-op, not a duplicate.
             return existing
-        now = self._now()
-        cfg = await self._config()
         is_late, _, _ = self._flags(cfg, now, None)
         log = AttendanceLog(
             employee_id=employee_id, work_date=today,
@@ -177,7 +224,7 @@ class AttendanceService:
         return await self.repo.add(log)
 
     async def _close(self, *, employee_id: uuid.UUID) -> AttendanceLog:
-        today = date.today()
+        today = await self._local_today()
         log = await self.repo.find(employee_id, today)
         if not log:
             raise HTTPException(400, "No open check-in to close for today.")
@@ -192,7 +239,7 @@ class AttendanceService:
     # ══════════════════════════════════════════════════════════════════
     async def is_present_today(self, employee_id: uuid.UUID) -> bool:
         """Used by the production service to validate event entry."""
-        log = await self.repo.find(employee_id, date.today())
+        log = await self.repo.find(employee_id, await self._local_today())
         return log is not None
 
     async def total_hours(self, employee_id: uuid.UUID, start: date, end: date) -> float:
@@ -215,14 +262,52 @@ class AttendanceService:
         return await self.repo.for_employee(employee_id, start, end)
 
     async def today_roster(self) -> list[AttendanceLog]:
-        return await self.repo.by_day(date.today())
+        return await self.repo.by_day(await self._local_today())
+
+    async def my_status(self, user: User) -> schemas.ShiftStatus:
+        """Server-anchored data for the frontend live countdown.
+
+        The frontend must NOT trust the device clock. It computes a one-time
+        offset (server_now - device_now) and ticks the remaining time toward
+        shift_end_at. All values are UTC; the backend remains the source of
+        truth — at check-out it recomputes hours from the stored timestamps.
+        """
+        cfg = await self._config()
+        now = self._now()
+        log = None
+        if user.employee_id is not None:
+            log = await self.repo.find(user.employee_id, now.astimezone(self._tz(cfg)).date())
+
+        check_in_at = self._as_utc(log.check_in_at) if log and log.check_in_at else None
+        checked_out = bool(log and log.check_out_at)
+        shift_end_at = self._shift_end_at(cfg, check_in_at) if (check_in_at and not checked_out) else None
+        remaining = (
+            max(0, int((shift_end_at - now).total_seconds())) if shift_end_at else None
+        )
+        return schemas.ShiftStatus(
+            server_now=now,
+            timezone=cfg.timezone,
+            shift_length_hours=float(cfg.shift_length_hours),
+            checked_in=bool(log),
+            checked_out=checked_out,
+            check_in_at=check_in_at,
+            shift_end_at=shift_end_at,
+            remaining_seconds=remaining,
+        )
 
     async def get_config(self) -> ShiftConfig:
         return await self._config()
 
     async def update_config(self, body: schemas.ShiftConfigUpdate) -> ShiftConfig:
         cfg = await self._config()
-        for k, v in body.model_dump(exclude_unset=True).items():
+        data = body.model_dump(exclude_unset=True)
+        if "timezone" in data and data["timezone"] is not None:
+            try:
+                ZoneInfo(data["timezone"])
+            except (ZoneInfoNotFoundError, ValueError):
+                raise HTTPException(
+                    400, f"Unknown timezone '{data['timezone']}'. Use an IANA name like 'Asia/Kolkata'.")
+        for k, v in data.items():
             setattr(cfg, k, v)
         await self.repo.save(cfg)
         return cfg

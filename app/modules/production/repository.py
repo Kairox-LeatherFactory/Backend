@@ -50,9 +50,9 @@ class ProductionRepository:
         return ev
 
     async def list_events(self, sku_id: uuid.UUID | None = None,
-                          employee_id: uuid.UUID | None = None,
-                          start: date | None = None,
-                          end: date | None = None) -> list[ProductionEvent]:
+                        employee_id: uuid.UUID | None = None,
+                        start: date | None = None,
+                        end: date | None = None) -> list[ProductionEvent]:
         stmt = select(ProductionEvent)
         if sku_id:
             stmt = stmt.where(ProductionEvent.sku_id == sku_id)

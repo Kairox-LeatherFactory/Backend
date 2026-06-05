@@ -48,7 +48,7 @@ class UserCreate(BaseModel):
     phone: str
     email: str | None = None
     role: UserRole = UserRole.VIEWER
-    password: str | None = None          # defaults to the phone number if omitted
+    password: str       # defaults to the phone number if omitted
     employee_id: uuid.UUID | None = None
 
 
@@ -58,7 +58,7 @@ class ClientUserCreate(BaseModel):
     phone: str
     email: str | None = None
     client_id: uuid.UUID
-    password: str | None = None          # defaults to the phone number if omitted
+    password: str         # defaults to the phone number if omitted
 
 
 class PasswordChange(BaseModel):

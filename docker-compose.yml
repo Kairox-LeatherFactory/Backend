@@ -1,32 +1,79 @@
+# ──────────────────────────────────────────────────────────────
+# Leather Factory backend — docker-compose.yml
+# ──────────────────────────────────────────────────────────────
+#   docker compose up --build   → Postgres + Backend API (migrate + seed + uvicorn)
+#   docker compose down         → stop, KEEP data (volume persists)
+#   docker compose down -v      → stop AND wipe the DB (next `up` re-migrates + reseeds)
+#
+# The API talks to the bundled `db` service, NOT the Supabase URL in .env —
+# the DATABASE_URL / ASYNC_DATABASE_URL below override .env on purpose (compose
+# `environment:` wins over `env_file:`).
+# ──────────────────────────────────────────────────────────────
+
 services:
+  # ────────────────────────────────────────────────────────────
+  # Postgres 16 — primary data store
+  # ────────────────────────────────────────────────────────────
   db:
     image: postgres:16
+    container_name: factory_postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: factory
-      POSTGRES_PASSWORD: factory
-      POSTGRES_DB: factory
-    ports: ["5432:5432"]
-    volumes: ["pgdata:/var/lib/postgresql/data"]
+      POSTGRES_USER: ${POSTGRES_USER:-factory}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-factory}
+      POSTGRES_DB: ${POSTGRES_DB:-factory}
+    ports:
+      # Exposed on the host so devs can connect with psql/DBeaver.
+      # Drop this in production — Docker-internal access only.
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U factory"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-factory} -d ${POSTGRES_DB:-factory}"]
       interval: 5s
-      retries: 5
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
+  # ────────────────────────────────────────────────────────────
+  # Backend API — FastAPI / uvicorn
+  # entrypoint.sh runs: wait-for-db → migrate → seed → uvicorn
+  # ────────────────────────────────────────────────────────────
   api:
-    build: .
-    depends_on:
-      db: { condition: service_healthy }
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: factory_api
+    restart: unless-stopped
+    command: ["api"]
+    # Pull non-DB config (SECRET_KEY, CHAT_MODEL, GROQ_API_KEY, rate-limit knobs)
+    # from .env, then override the DB URLs to point at the compose `db` service.
+    env_file:
+      - .env
     environment:
-      # SYNC URL for Alembic + seed; the app auto-derives the async (asyncpg) URL.
-      DATABASE_URL: postgresql+psycopg2://factory:factory@db:5432/factory
-      SECRET_KEY: dev-only-insecure-change-me
+      # Sync URL (Alembic + seed) and async URL (live API), both at the `db` host.
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-factory}:${POSTGRES_PASSWORD:-factory}@db:5432/${POSTGRES_DB:-factory}
+      ASYNC_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-factory}:${POSTGRES_PASSWORD:-factory}@db:5432/${POSTGRES_DB:-factory}
       DEBUG: "true"
-    ports: ["8000:8000"]
-    command: >
-      sh -c "alembic upgrade head &&
-             python -m scripts.seed &&
-             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
-    volumes: ["./:/app"]
+      RUN_MIGRATIONS: "true"
+      RUN_SEED: "true"
+      UVICORN_RELOAD: "true"   # hot-reload in dev; remove for a production-like run
+    ports:
+      - "${BACKEND_HOST_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # Bind-mount the source for hot-reload during dev.
+      # COMMENT THIS OUT to test the baked image as it ships.
+      - ./:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s   # first boot runs migrations + seed
 
 volumes:
   pgdata:
+    name: factory_pgdata
