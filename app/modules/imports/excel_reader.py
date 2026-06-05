@@ -35,7 +35,7 @@ def to_int(value) -> int | None:
     if isinstance(value, bool):          # bools are ints in Python; reject them
         return None
     if isinstance(value, (int, float)):
-        if value != value:               # NaN check (NaN != NaN is True)
+        if value != value:               # NaN check (NaN != NaN is True) bz NaN is not equal to anything, including itself
             return None
         return int(value)
     s = str(value).strip()
@@ -53,7 +53,7 @@ def to_date(value) -> date | None:
     if isinstance(value, date):
         return value
     s = str(value).strip()
-    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y"):
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y"):#No need to loop here
         try:
             return datetime.strptime(s, fmt).date()
         except ValueError:

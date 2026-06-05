@@ -59,7 +59,7 @@ class AttendanceService:
         """Spec: distance > radius -> block with a clear error."""
         cfg = await self._config()
         ok, dist = within_geofence(lat, lon, float(cfg.factory_lat),
-                                   float(cfg.factory_lon), cfg.radius_m)
+                                float(cfg.factory_lon), cfg.radius_m)
         if not ok:
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
@@ -104,7 +104,7 @@ class AttendanceService:
         return self._local_now(cfg).date()
 
     def _flags(self, cfg: ShiftConfig, check_in: datetime,
-               check_out: datetime | None) -> tuple[bool, bool, bool]:
+            check_out: datetime | None) -> tuple[bool, bool, bool]:
         """Compute (is_late, is_short, is_overtime) from policy + punches.
 
         is_late is a WALL-CLOCK comparison, so we convert the (UTC) check-in to
@@ -158,7 +158,7 @@ class AttendanceService:
     # Flow B — Supervisor proxy-marks daily-wage workers
     # ══════════════════════════════════════════════════════════════════
     async def proxy_mark_present(self, supervisor: User,
-                                 body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
+                                body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
         # Permission: SUPERVISOR (and DIRECT_MANAGER as superuser) only.
         if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER):
             raise HTTPException(403, "Only a supervisor may proxy-mark attendance.")
@@ -207,7 +207,7 @@ class AttendanceService:
     # Open / close primitives (used by both flows)
     # ══════════════════════════════════════════════════════════════════
     async def _open_or_reject(self, *, employee_id: uuid.UUID, source: AttendanceSource,
-                              recorded_by: uuid.UUID | None, distance_m: float) -> AttendanceLog:
+                            recorded_by: uuid.UUID | None, distance_m: float) -> AttendanceLog:
         cfg = await self._config()
         now = self._now()
         today = now.astimezone(self._tz(cfg)).date()    # factory-local calendar day

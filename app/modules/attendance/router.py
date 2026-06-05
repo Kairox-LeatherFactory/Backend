@@ -33,8 +33,8 @@ router = APIRouter(prefix="/attendance", tags=["Attendance"])
 
 @router.post("/check-in", response_model=schemas.AttendanceRead, status_code=201)
 async def check_in(body: schemas.CheckInRequest,
-                   db: AsyncSession = Depends(get_db),
-                   user: User = Depends(get_current_user)):
+            db: AsyncSession = Depends(get_db),
+            user: User = Depends(get_current_user)):
     return await AttendanceService(db).self_check_in(user, body)
 
 
@@ -47,8 +47,8 @@ async def check_out(body: schemas.CheckOutRequest,
 
 @router.post("/proxy/check-in", response_model=list[schemas.AttendanceRead], status_code=201)
 async def proxy_check_in(body: schemas.ProxyMarkRequest,
-                         db: AsyncSession = Depends(get_db),
-                         user: User = Depends(get_current_user)):
+                        db: AsyncSession = Depends(get_db),
+                        user: User = Depends(get_current_user)):
     """Spec Flow B. require_roles isn't used here because the SERVICE enforces
     SUPERVISOR/DIRECT_MANAGER and also validates the worker is daily-wage."""
     return await AttendanceService(db).proxy_mark_present(user, body)
@@ -56,15 +56,15 @@ async def proxy_check_in(body: schemas.ProxyMarkRequest,
 
 @router.post("/proxy/check-out", response_model=list[schemas.AttendanceRead])
 async def proxy_check_out(body: schemas.ProxyMarkRequest,
-                          db: AsyncSession = Depends(get_db),
-                          user: User = Depends(get_current_user)):
+                        db: AsyncSession = Depends(get_db),
+                        user: User = Depends(get_current_user)):
     return await AttendanceService(db).proxy_check_out(user, body)
 
 
 @router.post("/daily-workers", status_code=201)
 async def add_daily_worker(body: schemas.AddDailyWorkerRequest,
-                           db: AsyncSession = Depends(get_db),
-                           user: User = Depends(get_current_user)):
+                        db: AsyncSession = Depends(get_db),
+                        user: User = Depends(get_current_user)):
     emp = await AttendanceService(db).add_daily_worker(user, body)
     return {"id": str(emp.id), "name": emp.name, "wage_type": emp.wage_type.value}
 
