@@ -16,8 +16,8 @@ from app.modules.wages.service import WageService
 
 async def _setup(db):
     client = cm.Client(name="C"); db.add(client); await db.flush()
-    po = cm.PurchaseOrder(client_id=client.id, po_number="PO1"); db.add(po); await db.flush()
-    carnaby = cm.Style(purchase_order_id=po.id, name="CARNABY"); db.add(carnaby); await db.flush()
+    po = cm.ClientOrder(client_id=client.id, order_number="PO1"); db.add(po); await db.flush()
+    carnaby = cm.Style(client_order_id=po.id, name="CARNABY"); db.add(carnaby); await db.flush()
     # 152 ordered pieces across a couple of SKUs (matches the real Carnaby card).
     db.add_all([
         cm.SKU(style_id=carnaby.id, color_code="57", size="S", qty_ordered=100),

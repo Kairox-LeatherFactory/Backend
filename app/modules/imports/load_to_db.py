@@ -15,7 +15,7 @@ from datetime import date
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.modules.clients.models import Client, PurchaseOrder, Style, SKU
+from app.modules.clients.models import Client, ClientOrder, Style, SKU
 from app.modules.production.models import Operation, ProductionEvent
 from app.modules.wages.models import Rate
 
@@ -28,21 +28,21 @@ def _get_or_create_client(db: Session, name: str, country: str | None) -> Client
     return c
 
 
-def _get_or_create_po(db: Session, client: Client, po_number: str) -> PurchaseOrder:
-    po = db.scalar(select(PurchaseOrder).where(
-        PurchaseOrder.client_id == client.id, PurchaseOrder.po_number == po_number))
-    if not po:
-        po = PurchaseOrder(client_id=client.id, po_number=po_number)
-        db.add(po); db.flush()
-    return po
+def _get_or_create_order(db: Session, client: Client, order_number: str) -> ClientOrder:
+    order = db.scalar(select(ClientOrder).where(
+        ClientOrder.client_id == client.id, ClientOrder.order_number == order_number))
+    if not order:
+        order = ClientOrder(client_id=client.id, order_number=order_number)
+        db.add(order); db.flush()
+    return order
 
 
-def _get_or_create_style(db: Session, po: PurchaseOrder, name: str,
+def _get_or_create_style(db: Session, order: ClientOrder, name: str,
                          article: str | None) -> Style:
     st = db.scalar(select(Style).where(
-        Style.purchase_order_id == po.id, Style.name == name))
+        Style.client_order_id == order.id, Style.name == name))
     if not st:
-        st = Style(purchase_order_id=po.id, name=name, article=article)
+        st = Style(client_order_id=order.id, name=name, article=article)
         db.add(st); db.flush()
     return st
 
@@ -97,12 +97,12 @@ def load_preview(db: Session, preview, country_map: dict | None = None,
         client = _get_or_create_client(db, key, country_map.get(key))
         stats["clients"] += 1
         # One PO per client for now (the sheets don't carry PO numbers); use the key.
-        po = _get_or_create_po(db, client, f"{key}-PO")
+        order = _get_or_create_order(db, client, f"{key}-PO")
 
         if replace:
             # Clear this client's prior order data so a re-import replaces, not adds.
             old_styles = db.scalars(select(Style).where(
-                Style.purchase_order_id == po.id)).all()
+                Style.client_order_id == order.id)).all()
             for st in old_styles:
                 for sk in db.scalars(select(SKU).where(SKU.style_id == st.id)).all():
                     db.delete(sk)
@@ -114,7 +114,7 @@ def load_preview(db: Session, preview, country_map: dict | None = None,
         # styles + skus from order lines
         styles_seen = set()
         for line in cp.order_lines:
-            style = _get_or_create_style(db, po, line.style, line.article)
+            style = _get_or_create_style(db, order, line.style, line.article)
             if style.id not in styles_seen:
                 styles_seen.add(style.id); stats["styles"] += 1
             for size, qty in line.sizes.items():
@@ -132,7 +132,7 @@ def load_preview(db: Session, preview, country_map: dict | None = None,
             # rates: attach to the matching style if we can find it by title prefix
             ref_style = None
             tprefix = card.title.split("-")[0].strip().upper()
-            for st in db.scalars(select(Style).where(Style.purchase_order_id == po.id)):
+            for st in db.scalars(select(Style).where(Style.client_order_id == order.id)):
                 if st.name.upper() in card.title.upper() or tprefix in st.name.upper():
                     ref_style = st; break
             if ref_style:

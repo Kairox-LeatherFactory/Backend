@@ -32,7 +32,7 @@ from datetime import date, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.clients.models import SKU, Client, PurchaseOrder, Style
+from app.modules.clients.models import SKU, Client, ClientOrder, Style
 from app.modules.intelligence.forecast import (
     StyleInput, schedule_status, detect_bottleneck, plan_styles,
 )
@@ -86,8 +86,8 @@ async def _style_ordered(db: AsyncSession, style_id) -> int:
 
 async def _deadline_for_style(db: AsyncSession, style_id) -> date | None:
     return await db.scalar(
-        select(PurchaseOrder.delivery_deadline)
-        .join(Style, Style.purchase_order_id == PurchaseOrder.id)
+        select(ClientOrder.delivery_deadline)
+        .join(Style, Style.client_order_id == ClientOrder.id)
         .where(Style.id == style_id)
     )
 

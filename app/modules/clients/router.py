@@ -40,7 +40,7 @@ async def create_client(
     return await ClientService(db).create_client(body.name, body.country)
 
 
-@router.get("/{client_id}/orders", response_model=list[schemas.PurchaseOrderRead])
+@router.get("/{client_id}/orders", response_model=list[schemas.ClientOrderRead])
 async def client_orders(
     client_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),

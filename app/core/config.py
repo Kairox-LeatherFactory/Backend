@@ -55,11 +55,25 @@ class Settings(BaseSettings):
     # Async URL drives the live API (non-blocking). If left blank we derive it
     # from database_url by swapping the driver to asyncpg.
     async_database_url: str = ""
+    # Optional least-privilege, READ-ONLY URL for the LLM / agent path (SELECT on
+    # whitelisted tables only). Blank => unused (the agent shares the app session).
+    # This is NOT Supabase Auth — just a separate Postgres role connection string.
+    ai_reader_database_url: str = ""
 
     # ── Auth (self-issued JWT) ───────────────────────────────────────────────
     # Chat model for the LangGraph agent. Blank => deterministic router (no model).
     # Examples: "ollama:qwen2.5:3b-instruct", "anthropic:claude-3-5-haiku", "openai:gpt-4o-mini"
     chat_model: str = ""
+
+    # ── Document extraction (BOM Procurement Workflow) ───────────────────────
+    # Policy: NO LLM unless extraction/classification genuinely requires it (scanned
+    # / handwritten PDFs, narrative spec sheets, ambiguous classification). The
+    # service runs a provider chain Gemini -> Groq -> "needs manual entry"; it never
+    # silently guesses. Embeddings remain local HF (intelligence/models_catalog.py).
+    extraction_model: str = "gemini:gemini-2.0-flash"          # primary (multimodal/long-context)
+    extraction_fallback_model: str = "groq:llama-3.3-70b-versatile"  # fallback (text/structured)
+    gemini_api_key: str = ""        # langchain-google-genai
+    groq_api_key: str = ""          # langchain-groq (also read from env by ChatGroq)
 
     secret_key: str = "dev-only-insecure-change-me-in-prod"
     algorithm: str = "HS256"

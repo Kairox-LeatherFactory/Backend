@@ -62,12 +62,12 @@ async def seed(db):
     """A single client/PO/style 'CARNABY', ordered 200, behind schedule, with a
     clear CUTTING->FF bottleneck in the last 14 days."""
     client = cm.Client(name="Carnaby Co", country="UK"); db.add(client); await db.flush()
-    po = cm.PurchaseOrder(
-        client_id=client.id, po_number="PO-CARNABY-01",
+    po = cm.ClientOrder(
+        client_id=client.id, order_number="PO-CARNABY-01",
         order_date=TODAY - timedelta(days=40),
         delivery_deadline=TODAY + timedelta(days=7),   # tight -> behind schedule
     ); db.add(po); await db.flush()
-    style = cm.Style(purchase_order_id=po.id, name="CARNABY"); db.add(style); await db.flush()
+    style = cm.Style(client_order_id=po.id, name="CARNABY"); db.add(style); await db.flush()
     sku = cm.SKU(style_id=style.id, color_code="57", color_name="PINE GREEN",
                  size="M", qty_ordered=200); db.add(sku); await db.flush()
 

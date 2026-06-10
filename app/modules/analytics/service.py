@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.enums import ShipMode
-from app.modules.clients.models import SKU, Client, PurchaseOrder, Style
+from app.modules.clients.models import SKU, Client, ClientOrder, Style
 from app.modules.production.models import Operation, ProductionEvent
 
 
@@ -77,18 +77,18 @@ class AnalyticsService:
         today = today or date.today()
         warn_from = settings.sea_cutoff_warning_days
         risks: list[dict] = []
-        pos = (await self.db.execute(select(PurchaseOrder))).scalars().all()
+        orders = (await self.db.execute(select(ClientOrder))).scalars().all()
         last_seq = await self.db.scalar(select(func.max(Operation.sequence)))
-        for po in pos:
-            if not po.sea_cutoff_date or po.ship_mode == ShipMode.AIR.value:
+        for order in orders:
+            if not order.sea_cutoff_date or order.ship_mode == ShipMode.AIR.value:
                 continue
-            days_left = (po.sea_cutoff_date - today).days
+            days_left = (order.sea_cutoff_date - today).days
             if days_left > warn_from:
                 continue
             ordered = await self.db.scalar(
                 select(func.coalesce(func.sum(SKU.qty_ordered), 0))
                 .join(Style, Style.id == SKU.style_id)
-                .where(Style.purchase_order_id == po.id)
+                .where(Style.client_order_id == order.id)
             ) or 0
             finished = await self.db.scalar(
                 select(func.coalesce(func.sum(ProductionEvent.qty), 0))
@@ -96,12 +96,12 @@ class AnalyticsService:
                 .join(SKU, SKU.id == ProductionEvent.sku_id)
                 .join(Style, Style.id == SKU.style_id)
                 .join(Operation, Operation.id == ProductionEvent.operation_id)
-                .where(Style.purchase_order_id == po.id, Operation.sequence == last_seq)
+                .where(Style.client_order_id == order.id, Operation.sequence == last_seq)
             ) or 0
             pct = (finished / ordered) if ordered else 0
             risks.append({
-                "po_number": po.po_number,
-                "sea_cutoff": po.sea_cutoff_date.isoformat(),
+                "order_number": order.order_number,
+                "sea_cutoff": order.sea_cutoff_date.isoformat(),
                 "days_left": days_left,
                 "ordered": int(ordered),
                 "finished": int(finished),

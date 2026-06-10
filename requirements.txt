@@ -61,8 +61,10 @@ sentence-transformers==5.5.1
 langchain-community==0.4.2       # 0.4.x = the core-1.x-compatible series (the fix)
 faiss-cpu==1.14.2
 python-docx==1.2.0               # read the workflow .docx for RAG
-# Chat model providers (install the ONE you use):
+# Chat / extraction model providers (install the ONE(s) you use):
 langchain-groq==1.1.2            # Groq hosted models (set GROQ_API_KEY + CHAT_MODEL=groq:...)
+langchain-google-genai==3.0.1    # Gemini — PRIMARY for BOM doc extraction (multimodal PDF/image
+                                 # + long-context spec grids). Set GEMINI_API_KEY + EXTRACTION_MODEL=gemini:...
 # langchain-ollama>=0.2          # local/free
 # langchain-anthropic            # hosted
 # langchain-openai               # hosted

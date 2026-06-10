@@ -10,12 +10,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.core.config import get_settings
 from app.core.database import Base
-# Import every module's models so autogenerate sees all tables.
+# Import every module's models so autogenerate sees all tables. Missing a module
+# here makes autogenerate SILENTLY skip its tables — attendance + procurement were
+# previously absent (analytics/intelligence own no tables, so they stay out).
 from app.modules.users import models as _u    # noqa
 from app.modules.clients import models as _c   # noqa
 from app.modules.employees import models as _e  # noqa
 from app.modules.production import models as _p  # noqa
 from app.modules.wages import models as _w       # noqa
+from app.modules.attendance import models as _a  # noqa
+from app.modules.procurement import models as _pr  # noqa
 
 config = context.config
 db_url = get_settings().database_url
