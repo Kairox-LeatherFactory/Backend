@@ -51,8 +51,7 @@ class WageType(str, enum.Enum):
     """How an employee is paid. A property of the PERSON, set explicitly —
     NOT inferred from designation (TAILOR/CUTTER appear in both pay schemes)."""
     MONTHLY = "monthly"
-    PIECE_RATE = "piece_rate"
-    DAILY_WAGE = "daily_wage"      # paid per attendance day (from check-in/out hours)
+    PIECE_RATE = "piece_rate"      # paid per piece produced; floor workers marked via attendance
 
 
 class RunStatus(str, enum.Enum):

@@ -169,10 +169,10 @@ class AttendanceService:
             emp = await self.employees.get(emp_id)
             if not emp:
                 continue                                    # silently skip unknown ids
-            # Spec restricts PROXY to daily-wage workers.
-            if emp.wage_type != WageType.DAILY_WAGE:
+            # Spec restricts PROXY to piece-rate workers.
+            if emp.wage_type != WageType.PIECE_RATE:
                 raise HTTPException(
-                    400, f"{emp.name} is not a daily-wage worker — proxy not allowed.")
+                    400, f"{emp.name} is not a piece-rate worker — proxy not allowed.")
             log = await self._open_or_reject(
                 employee_id=emp.id, source=AttendanceSource.PROXY,
                 recorded_by=supervisor.id, distance_m=dist,
@@ -199,7 +199,7 @@ class AttendanceService:
             raise HTTPException(403, "Only a supervisor may add daily workers.")
         return await self.employees.create(
             name=body.name, designation=body.designation,
-            wage_type=WageType.DAILY_WAGE,
+            wage_type=WageType.PIECE_RATE,
             daily_rate=body.daily_rate, phone=body.phone, email=None,
         )
 

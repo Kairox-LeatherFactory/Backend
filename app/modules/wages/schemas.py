@@ -19,7 +19,7 @@ class WageLineRead(BaseModel):
 
 
 class WageRunRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True) #This tells Pydantic: Read attributes from ORM objects
     id: uuid.UUID
     period_start: date
     period_end: date

@@ -35,7 +35,7 @@ class Employee(Base, UUIDMixin, TimestampMixin):
         Enum(WageType, name="wage_type"), default=WageType.PIECE_RATE
     )
     monthly_salary: Mapped[float | None] = mapped_column(Numeric(10, 2))
-    daily_rate: Mapped[float | None] = mapped_column(Numeric(10, 2))   # for DAILY_WAGE workers
+    daily_rate: Mapped[float | None] = mapped_column(Numeric(10, 2))   # for PIECE_RATE workers
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # Mocked contact details (used to provision logins). Nullable + unique-light.

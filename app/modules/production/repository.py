@@ -79,18 +79,29 @@ class ProductionRepository:
         return {code: int(total) for code, total in res.all()}
 
     async def piece_counts_by_employee_style_op(self, start: date, end: date):
-        """Rows of (employee_id, style_id, operation_id, total_qty) for a window —
-        the raw material for piece-rate wage calculation."""
+        """Rows of (employee_id, style_id, operation_id, work_date, total_qty) for a
+        window — the raw material for piece-rate wage calculation.
+
+        work_date is kept in the grouping ON PURPOSE: a rate can change mid-period,
+        so each day's pieces must be priced at the rate effective on THAT day. If we
+        collapsed all dates into one total we'd be forced to apply a single rate and
+        mis-price work done before/after a rate change."""
         stmt = (
             select(
                 ProductionEvent.employee_id,
                 SKU.style_id,
                 ProductionEvent.operation_id,
+                ProductionEvent.work_date,
                 func.sum(ProductionEvent.qty),
             )
             .join(SKU, SKU.id == ProductionEvent.sku_id)
             .where(ProductionEvent.work_date >= start, ProductionEvent.work_date <= end)
-            .group_by(ProductionEvent.employee_id, SKU.style_id, ProductionEvent.operation_id)
+            .group_by(
+                ProductionEvent.employee_id,
+                SKU.style_id,
+                ProductionEvent.operation_id,
+                ProductionEvent.work_date,
+            )
         )
         res = await self.db.execute(stmt)
         return res.all()
