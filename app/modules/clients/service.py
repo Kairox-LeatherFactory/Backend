@@ -11,7 +11,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.clients.models import SKU, Client, PurchaseOrder, Style
+from app.modules.clients.models import SKU, Client, ClientOrder, Style
 from app.modules.clients.repository import ClientRepository
 
 
@@ -26,8 +26,8 @@ class ClientService:
     async def create_client(self, name: str, country: str | None) -> Client:
         return await self.repo.create_client(name, country)
 
-    async def get_client_orders(self, client_id: uuid.UUID) -> list[PurchaseOrder]:
-        return await self.repo.get_pos_for_client(client_id)
+    async def get_client_orders(self, client_id: uuid.UUID) -> list[ClientOrder]:
+        return await self.repo.get_orders_for_client(client_id)
 
     async def get_style(self, style_id: uuid.UUID) -> Style | None:
         return await self.repo.get_style(style_id)

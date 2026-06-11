@@ -17,14 +17,18 @@ WHY str-Enums
     value serialises straight to JSON and stores cleanly in a Postgres column.
 
 ROLE MODEL (maps directly onto the factory's org chart)
-    DIRECT_MANAGER     Superuser. Sees everything, approves orders, manages users
-                       and clients, runs payroll. (The "Direct Manager" in the
-                       workflow doc, Stage 2.)
+    MANAGING_DIRECTOR  Superuser / final authority. Approves & locks BOMs (the
+                       Stage-3 gate in the BOM Procurement Workflow). Outranks the
+                       Direct Manager.
+    DIRECT_MANAGER     Operational lead. Stage-1 uploader (order + spec), edits
+                       draft BOMs, manages users/clients, runs payroll. During the
+                       MD transition still bypasses role gates (see users/deps.py).
     CUTTING_MANAGER    Logs cutting-side production operations.
     STITCHING_MANAGER  Logs fusing -> lining-stitch -> final-finish operations.
     EMPLOYEE           A shop-floor worker. Can view their own work / wages.
     CLIENT             An external client logging in to track their own orders.
-    VIEWER             Read-only office staff (accountant, HR) — no data entry.
+    HR                 Reads employees / wages / attendance + inventory checks.
+    VIEWER             Read-only office staff (accountant) — no data entry.
 
     Adding a role = add a line here; the rest of the app picks it up.
 ================================================================================
@@ -33,6 +37,7 @@ import enum
 
 
 class UserRole(str, enum.Enum):
+    MANAGING_DIRECTOR = "managing_director"   # superuser / BOM approver (outranks DM)
     DIRECT_MANAGER = "direct_manager"
     CUTTING_MANAGER = "cutting_manager"
     STITCHING_MANAGER = "stitching_manager"
@@ -40,6 +45,7 @@ class UserRole(str, enum.Enum):
     CLIENT = "client"
     VIEWER = "viewer"
     SUPERVISOR = "supervisor"      # may PROXY check-in daily-wage workers + add them
+    HR = "hr"                      # HR / accounts: reads people, wages, attendance
 
     @classmethod
     def manager_roles(cls) -> set["UserRole"]:
