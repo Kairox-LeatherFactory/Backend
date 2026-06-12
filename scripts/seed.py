@@ -72,10 +72,14 @@ from app.modules.clients.models import Client, Style
 from app.modules.production.models import Operation, OperationAccess
 from app.modules.wages.models import Rate
 from app.modules.attendance.models import AttendanceLog, ShiftConfig  # noqa: F401
-from app.modules.procurement import models as _procurement  # noqa: F401  (register tables)
+from app.core import models as _core_models  # noqa: F401  (cross-cutting tables)
+from app.modules.procurement import models as _procurement  # noqa: F401
+from app.modules.bom import models as _bom  # noqa: F401
+from app.modules.inventory import models as _inv  # noqa: F401
+from app.modules.supplier_po import models as _spo  # noqa: F401
 from app.modules.procurement.seed_templates import seed_client_templates
-from app.modules.procurement.seed_stage2 import seed_stage2
-from app.modules.procurement.seed_inventory import seed_inventory
+from app.modules.bom.seed_stage2 import seed_stage2
+from app.modules.inventory.seed_inventory import seed_inventory
 
 # Import engine (sync) for the spreadsheets.
 from app.modules.imports.import_engine import build_preview

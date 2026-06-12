@@ -19,7 +19,11 @@ from app.modules.employees import models as _e  # noqa
 from app.modules.production import models as _p  # noqa
 from app.modules.wages import models as _w       # noqa
 from app.modules.attendance import models as _a  # noqa
+from app.core import models as _core_models  # noqa
 from app.modules.procurement import models as _pr  # noqa
+from app.modules.bom import models as _bom  # noqa
+from app.modules.inventory import models as _inv  # noqa
+from app.modules.supplier_po import models as _spo  # noqa
 
 config = context.config
 db_url = get_settings().database_url

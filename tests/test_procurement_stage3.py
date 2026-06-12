@@ -30,26 +30,23 @@ from sqlalchemy import func, select
 
 from app.core.enums import UserRole
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
-from app.modules.procurement.bom_service import BomService, LineSeed, StyleIdentity
-from app.modules.procurement.enums import (
-    BomItemCategory,
-    BomStatus,
+from app.modules.bom.service import BomService, LineSeed, StyleIdentity
+from app.core.enums import (
     NotificationChannel,
     NotificationStatus,
     NotificationType,
     SpecType,
 )
-from app.modules.procurement.models import (
-    AuditLog,
-    Document,
+from app.modules.bom.enums import BomItemCategory, BomStatus
+from app.core.models import AuditLog, Document, Notification
+from app.modules.bom.models import (
     GarmentType,
-    Notification,
     PomDictionary,
     SpecSheet,
     StyleConsumptionTemplate,
 )
-from app.modules.procurement.notification_service import NotificationService
-from app.modules.procurement.seed_stage2 import _GARMENT_YAML, _POM_DICT_YAML
+from app.modules.bom.notification_service import NotificationService
+from app.modules.bom.seed_stage2 import _GARMENT_YAML, _POM_DICT_YAML
 from app.modules.users.models import User
 
 DATA = Path(__file__).resolve().parent.parent / "data"

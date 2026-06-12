@@ -1,0 +1,4 @@
+Issues & risks
+None blocking. Minor observations only:
+claim_revision returning rowcount inherits the DBAPI caveat that some drivers report -1 for "unknown" — harmless here (asyncpg and sqlite3 both report exact counts for UPDATE, and == 0 is the only branch that matters), but if a future backend is added, rowcount == 0 rather than <= 0 is the intended check and is correct.
+The Bom(client_order_id=uuid4(), style_id=uuid4()) test row relies on SQLite FK enforcement being off (it is, by default, in the test engine) — fine, and documented in the test comment.

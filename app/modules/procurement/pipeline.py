@@ -39,7 +39,7 @@ from app.modules.procurement.sniffing import (
     UnsupportedMime,
     sniff_and_extract,
 )
-from app.modules.procurement.storage import (
+from app.core.storage import (
     StorageBackend,
     get_storage,
     quarantine_key,

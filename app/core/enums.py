@@ -71,3 +71,48 @@ class ShipMode(str, enum.Enum):
     Air = margin-eroding (the central financial risk in the workflow)."""
     SEA = "sea"
     AIR = "air"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Cross-cutting value-sets (the notification + document + audit tables live in
+# core/models.py because bom, inventory, and supplier_po ALL write them). Kept here
+# so a module never imports another module just to emit a notification / Document /
+# audit row. str-Enum + VARCHAR columns (the module convention) — no native PG ENUM.
+# ══════════════════════════════════════════════════════════════════════════
+class DocumentKind(str, enum.Enum):
+    ORDER_SHEET = "order_sheet"
+    SPEC_SHEET = "spec_sheet"
+    BOM_QUOTE = "bom_quote"
+    SUPPLIER_PO_PDF = "supplier_po_pdf"
+
+
+class SpecType(str, enum.Enum):
+    """The two real spec-sheet shapes share almost no columns. Cross-stage vocab:
+    Stage-1 classifies the shape, Stage-2 (bom) reads the numbers."""
+    MEASUREMENT_GRID = "measurement_grid"        # Japanese per-size grid + tolerances
+    NARRATIVE_TECHPACK = "narrative_techpack"    # Jackie free-text key->value tech pack
+
+
+class NotificationChannel(str, enum.Enum):
+    IN_APP = "in_app"
+    EMAIL = "email"
+    WHATSAPP = "whatsapp"      # Stage 5 §7
+    CALL = "call"
+
+
+class NotificationType(str, enum.Enum):
+    BOM_AWAITING_REVIEW = "bom_awaiting_review"   # Stage 3: MD review notice
+    PO_AWAITING_APPROVAL = "po_awaiting_approval"  # Stage 5 §3: cross-check notice
+    PO_DISPATCH = "po_dispatch"                    # Stage 5: PO email to supplier
+    PO_ESCALATION_WHATSAPP = "po_escalation_whatsapp"  # Stage 5 §7: WhatsApp rung
+    ESCALATION_CALL = "escalation_call"            # Stage 5: auto-call rung
+    PO_ESCALATION_EXHAUSTED = "po_escalation_exhausted"  # Stage 5 §7: hand to buyer
+    MATERIAL_READY = "material_ready"              # Stage 6: MD alert
+
+
+class NotificationStatus(str, enum.Enum):
+    PENDING = "pending"
+    SENT = "sent"
+    OPENED = "opened"
+    RESPONDED = "responded"
+    FAILED = "failed"

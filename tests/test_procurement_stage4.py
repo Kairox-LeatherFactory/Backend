@@ -27,20 +27,18 @@ import pytest
 
 from app.core.enums import UserRole
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
-from app.modules.procurement.bom_service import BomService
-from app.modules.procurement.enums import (
-    BomItemCategory,
-    BomStatus,
+from app.modules.bom.service import BomService
+from app.modules.bom.enums import BomItemCategory, BomStatus
+from app.modules.inventory.enums import (
     InventoryLineStatus,
     MatchMethod,
     ReservationStatus,
 )
-from app.modules.procurement.inventory_import import parse_inventory
-from app.modules.procurement.inventory_normalize import normalize_key
-from app.modules.procurement.inventory_service import InventoryService
-from app.modules.procurement.models import (
-    Bom,
-    BomItem,
+from app.modules.inventory.inventory_import import parse_inventory
+from app.modules.inventory.inventory_normalize import normalize_key
+from app.modules.inventory.service import InventoryService
+from app.modules.bom.models import Bom, BomItem
+from app.modules.inventory.models import (
     InventoryItem,
     InventoryReservation,
     MaterialAlias,

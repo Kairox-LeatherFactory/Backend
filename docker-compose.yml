@@ -36,6 +36,26 @@ services:
       start_period: 10s
 
   # ────────────────────────────────────────────────────────────
+  # ClamAV — virus scanner sidecar (Stage-1 upload gate, §7)
+  # The API streams uploads to clamd over INSTREAM at clamav:3310. In dev you can
+  # skip this entirely with VIRUS_SCAN_ENABLED=false (uploads record scan_status
+  # =skipped). ON in staging/prod: a malware hit is rejected (422) and the API
+  # fails CLOSED (503) if clamd is unreachable — an unscanned file is never stored.
+  # ────────────────────────────────────────────────────────────
+  clamav:
+    image: clamav/clamav:latest
+    container_name: factory_clamav
+    restart: unless-stopped
+    ports:
+      - "${CLAMD_HOST_PORT:-3310}:3310"
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --version || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s   # first boot downloads virus definitions (freshclam)
+
+  # ────────────────────────────────────────────────────────────
   # Backend API — FastAPI / uvicorn
   # entrypoint.sh runs: wait-for-db → migrate → seed → uvicorn
   # ────────────────────────────────────────────────────────────
@@ -58,11 +78,23 @@ services:
       RUN_MIGRATIONS: "true"
       RUN_SEED: "true"
       UVICORN_RELOAD: "true"   # hot-reload in dev; remove for a production-like run
+      # Stage-1 upload gate: scan via the clamav sidecar. Flip VIRUS_SCAN_ENABLED
+      # to "false" to skip scanning when clamav isn't running (dev).
+      VIRUS_SCAN_ENABLED: "${VIRUS_SCAN_ENABLED:-true}"
+      CLAMD_HOST: clamav
+      CLAMD_PORT: "3310"
+      # Storage stays on the local driver inside the container by default; set
+      # STORAGE_BACKEND=supabase + the SUPABASE_* vars in prod (see .env.example).
+      STORAGE_BACKEND: "${STORAGE_BACKEND:-local}"
+      LOCAL_STORAGE_DIR: "/app/var/procurement-documents"
+      MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-25}"
     ports:
       - "${BACKEND_HOST_PORT:-8000}:8000"
     depends_on:
       db:
         condition: service_healthy
+      clamav:
+        condition: service_started
     volumes:
       # Bind-mount the source for hot-reload during dev.
       # COMMENT THIS OUT to test the baked image as it ships.

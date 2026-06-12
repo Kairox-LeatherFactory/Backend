@@ -27,15 +27,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from app.modules.procurement.classifier import Classifier, build_default_classifier
+from app.core.enums import DocumentKind
 from app.modules.procurement.enums import (
-    DocumentKind,
     RejectReason,
     SubmissionStatus,
     ValidationStatus,
 )
 from app.modules.procurement import presenters
 from app.modules.procurement.errors import UploadError
-from app.modules.procurement.models import AuditLog, Document, Submission
+from app.core.models import AuditLog, Document
+from app.modules.procurement.models import Submission
 from app.modules.procurement.pipeline import PipelineResult, process_upload, sha256_of
 from app.modules.procurement.registry import ProfileView
 from app.modules.procurement.repository import ProcurementRepository

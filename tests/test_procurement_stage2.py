@@ -37,13 +37,14 @@ from sqlalchemy import func, select
 
 from app.core.enums import UserRole
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
-from app.modules.procurement.bom_service import BomService, LineSeed, StyleIdentity
-from app.modules.procurement.enums import BomItemCategory, BomStatus, DcmSource, SpecType
-from app.modules.procurement.models import (
+from app.modules.bom.service import BomService, LineSeed, StyleIdentity
+from app.core.enums import SpecType
+from app.modules.bom.enums import BomItemCategory, BomStatus, DcmSource
+from app.modules.bom.models import (
     GarmentType, PatternReference, PomDictionary, PomMeasurement, SpecSheet,
     StyleConsumptionTemplate,
 )
-from app.modules.procurement.seed_stage2 import _GARMENT_YAML, _POM_DICT_YAML
+from app.modules.bom.seed_stage2 import _GARMENT_YAML, _POM_DICT_YAML
 from app.modules.users.models import User
 
 DATA = Path(__file__).resolve().parent.parent / "data"
@@ -412,7 +413,7 @@ async def test_cross_checks_fire(db):
     assert flags["qty_sum"]["severity"] == "error" and flags["qty_sum"]["ok"] is False
 
     # direct check engine: Jackiee unresolved pattern → error; substance out of band → warn
-    from app.modules.procurement.checks import run_checks, has_blocking_error
+    from app.modules.bom.checks import run_checks, has_blocking_error
     jackiee_flags = run_checks("the_jackie", {
         "attributes": {"substance_mm": [0.60, 0.62]},        # outside [0.45, 0.50]
         "pattern_reference": {"pattern_code": "MIMI", "resolved": False},
@@ -482,13 +483,13 @@ async def test_new_client_by_config_only(db):
 # §7 — the revision CAS primitive (the conflict branch the bulk PATCH relies on)
 # ════════════════════════════════════════════════════════════════════════════
 async def test_claim_revision_is_atomic_cas(db):
-    from app.modules.procurement.models import Bom
-    from app.modules.procurement.repository import ProcurementRepository
+    from app.modules.bom.models import Bom
+    from app.modules.bom.repository import BomRepository
 
     # FK enforcement is off on the test SQLite engine, so a bare Bom row is enough
     bom = Bom(client_order_id=uuid.uuid4(), style_id=uuid.uuid4(), revision=1)
     db.add(bom); await db.commit()
-    repo = ProcurementRepository(db)
+    repo = BomRepository(db)
 
     assert await repo.claim_revision(bom.id, 1) == 1     # winner claims 1 → 2
     await db.commit()

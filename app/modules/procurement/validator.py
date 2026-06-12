@@ -25,10 +25,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from app.core.enums import DocumentKind
 from app.modules.procurement.classifier import Classifier
 from app.modules.procurement.enums import (
     ClassificationMethod,
-    DocumentKind,
     RejectReason,
     ValidationStatus,
 )

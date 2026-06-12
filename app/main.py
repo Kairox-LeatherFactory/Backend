@@ -50,11 +50,16 @@ from app.modules.clients import models as _clients      # noqa: F401
 from app.modules.production import models as _production  # noqa: F401
 from app.modules.wages import models as _wages           # noqa: F401
 from app.modules.attendance import models as _attendance           # noqa: F401
-# procurement (BOM workflow): schema-only in Stage 0 — no router yet — but the
-# models MUST be imported so create_all/Alembic register the `document`,
-# `purchase_order`, `bom`, ... tables. `client_order.source_document_id` FKs to
-# `document`; omit this and metadata can't resolve that FK.
-from app.modules.procurement import models as _procurement          # noqa: F401
+# Cross-cutting tables (document/notification/audit_log) live in core after the
+# procurement monolith was split into procurement (Stage 1) / bom (Stage 2-3) /
+# inventory (Stage 4) / supplier_po (Stage 5). Every module's models MUST be imported
+# so create_all/Alembic register all tables (a missed import makes autogenerate try to
+# DROP the table — the schema-drift trap).
+from app.core import models as _core_models                         # noqa: F401
+from app.modules.procurement import models as _procurement          # noqa: F401  Stage 1
+from app.modules.bom import models as _bom                          # noqa: F401  Stage 2/3
+from app.modules.inventory import models as _inventory              # noqa: F401  Stage 4
+from app.modules.supplier_po import models as _supplier_po          # noqa: F401  Stage 5
 
 # Routers
 from app.modules.users.router import auth_router, users_router
@@ -67,6 +72,9 @@ from app.modules.imports.router import router as imports_router
 from app.modules.intelligence.router import router as chat_router
 from app.modules.attendance.router import router as attendance_router
 from app.modules.procurement.router import router as procurement_router
+from app.modules.bom.router import router as bom_router
+from app.modules.inventory.router import router as inventory_router
+from app.modules.supplier_po.router import router as supplier_po_router
 
 API_PREFIX = "/api/v1"
 
@@ -84,7 +92,7 @@ async def _notification_sweeper():
     replica, move to SELECT ... FOR UPDATE SKIP LOCKED or an external worker — the same
     caveat as the in-process login rate-limiter (CLAUDE.md §6/§13.9)."""
     from app.core.database import AsyncSessionLocal
-    from app.modules.procurement.notification_service import NotificationService
+    from app.modules.bom.notification_service import NotificationService
 
     while True:
         try:
@@ -171,7 +179,10 @@ app.include_router(analytics_router, prefix=API_PREFIX)
 app.include_router(imports_router, prefix=API_PREFIX)
 app.include_router(chat_router, prefix=API_PREFIX)
 app.include_router(attendance_router, prefix=API_PREFIX)
-app.include_router(procurement_router, prefix=API_PREFIX)
+app.include_router(procurement_router, prefix=API_PREFIX)   # Stage 1 intake
+app.include_router(bom_router, prefix=API_PREFIX)           # Stage 2/3 BOM + notifications
+app.include_router(inventory_router, prefix=API_PREFIX)     # Stage 4 inventory
+app.include_router(supplier_po_router, prefix=API_PREFIX)   # Stage 5 supplier PO
 
 
 # ──────────────────────────────────────────────────────────

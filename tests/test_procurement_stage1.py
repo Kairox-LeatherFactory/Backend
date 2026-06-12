@@ -27,10 +27,11 @@ from sqlalchemy import func, select
 
 import app.core.config as cfgmod
 from app.core.enums import UserRole
-from app.modules.procurement import storage as storagemod
+from app.core import storage as storagemod
 from app.modules.procurement.enums import RejectReason, ScanStatus
 from app.modules.procurement.errors import UploadError
-from app.modules.procurement.models import Bom, ClientTemplate
+from app.modules.bom.models import Bom
+from app.modules.procurement.models import ClientTemplate
 from app.modules.procurement.scanning import EICAR
 from app.modules.procurement.seed_templates import load_template_rows
 from app.modules.procurement.service import ProcurementService
@@ -230,7 +231,7 @@ async def test_idempotent_reupload_no_second_llm(db):
     assert env1["document"]["id"] == env2["document"]["id"]
     assert clf.calls["n"] == 1                  # second upload was a cache hit
 
-    from app.modules.procurement.models import Document
+    from app.core.models import Document
     n_docs = await db.scalar(select(func.count(Document.id)))
     assert n_docs == 1
 
@@ -250,7 +251,7 @@ async def test_virus_detected_when_enabled(db, monkeypatch):
     assert ei.value.reason == RejectReason.VIRUS_DETECTED
     assert ei.value.http_status == 422
     # an audit_log row was written
-    from app.modules.procurement.models import AuditLog
+    from app.core.models import AuditLog
     n_audit = await db.scalar(
         select(func.count(AuditLog.id)).where(AuditLog.action == "VIRUS_DETECTED"))
     assert n_audit == 1
@@ -304,7 +305,7 @@ async def test_stays_in_lane_no_stage2_rows(db):
     sub = await svc.open_submission(user, None)
     await svc.upload_spec_sheet(user, sub.id, _read("spec_sheet_1.xlsx"), "spec_sheet_1.xlsx")
 
-    from app.modules.procurement.models import SpecSheet
+    from app.modules.bom.models import SpecSheet
     from app.modules.clients.models import ClientOrder
     assert await db.scalar(select(func.count(SpecSheet.id))) == 0
     assert await db.scalar(select(func.count(ClientOrder.id))) == 0

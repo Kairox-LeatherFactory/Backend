@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from app.modules.procurement.enums import SpecType
+from app.core.enums import SpecType
 from app.modules.procurement.sniffing import DocFeatures
 
 GENERIC_CODE = "_generic"

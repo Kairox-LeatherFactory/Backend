@@ -14,7 +14,8 @@ a plain dict. The service calls these; nothing here calls back into the service.
 """
 from __future__ import annotations
 
-from app.modules.procurement.enums import DocumentKind, ScanStatus, ValidationStatus
+from app.core.enums import DocumentKind
+from app.modules.procurement.enums import ScanStatus, ValidationStatus
 from app.modules.procurement.errors import UploadError
 from app.modules.procurement.pipeline import sha256_of
 
