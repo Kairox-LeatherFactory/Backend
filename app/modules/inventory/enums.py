@@ -1,5 +1,11 @@
 """
 modules/inventory/enums.py — Stage-4 inventory value-sets (str-Enum + VARCHAR columns).
+
+ENUM GUIDE (each str-Enum; the model stores `.value` in a VARCHAR column)
+  InventoryCheckStatus   running → complete (the check header lifecycle).
+  InventoryLineStatus    sufficient / partial / out_of_stock — the per-line verdict + the badge.
+  ReservationStatus      active (counts against available) / released / consumed.
+  MatchMethod            key / alias / manual — how a line matched stock (fuzzy is only a suggestion).
 """
 import enum
 

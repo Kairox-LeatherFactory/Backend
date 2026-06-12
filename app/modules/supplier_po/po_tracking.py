@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/po_tracking.py — self-hosted open tracking (§6)
+modules/supplier_po/po_tracking.py — self-hosted open tracking (§6)
 ================================================================================
 
 PURE helpers for the self-hosted pixel + link-wrap (§6a recommends self-hosted over
@@ -19,6 +19,16 @@ false positive from a proxy prefetch, a false negative when images are off). A C
 the reliable read signal; the ladder (§7) treats open as the soft trigger and reserves
 the strong action for no-read-at-all, and any acknowledgement is the authoritative stop —
 so a missed pixel only ever over-escalates by one cheap rung, never under-delivers.
+
+FUNCTION GUIDE  (pure + sync; no DB — the service persists the resulting events)
+  PIXEL_GIF        the 1×1 transparent GIF bytes (the open-pixel response body). → the /t/o route.
+  new_token() -> str            a per-send opaque token. CALLED FROM: PoService.send_po.
+  sign(target, secret) / verify(target, sig, secret)   HMAC tag (anti open-redirect).
+  pixel_url(base, token) -> str        the open-pixel URL.
+  wrap(base, token, target, secret) -> str   a click-tracking redirect URL.
+  inject_tracking(html, base, token, secret) -> str
+      Rewrite every link + append the pixel into the email HTML. CALLED FROM: PoService._send_email.
+  unwrap_target(u) -> str       URL-decode a wrapped target (used by the /t/c redirect route).
 ================================================================================
 """
 from __future__ import annotations

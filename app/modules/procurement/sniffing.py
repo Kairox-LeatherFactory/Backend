@@ -23,6 +23,19 @@ WHAT IT EXTRACTS (DocFeatures)
 MIME ALLOWLIST (workflow doc: "PDF, XLSX, and CSV")
     application/pdf · the XLSX mime · text/csv. A mismatch between the sniffed type
     and the filename extension is itself a reject (unsupported_mime).
+
+FUNCTION GUIDE  (pure + sync; called by pipeline.process_upload)
+  UnsupportedMime / EmptyOrCorrupt   exceptions → the pipeline maps them to 415 / 422.
+  DocFeatures   the extracted structural features the validator scores on.
+  _sniff_mime(data) -> str   [private] TRUE content type (libmagic if present, else file
+      signatures + a zip-content probe for XLSX). "" for unrecognised.
+  sniff_and_extract(data, filename) -> DocFeatures
+      THE ENTRY POINT. Sniff the MIME, enforce the allowlist + extension agreement, dispatch
+      to the per-type extractor. CALLED FROM: pipeline.process_upload (in a threadpool).
+  _compute_prose_signals(blob, feats) [private] measure narrative-ness (long sentences +
+      section headings) so the validator can reject a quoting process narrative.
+  _extract_pdf / _extract_xlsx / _extract_csv  [private] per-type feature extraction
+      (page count + text layer; sheet shape + numeric ratio; CSV shape).
 ================================================================================
 """
 from __future__ import annotations

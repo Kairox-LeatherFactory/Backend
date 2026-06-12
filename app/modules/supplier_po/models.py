@@ -8,6 +8,15 @@ ORDER and its line items + responses, the open-tracking engagement log (§6c), a
 production board (§8b). Split out of the former procurement monolith. Cross-module FKs
 (bom, bom_item, client_order, style, document, inventory_item, app_user) are table-name
 strings only; the supplier/supply-history/PO relationships are defined within this module.
+
+TABLE GUIDE (each class is one table; see the per-class docstring for column detail)
+  Supplier               the vendor directory + send target (contact, GSTIN, type, email_status).
+  SupplierSupplyHistory  the §1d matching index — pre-aggregated (supplier, article) ledger evidence.
+  PurchaseOrder          the supplier PO: money + the cross-check/send/escalation state machine.
+  PoItem                 one PO line; keeps the bom_item/inventory_item back-links to the shortfall.
+  PoResponse             one send/contact attempt (email/whatsapp/call) + its result.
+  PoTrackingEvent        the unified engagement log (open/click/bounce/whatsapp/call).
+  ProductionTracking     one row per style/order advancing through the §8c production ladder.
 ================================================================================
 """
 import uuid

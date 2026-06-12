@@ -7,6 +7,27 @@ The only place that talks to the DB for supplier_po-owned tables (supplier,
 supplier_supply_history, purchase_order, po_item, po_response, po_tracking_event,
 production_tracking) plus the cross-cutting core `document` write path for the PO PDF.
 BOM + inventory data (shortfall lines, aliases) flow through those modules' services.
+
+FUNCTION GUIDE  (all async; called by PoService / SupplierService / ProductionTrackingService)
+  commit/rollback   session plumbing.
+  document (core; supplier_po owns the PO-PDF write path):
+    get_document_by_sha(sha) / add_document(doc)   dedupe + persist the rendered PO PDF.
+  supplier:
+    get_supplier(id) (history eager) / get_supplier_by_name(name) / list_suppliers(filters)
+    all_active_suppliers() / supplier_open_pos(id).
+  supplier_supply_history (the §1d index):
+    clear_supply_history()                            wholesale rebuild on re-import.
+    supply_history_for_supplier(id)                   one supplier's history.
+    fetch_supply_history_candidates(*, like_terms, modes?)   the set-based matcher pull (joined to supplier).
+  purchase_order:
+    get_po(id) (items/responses/supplier eager) / get_po_by_token(token) / list_pos(filters) / pos_for_bom(id).
+    claim_po_revision(po_id, base_revision) -> rowcount   the optimistic-lock CAS (0 ⇒ 409).
+    next_po_number(fy) -> "PO-NN(FY)"                 the FY monotonic counter (allocated at send).
+    get_po_response(id) / latest_response(po_id)      the PO's contact attempts.
+    add_tracking_event(ev)                            append an engagement event.
+    due_po_escalations(now) -> [PurchaseOrder]        sent/escalated, unacked, rung<3, due — read by the sweeper.
+  production_tracking (§8):
+    get_production_tracking(order, style) / get_production_tracking_by_id(id) / list_production_tracking().
 ================================================================================
 """
 from __future__ import annotations

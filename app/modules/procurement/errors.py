@@ -8,6 +8,12 @@ STABLE HTTP status (415 unsupported MIME, 413 too large, 422 identity failures,
 409 locked/slot conflicts, 503 scanner unavailable when fail-closed). The router
 catches `UploadError` and renders the diagnostics envelope with the right status —
 never a bare boolean.
+
+FUNCTION GUIDE
+  STATUS_FOR_REASON   the reason_code → HTTP status map (415/413/422/409/503).
+  UploadError(reason, message, payload?)   the one exception every Stage-1 gate raises;
+      `.http_status` derives the status from the reason. RAISED IN: pipeline / sniffing /
+      scanning / validator / service; CAUGHT IN: procurement/router (_error_response).
 ================================================================================
 """
 from __future__ import annotations

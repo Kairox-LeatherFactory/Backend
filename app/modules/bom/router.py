@@ -14,6 +14,23 @@ Endpoints (under /api/v1/procurement, preserving the pre-split URLs):
 The notification routes live here because NotificationService (BOM-review notice +
 2-hour email escalation) lives in this module; it resolves recipients via users.service
 and reads the cross-cutting core `notification` table.
+
+LAYERING: this router is a THIN HTTP shell — every handler just resolves the role
+dependency, unpacks the request body, and delegates to BomService / NotificationService.
+No business logic here (house rule). Role gates: _DMMD (DM+MD), _CUTTING (cutting mgr;
+MD/DM bypass as superusers), _MD (MD only — the sole approver/rejecter/exporter).
+
+FUNCTION GUIDE  (path → handler → service call → returns)
+  GET   /boms/{id}                 get_bom          → BomService.get_bom            the editable tree (dict)
+  PATCH /boms/{id}/items           patch_bom_items  → edit_bom_items                {revision, recomputed, reconfirm_required}
+  POST  /boms/{id}/confirm-cutting confirm_cutting  → confirm_cutting               {status, templates_backfilled, ...}
+  POST  /boms/{id}/approve         approve_bom      → approve_bom(lock=?)           {status, inventory_check_id}  [MD]
+  POST  /boms/{id}/reject          reject_bom       → reject_bom(reason)            {status, rejection_reason}    [MD]
+  POST  /boms/{id}/reopen          reopen_bom       → reopen_bom                    {status, revision}            [DM/MD]
+  POST  /boms/{id}/export          export_bom       → export_bom                    {export_document_id, sha256}  [MD]
+  GET   /notifications             list_notifications     → NotificationService.list_for_user   the caller's rows
+  GET   /notifications/stream      stream_notifications   → NotificationService.stream          an SSE event stream
+  POST  /notifications/{id}/open   open_notification      → NotificationService.mark_opened     stamps opened_at (cancels escalation)
 ================================================================================
 """
 from __future__ import annotations

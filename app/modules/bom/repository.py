@@ -8,6 +8,35 @@ garment_type, style_consumption_template, pattern_reference, bom, bom_item) plus
 cross-cutting core tables this stage writes (document for the BOM-quote export,
 notification for the MD review notice + its escalation). Cross-module data (clients,
 inventory) flows through those modules' services, never here.
+
+FUNCTION GUIDE  (all async; every method is called only by BomService)
+  commit/rollback/save(obj)/add(obj)   session plumbing (save = commit + refresh).
+  Document:
+    get_document(id) / get_document_by_sha(sha) -> Document | None   export dedupe lookups.
+    add_document(doc) -> Document                                    persist the rendered BOM-quote PDF.
+  POM tables:
+    pom_dictionary_rows() -> [(language, source_term, pom_code)]     feeds the PomDict standardizer.
+    replace_pom_measurements(spec_sheet_id, rows)                    delete+insert (replace-on-key).
+    pom_measurements(spec_sheet_id) -> [PomMeasurement]              read back the stored POMs.
+  garment_type:
+    get_garment_type(code) -> GarmentType | None                    the area-formula/wastage config row.
+  style_consumption_template (the DCM memory):
+    find_consumption_template(...)   exact Source-1 lookup on the 5-tuple key.
+    find_similar_template(...)       Source-2 nearest (same type/category/size, other signature).
+    get_consumption_template(id)     fetch by id (pattern-resolved template).
+    upsert_consumption_template(...) the §10 back-fill (update or insert one confirmed DCM).
+  pattern_reference:
+    add_pattern_reference(ref) -> PatternReference.
+  spec_sheet:
+    get_spec_sheet(id) -> SpecSheet | None.
+  bom:
+    add_bom(bom) / get_bom(id, selectinload items) -> Bom | None.
+    claim_revision(bom_id, base_revision) -> rowcount    atomic optimistic-lock CAS;
+        0 rows ⇒ the caller raises 409 stale_revision.
+  notification (core table; bom owns the BOM-ready notice + escalation read paths):
+    add_notification / get_notification / list_notifications_for_user(unread_only).
+    due_escalations(now) -> [Notification]   in-app review/approval notices past their
+        deadline, unseen, not yet emailed (idempotent NOT-EXISTS guard) — read by the sweeper.
 ================================================================================
 """
 from __future__ import annotations

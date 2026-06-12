@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/inventory_service.py — Stage-4 inventory orchestration
+modules/inventory/service.py — Stage-4 inventory orchestration (InventoryService)
 ================================================================================
 
 The business brain of Stage 4 (the workflow's procurement reality check). Owns:
@@ -18,6 +18,30 @@ LAYERING. Reads only procurement-owned tables; the client/order/style identity t
 dashboard groups by is resolved through clients.service (a permitted service→service
 call), never the clients repository (CLAUDE.md §3.2). Blocking openpyxl work runs in a
 threadpool (house async rule).
+
+FUNCTION / METHOD GUIDE  (router → service; * = called by other modules)
+  STOCKABLE          the 7 BOM categories the check considers (manufacturing/FOB excluded).
+  InventoryService(db)   session + InventoryRepository.
+  _bom_dto(bom_id)*  read a BOM through bom.service's strict DTO (never its repo/models).
+  get_latest_check_dto(bom_id)*  the latest check's shortfall lines as a DTO — consumed by
+      supplier_po generation. Returns None if no check has run.
+  get_alias_pairs()*  active material aliases as DTOs — consumed by the supplier matcher.
+  preview(data) -> dict        dry-run parse+normalize the .xlsx (no writes). → POST /inventory/preview.
+  commit(data) -> dict         parse → upsert each row (sheet wins on qty) → soft-deactivate
+      absent keys. Idempotent. → POST /inventory/commit.
+  list_items(*, search, limit, offset) -> dict   the paged stock list. → GET /inventory/items.
+  run_check(user, bom_id) -> dict
+      THE CHECK. Guards approved/locked; releases prior reservations; builds line keys +
+      a locked candidate fetch (FOR UPDATE); writes the InventoryCheck header; runs
+      _check_line per stockable item; marks COMPLETE; audits INVENTORY_CHECK_RUN; advances
+      the production board. CALLED FROM: bom_service.approve_bom (auto) + POST /boms/{id}/inventory-check.
+  _check_line(...) -> dict   [private] for one BOM line: match → sum on-hand across lots
+      (UOM-converted) → compute available/reserve/shortfall/status → write the line +
+      the ACTIVE reservations across lots. Returns the presenter view.
+  get_check(check_id) / latest_for_bom(bom_id) -> dict   read a stored check (re-rendered).
+  dashboard(*, client_id?, order_id?) -> dict   the grouped client→order→style board.
+  _rebuild_view(check) -> dict   [private] re-render a stored check from its persisted
+      lines (no recompute on read — the rows ARE the truth).
 ================================================================================
 """
 from __future__ import annotations
@@ -185,6 +209,15 @@ class InventoryService:
             after={"inventory_check_id": str(check.id), "lines": len(line_views)},
         ))
         await self.db.commit()
+        # Stage 5 (§8c): advance the production board INVENTORY_CHECKED edge as a
+        # service→service side-effect. Best-effort — the board never blocks a check.
+        try:
+            from app.modules.supplier_po.production_tracking_service import (
+                ProductionTrackingService,
+            )
+            await ProductionTrackingService(self.db).on_inventory_checked(bom_id)
+        except Exception:
+            pass
         check = await self.repo.get_inventory_check(check.id)
         return present.check_view(check, line_views, excluded)
 

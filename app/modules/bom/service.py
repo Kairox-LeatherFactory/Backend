@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/bom_service.py — Stage-2 BOM generation engine
+modules/bom/service.py — Stage-2/3 BOM generation + approval engine (BomService)
 ================================================================================
 
 The business brain of Stage 2 (the workflow's engine). Consumes a completed
@@ -22,6 +22,52 @@ style_consumption_template, pattern_reference, garment_type, bom*). The order/st
 identity it needs (client_id, signature fields, per-size qty) is passed IN by the
 caller (resolved via clients.service upstream) — procurement never queries the
 clients module's repository, honouring the one non-negotiable rule (CLAUDE.md §3.2).
+
+FUNCTION / METHOD GUIDE  (everything is called from bom/router.py unless noted)
+  Dataclasses
+    LineSeed       one BOM line BEFORE DCM resolution + costing (extracted/configured input).
+    StyleIdentity  the order/style identity passed in by the caller (resolved upstream).
+  BomService(db)   holds the AsyncSession + a BomRepository.
+  get_bom_dto(bom_id) -> SimpleNamespace | None
+      A session-free BOM snapshot for OTHER modules (inventory check, PO generation,
+      production board) so they never touch this repo/models. Returns None if absent.
+  generate_bom(user, *, spec_sheet, spec_bytes, filename, identity, client_match_code,
+               line_seeds, ...) -> dict
+      The Stage-2 engine. Steps: select adapter → extract POMs/attrs/pattern (threadpool)
+      → persist pom_measurement → merge spec attributes → resolve pattern reference →
+      build bom_items with _resolve_dcm + costing → run cross-checks → audit BOM_GENERATE.
+      Returns {bom: view, flags, extraction}. CALLED FROM: the generate endpoint / pipeline.
+  _resolve_dcm(...) -> (Decimal|None, DcmSource|None)   [private]
+      The ordered DCM fallback: Source 1 template → 1b pattern-template → 2 similar-style
+      → 3 ai_estimate. Returns (value, source) or (None, None) when manual confirm is needed.
+  _poms_by_size(poms) -> dict   [private] reshape POM list → {size: {pom_code: value}}.
+  edit_bom_items(user, bom_id, base_revision, edits) -> dict
+      The editable contract (Stage 2 §7 / Stage 3 §3): bulk edit guarded by optimistic
+      `revision` locking. Validates state (draft/ready_for_review only), applies edits
+      (a DCM edit → dcm_source=manual; a late DCM edit re-opens the cutting gate → draft),
+      recomputes, does an atomic revision CAS (claim_revision → 409 on stale), audits
+      BOM_EDIT. Returns {revision, recomputed, reconfirm_required}.
+  confirm_cutting(user, bom_id, identity?) -> dict
+      The §10 cutting gate. Stamps cutting_confirmed_*, flips status→ready_for_review,
+      BACK-FILLS style_consumption_template for every confirmed material line (the DCM
+      memory learns), audits BOM_SUBMIT_FOR_REVIEW, and fires the Stage-3 review
+      notifications. Returns {bom_id, status, templates_backfilled, notifications_created}.
+  approve_bom(user, bom_id, *, lock=False) -> dict
+      Stage-3 MD approve. REFUSES if cutting_confirmed_at is null (409). Stamps
+      approved_by/at + locked_at, status→approved/locked, audits BOM_APPROVE, then
+      best-effort advances the production board AND auto-fires the Stage-4 inventory
+      check (a check failure never rolls back a valid approval). Returns
+      {bom_id, status, inventory_check_id}.
+  reject_bom(user, bom_id, *, reason) -> dict   reason mandatory; status→rejected; audit BOM_REJECT.
+  reopen_bom(user, bom_id) -> dict   rejected→draft, revision++, clears rejection + cutting confirm.
+  export_bom(user, bom_id) -> dict
+      Stage-3 §4 PDF export from an approved/locked BOM. Renders the CURRENT persisted
+      rows (threadpool), dedupes on sha256, stores a Document(kind=bom_quote), links it
+      via export_document_id, status→exported, audit BOM_EXPORT. Idempotent re-export.
+  get_bom(bom_id) -> dict   the _bom_view of a loaded BOM.
+  Helpers [private]: _load_bom (404 if absent), _resolve_identity (via clients.service),
+      _base_size, _recompute (delegates to costing.recompute_bom), _bom_snapshot (audit
+      diff), _bom_view (the API/PDF dict), _audit (write one AuditLog row + commit).
 ================================================================================
 """
 from __future__ import annotations
@@ -473,6 +519,15 @@ class BomService:
         await self._audit(user, "BOM_APPROVE", bom.id, before=before,
                           after={"status": bom.status, "approved_at": now.isoformat(),
                                  "locked_at": now.isoformat(), "revision": bom.revision})
+        # Stage 5 (§8c): advance the production board BOM_APPROVED edge as a service→service
+        # side-effect. Best-effort — the board never blocks a valid approval.
+        try:
+            from app.modules.supplier_po.production_tracking_service import (
+                ProductionTrackingService,
+            )
+            await ProductionTrackingService(self.db).on_bom_approved(bom.id)
+        except Exception:
+            pass
         # Stage 4 (§8c): approval auto-fires the inventory check so the freshly approved
         # BOM lands on the procurement dashboard with its stock badge without a manual
         # step. Best-effort — a check failure must not roll back a valid approval; the

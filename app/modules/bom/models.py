@@ -12,6 +12,16 @@ Numeric(12,2); fractional qty = Numeric(12,3); status/kind = VARCHAR storing an
 enum `.value`; semi-structured data = JSON_VARIANT. Cross-module FKs (client,
 client_order, style, app_user, document) are TABLE-NAME STRINGS only — no Python
 import of those modules. Relationships are defined only WITHIN this module.
+
+TABLE GUIDE (each class is one table; see the per-class docstring for column detail)
+  SpecSheet                 a parsed spec sheet (typed cols + JSON behind a spec_type discriminator).
+  Bom                       the BMO-1 header + the Stage-3 state machine. UNIQUE (client_order_id, style_id).
+  BomItem                   one BOM line; qty_per_garment IS the DCM for material lines.
+  GarmentType               per-type config (required POMs + Source-3 area formula + wastage).
+  PomDictionary             native term → standard pom_code map (seeded).
+  PomMeasurement            one standardized POM per spec sheet per size.
+  StyleConsumptionTemplate  the DCM memory — cross-order-stable key; back-filled by the cutting gate.
+  PatternReference          "follow pattern X in size Y" → resolved base style / DCM template.
 ================================================================================
 """
 import uuid

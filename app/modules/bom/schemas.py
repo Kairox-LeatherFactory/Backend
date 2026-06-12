@@ -2,6 +2,12 @@
 modules/bom/schemas.py — Stage-2/3 BOM API contracts (the editable-BOM bulk-PATCH
 + approval lifecycle bodies). Rich response envelopes are assembled as dicts in the
 service; only request bodies are typed here.
+
+SCHEMA GUIDE (Pydantic request bodies; FastAPI validates them at the router boundary)
+  BomItemEdit        one changed cell {bom_item_id, field, value}; used inside BomBulkPatch.
+  BomBulkPatch       PATCH /boms/{id}/items body — {base_revision, edits[]}. → edit_bom_items.
+  BomApproveRequest  POST /boms/{id}/approve body — {lock}. → approve_bom.
+  BomRejectRequest   POST /boms/{id}/reject body — {reason} (mandatory). → reject_bom.
 """
 from __future__ import annotations
 

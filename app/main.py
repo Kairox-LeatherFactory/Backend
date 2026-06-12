@@ -107,6 +107,32 @@ async def _notification_sweeper():
             print(f"⚠️  notification sweeper error: {exc}")
 
 
+async def _po_escalation_sweeper():
+    """Stage-5 supplier-chase ladder (stage-5 spec §7c). Every `notification_sweep_seconds`
+    it advances one rung (email → WhatsApp → auto-call → exhausted) for any sent PO whose
+    `next_escalation_at` is due and that the supplier has not acknowledged. DB-driven +
+    idempotent (the `acknowledged_at IS NULL` + `current_rung < 3` guards make a second
+    pass a no-op), so it survives restarts and never double-fires.
+
+    SINGLE-REPLICA ONLY (documented in config): one sweeper per process. At >1 API replica,
+    move to SELECT ... FOR UPDATE SKIP LOCKED or an external worker — the same caveat as the
+    BOM-review sweeper above (stage-5 §7c)."""
+    from app.core.database import AsyncSessionLocal
+    from app.modules.supplier_po.po_service import PoService
+
+    while True:
+        try:
+            await asyncio.sleep(settings.notification_sweep_seconds)
+            async with AsyncSessionLocal() as db:
+                advanced = await PoService(db).sweep_escalations()
+                if advanced:
+                    print(f"📞 advanced {advanced} supplier-PO escalation rung(s)")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                      # one bad sweep must not kill the loop
+            print(f"⚠️  PO escalation sweeper error: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── STARTUP ──
@@ -125,13 +151,21 @@ async def lifespan(app: FastAPI):
               f"(every {settings.notification_sweep_seconds}s, "
               f"{settings.bom_review_escalation_hours}h deadline)")
 
+    po_sweeper = None
+    if settings.po_escalation_sweeper_enabled:
+        po_sweeper = asyncio.create_task(_po_escalation_sweeper())
+        print(f"📦 Supplier-PO escalation sweeper started "
+              f"(every {settings.notification_sweep_seconds}s, "
+              f"{settings.po_escalation_hours}h ladder window)")
+
     yield
 
     # ── SHUTDOWN ──
-    if sweeper is not None:
-        sweeper.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await sweeper
+    for task in (sweeper, po_sweeper):
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
     await async_engine.dispose()
     print("🛑 Database connections closed")
 

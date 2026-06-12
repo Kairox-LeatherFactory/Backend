@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/supplier_match.py — shortfall line → supplier (§1)
+modules/supplier_po/supplier_match.py — shortfall line → supplier (§1)
 ================================================================================
 
 PURE matching + ranking (no DB): given a shortfall line's normalized key + colour
@@ -19,6 +19,19 @@ hits / low confidence → `ambiguous=True` (do not auto-select — surface the
 shortlist, the buyer picks). Contactability is a ranking TERM, not a hard filter:
 a frequent contactless vendor still surfaces (top, even) but the PO is flagged
 `no_contact_channel` downstream (§5/§7).
+
+FUNCTION GUIDE  (pure + sync; called by SupplierService.match_line per shortfall line)
+  Dataclasses: HistoryCandidate (a supply-history row + contactability),
+               SupplierScore (a ranked supplier), MatchResult (method/ranked/chosen/ambiguous/suggestion).
+  _color_ok / _recency / _jaccard   [private] colour gate, recency decay (~half/year), token overlap.
+  _rank(matched, today) -> [SupplierScore]
+      Aggregate matching history per supplier (most-recent buy wins), score each
+      (recency·freq·contactable − rate), sort best-first.
+  _decide(ranked, method, *, weak) -> MatchResult
+      Auto-select the top supplier UNLESS it's a weak category hit or a near-tie → hold ambiguous.
+  match_shortfall(bom_key, color, category_mode, candidates, aliases, *, today) -> MatchResult
+      THE ENTRY POINT. Ordered: (1) exact ledger → (2) alias → (3) category/MODE (weak) →
+      (4) fuzzy suggestion → (5) unresolved. CALLED FROM: SupplierService.match_line.
 ================================================================================
 """
 from __future__ import annotations

@@ -9,6 +9,15 @@ when the monolith was split, so a later-stage module never imports procurement j
 to name a document kind. BOM / inventory / supplier-PO enums live in their own modules.
 
 str-Enum + VARCHAR columns (the module convention) — never native PG ENUM.
+
+ENUM GUIDE (each str-Enum; the model stores `.value` in a VARCHAR column)
+  SubmissionStatus      open → complete → consumed/rejected (the upload-batch lifecycle).
+  ValidationStatus      per-document verdict (pending/accepted/rejected/superseded/needs_manual_review).
+  ScanStatus            clean/skipped/infected/error (clean+skipped pass the gate).
+  ClassificationMethod  heuristic/llm/manual — which gate decided (the LLM-policy audit trail).
+  ExpectedLayout        registry hint (scanned_pdf → skip text-layer, escalate straight to LLM).
+  SizeSystem            letter/eu/mixed (client.default_size_system).
+  RejectReason          the stable reason_code catalog → fixed HTTP statuses (see errors.py).
 ================================================================================
 """
 import enum

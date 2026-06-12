@@ -17,6 +17,15 @@ ORDER OF OPERATIONS (§6 quarantine→promote, §7 scan-then-validate)
     4. accepted → PROMOTE quarantine/ → submissions/ and return its storage_url;
        rejected/needs-review → delete the quarantined object (never referenced by
        an accepted document) and return storage_url=None.
+
+FUNCTION GUIDE  (pure-ish + sync; ProcurementService threadpools process_upload)
+  PipelineResult   the bundle returned to the service: sha + feats + outcome + scan + storage.
+  sha256_of(data) -> str   the dedupe/cache key (also called directly by the service).
+  process_upload(data, filename, submission_id, expected_kind, profiles, *, classifier?,
+                 scanner?, storage?) -> PipelineResult
+      THE ORCHESTRATOR: scan (fail-closed) → sniff+extract → quarantine-store → validate →
+      promote on accept / delete on reject. Raises UploadError on a hard gate (virus,
+      scanner down, unsupported mime, empty). Touches NO DB — the service persists the result.
 ================================================================================
 """
 from __future__ import annotations

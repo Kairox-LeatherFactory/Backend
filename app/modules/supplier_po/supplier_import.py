@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/supplier_import.py — supplier workbook importer (§9a/§1d)
+modules/supplier_po/supplier_import.py — supplier workbook importer (§9a/§1d)
 ================================================================================
 
 PURE parse of `SUPPLIERS_updated (2).xlsx` → a normalized preview (no DB, no I/O
@@ -19,6 +19,17 @@ The workbook has TWO sheets that tell two stories (§0):
 
 Output is deterministic + idempotent: the same bytes always yield the same rows, so
 committing twice produces identical `supplier` + `supplier_supply_history` rows.
+
+FUNCTION GUIDE  (pure + sync; SupplierService threadpools parse_suppliers)
+  Dataclasses: SupplierRow (one vendor to upsert), SupplyHistoryRow (one aggregated
+    (supplier, article) row), SupplierPreview (rows + counts + warnings).
+  _to_decimal / _to_date / _header_index   [private] cell coercion + header→index map.
+  _parse_contacts(ws) -> ({norm_name: SupplierRow}, count)   the sparse contact directory.
+  _parse_provision(ws) -> (accumulator keyed (name, desc), count)   the purchase ledger,
+      aggregated per (supplier, article): modes, txn_count, recency, rate band.
+  parse_suppliers(data) -> SupplierPreview
+      THE ENTRY POINT. Parse both sheets, UNION the vendors (a ledger-only vendor still
+      becomes a supplier), build the supply-history rows. CALLED FROM: SupplierService.preview/commit.
 ================================================================================
 """
 from __future__ import annotations

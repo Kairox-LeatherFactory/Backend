@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/supplier_normalize.py — supplier text normalization (§1/§9)
+modules/supplier_po/supplier_normalize.py — supplier text normalization (§1/§9)
 ================================================================================
 
 PURE helpers, no DB, no I/O — the single place the messy
@@ -16,6 +16,17 @@ The two sheets are dirty in specific ways the importer must survive:
   - the provision DESCRIPTION is the trustworthy article evidence (normalized with
     the SAME Stage-4 `normalize_key` so a BOM term and a historical buy collapse to
     one comparable key).
+
+FUNCTION GUIDE  (all pure + sync; shared by supplier_import + supplier_service/matcher)
+  normalize_key (re-exported from inventory) — the article key, identical to Stage 4.
+  clean(value) -> str | None            trimmed, null-ish ("NULL"/"-"/blank) → None.
+  normalize_supplier_name(name) -> str  the dedupe key (M.V.P.N.K ≡ M V P N K).
+  clean_phone(value) -> str | None      pull a real 7+ digit phone out of the messy cell.
+  clean_email(value) -> str | None      a syntactically valid email or None.
+  state_code_from_gstin(gstin) -> str | None   first 2 GSTIN digits (33=TN) → the GST decision.
+  mode_for_bom_category(category) -> str | None  BOM category → provision MODE bucket (matcher fallback).
+  supplier_type_for_mode(mode) -> str | None     dominant history mode → curated SupplierType.
+  CALLED FROM: supplier_import (cleaning every cell) + supplier_service (matching + type/state defaults).
 ================================================================================
 """
 from __future__ import annotations

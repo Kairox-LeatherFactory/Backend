@@ -1,12 +1,25 @@
 """
 ================================================================================
-modules/procurement/inventory_presenters.py — Stage-4 response shapes (§8)
+modules/inventory/presenters.py — Stage-4 response shapes (§8)
 ================================================================================
 
 PURE serialization: ORM rows + the computed line results → the exact JSON the FE
 renders. Split out of the service so the service stays focused on orchestration.
 Two shapes: the per-CHECK result (§8a) and the grouped DASHBOARD (§8b, client →
 order → style with a status badge). No DB, no business rules.
+
+FUNCTION GUIDE  (pure + sync; called by InventoryService to build API dicts)
+  _f(v) / _iso(dt)   [private] None-safe float / ISO-timestamp formatting.
+  preview_block(prev) -> dict   the importer summary (kept/dropped/warnings/rows). → preview & commit.
+  item_block(i) -> dict         one inventory_item row. → list_items.
+  line_view(item, line, matched_primary, result, available, reserve, on_hand, flags) -> dict
+      a FRESHLY-computed check line (carries the live available/reserved). → run_check / _check_line.
+  stored_line_view(item, ln, inv) -> dict
+      re-render a PERSISTED line (reserved recovered as required−shortfall). → get_check/latest_for_bom.
+  badge_for(lines) -> str   the BOM-level badge = the worst line status. → dashboard.
+  check_view(check, line_views, excluded) -> dict   the full per-check envelope (summary +
+      lines + excluded service lines). → run_check & _rebuild_view.
+  dashboard_block(rows) -> dict   group flat per-BOM rows into client→order→style + totals. → dashboard.
 ================================================================================
 """
 from __future__ import annotations

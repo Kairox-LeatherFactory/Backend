@@ -19,6 +19,20 @@ minority; never silently guess.
 This module is PURE and SYNC (no DB, no I/O beyond the injected classifier) so the
 whole thing runs inside run_in_threadpool. The service supplies the registry rows
 as ProfileViews and an optional Classifier.
+
+FUNCTION GUIDE  (pure + sync; called by pipeline.process_upload)
+  is_narrative_document(feats) -> bool
+      True for a flowing-prose PDF with section headings — a document ABOUT a process,
+      not an order/spec sheet. This rejects the BOM-workflow PDF even though it quotes
+      real client refs (fingerprints identify the CLIENT, not the KIND).
+  ValidationOutcome   the verdict dataclass: status/method/confidence + classification +
+      the matched/expected/found signals + a suggested fix. `.accepted` convenience prop.
+  _structural_found(feats, extra) [private] human-readable "what we saw" list for diagnostics.
+  validate_document(feats, expected_kind, profiles, *, classifier?) -> ValidationOutcome
+      THE GATE. scanned/no-text → escalate; narrative-doc guard → reject; else heuristic
+      score: ≥accept_high → ACCEPT, ≤reject_low → REJECT, mid-band → _escalate.
+  _escalate(...) -> ValidationOutcome   [private] the LLM path: no classifier → needs_manual_review;
+      else run it → ACCEPT / REJECT / WRONG_SLOT / needs_manual_review (never a silent guess).
 ================================================================================
 """
 from __future__ import annotations

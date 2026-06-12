@@ -15,6 +15,15 @@ The BOM (/boms), inventory (/inventory), and supplier-PO (/suppliers, /pos) rout
 moved to their own modules' routers when the monolith was split. The thin HTTP shell:
 streams the body + aborts past MAX_UPLOAD_MB, maps UploadError → its stable status, and
 delegates to the service.
+
+FUNCTION GUIDE  (path → handler → service call; all gated by _DMMD = DM+MD)
+  _read_capped(file) -> bytes   stream the upload, abort past MAX_UPLOAD_MB (UploadError → 413).
+  _error_response(exc) -> JSONResponse   map an UploadError to its stable HTTP status + body.
+  POST /submissions                      open_submission   → ProcurementService.open_submission
+  POST /submissions/{id}/order-sheet     upload_order_sheet → upload_order_sheet (201 / 4xx diagnostics)
+  POST /submissions/{id}/spec-sheet      upload_spec_sheet  → upload_spec_sheet
+  GET  /submissions/{id}                 submission_status  → get_submission_status (the gate)
+  GET  /submissions/{id}/documents/{id}  document_report    → get_document_report
 ================================================================================
 """
 from __future__ import annotations

@@ -3,6 +3,15 @@ modules/bom/enums.py — Stage-2/3 BOM value-sets (str-Enum + VARCHAR columns).
 
 Domain-specific to BOM generation + approval. Cross-cutting vocab (DocumentKind,
 SpecType, Notification*) lives in app/core/enums.py.
+
+ENUM GUIDE (each is a str-Enum; the model stores `.value` in a VARCHAR column)
+  BomStatus         the Stage-3 state machine — read by every edit/approve guard.
+  BomItemCategory   the 9 BMO-1 line types; MAIN/SUB/LINING/INTERLINING get DCM-resolved,
+                    MANUFACTURING/FOB_CHARGE are excluded from the inventory check.
+  DcmSource         provenance of a material line's DCM (template/similar/ai_estimate/manual)
+                    — keys the dcm.CONFIDENCE map and the §10 re-gate logic.
+  ExtractionSource  who produced an extracted value (deterministic/gemini/groq/manual) —
+                    the audit trail the LLM policy requires.
 """
 import enum
 

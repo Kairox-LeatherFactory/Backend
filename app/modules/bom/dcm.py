@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/dcm.py — DCM resolution math (Stage 2 §2, the spine)
+modules/bom/dcm.py — DCM resolution math (Stage 2 §2, the spine)
 ================================================================================
 
 DCM = dm² of each material consumed per garment (BMO-1: Sheep Glass 34.5, Goat
@@ -16,6 +16,26 @@ This module holds the PURE pieces: the cross-order style signature (so the memor
 keys stably across orders, §3c) and the Source-3 area heuristic. The ordered DB
 lookups (Sources 1/2/4) live in the service, which owns the session. A lower-
 numbered source ALWAYS wins when available; the AI estimate is never the default.
+
+FUNCTION GUIDE
+  CONFIDENCE  [dict constant]
+      Maps each DcmSource → its stamped confidence (template 0.95, similar 0.70,
+      ai_estimate 0.50, manual 1.00). BomService reads it to set bom_item.dcm_confidence.
+  slugify(name) -> str
+      Lowercase + hyphenate a string. Helper for style_signature's last-resort key.
+  style_signature(*, customer_ref, internal_ref, name) -> str
+      The CROSS-ORDER-STABLE key for the DCM memory. Style rows are order-scoped, so
+      we must NOT key on style_id — prefer customer_ref → internal_ref → slug(name).
+      Returns an UPPERCASE signature string. CALLED FROM: BomService.generate_bom
+      (to look up / write templates) and confirm_cutting (to back-fill them), so the
+      second order of the same physical style hits Source 1.
+  estimate_area_dcm(area_formula, wastage_pct, poms_for_size) -> Decimal | None
+      Source-3 last-resort heuristic — the ONLY place finished measurements touch
+      consumption. Computes a rough panel bounding-box area from POMs × the garment
+      type's formula × (1 + wastage). Returns a positive Decimal estimate, or None
+      when the needed POMs are absent (e.g. Jackiee has no POMs → can never use
+      Source 3). CALLED FROM: BomService._resolve_dcm, after Sources 1/2 miss; the
+      caller stamps dcm_source=ai_estimate + flags it for cutting review.
 ================================================================================
 """
 from __future__ import annotations

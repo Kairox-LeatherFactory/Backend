@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/escalation.py — WhatsApp + Voice transport (§7b)
+modules/supplier_po/escalation.py — WhatsApp + Voice transport (§7b)
 ================================================================================
 
 A thin transport abstraction (mirrors notifier.py's EmailBackend) for the §7
@@ -15,6 +15,15 @@ A dev `log`/`noop` driver makes the ladder testable offline (no Twilio account);
 real `twilio` driver is selected by `settings.escalation_transport` (blank-defaulted
 TWILIO_* keys). Sends are blocking → callers invoke from a threadpool. Outcomes post
 back to the §7 webhooks (`/webhooks/twilio/*`) which stamp the PO acknowledgement.
+
+FUNCTION GUIDE  (mirrors notifier.py: an interface + drivers + a singleton factory)
+  EscalationTransport          the interface: send_whatsapp(to, body) / place_call(to, message),
+                               each returning {ok, sid?, error?} and NEVER raising.
+  LogEscalationTransport       default — prints (observable offline). NoopEscalationTransport — silent.
+  TwilioEscalationTransport    real Twilio WhatsApp + Voice (lazy import; blocking → threadpool).
+  get_escalation_transport() -> EscalationTransport   the configured singleton (defaults to log).
+      CALLED FROM: PoService.sweep_escalations (rung 1 WhatsApp, rung 2 call).
+  reset_escalation_cache()     test hook — drop the cached transport.
 ================================================================================
 """
 from __future__ import annotations

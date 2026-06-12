@@ -13,6 +13,19 @@ Endpoints (under /api/v1/procurement, preserving the pre-split URLs):
 
 Self-contained upload cap (raises HTTP 413 directly) so the inventory module does not
 depend on the Stage-1 procurement upload machinery.
+
+LAYERING: thin HTTP shell — handlers delegate to InventoryService. Role gates:
+_DMMD (DM+MD, mutating), _VIEW (DM/MD/VIEWER, read-only).
+
+FUNCTION GUIDE  (path → handler → service call)
+  _read_capped(file) -> bytes   stream the upload, abort past MAX_UPLOAD_MB (413).
+  POST /inventory/preview         inventory_preview      → preview        (dry-run summary)
+  POST /inventory/commit          inventory_commit       → commit         (idempotent upsert)
+  GET  /inventory/items           inventory_items        → list_items     (paged stock list)
+  POST /boms/{id}/inventory-check run_inventory_check    → run_check      (run/re-run the check)
+  GET  /inventory-checks/{id}     get_inventory_check    → get_check      (per-check result)
+  GET  /inventory-checks          inventory_dashboard    → dashboard      (grouped board)
+  GET  /boms/{id}/inventory-check latest_inventory_check → latest_for_bom (latest for a BOM)
 ================================================================================
 """
 from __future__ import annotations

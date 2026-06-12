@@ -4,14 +4,17 @@ core/security.py — Self-issued JWT auth + role-based access control
 ================================================================================
 
 PURPOSE
-    Owns authentication end to end. We MINT and VERIFY our own JWTs now — the
-    Supabase dependency is gone. This file provides:
-      - password hashing/verification (bcrypt via passlib)
+    The auth PRIMITIVES. We MINT and VERIFY our own JWTs now — the Supabase
+    dependency is gone. This file provides:
+      - password hashing/verification (bcrypt, called directly — see note below)
       - access-token creation and decoding (HS256, signed with settings.secret_key)
-      - get_current_user(): the async FastAPI dependency that turns a Bearer
-        token into a live User row (one indexed DB lookup)
-      - require_roles(): a dependency factory restricting an endpoint to roles
       - an in-memory login rate-limiter (5 attempts / 10 min per phone)
+
+    NOTE: the FastAPI DEPENDENCIES that consume these primitives —
+    `get_current_user()` (Bearer token → live User row) and `require_roles()` (the
+    per-endpoint role gate, where DIRECT_MANAGER/MANAGING_DIRECTOR bypass) — live in
+    `app/modules/users/deps.py`, because they need the users repository. This file
+    stays dependency-free of app.modules so core never imports a module.
 
 AUTH MODEL (what changed from Supabase)
     OLD: Supabase issued a token; we only verified it and read user_metadata.role.
@@ -39,6 +42,20 @@ RATE LIMITER
     A process-local sliding counter. Good enough for a single-instance
     deployment. If you run multiple API replicas, move this to Redis (the shape
     of the helper stays identical).
+
+FUNCTION GUIDE  (consumed by modules/users — auth/login + the deps that gate routes)
+  verify_password(plain, hashed) -> bool
+      bcrypt check; truncates to 72 BYTES first (bcrypt 5.x errors past that). Never raises.
+      CALLED FROM: users authenticate (login).
+  get_password_hash(password) -> str
+      bcrypt hash for storage. CALLED FROM: user creation + scripts/seed.py (seeded pw = phone).
+  create_access_token(*, user_id, role, name, expires_delta?) -> str
+      Mint the signed HS256 JWT {sub, role, name, exp}. CALLED FROM: users authenticate.
+  decode_access_token(token) -> dict | None
+      Verify + decode (no network call); None on any JWT error. CALLED FROM: users.deps.get_current_user.
+  login_attempts_check(phone) -> None     raise 429 if the phone exceeded the window budget.
+  login_attempts_clear(phone) -> None      reset the counter after a successful login.
+      Both CALLED FROM: the login endpoint (before verify / on success).
 ================================================================================
 """
 import time

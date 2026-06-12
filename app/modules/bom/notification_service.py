@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/notification_service.py — Stage-3 BOM-ready notifications (§2)
+modules/bom/notification_service.py — Stage-3 BOM-ready notifications (§2)
 ================================================================================
 
 The in-app "BOM is ready for review" notice + its 2-hour auto-email escalation.
@@ -19,6 +19,26 @@ DESIGN (stage-3 spec §2)
 LAYERING. This service owns the `notification` table (procurement). The MD/DM
 recipient users come from `users.service` (a permitted service→service call) — it
 never queries the users repository directly (CLAUDE.md §3.2).
+
+FUNCTION GUIDE
+  STREAM_POLL_SECONDS  how often an open SSE stream re-checks the table (10s).
+  NotificationService(db)  holds the session + a BomRepository.
+  create_review_notifications(bom_id, *, style_name?, order_number?) -> [Notification]
+      Write one in-app row per recipient (MD always; DM if notify_dm_on_review), each
+      with scheduled_for = now + escalation_hours. CALLED FROM: BomService.confirm_cutting.
+  list_for_user(user_id, *, unread_only=False) -> {notifications, unread}
+      The poll fallback + initial load. CALLED FROM: GET /notifications.
+  mark_opened(notification_id, user) -> dict
+      Stamp opened_at + status=opened (recipient only) — the signal that CANCELS the
+      email escalation. CALLED FROM: POST /notifications/{id}/open.
+  stream(user_id, *, poll_seconds?) -> async generator of SSE frames
+      Emits the unseen backlog on connect (marking each SENT), then polls for new rows
+      with keep-alive comments until the client disconnects. CALLED FROM: GET /notifications/stream.
+  run_escalations() -> int
+      The 2-hour sweep: find due+unseen+un-escalated notices (repo.due_escalations),
+      send an email child per row (threadpool, idempotent), return the count dispatched.
+      CALLED FROM: the in-process sweeper started in main.py lifespan.
+  _view(n) -> dict   [static] serialize a Notification for the API/SSE.
 ================================================================================
 """
 from __future__ import annotations

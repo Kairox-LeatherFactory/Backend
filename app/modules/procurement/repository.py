@@ -7,6 +7,15 @@ The only place that talks to the DB for the Stage-1 surface: `submission`,
 `client_template` (procurement-owned) and the cross-cutting `document` (core-owned,
 imported from app.core.models). BOM / inventory / supplier-PO queries moved to their
 own modules' repositories when the monolith was split.
+
+FUNCTION GUIDE  (all async; called only by ProcurementService)
+  commit() / save(obj)   session plumbing (save = commit + refresh).
+  create_submission(*, client_id, created_by, status) -> Submission   mint the upload batch.
+  get_submission(id) -> Submission | None.
+  get_document(id) / get_document_by_sha(sha) -> Document | None   (sha = the dedupe/cache lookup).
+  add_document(doc) -> Document   persist a validated upload (accepted OR rejected — caches by sha).
+  active_templates(doc_kind?) -> [ClientTemplate]   the validation profiles for a slot
+      (the validator reads these at request time → onboarding a client is a row, no code).
 ================================================================================
 """
 from __future__ import annotations

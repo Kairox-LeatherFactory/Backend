@@ -24,6 +24,18 @@ GRACEFUL DEGRADATION + TESTABILITY
     heuristic). A `Classifier` is just a callable, so tests inject a deterministic
     fake — exactly how intelligence/langgraph_agent.py injects a fake chat model —
     proving the wiring end-to-end with no API key.
+
+FUNCTION GUIDE
+  Classifier   the callable type: (features, expected_kind, profiles) → result dict | None.
+  _build_prompt(feats, expected_kind, profiles) -> str   [private] the structured-output prompt.
+  _coerce(raw) -> dict | None   [private] parse the model's JSON (tolerates ```json fences).
+  _init_model(spec) -> chat model | None
+      Build a LangChain model from a "provider:model" spec (gemini/groq), or None if the
+      key is missing. Also reused by bom/extraction.build_default_extractor.
+  build_default_classifier() -> Classifier | None
+      Build the real Gemini→Groq classifier (None if neither key is set → escalation degrades
+      to needs_manual_review). CALLED FROM: ProcurementService._get_classifier. The returned
+      closure tries primary→fallback and coerces the JSON.
 ================================================================================
 """
 from __future__ import annotations

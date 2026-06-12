@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/extraction.py — POM/attribute/pattern extraction (Stage 2 §1/§4)
+modules/bom/extraction.py — POM/attribute/pattern extraction (Stage 2 §1/§4)
 ================================================================================
 
 The config-driven extraction engine. One GENERIC pipeline; the per-client
@@ -21,6 +21,35 @@ configured, so a model outage never stalls extraction.
 The four adapter steps (§4a) — detect / extract_poms / extract_attributes /
 resolve_pattern_ref — emit the §1a INTERMEDIATE JSON, validated before any row is
 written (validate_intermediate).
+
+FUNCTION GUIDE  (extract_spec is the entry point; BomService.generate_bom calls it
+in a threadpool)
+  load_adapters(path?) -> tuple        [lru_cached] read+cache config/extraction_adapters.yaml.
+  select_adapter(spec_type, client_match_code, adapters?) -> dict
+      Pick the adapter owning this sheet: exact (client, spec_type) → any for client →
+      `_generic`. CALLED FROM: generate_bom (step 1).
+  _norm_term(t)                        [private] strip+lowercase a POM label for matching.
+  PomDict(rows)                        a session-free term→pom_code map built from the DB rows.
+      .resolve(term, language) -> pom_code | None   tries language-specific then any-language.
+  _col_idx(letter) / _num(v)           [private] spreadsheet helpers (A→1; cell→float|None).
+  extract_poms_grid(wb, adapter, pom_dict) -> (poms, unresolved)
+      Deterministic openpyxl parse of the numbered measurement block (NO LLM). Unmapped
+      terms go to `unresolved` (never dropped). CALLED FROM: extract_spec when poms.strategy=deterministic.
+  parse_techpack_fields(wb) -> {FIELD: prose}   3-column field→value sheet → a flat map.
+  _prose_attributes(fields) -> dict    [private] regex the high-value facts (leather/colour/SMS) — the no-LLM fallback.
+  extract_attributes_techpack(fields, garment_type, extractor) -> dict
+      LLM attributes when an extractor is available, MERGED over the deterministic base.
+  detect_pattern_ref(adapter, *, fields?, grid_text?) -> {pattern_code, base_size, source_term} | None
+      Resolve "follow pattern X in size Y" via a per-adapter regex — NOT new POMs.
+  extract_spec(data, filename, adapter, pom_dict, *, spec_sheet_id?, extractor?) -> dict
+      THE ORCHESTRATOR. Loads the workbook, runs the four steps, builds the §1a JSON,
+      validates it, returns it. This is what the service threadpools.
+  _size_sort_key(s)                    [private] order sizes XS<S<M<...< numeric.
+  ExtractionError                      raised when the intermediate JSON fails schema validation.
+  validate_intermediate(d) -> None     enforce the fixed schema before any row is written.
+  build_default_extractor() -> AttributeExtractor | None
+      Build the real Gemini→Groq attribute extractor (or None if no key set → prose parse).
+      The returned closure invokes primary→fallback and coerces JSON.
 ================================================================================
 """
 from __future__ import annotations

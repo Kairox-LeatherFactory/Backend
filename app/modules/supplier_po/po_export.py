@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/po_export.py — Stage-5 supplier-PO PDF (§2)
+modules/supplier_po/po_export.py — Stage-5 supplier-PO PDF (§2)
 ================================================================================
 
 Renders a supplier PO shaped like the real `suppler-po-form/*.pdf`: a fixed buyer
@@ -17,6 +17,17 @@ path; this module is the offline-safe Python renderer the service calls.
 
 ENGINE PRECEDENCE mirrors the Stage-3 BOM export: WeasyPrint → ReportLab → raw HTML,
 so export always yields a durable artifact. Blocking → callers invoke from a threadpool.
+
+FUNCTION GUIDE  (mirrors bom/export.py; cfg = the per-supplier-type template config)
+  DEFAULT_TEMPLATE_CFG   the accessory fallback when a supplier_type has no registry row.
+  _fmt(v) [private] money formatting.
+  _line_rows_html(view, uom_header) [private] the line-grid <tr> rows.
+  _build_html(view, meta, cfg) [private] the full PO HTML: buyer block + Bill-To + grid +
+      CGST/SGST-or-IGST footer + terms. The ONE per-type variation is the UOM header (cfg).
+  _reportlab_pdf(view, meta, cfg) [private] the pure-Python fallback render.
+  render_po_pdf(view, meta, template_cfg?) -> (bytes, mime, ext)
+      THE ENTRY POINT. WeasyPrint → ReportLab → raw HTML. CALLED FROM: PoService.send_po
+      (in a threadpool); the bytes are sha256-deduped into a Document(kind=supplier_po_pdf).
 ================================================================================
 """
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/po_templates.py — PO template registry (§2b)
+modules/supplier_po/po_templates.py — PO template registry (§2b)
 ================================================================================
 
 "One PO template per supplier type" (§2): the differences between a leather, an
@@ -13,6 +13,15 @@ posture as every prior stage.
 This is the PURE, sync registry loader (no DB). Templates that are persisted into a
 `po_template` table instead are an equivalent option (§10); the YAML is the shipped
 default.
+
+FUNCTION GUIDE
+  _BUILTIN   the shipped fallback map (leather/accessory/service) so the renderer works
+             before the YAML is seeded.
+  _load() -> {supplier_type: cfg}   [private, cached] merge the YAML over _BUILTIN.
+  template_cfg_for(supplier_type) -> dict | None
+      The template cfg (uom_header/default_uom/...) for a type, or None to let the caller
+      default. CALLED FROM: PoService._po_template_cfg (at send time).
+  reset_cache()   test hook — drop the cached registry.
 ================================================================================
 """
 from __future__ import annotations

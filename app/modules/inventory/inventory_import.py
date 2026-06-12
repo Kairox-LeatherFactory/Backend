@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/inventory_import.py — normalizing inventory importer (§2)
+modules/inventory/inventory_import.py — normalizing inventory importer (§2)
 ================================================================================
 
 PURE parse of `INVENTORY (1).xlsx` → a normalized, DEDUPED preview (no DB, no I/O
@@ -15,6 +15,18 @@ blank quantities, and section/ledger NOISE rows. This module:
   3. computes the normalized_key + colour,
   4. DEDUPS by normalized_key (the 410/446/673 lots of one article) → qty_on_hand
      summed, rate qty-weighted, modal UOM (a per-key UOM clash is a warning).
+
+FUNCTION GUIDE  (pure + sync; the service threadpools parse_inventory)
+  clean_str(value) -> str | None   [private-ish] trimmed/whitespace-collapsed cell read.
+  InventoryRow      dataclass — one DEDUPED article ready to upsert (key/desc/uom/qty/rate/color/lots).
+  InventoryPreview  dataclass — {rows, dropped, warnings, raw_count}; .kept = len(rows).
+  _to_decimal(value) -> Decimal | None   [private] safe numeric coercion.
+  _resolve_columns(header) -> {field: index}   [private] map DESCRIPTION/NOM/PCS/RATE by
+      header name, fall back to positions 0–3.
+  parse_inventory(data, *, sheet_name?) -> InventoryPreview
+      THE ENTRY POINT. Reads the workbook, drops noise rows, coerces types, computes the
+      key/colour, and ACCUMULATES per normalized_key (sum qty, qty-weighted rate, modal
+      UOM). Deterministic + idempotent. CALLED FROM: InventoryService.preview AND .commit.
 ================================================================================
 """
 from __future__ import annotations

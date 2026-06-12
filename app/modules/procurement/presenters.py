@@ -10,6 +10,20 @@ API returns. Split out of service.py so the service stays focused on orchestrati
 No DB session, no business rules, no I/O. Every function takes already-loaded
 `Document` / `Submission` rows (duck-typed — no `models` import needed) and returns
 a plain dict. The service calls these; nothing here calls back into the service.
+
+FUNCTION GUIDE  (pure + sync; called by ProcurementService)
+  ACCEPTABLE_SCAN   the scan statuses (clean/skipped) that don't block the Stage-2 gate.
+  signals_blob(outcome) -> dict   the matched/expected/found bundle persisted on Document.
+  document_block(doc) -> dict     the per-document envelope. → GET …/documents/{id} + success body.
+  submission_block(sub, order_doc, spec_doc) -> dict
+      the submission status + the ready_for_stage_2 GATE (both slots accepted + scan ok).
+      → GET /submissions/{id}.
+  success_envelope(sub, doc) -> dict   the 201/200 upload body (document + submission summary).
+  fingerprint(filename, data) -> dict  the minimal fingerprint for a pre-validation gate error.
+  rejection_envelope(sub, doc, outcome) -> dict          the 422 diagnostics (fresh validation).
+  rejection_envelope_from_row(sub, doc) -> dict           the 422 replayed from a CACHED row.
+  enrich_gate_error(exc, sub, filename, data, kind, sha) -> UploadError
+      attach the §5b fingerprint envelope to a hard-gate error (MIME/size/virus/scanner).
 ================================================================================
 """
 from __future__ import annotations

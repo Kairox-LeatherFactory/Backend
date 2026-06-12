@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/export.py — Stage-3 BOM PDF export (§4)
+modules/bom/export.py — Stage-3 BOM PDF export (§4)
 ================================================================================
 
 Renders the approved BOM as a "Yardage & Price Quotation" PDF shaped like
@@ -20,6 +20,18 @@ ENGINE PRECEDENCE (stage-3 spec §4a — WeasyPrint primary, ReportLab fallback)
 Rendering is blocking → callers invoke `render_bom_pdf` from a threadpool
 (bom_service does). The revision + approver identity + timestamp are stamped onto
 the artifact (the workflow doc's "locked, full revision history" requirement).
+
+FUNCTION GUIDE
+  _fmt(v, dash="-") -> str   [private] money/number formatting ("-" for None, 2dp commas).
+  _build_html(view, meta) -> str   [private] build the quotation HTML (header + line grid
+      + FOB/bulk totals footer + approver stamp). `view` = BomService._bom_view; `meta` =
+      style/order/approver context. Used by both render paths.
+  _reportlab_pdf(view, meta) -> bytes   [private] the pure-Python fallback render (landscape
+      A4 table) — no native deps, so it works on Windows dev + the SQLite test suite.
+  render_bom_pdf(view, meta) -> (bytes, mime, ext)
+      THE ENTRY POINT. Tries WeasyPrint (PDF) → ReportLab (PDF) → raw HTML bytes, so export
+      never hard-fails. CALLED FROM: BomService.export_bom (in a threadpool); the bytes are
+      hashed → sha256-deduped Document.
 ================================================================================
 """
 from __future__ import annotations
