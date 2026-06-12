@@ -48,6 +48,9 @@ class ClientRepository:
     async def get_style(self, style_id: uuid.UUID) -> Style | None:
         return await self.db.get(Style, style_id)
 
+    async def get_order(self, order_id: uuid.UUID) -> ClientOrder | None:
+        return await self.db.get(ClientOrder, order_id)
+
     async def get_sku(self, sku_id: uuid.UUID) -> SKU | None:
         return await self.db.get(SKU, sku_id)
 

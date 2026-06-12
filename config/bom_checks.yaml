@@ -1,0 +1,27 @@
+# =============================================================================
+# config/bom_checks.yaml — per-client BOM cross-check rules (Stage 2 §8)
+# =============================================================================
+# Loaded (and cached) at runtime by checks.py — per-client validation, NOT a code
+# branch. Each rule yields a non-blocking FLAG on the draft (surfaced to the
+# cutting manager) unless marked `severity: error`, which blocks finalization.
+#
+# Rule KINDS are generic engine primitives (checks.py); the which/where is config:
+#   range                 a numeric field within [lo, hi]               (warn)
+#   pom_pitch_monotonic   per-POM grading pitch is consistent           (warn)
+#   size_qty_sum_equals_total   Σ per-size order qty == order total      (error)
+#   pattern_reference_exists    the spec's pattern_reference resolved    (error)
+# New client → new entry here; no source change (acceptance §11.6/§11.8).
+# =============================================================================
+
+- client_code: beau_geste
+  checks:
+    - { id: leather_thickness, kind: range, field: substance_mm,
+        range: [0.6, 0.7], severity: warn }                 # 規格 column
+    - { id: size_pitch_monotonic, kind: pom_pitch_monotonic, severity: warn }
+    - { id: qty_sum, kind: size_qty_sum_equals_total, severity: error }
+
+- client_code: the_jackie
+  checks:
+    - { id: pattern_resolves, kind: pattern_reference_exists, severity: error }
+    - { id: leather_substance, kind: range, field: substance_mm,
+        range: [0.45, 0.50], severity: warn }

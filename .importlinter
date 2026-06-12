@@ -21,3 +21,4 @@ containers =
     app.modules.production
     app.modules.wages
     app.modules.users
+    app.modules.procurement

@@ -83,6 +83,85 @@ class Settings(BaseSettings):
     login_max_attempts: int = 5
     login_window_seconds: int = 600                  # 10 minutes
 
+    # ── Stage 1: upload, storage & virus scan (BOM Procurement Workflow) ─────
+    # Pluggable storage backend so the repo keeps NO hard Supabase dependency and
+    # the SQLite/local test path is preserved. `local` writes under a directory;
+    # `supabase`/`s3` are the staging/prod drivers (blank-defaulted credentials).
+    storage_backend: str = "local"                 # local | s3 | minio | supabase
+    local_storage_dir: str = "./var/procurement-documents"
+    supabase_url: str = ""
+    supabase_service_key: str = ""
+    supabase_bucket: str = "procurement-documents"
+    s3_endpoint_url: str = ""                       # MinIO / S3-compatible endpoint
+    s3_region: str = ""
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    # Upload limits. MAX_UPLOAD_MB closes the unbounded-read gap in the imports
+    # handler (CLAUDE.md §13.4) — the body is streamed and aborted past the cap.
+    max_upload_mb: int = 25
+    # Virus scan (real ClamAV) gated by a flag: ON in staging/prod (reject on hit,
+    # fail closed if clamd is unreachable); OFF in dev records scan_status=skipped.
+    virus_scan_enabled: bool = True
+    clamd_host: str = "127.0.0.1"
+    clamd_port: int = 3310
+
+    # ── Stage 3: BOM approval — notifications + escalation (BOM Procurement) ──
+    # When a BOM enters `ready_for_review` the MD (and, when enabled, the DM) get an
+    # in-app `notification` row delivered over SSE. If a recipient has NOT *seen* it
+    # within `bom_review_escalation_hours`, a DB-driven in-process sweeper sends an
+    # auto-email (the product owner's 2-hour rule; supersedes the doc's "5 hour").
+    bom_review_escalation_hours: int = 2
+    notify_dm_on_review: bool = True             # notify MD + DM (vs MD only)
+    # The in-process escalation sweeper (started in main.py lifespan). Single-replica
+    # only — at >1 replica move to SELECT ... FOR UPDATE SKIP LOCKED / an external
+    # worker (mirrors the in-process login rate-limiter caveat). Off in tests.
+    notification_sweeper_enabled: bool = True
+    notification_sweep_seconds: int = 60
+    # Email transport for the escalation. `log` (default) writes to stdout — exercises
+    # the path with no SMTP server; `smtp` sends for real; `noop` discards.
+    email_backend: str = "log"                   # log | smtp | noop
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = "no-reply@leatherfactory.local"
+    smtp_use_tls: bool = True
+    # Base URL the in-app/email deep link points at (the approval screen).
+    frontend_base_url: str = "http://localhost:3000"
+
+    # ── Stage 5: supplier PO — buyer block, GST, send, tracking, escalation ───
+    # The fixed buyer block printed on every PO form (PAKKAR TANVEER EXPORTS), from the
+    # real suppler-po-form PDFs. Config, not hard-coded, so a different factory entity is
+    # one settings change.
+    po_buyer_name: str = "PAKKAR TANVEER EXPORTS"
+    po_buyer_address: str = "NO.1 Hyder Garden, 3rd Street, Periamet, Chennai-600012"
+    po_buyer_gstin: str = "33AAGPA0428C1ZO"
+    po_buyer_state_code: str = "33"                 # Tamil Nadu — drives intra/inter GST (§2c)
+    po_buyer_email: str = "tanveer@ptexports.com"
+    po_buyer_phone: str = ""
+    po_gst_rate: float = 12.0                        # CGST 6 + SGST 6 intra, IGST 12 inter (§2c)
+    po_default_delivery_days: int = 10
+    po_default_payment_terms_days: int = 60
+    # The external supplier escalation window stays 5h (§7a) — distinct from the 2h
+    # internal BOM-review nudge. The PO escalation sweeper shares the lifespan loop.
+    po_escalation_hours: int = 5
+    po_escalation_sweeper_enabled: bool = True
+    # Base URL the open-tracking pixel + wrapped links resolve against (the API, not the
+    # FE) — must be reachable by the supplier's mail client (§6b).
+    po_tracking_base_url: str = "http://localhost:8000/api/v1/procurement"
+    # WhatsApp + Voice escalation transport (§7b). `log` (default) writes to stdout so the
+    # ladder is testable offline; `twilio` sends for real (blank-defaulted credentials).
+    escalation_transport: str = "log"               # log | noop | twilio
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_whatsapp_from: str = ""                  # "whatsapp:+1..."
+    twilio_voice_from: str = ""                     # "+1..."
+    # Amazon SES is the recommended real email driver (§5a) — it slots behind the same
+    # email_backend switch as smtp/log (email_backend=ses; AWS_SES_* below).
+    aws_ses_region: str = ""
+    aws_ses_access_key_id: str = ""
+    aws_ses_secret_access_key: str = ""
+
     # ── Domain knobs ─────────────────────────────────────────────────────────
     # How many days before a PO's sea-freight cutoff we start raising warnings.
     sea_cutoff_warning_days: int = 7

@@ -26,6 +26,11 @@ from app.modules.clients import models as _c   # noqa
 from app.modules.employees import models as _e  # noqa
 from app.modules.production import models as _p  # noqa
 from app.modules.wages import models as _w       # noqa
+from app.modules.attendance import models as _a  # noqa
+# procurement (BOM workflow) — required so the `document` table exists, since
+# client_order.source_document_id FKs to it. Without it, create_all raises
+# NoReferencedTableError on the whole schema.
+from app.modules.procurement import models as _pr  # noqa
 
 
 @pytest_asyncio.fixture

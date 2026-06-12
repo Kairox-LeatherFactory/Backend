@@ -43,6 +43,22 @@ bcrypt==5.0.0            # used DIRECTLY in core/security.py. passlib was remove
 # ── Excel import ───────────────────────────────────────────────────────────
 openpyxl==3.1.5
 
+# ── Stage-1 document upload & validation (BOM procurement) ──────────────────
+pypdf==6.13.2             # PDF text-layer probe + page count (identity validation)
+PyYAML==6.0.3            # client_template registry seed (config/client_templates.yaml)
+
+# ── Stage-3 BOM PDF export (approval) ───────────────────────────────────────
+reportlab==4.2.5         # pure-Python PDF render — the FALLBACK that runs everywhere
+                         # (Windows dev + SQLite tests), no native deps. WeasyPrint is
+                         # the documented PRIMARY (HTML/CSS, better BMO-1 layout) but
+                         # needs cairo/pango; it is imported lazily ONLY in the Docker/
+                         # Linux runtime where those libs exist. See export.py precedence.
+# weasyprint             # OPTIONAL primary — install in the Docker image (+ cairo/pango)
+# python-magic           # OPTIONAL libmagic MIME sniff; a signature sniffer is the
+#                        # cross-platform fallback (libmagic is absent on Windows).
+# boto3                  # OPTIONAL — only if STORAGE_BACKEND=s3/minio
+# supabase               # OPTIONAL — only if STORAGE_BACKEND=supabase (prod)
+
 # ── Tests ──────────────────────────────────────────────────────────────────
 pytest==9.0.3
 pytest-asyncio==1.4.0

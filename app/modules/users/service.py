@@ -97,3 +97,13 @@ class UserService:
 
     async def list_users(self, active_only: bool = True) -> list[User]:
         return await self.repo.list_all(active_only)
+
+    async def list_by_roles(self, roles, active_only: bool = True) -> list[User]:
+        """Active users in any of `roles` — the public interface other modules use
+        (e.g. procurement resolving the MD/DM recipients of a BOM-review notice)."""
+        return await self.repo.list_by_roles(roles, active_only)
+
+    async def get(self, user_id) -> User | None:
+        """One user by id — used by the procurement escalation sweeper to resolve a
+        notification recipient's email."""
+        return await self.repo.get(user_id)

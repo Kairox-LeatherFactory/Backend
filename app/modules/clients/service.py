@@ -32,6 +32,9 @@ class ClientService:
     async def get_style(self, style_id: uuid.UUID) -> Style | None:
         return await self.repo.get_style(style_id)
 
+    async def get_order(self, order_id: uuid.UUID) -> ClientOrder | None:
+        return await self.repo.get_order(order_id)
+
     # Public interface other modules rely on:
     async def get_sku(self, sku_id: uuid.UUID) -> SKU | None:
         return await self.repo.get_sku(sku_id)

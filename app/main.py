@@ -33,6 +33,8 @@ ROUTE MAP (every router lives under /api/v1)
   /api/v1/imports     Excel preview/commit
 ================================================================================
 """
+import asyncio
+import contextlib
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Response
@@ -48,6 +50,11 @@ from app.modules.clients import models as _clients      # noqa: F401
 from app.modules.production import models as _production  # noqa: F401
 from app.modules.wages import models as _wages           # noqa: F401
 from app.modules.attendance import models as _attendance           # noqa: F401
+# procurement (BOM workflow): schema-only in Stage 0 — no router yet — but the
+# models MUST be imported so create_all/Alembic register the `document`,
+# `purchase_order`, `bom`, ... tables. `client_order.source_document_id` FKs to
+# `document`; omit this and metadata can't resolve that FK.
+from app.modules.procurement import models as _procurement          # noqa: F401
 
 # Routers
 from app.modules.users.router import auth_router, users_router
@@ -59,6 +66,7 @@ from app.modules.analytics.router import router as analytics_router
 from app.modules.imports.router import router as imports_router
 from app.modules.intelligence.router import router as chat_router
 from app.modules.attendance.router import router as attendance_router
+from app.modules.procurement.router import router as procurement_router
 
 API_PREFIX = "/api/v1"
 
@@ -66,6 +74,31 @@ API_PREFIX = "/api/v1"
 # ──────────────────────────────────────────────────────────
 # Lifecycle Management (async)
 # ──────────────────────────────────────────────────────────
+async def _notification_sweeper():
+    """Stage-3 escalation loop (stage-3 spec §2c). Every `notification_sweep_seconds`
+    it sends the auto-email for any in-app BOM-review notice that went unseen past its
+    2-hour deadline. DB-driven + idempotent (repo.due_escalations' NOT-EXISTS guard),
+    so it survives restarts and never double-emails.
+
+    SINGLE-REPLICA ONLY (documented in config): one sweeper per process. At >1 API
+    replica, move to SELECT ... FOR UPDATE SKIP LOCKED or an external worker — the same
+    caveat as the in-process login rate-limiter (CLAUDE.md §6/§13.9)."""
+    from app.core.database import AsyncSessionLocal
+    from app.modules.procurement.notification_service import NotificationService
+
+    while True:
+        try:
+            await asyncio.sleep(settings.notification_sweep_seconds)
+            async with AsyncSessionLocal() as db:
+                sent = await NotificationService(db).run_escalations()
+                if sent:
+                    print(f"📧 escalated {sent} unseen BOM-review notification(s) to email")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                      # one bad sweep must not kill the loop
+            print(f"⚠️  notification sweeper error: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── STARTUP ──
@@ -77,9 +110,20 @@ async def lifespan(app: FastAPI):
             await conn.run_sync(Base.metadata.create_all)
         print("✅ Database tables verified")
 
+    sweeper = None
+    if settings.notification_sweeper_enabled:
+        sweeper = asyncio.create_task(_notification_sweeper())
+        print(f"⏰ Notification escalation sweeper started "
+              f"(every {settings.notification_sweep_seconds}s, "
+              f"{settings.bom_review_escalation_hours}h deadline)")
+
     yield
 
     # ── SHUTDOWN ──
+    if sweeper is not None:
+        sweeper.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sweeper
     await async_engine.dispose()
     print("🛑 Database connections closed")
 
@@ -127,6 +171,7 @@ app.include_router(analytics_router, prefix=API_PREFIX)
 app.include_router(imports_router, prefix=API_PREFIX)
 app.include_router(chat_router, prefix=API_PREFIX)
 app.include_router(attendance_router, prefix=API_PREFIX)
+app.include_router(procurement_router, prefix=API_PREFIX)
 
 
 # ──────────────────────────────────────────────────────────

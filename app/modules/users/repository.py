@@ -36,6 +36,19 @@ class UserRepository:
         res = await self.db.execute(stmt)
         return list(res.scalars())
 
+    async def list_by_roles(self, roles, active_only: bool = True) -> list[User]:
+        """Active users whose role is in `roles`. Used by the procurement
+        notification service (a permitted service→service call) to resolve the
+        MD/DM recipients of a BOM-review notice."""
+        roles = list(roles)
+        if not roles:
+            return []
+        stmt = select(User).where(User.role.in_(roles)).order_by(User.name)
+        if active_only:
+            stmt = stmt.where(User.is_active.is_(True))
+        res = await self.db.execute(stmt)
+        return list(res.scalars())
+
     async def create(self, **kw) -> User:
         user = User(**kw)
         self.db.add(user)

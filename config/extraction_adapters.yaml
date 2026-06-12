@@ -1,0 +1,70 @@
+# =============================================================================
+# config/extraction_adapters.yaml — per-client extraction adapters (Stage 2 §4)
+# =============================================================================
+# Loaded (and cached) at runtime by extraction.py — NOT a DB table: this is
+# behaviour config, not queryable data, so it lives only in this file.
+# An adapter is SELECTED at runtime off (spec_type, client_match_code) — both
+# already on the Document/SpecSheet rows from Stage 1 — and reads this per-client
+# config; the CODE is one generic pipeline (extraction.py). Onboarding a client =
+# one entry here, not a Python branch (acceptance §11.6). Unknown layouts fall to
+# `_generic` (LLM-only, stricter confidence floor).
+#
+# Per entry:
+#   client_code        matches Document.client_match_code (beau_geste, the_jackie)
+#   spec_type          measurement_grid | narrative_techpack  (Stage-1 discriminator)
+#   language           POM-dictionary language for term standardization
+#   garment_type       default garment_type.code for this client's styles
+#   poms               { strategy: deterministic|llm|none, ... grid coords }
+#   pattern_ref        { field/regex } — "follow pattern X" detection
+#   attributes         { strategy: deterministic|llm } — leather/colour/accessories
+# =============================================================================
+
+# ── Beau Geste — tabular Japanese measurement grid (deterministic, NO LLM) ───
+- client_code: beau_geste
+  spec_type: measurement_grid
+  language: ja
+  garment_type: TRACK_PANT
+  sheet_name: "CRPL-004"          # the 規格寸法 block lives here
+  poms:
+    strategy: deterministic       # openpyxl grid parse — the grid is machine-readable
+    term_col: B                   # the Japanese POM label column
+    first_row: 9                  # row of POM #1 (ウェスト上り)
+    last_row: 22                  # row of POM #14 (脇総丈)
+    pitch_col: L
+    size_cols: { S: G, M: H, L: I, XL: J, XXL: K }
+  pattern_ref:
+    strategy: regex
+    # 特記事項: "※CR1-O2B5-PL02をベースに作成" → CR1-O2B5-PL02
+    pattern: '※\s*([A-Z0-9O\-]+)\s*をベース'
+  attributes:
+    strategy: deterministic       # materials/accessories block; LLM only if missing
+
+# ── Jackiee — prose Italian tech pack + pattern reference (Gemini) ───────────
+- client_code: the_jackie
+  spec_type: narrative_techpack
+  language: it
+  garment_type: JACKET
+  poms:
+    strategy: none                # there are NO POMs — completeness met via pattern ref
+  pattern_ref:
+    strategy: regex
+    field: PATTERN
+    # "...follow pattern already used for SS26 named MIMI-28-09-22-ZZ, in size 42"
+    pattern: 'named\s+([A-Z0-9\-]+)\s*,?\s*in\s+size\s+(\w+)'
+  attributes:
+    strategy: llm                 # Gemini structured output over the 3-column sheet
+
+# ── Generic fallback — unknown layout, LLM-only, stricter floor ──────────────
+- client_code: _generic
+  spec_type: narrative_techpack
+  language: en
+  garment_type: JACKET
+  poms:
+    strategy: llm
+  pattern_ref:
+    strategy: regex
+    field: PATTERN
+    pattern: 'pattern\s+(?:named\s+)?([A-Z0-9\-]{4,})'
+  attributes:
+    strategy: llm
+  min_confidence: 0.6

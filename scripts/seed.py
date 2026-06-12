@@ -73,6 +73,9 @@ from app.modules.production.models import Operation, OperationAccess
 from app.modules.wages.models import Rate
 from app.modules.attendance.models import AttendanceLog, ShiftConfig  # noqa: F401
 from app.modules.procurement import models as _procurement  # noqa: F401  (register tables)
+from app.modules.procurement.seed_templates import seed_client_templates
+from app.modules.procurement.seed_stage2 import seed_stage2
+from app.modules.procurement.seed_inventory import seed_inventory
 
 # Import engine (sync) for the spreadsheets.
 from app.modules.imports.import_engine import build_preview
@@ -315,6 +318,9 @@ def main():
         employees = seed_employees(db)
         n_rates = seed_rates(db, ops)
         user_stats = seed_users(db, employees)
+        n_templates = seed_client_templates(db)   # Stage-1 validation registry (§4)
+        stage2_stats = seed_stage2(db)             # Stage-2 garment types + POM dict (§3)
+        stage4_stats = seed_inventory(db)          # Stage-4 aliases + uom + inventory master
 
         n_clients = db.scalar(select(__import__("sqlalchemy").func.count(Client.id)))
         n_styles = db.scalar(select(__import__("sqlalchemy").func.count(Style.id)))
@@ -325,6 +331,9 @@ def main():
         print(f"   styles     : {n_styles}")
         print(f"   employees  : {len(employees)}")
         print(f"   rates      : {n_rates}")
+        print(f"   templates  : {n_templates}")
+        print(f"   stage2     : {stage2_stats}")
+        print(f"   stage4     : {stage4_stats}")
         print(f"   users      : {user_stats}")
         print("─" * 60)
         print("   Login (Swagger Authorize / POST /api/v1/auth/login):")

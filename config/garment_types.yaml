@@ -1,0 +1,39 @@
+# =============================================================================
+# config/garment_types.yaml — required POMs + Source-3 area heuristic (Stage 2 §3e)
+# =============================================================================
+# Seeded idempotently into the `garment_type` table by scripts/seed.py.
+#
+#   required_poms        the POM codes a complete spec of this type should carry
+#                        (drives a completeness check; satisfied via a pattern
+#                        reference when the spec has no grid — Jackiee).
+#   area_formula         the LAST-RESORT DCM heuristic (§2 Source 3). It is the ONLY
+#                        place finished measurements touch consumption, and its
+#                        output is always stamped ai_estimate / confidence ≤0.5 and
+#                        flagged for human confirmation — never a silent final value.
+#                        Shape: a rough pattern bounding-box per panel.
+#                          dcm_dm2 = panels * length_cm * width_cm / 100 * (1+wastage)
+#                          length_cm = Σ(weight·POM) over `length_poms`
+#                          width_cm  = Σ(weight·POM) over `width_poms`
+#   default_wastage_pct  marker wastage applied in Source 3 (as a percentage).
+# =============================================================================
+
+- code: TRACK_PANT
+  label: "Side-suede leather track pant"
+  required_poms: [WAIST_FINISHED, WAIST_ACTUAL, HIP, THIGH_WIDTH, KNEE_WIDTH,
+                  HEM_WIDTH, FRONT_RISE, INSEAM, OUTSEAM]
+  area_formula:
+    length_poms: { OUTSEAM: 1.0 }
+    width_poms:  { HIP: 0.20, THIGH_WIDTH: 0.30 }
+    panels: 2
+    calibration: 1.0        # tuning knob; estimate only, corrected at the §10 gate
+  default_wastage_pct: 15.0
+
+- code: JACKET
+  label: "Leather / suede jacket"
+  required_poms: [CHEST, SHOULDER, SLEEVE_LENGTH, BACK_LENGTH, HEM_WIDTH]
+  area_formula:
+    length_poms: { BACK_LENGTH: 1.0 }
+    width_poms:  { CHEST: 0.50 }
+    panels: 3
+    calibration: 1.0
+  default_wastage_pct: 18.0

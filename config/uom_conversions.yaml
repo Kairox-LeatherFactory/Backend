@@ -1,0 +1,17 @@
+# config/uom_conversions.yaml — stock-UOM → BOM-UOM factors (stage-4 §6.2)
+#
+#   on_hand_in_bom_uom = on_hand_in_stock_uom × factor
+#
+# Identity equivalences (dm²≡DCM, pc≡NOS≡PCS) are handled in code (inventory_match.
+# convert_on_hand) and need no row here; they are listed explicitly for documentation.
+# A matched stock UOM with no identity + no row here is a flagged `uom_mismatch` →
+# conservative out_of_stock (never a false 'sufficient').
+
+# explicit identities (documentation; code already treats these as factor 1)
+- { from_uom: "DCM", to_uom: "DCM", factor: 1 }
+- { from_uom: "NOS", to_uom: "PCS", factor: 1 }
+- { from_uom: "PCS", to_uom: "PCS", factor: 1 }
+
+# real cross-unit conversions (factory-specific; sample defaults — tune per article)
+- { from_uom: "ROLL", to_uom: "MTRS", factor: 25 }     # a tissue-tape roll ≈ 25 m
+- { from_uom: "REEM", to_uom: "PCS", factor: 500 }      # a ream ≈ 500 sheets
