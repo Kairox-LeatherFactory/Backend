@@ -1,51 +1,32 @@
 """
-procurement — the BOM Procurement Workflow domain (supplier side of the doc).
+procurement — Stage 1 intake (the BOM Procurement Workflow front door).
 
-Owns the schema for: uploaded documents + extracted spec sheets (Stage 1),
-the BOM and its line items (Stage 2/3), the inventory master + per-BOM stock
-checks (Stage 4), suppliers + the supplier PURCHASE ORDER and its escalation
-responses (Stage 5), plus cross-cutting notifications and an audit log
-(Stage 3/5/6).
-
-NAMING: the name `purchase_order` belongs HERE (the supplier PO). The buyer's
-order is `client_order` in the clients module. Domain value-sets live in
-`enums.py`; the tables live in `models.py`.
-
-Stage 0 establishes only the schema. Stage 1 adds the upload & validation surface
-(submission pairing, identity validation, virus scan, storage). The Gemini->Groq
-extraction service and the BOM/inventory/supplier logic arrive in later stages.
+Owns the upload & validation surface: the `submission` upload-batch (the pairing
+surrogate that becomes the client_order link in Stage 2) and the per-client × doc-kind
+validation registry `client_template`, plus the scan → sniff → validate → store
+pipeline (classifier, sniffing, scanning, validator, registry, presenters, errors,
+seed_templates).
 
 ────────────────────────────────────────────────────────────────────────────────
-MODULE STRUCTURE & BOUNDARIES — why this is ONE module (and how it grows)
+MODULE SPLIT — the former monolith is now FOUR stage modules + a shared core
 ────────────────────────────────────────────────────────────────────────────────
-DECISION: procurement is ONE module = ONE deployable = ONE import-linter container.
-It is NOT split into separate modules or microservices, on purpose.
+The BOM Procurement Workflow was split out of one `procurement` package into focused,
+independently-ownable modules so each stage has its own router → service → repository →
+models stack:
 
-WHY ONE: the 13 tables are a single, tightly-FK-coupled bounded context — a single
-workflow run threads through nearly all of them in ONE transaction (`submission` →
-`document` → `bom` → `bom_item` → `inventory_check`/`inventory_check_line` →
-`purchase_order` → `po_item` → `po_response`, with `notification`/`audit_log`
-cross-cutting). `document` alone is referenced by 5 FKs, `bom` by 3. Splitting that
-into network services would replace in-process referential integrity with a
-distributed saga (eventual consistency + retries + compensation) for no current
-gain (one team, one DB, no independent scaling need). The platform is a *modular
-monolith, microservice-READY* (CLAUDE.md §3.1–3.2) — ready, not pre-split.
+    procurement   Stage 1   upload & validation intake (this module)
+    bom           Stage 2/3 BOM generation + approval/lock + in-app notifications
+    inventory     Stage 4   inventory master + per-BOM stock checks + reservations
+    supplier_po   Stage 5   suppliers, the supplier PO, matching, escalation, board
 
-FUTURE INTERNAL LAYOUT (organise by STAGE as each gains real logic — NOT before,
-to avoid empty shells). Keep the shared `models.py` + `enums.py` at the module root;
-group the per-stage behavior into sub-packages:
-    procurement/intake/     Stage 1 upload & validation  (today's service, router,
-                            pipeline, validator, registry, classifier, sniffing,
-                            scanning, storage, presenters, seed_templates, errors)
-    procurement/bom/        Stage 2/3 extraction + BOM approval/lock
-    procurement/inventory/  Stage 4 stock checks
-    procurement/suppliers/  Stage 5 supplier PO + escalation
-(As of now only Stage 1 has logic, so the files live flat at the module root; move
-them into `intake/` only when a second stage's package is introduced.)
+Cross-cutting tables that EVERY stage writes — `document`, `notification`, `audit_log`
+— plus the pluggable email/storage backends live in `app/core` (FK-by-string only, so
+core imports nothing from app.modules). Cross-module data flows through the owning
+module's SERVICE returning plain DTOs, never another module's repository/models.
 
-
-PROMOTE-TO-SERVICE CRITERIA (when to revisit the monolith decision): a stage develops
-an independent scaling profile, a separate ownership/team boundary, or a genuinely
-async/queue-driven workload. The move is then "lift the sub-package, swap the
-in-process service call for HTTP" (CLAUDE.md §3.2) — nothing else changes.
+IMPORT DIRECTION (acyclic except a deliberate lazy bom↔inventory service pair):
+    procurement → core, clients.service              (never imports bom/inventory/supplier_po)
+    bom         → core, clients.service, inventory.service
+    inventory   → core, bom.service, clients.service
+    supplier_po → core, bom.service, inventory.service, clients.service, users.service
 """
