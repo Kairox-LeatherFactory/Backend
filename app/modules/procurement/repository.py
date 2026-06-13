@@ -69,6 +69,13 @@ class ProcurementRepository:
         await self.db.refresh(doc)
         return doc
 
+    async def delete_document(self, doc: Document) -> None:
+        """Drop a cached document row. Used to evict a stale NEEDS_MANUAL_REVIEW result so a
+        byte-identical re-upload re-runs the pipeline (the sha cache must not pin an
+        unresolved verdict forever — see service._handle_existing)."""
+        await self.db.delete(doc)
+        await self.db.commit()
+
     # ── client_template registry ─────────────────────────────────────────────
     async def active_templates(self, doc_kind: str | None = None) -> list[ClientTemplate]:
         stmt = select(ClientTemplate).where(ClientTemplate.is_active.is_(True))

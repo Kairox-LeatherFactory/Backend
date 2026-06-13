@@ -40,16 +40,31 @@ FUNCTION GUIDE
 """
 from __future__ import annotations
 
+import base64
 import json
+import logging
 from typing import Callable
 
 from app.core.config import settings
-from app.modules.procurement.sniffing import DocFeatures
+from app.modules.procurement.sniffing import (
+    PDF_MIME,
+    DocFeatures,
+    render_pdf_pages,
+)
 from app.modules.procurement.registry import ProfileView
+
+logger = logging.getLogger(__name__)
 
 # A classifier maps (features, expected_kind, candidate profiles) → a structured
 # result dict (the schema above) or None if no model is available.
 Classifier = Callable[[DocFeatures, str, "list[ProfileView]"], "dict | None"]
+
+# A vision classifier additionally gets the RAW bytes + filename so it can send the
+# page IMAGES (PDF) — or the full content (XLSX/CSV) — to a multimodal model. Same
+# structured-result contract as the text Classifier above.
+VisionClassifier = Callable[
+    [bytes, str, DocFeatures, str, "list[ProfileView]"], "dict | None"
+]
 
 _SCHEMA_HINT = """Return ONLY a JSON object with this exact shape:
 {
@@ -107,6 +122,11 @@ def _init_model(spec: str):
     if not spec or ":" not in spec:
         return None
     provider, model = spec.split(":", 1)
+    # A per-call timeout + no internal retries: a hung or unreachable provider must
+    # RAISE within the budget so the caller's Gemini→Groq→deterministic fallback runs,
+    # instead of the invoke() blocking the threadpool and stalling BOM generation.
+    timeout = settings.llm_request_timeout
+    retries = settings.llm_max_retries
     try:
         if provider == "gemini":
             if not settings.gemini_api_key:
@@ -114,13 +134,14 @@ def _init_model(spec: str):
             from langchain_google_genai import ChatGoogleGenerativeAI
 
             return ChatGoogleGenerativeAI(model=model, google_api_key=settings.gemini_api_key,
-                                          temperature=0)
+                                          temperature=0, timeout=timeout, max_retries=retries)
         if provider == "groq":
             if not settings.groq_api_key:
                 return None
             from langchain_groq import ChatGroq
 
-            return ChatGroq(model=model, api_key=settings.groq_api_key, temperature=0)
+            return ChatGroq(model=model, api_key=settings.groq_api_key, temperature=0,
+                            timeout=timeout, max_retries=retries)
     except Exception:
         return None
     return None
@@ -136,16 +157,96 @@ def build_default_classifier() -> Classifier | None:
     def _classify(feats: DocFeatures, expected_kind: str,
                   profiles: list[ProfileView]) -> dict | None:
         prompt = _build_prompt(feats, expected_kind, profiles)
-        for model in (primary, fallback):
+        for label, model in (("gemini-primary", primary), ("groq-fallback", fallback)):
             if model is None:
                 continue
             try:
+                logger.info("classifying document via %s (expected_kind=%s)", label, expected_kind)
                 resp = model.invoke(prompt)
                 parsed = _coerce(getattr(resp, "content", "") or "")
                 if parsed is not None:
                     return parsed
-            except Exception:
+                logger.warning("%s returned unparseable output → trying next rung", label)
+            except Exception as exc:
+                logger.warning("%s failed (%s) → falling back", label, exc)
                 continue        # provider error → try fallback → else None
+        logger.warning("all classifier rungs exhausted → needs_manual_review")
         return None
+
+    return _classify
+
+
+# ── Vision classifier (§3c — the LAST rung: look at the actual pages) ─────────
+def _vision_prompt(expected_kind: str, profiles: list[ProfileView], *, has_images: bool) -> str:
+    """Instruction text for the multimodal call. Same structured-output schema as the
+    text classifier so the validator interprets both results identically."""
+    known = ", ".join(sorted({p.client_code for p in profiles if p.client_code != "_generic"}))
+    source = (
+        "The page IMAGES of the uploaded document are attached below."
+        if has_images else
+        "The full extracted CONTENT of the uploaded spreadsheet/CSV follows as text."
+    )
+    return (
+        "You are a document-intake validator for a leather-garment factory's BOM "
+        "procurement workflow, looking at the document directly (the cheap text "
+        "heuristic and a first text-model pass were inconclusive). Decide whether "
+        f"this is genuinely the expected document type: '{expected_kind}'.\n\n"
+        f"{source}\n"
+        f"Known client codes: {known or 'none'}.\n\n"
+        "An ORDER SHEET has per-size quantities, an order number, and SKU/style "
+        "references. A SPEC SHEET is either a per-size MEASUREMENT GRID (with "
+        "tolerances) or a NARRATIVE TECH PACK (free-text leather/pockets/stitching). "
+        "If it is neither (e.g. a process narrative or a BOM quote), say so.\n\n"
+        + _SCHEMA_HINT
+    )
+
+
+def build_vision_classifier() -> VisionClassifier | None:
+    """Build the Gemini multimodal classifier, or None if vision is disabled or no
+    Gemini key is set (→ the vision rung is simply skipped and we defer to a human).
+
+    PDF  → render the first pages to PNG (PyMuPDF) and send them as image parts.
+    XLSX/CSV (no image) → send the full extracted content as a longer text retry.
+    CALLED FROM: ProcurementService._get_vision_classifier."""
+    if not settings.vision_classifier_enabled:
+        return None
+    model = _init_model(settings.vision_model)
+    if model is None:
+        return None
+
+    def _classify(data: bytes, filename: str, feats: DocFeatures,
+                  expected_kind: str, profiles: list[ProfileView]) -> dict | None:
+        from langchain_core.messages import HumanMessage
+
+        content: list[dict] = []
+        if feats.mime == PDF_MIME:
+            images = render_pdf_pages(
+                data, max_pages=settings.vision_max_pages, dpi=settings.ocr_dpi)
+            if not images:
+                return None     # can't rasterise → nothing to "see"; let it stay manual
+            content.append({"type": "text",
+                            "text": _vision_prompt(expected_kind, profiles, has_images=True)})
+            for png in images:
+                b64 = base64.b64encode(png).decode("ascii")
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{b64}"},
+                })
+        else:
+            # Spreadsheet/CSV: no image to show — send the full content as a text retry.
+            blob = (feats.text_blob or "")[:12000]
+            if not blob.strip():
+                return None
+            content.append({
+                "type": "text",
+                "text": _vision_prompt(expected_kind, profiles, has_images=False)
+                + f"\n\n--- content ---\n{blob}\n--- end content ---",
+            })
+
+        try:
+            resp = model.invoke([HumanMessage(content=content)])
+            return _coerce(getattr(resp, "content", "") or "")
+        except Exception:
+            return None         # provider/transport error → defer to a human
 
     return _classify

@@ -55,6 +55,7 @@ in a threadpool)
 from __future__ import annotations
 
 import io
+import logging
 import os
 import re
 from functools import lru_cache
@@ -69,6 +70,8 @@ from app.modules.bom.enums import ExtractionSource
 # An attribute extractor maps (techpack fields, garment_type) → the §1d attributes
 # dict, or None when no model is available (then we fall back to a prose parse).
 AttributeExtractor = Callable[[dict, "str | None"], "dict | None"]
+
+logger = logging.getLogger(__name__)
 
 GENERIC_CODE = "_generic"
 
@@ -336,6 +339,10 @@ def extract_spec(data: bytes, filename: str, adapter: dict, pom_dict: PomDict, *
         sizes = [attributes["sms_size"]]
 
     wb.close()
+    logger.info("extract_spec: file=%s spec_type=%s pom_strategy=%s → %d POMs, %d sizes, "
+                "%d attrs, %d unresolved, pattern_ref=%s", filename, spec_type, pom_strategy,
+                len(poms), len(sizes), len(attributes), len(unresolved),
+                bool(pattern_reference))
     result = {
         "spec_sheet_id": spec_sheet_id,
         "spec_type": spec_type,
@@ -405,6 +412,7 @@ def build_default_extractor() -> AttributeExtractor | None:
     primary = _init_model(settings.extraction_model)
     fallback = _init_model(settings.extraction_fallback_model)
     if primary is None and fallback is None:
+        logger.info("no LLM attribute extractor (no Gemini/Groq key) → deterministic prose parse")
         return None
 
     def _extract(fields: dict, garment_type: str | None) -> dict | None:
@@ -418,16 +426,22 @@ def build_default_extractor() -> AttributeExtractor | None:
             "labelling, and the SMS quantity/size.\n\n"
             f"--- tech sheet ---\n{body}\n--- end ---\n\n" + _ATTR_SCHEMA_HINT
         )
-        for model in (primary, fallback):
+        for label, model in (("gemini-primary", primary), ("groq-fallback", fallback)):
             if model is None:
                 continue
             try:
+                logger.info("attribute extraction via %s (garment=%s)", label, garment_type)
                 resp = model.invoke(prompt)
                 parsed = _coerce(getattr(resp, "content", "") or "")
                 if parsed is not None:
+                    logger.info("attribute extraction succeeded via %s (%d keys)",
+                                label, len(parsed))
                     return parsed
-            except Exception:
+                logger.warning("%s returned unparseable output → trying next rung", label)
+            except Exception as exc:
+                logger.warning("%s failed (%s) → falling back", label, exc)
                 continue
+        logger.warning("all LLM extractors failed → deterministic prose parse will be used")
         return None
 
     return _extract

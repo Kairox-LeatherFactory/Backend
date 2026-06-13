@@ -33,7 +33,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
-from app.modules.procurement.classifier import Classifier
+from app.modules.procurement.classifier import Classifier, VisionClassifier
 from app.modules.procurement.enums import RejectReason, ScanStatus
 from app.modules.procurement.errors import UploadError
 from app.modules.procurement.registry import ProfileView
@@ -83,6 +83,7 @@ def process_upload(
     profiles: list[ProfileView],
     *,
     classifier: Classifier | None = None,
+    vision_classifier: VisionClassifier | None = None,
     scanner: Scanner | None = None,
     storage: StorageBackend | None = None,
 ) -> PipelineResult:
@@ -121,8 +122,12 @@ def process_upload(
                           sha, feats.ext)
     storage.put(qkey, data)
 
-    # ── 3. identity validation (heuristic → LLM hybrid) ──────────────────────
-    outcome = validate_document(feats, expected_kind, profiles, classifier=classifier)
+    # ── 3. identity validation (heuristic → text LLM → vision LLM) ───────────
+    outcome = validate_document(
+        feats, expected_kind, profiles,
+        classifier=classifier, vision_classifier=vision_classifier,
+        data=data, filename=filename,
+    )
 
     # ── 4. promote on accept, else delete the quarantined object ─────────────
     storage_url = storage_key = None

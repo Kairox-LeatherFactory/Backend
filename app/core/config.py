@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     app_name: str = "Leather Factory Intelligence Platform"
     environment: str = "local"          # local | staging | production
     debug: bool = True                  # auto-create tables on startup when True
+    # Root log level for the app's loggers. DEBUG surfaces every pipeline step
+    # (upload → scan → sniff → classify → validate → BOM extract); INFO is the
+    # production default. Configured once in app.main._configure_logging().
+    log_level: str = "INFO"             # DEBUG | INFO | WARNING | ERROR
 
     # ── Database ─────────────────────────────────────────────────────────────
     # Sync URL drives Alembic migrations and the seed script (simpler, blocking).
@@ -74,6 +78,32 @@ class Settings(BaseSettings):
     extraction_fallback_model: str = "groq:llama-3.3-70b-versatile"  # fallback (text/structured)
     gemini_api_key: str = ""        # langchain-google-genai
     groq_api_key: str = ""          # langchain-groq (also read from env by ChatGroq)
+    # Hard wall-clock budget (seconds) for a SINGLE LLM call. A hung/slow Gemini must
+    # raise — not block BOM generation forever — so the Gemini→Groq→deterministic
+    # fallback actually fires. max_retries=0 keeps a dead provider from burning the
+    # whole budget on internal backoff before we move to the next rung.
+    llm_request_timeout: float = 20.0
+    llm_max_retries: int = 0
+
+    # ── Scanned-document OCR + Gemini vision fallback (§3a identity validation) ─
+    # The escalation ladder for an upload the cheap heuristic can't settle:
+    #   1. OCR  — Tesseract over rasterised pages fills text_blob for a scanned PDF
+    #             so the text classifier (Gemini→Groq) gets something to read.
+    #   2. text classifier — runs on that OCR text (or the native text/cells).
+    #   3. vision classifier — if the text path stays below vision_conf_threshold
+    #             (genuinely ambiguous / needs_manual_review), send the actual page
+    #             images to Gemini vision for a second opinion. PDFs go as rendered
+    #             PNGs; XLSX/CSV (no image) fall back to a full-content Gemini retry.
+    # Each rung degrades gracefully: no tesseract binary / no Gemini key → the rung
+    # is skipped and we defer to a human rather than crash or fabricate a verdict.
+    ocr_enabled: bool = True
+    ocr_language: str = "eng"                       # tesseract language pack(s), e.g. "eng+fra"
+    ocr_max_pages: int = 5                           # cap pages OCR'd (cost/latency bound)
+    ocr_dpi: int = 200                               # rasterisation DPI for OCR + vision
+    vision_classifier_enabled: bool = True
+    vision_model: str = "gemini:gemini-2.0-flash"    # multimodal model for the vision rung
+    vision_conf_threshold: float = 0.5               # below this from the text path → escalate
+    vision_max_pages: int = 4                        # cap page-images sent to the vision model
 
     secret_key: str = "dev-only-insecure-change-me-in-prod"
     algorithm: str = "HS256"

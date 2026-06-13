@@ -73,6 +73,7 @@ FUNCTION / METHOD GUIDE  (everything is called from bom/router.py unless noted)
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -121,6 +122,8 @@ MATERIAL_DCM_CATEGORIES = {
     BomItemCategory.LINING.value,
     BomItemCategory.INTERLINING.value,
 }
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -191,6 +194,9 @@ class BomService:
         # Passing them in lets a brand-new client be onboarded by CONFIG ALONE (the
         # prod path being a YAML entry the loaders read) — proves §11.6 end-to-end.
         # ── 1. extract POMs / attributes / pattern ref (threadpool) ───────────
+        logger.info("generate_bom start: order=%s style=%s spec_type=%s client_match=%s seeds=%d",
+                    identity.client_order_id, identity.style_id, spec_sheet.spec_type,
+                    client_match_code, len(line_seeds))
         adapter = select_adapter(spec_sheet.spec_type, client_match_code, adapters)
         pom_dict = PomDict(await self.repo.pom_dictionary_rows())
         intermediate = await run_in_threadpool(
@@ -310,6 +316,9 @@ class BomService:
         flags = checks_mod.run_checks(client_match_code, ctx, checks_cfg)
 
         await self._audit(user, "BOM_GENERATE", bom.id, after=self._bom_snapshot(bom))
+        logger.info("generate_bom done: bom=%s items=%d fob=%s flags=%d unresolved=%d",
+                    bom.id, len(bom.items), bom.garment_fob_price, len(flags),
+                    len(intermediate["unresolved"]))
         return {"bom": self._bom_view(bom), "flags": flags,
                 "extraction": {"poms": len(pom_rows), "unresolved": intermediate["unresolved"],
                                "pattern_reference": pr_block}}

@@ -46,6 +46,13 @@ openpyxl==3.1.5
 # ── Stage-1 document upload & validation (BOM procurement) ──────────────────
 pypdf==6.13.2             # PDF text-layer probe + page count (identity validation)
 PyYAML==6.0.3            # client_template registry seed (config/client_templates.yaml)
+# Scanned-PDF OCR + page rasterisation (identity validation, §3a fallback). PyMuPDF
+# renders PDF pages to PNG with NO poppler/cairo native dep (Windows-dev friendly);
+# pytesseract wraps the Tesseract binary (must be installed on the host/image — the
+# code degrades gracefully to "needs manual review" when the binary is absent).
+PyMuPDF==1.27.2.3         # fitz — PDF page → PNG for OCR + Gemini vision (cp310-abi3 wheel: 3.10–3.13)
+pytesseract==0.3.13       # OCR over rasterised scanned pages (needs system tesseract)
+Pillow>=11.0.0            # image handling for OCR + base64 data-URI to Gemini vision (3.13 wheels)
 
 # ── Stage-3 BOM PDF export (approval) ───────────────────────────────────────
 reportlab==4.2.5         # pure-Python PDF render — the FALLBACK that runs everywhere

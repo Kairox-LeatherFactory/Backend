@@ -91,13 +91,16 @@ async def open_submission(
 async def upload_order_sheet(
     submission_id: uuid.UUID,
     file: UploadFile = File(...),
+    force: bool = False,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(_DMMD),
 ):
+    # force=true → accept a `needs_manual_review` document anyway and generate an
+    # editable BOM (the DM/MD vouches for it). Hard rejects are never overridable.
     try:
         data = await _read_capped(file)
         envelope = await ProcurementService(db).upload_order_sheet(
-            user, submission_id, data, file.filename)
+            user, submission_id, data, file.filename, override_manual_review=force)
         return JSONResponse(status_code=201, content=envelope)
     except UploadError as exc:
         return _error_response(exc)
@@ -107,13 +110,16 @@ async def upload_order_sheet(
 async def upload_spec_sheet(
     submission_id: uuid.UUID,
     file: UploadFile = File(...),
+    force: bool = False,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(_DMMD),
 ):
+    # force=true → accept a `needs_manual_review` document anyway and generate an
+    # editable BOM (the DM/MD vouches for it). Hard rejects are never overridable.
     try:
         data = await _read_capped(file)
         envelope = await ProcurementService(db).upload_spec_sheet(
-            user, submission_id, data, file.filename)
+            user, submission_id, data, file.filename, override_manual_review=force)
         return JSONResponse(status_code=201, content=envelope)
     except UploadError as exc:
         return _error_response(exc)

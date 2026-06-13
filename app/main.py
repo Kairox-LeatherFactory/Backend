@@ -35,6 +35,7 @@ ROUTE MAP (every router lives under /api/v1)
 """
 import asyncio
 import contextlib
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Response
@@ -42,6 +43,24 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.database import Base, async_engine
+
+
+def _configure_logging() -> None:
+    """Configure the root logger ONCE so every module's `logging.getLogger(__name__)`
+    surfaces to stdout (captured by Docker / journald). Level is driven by
+    settings.log_level — set LOG_LEVEL=DEBUG in .env to trace each pipeline step.
+    Runs at import time so even startup logs are formatted consistently."""
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
+        force=True,   # override uvicorn's default handler so our format wins
+    )
+    # asyncpg/sqlalchemy chatter stays at WARNING unless we explicitly want it.
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+
+
+_configure_logging()
+logger = logging.getLogger("app.main")
 
 # Import every module's models so SQLAlchemy's metadata knows all tables.
 from app.modules.users import models as _users          # noqa: F401

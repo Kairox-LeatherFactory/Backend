@@ -46,6 +46,8 @@ import re
 import zipfile
 from dataclasses import dataclass, field
 
+from app.core.config import settings
+
 PDF_MIME = "application/pdf"
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 CSV_MIME = "text/csv"
@@ -74,6 +76,7 @@ class DocFeatures:
     page_count: int | None = None
     has_text_layer: bool = False
     is_scanned_pdf: bool = False
+    ocr_used: bool = False            # text_blob came from Tesseract OCR, not a native layer
     text_blob: str = ""
     sheet_names: list[str] = field(default_factory=list)
     n_rows: int = 0
@@ -188,6 +191,56 @@ def _compute_prose_signals(blob: str, feats: DocFeatures) -> None:
     feats.heading_hits = hits[:8]
 
 
+# ── PDF rasterisation (shared by OCR here + the Gemini vision classifier) ────
+def render_pdf_pages(data: bytes, *, max_pages: int, dpi: int) -> list[bytes]:
+    """Render the first `max_pages` PDF pages to PNG bytes via PyMuPDF (no poppler
+    native dep). Returns [] if PyMuPDF is unavailable or the PDF is unrenderable —
+    every caller treats an empty list as 'rasterisation not available', never an error.
+    Reused by _ocr_pdf (OCR input) and classifier.build_vision_classifier (vision input)."""
+    try:
+        import fitz  # PyMuPDF
+    except Exception:
+        return []
+    pages: list[bytes] = []
+    try:
+        with fitz.open(stream=data, filetype="pdf") as doc:
+            zoom = dpi / 72.0
+            matrix = fitz.Matrix(zoom, zoom)
+            for page in doc[: max(1, max_pages)]:
+                try:
+                    pix = page.get_pixmap(matrix=matrix, alpha=False)
+                    pages.append(pix.tobytes("png"))
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    return pages
+
+
+def _ocr_pdf(data: bytes) -> str:
+    """OCR a scanned PDF: rasterise pages → Tesseract → joined text. Returns "" when
+    OCR is disabled, the deps/binary are missing, or nothing legible is found — the
+    validator then escalates (text classifier / vision) exactly as for an empty layer."""
+    if not settings.ocr_enabled:
+        return ""
+    images = render_pdf_pages(data, max_pages=settings.ocr_max_pages, dpi=settings.ocr_dpi)
+    if not images:
+        return ""
+    try:
+        import pytesseract
+        from PIL import Image
+    except Exception:
+        return ""
+    out: list[str] = []
+    for png in images:
+        try:
+            with Image.open(io.BytesIO(png)) as img:
+                out.append(pytesseract.image_to_string(img, lang=settings.ocr_language))
+        except Exception:
+            continue
+    return "\n".join(out).strip()
+
+
 # ── PDF ─────────────────────────────────────────────────────────────────────
 def _extract_pdf(data: bytes, feats: DocFeatures) -> None:
     try:
@@ -202,12 +255,20 @@ def _extract_pdf(data: bytes, feats: DocFeatures) -> None:
             except Exception:
                 continue
         blob = "\n".join(chunks).strip()
-        feats.text_blob = blob
         # A real text layer is more than whitespace/a few stray glyphs. Below this
-        # bar we treat it as scanned/handwritten (Beau Geste, Jackie) → escalate.
+        # bar we treat it as scanned/handwritten (Beau Geste, Jackie) → OCR, then escalate.
         feats.has_text_layer = len(blob) >= 40
         feats.is_scanned_pdf = not feats.has_text_layer
-        if feats.has_text_layer:
+        if not feats.has_text_layer:
+            # Scanned/handwritten: try OCR so the text classifier has something to read.
+            # is_scanned_pdf stays True (it IS a scan) — the validator still escalates,
+            # but now with OCR text in the prompt instead of an empty blob.
+            ocr_text = _ocr_pdf(data)
+            if ocr_text:
+                blob = ocr_text
+                feats.ocr_used = True
+        feats.text_blob = blob
+        if blob:
             _compute_prose_signals(blob, feats)
     except Exception as exc:
         raise EmptyOrCorrupt(f"unreadable PDF: {exc}") from exc
