@@ -38,7 +38,11 @@ class Submission(Base, UUIDMixin, TimestampMixin):
     `*_document_id` columns are the CURRENT slot pointers (a corrective re-upload
     supersedes the old doc and repoints the slot); `Document.submission_id` is the
     membership FK that keeps every version. `use_alter=True` on the slot FKs breaks the
-    circular dependency with `document` so Alembic/create_all can order the CREATEs."""
+    document↔submission cycle. NOTE: there is a SECOND, 3-table cycle
+    document → submission(.client_order_id) → client_order(.source_document_id) → document;
+    that one is broken by `use_alter=True` on `ClientOrder.source_document_id`
+    (see app/modules/clients/models.py). Both are needed for Alembic/create_all to
+    order the CREATEs."""
     __tablename__ = "submission"
     client_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("client.id"), nullable=True, index=True

@@ -32,6 +32,7 @@ STATUS_FOR_REASON: dict[str, int] = {
     RejectReason.WRONG_SLOT.value: 422,
     RejectReason.NEEDS_MANUAL_REVIEW.value: 422,
     RejectReason.SUBMISSION_LOCKED.value: 409,
+    RejectReason.DUPLICATE_CONTENT.value: 409,
 }
 
 

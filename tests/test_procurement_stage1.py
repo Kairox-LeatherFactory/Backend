@@ -28,7 +28,7 @@ from sqlalchemy import func, select
 import app.core.config as cfgmod
 from app.core.enums import UserRole
 from app.core import storage as storagemod
-from app.modules.procurement.enums import RejectReason, ScanStatus
+from app.modules.procurement.enums import RejectReason, ScanStatus, ValidationStatus
 from app.modules.procurement.errors import UploadError
 from app.modules.bom.models import Bom
 from app.modules.procurement.models import ClientTemplate
@@ -310,6 +310,69 @@ async def test_stays_in_lane_no_stage2_rows(db):
     assert await db.scalar(select(func.count(SpecSheet.id))) == 0
     assert await db.scalar(select(func.count(ClientOrder.id))) == 0
     assert await db.scalar(select(func.count(Bom.id))) == 0
+
+
+# ── sha-dedupe is scoped to (submission, slot) — no false success / no bypass ─
+# Regression for the two cross-submission / cross-kind dead-ends. Seeds Document
+# rows directly so it is independent of the LLM/PDF pipeline.
+async def _seed_doc(db, *, submission_id, kind, sha,
+                    status=ValidationStatus.ACCEPTED.value):
+    from app.core.models import Document
+    doc = Document(kind=kind, filename=f"{kind}.bin", mime="application/pdf",
+                   sha256=sha, size_bytes=10, validation_status=status,
+                   submission_id=submission_id)
+    db.add(doc)
+    await db.commit()
+    await db.refresh(doc)
+    return doc
+
+
+async def test_dedupe_cross_submission_is_conflict_not_false_success(db):
+    """Bug 1: a byte-identical accepted doc owned by ANOTHER submission must 409 —
+    never a 201 'success' that leaves this submission's slot empty (dead-end)."""
+    user = await _dm_user(db)
+    svc = ProcurementService(db, classifier=None)
+    sub_a = await svc.open_submission(user, None)
+    sub_b = await svc.open_submission(user, None)
+    other = await _seed_doc(db, submission_id=sub_b.id, kind="order_sheet", sha="dead00")
+
+    with pytest.raises(UploadError) as ei:
+        await svc._handle_existing(sub_a, "order_sheet", other)
+    assert ei.value.reason == RejectReason.DUPLICATE_CONTENT
+    assert ei.value.http_status == 409
+    # the slot was NOT silently filled with another submission's document
+    await db.refresh(sub_a)
+    assert sub_a.order_document_id is None
+
+
+async def test_dedupe_cross_kind_is_conflict_not_validation_bypass(db):
+    """Bug 2: the same bytes accepted in the ORDER slot must not be reusable for the
+    SPEC slot of the same submission (one file masquerading as both sheets)."""
+    user = await _dm_user(db)
+    svc = ProcurementService(db, classifier=None)
+    sub = await svc.open_submission(user, None)
+    order_doc = await _seed_doc(db, submission_id=sub.id, kind="order_sheet", sha="beef01")
+
+    with pytest.raises(UploadError) as ei:
+        await svc._handle_existing(sub, "spec_sheet", order_doc)
+    assert ei.value.reason == RejectReason.DUPLICATE_CONTENT
+    assert ei.value.http_status == 409
+    await db.refresh(sub)
+    assert sub.spec_document_id is None        # spec slot never repointed at the order doc
+
+
+async def test_dedupe_same_slot_same_submission_still_idempotent(db):
+    """The legitimate cache hit (same bytes, same slot, same submission) still
+    short-circuits to success and re-points the slot — no new row, no LLM."""
+    user = await _dm_user(db)
+    svc = ProcurementService(db, classifier=None)
+    sub = await svc.open_submission(user, None)
+    doc = await _seed_doc(db, submission_id=sub.id, kind="order_sheet", sha="cafe02")
+
+    env = await svc._handle_existing(sub, "order_sheet", doc)
+    assert env["document"]["id"] == str(doc.id)
+    await db.refresh(sub)
+    assert sub.order_document_id == doc.id
 
 
 # ── HTTP shell: RBAC + size cap (§9.6) + the full multipart happy path ───────

@@ -86,3 +86,7 @@ class RejectReason(str, enum.Enum):
     WRONG_SLOT = "wrong_slot"                      # 422
     NEEDS_MANUAL_REVIEW = "needs_manual_review"    # 422
     SUBMISSION_LOCKED = "submission_locked"        # 409
+    DUPLICATE_CONTENT = "duplicate_content"        # 409 — byte-identical file already
+    #   on record elsewhere (other submission, or the other slot of this one). The sha
+    #   cache is a true short-circuit ONLY for the same slot of the same submission;
+    #   `Document.sha256` is globally unique so the bytes can't be re-stored here.

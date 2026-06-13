@@ -199,6 +199,36 @@ def rejection_envelope_from_row(sub, doc) -> dict:
     }
 
 
+def duplicate_envelope(sub, existing, kind) -> dict:
+    """The 409 body when a byte-identical file is already on record but cannot be
+    reused for THIS slot — either it belongs to a different submission, or it was
+    accepted into the other slot of this one (reusing it would skip validation /
+    dead-end the slot). Surfaces where the bytes already live so the user can act."""
+    same_submission = existing.submission_id == sub.id
+    return {
+        "error": "duplicate_content",
+        "submission_id": str(sub.id),
+        "document_fingerprint": {
+            "filename": existing.filename, "mime": existing.mime,
+            "sha256": existing.sha256, "size_bytes": existing.size_bytes,
+        },
+        "conflict": {
+            "attempted_slot": kind,
+            "existing_kind": existing.kind,
+            "existing_validation_status": existing.validation_status,
+            "same_submission": same_submission,
+            "existing_submission_id": str(existing.submission_id) if existing.submission_id else None,
+            "suggested_fix": (
+                "This file is already accepted as the other slot of this submission; "
+                "upload the correct, distinct sheet for this slot."
+                if same_submission else
+                "These exact bytes already exist under a different submission; "
+                "upload this slot's own file or continue the original submission."
+            ),
+        },
+    }
+
+
 def enrich_gate_error(exc: UploadError, sub, filename, data, kind, sha) -> UploadError:
     """Attach the §5b fingerprint envelope to a hard-gate UploadError (MIME / size /
     virus / scanner) so even pre-validation rejections are diagnosable."""
