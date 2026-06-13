@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/po_costing.py — PO line + GST math (§2c)
+modules/supplier_po/po_costing.py — PO line + GST math (§2c)
 ================================================================================
 
 PURE, server-side recompute of a PO's money (no DB) — the house rule "all amounts
@@ -17,6 +17,15 @@ hard-coded:
     INTER → igst = subtotal × rate
     round_off = round(subtotal + tax) − (subtotal + tax)
     total     = subtotal + tax + round_off
+
+FUNCTION GUIDE  (pure + sync; the analogue of bom/costing.py for POs)
+  _q(v)   [private] quantize to 0.01.
+  line_amount(qty, unit_price) -> Decimal   one PO line's amount.
+  gst_mode(supplier_state_code, buyer_state_code) -> "INTRA" | "INTER"
+      same state → CGST+SGST; different → IGST; unknown → conservative INTRA (TN).
+  compute_totals(items, *, supplier_state_code, buyer_state_code, gst_rate) -> dict
+      Recompute subtotal/cgst/sgst/igst/round_off/total + each line `amount` (positional).
+      CALLED FROM: PoService._recompute (generation + every PO bulk-PATCH edit).
 ================================================================================
 """
 from __future__ import annotations

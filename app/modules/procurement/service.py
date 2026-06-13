@@ -15,6 +15,30 @@ RBAC is enforced at the router via require_roles(DIRECT_MANAGER, MANAGING_DIRECT
 MD bypasses as superuser. The heavy, blocking work (openpyxl, pypdf, libmagic,
 clamd, the optional LLM call) runs in run_in_threadpool — the event loop is never
 blocked, mirroring the imports handler.
+
+FUNCTION / METHOD GUIDE  (router → ProcurementService)
+  ProcurementService(db, *, classifier?, scanner?)
+      classifier/scanner are INJECTABLE so tests drive the LLM/AV paths without a key or
+      a running clamd. _get_classifier() lazily builds the config default.
+  open_submission(user, client_id?) -> Submission   mint an empty batch. → POST /submissions.
+  _load_submission(id) [private] fetch or 404.
+  upload_order_sheet / upload_spec_sheet(user, submission_id, data, filename) -> dict
+      Thin wrappers over _upload_slot for each slot. → the two slot endpoints.
+  _upload_slot(user, submission_id, kind, data, filename) -> dict   [private]
+      THE CORE FLOW: reject if the submission is CONSUMED (locked); sha256; idempotent
+      re-hit short-circuit; load the kind's client_template profiles; run the blocking
+      process_upload pipeline in a threadpool (scan→sniff→validate→quarantine/promote);
+      persist the Document (accepted OR rejected — caches by sha); on accept fill the slot
+      + recompute the gate; on reject raise UploadError with diagnostics.
+  _handle_existing(sub, kind, existing) [private] the sha256 cache hit — replay the stored
+      verdict (re-point the slot if accepted; replay diagnostics if not) — NO second LLM bill.
+  get_submission_status(id) -> dict   the slots + ready_for_stage_2 gate. → GET /submissions/{id}.
+  get_document_report(submission_id, document_id) -> dict   the full per-doc validation report.
+  _build_document(...) [private] map the PipelineResult → a Document row.
+  _accept_into_slot(...) [private] fill the slot, supersede a prior doc, recompute status.
+  _recompute_status / _slot_ok [private] the completeness gate logic.
+  _audit_virus(...) [private] write the VIRUS_DETECTED audit row.
+  _to_profile(t) [module fn] ORM client_template row → a session-free ProfileView for the validator.
 ================================================================================
 """
 from __future__ import annotations

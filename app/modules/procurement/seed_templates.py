@@ -7,6 +7,13 @@ Idempotently loads config/client_templates.yaml into the `client_template` table
 (the same replace-on-key pattern stage-0 §2 mandates). Onboarding a new client is
 ONE YAML entry + re-running the seed — no code change, no redeploy (acceptance
 §9.3). Used by scripts/seed.py and importable by tests.
+
+FUNCTION GUIDE  (SYNC — seeding runs on the sync engine via scripts/seed.py)
+  load_template_rows(path?) -> list[dict]   read config/client_templates.yaml.
+  seed_client_templates(db, path?) -> int
+      Upsert every entry by (client_code, doc_kind) — replace-on-key, idempotent. Returns
+      the count. CALLED FROM: scripts/seed.py + tests. The validator reads these rows at
+      request time, so a new client onboards by editing the YAML + re-seeding (no code).
 ================================================================================
 """
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/notifier.py — Pluggable email transport (Stage 3 §2c)
+core/notifier.py — Pluggable email transport (Stage 3 §2c)
 ================================================================================
 
 WHY AN ABSTRACTION (mirrors storage.py)
@@ -15,6 +15,16 @@ WHY AN ABSTRACTION (mirrors storage.py)
 
     `send()` is blocking for the smtp driver; callers invoke it from a threadpool
     (the house async rule, CLAUDE.md §3.3) — the sweeper does exactly that.
+
+FUNCTION GUIDE  (mirrors storage.py: an interface + drivers + a singleton factory)
+  EmailBackend   the interface: send(*, to, subject, body, html?, attachments?) -> bool.
+      NEVER raises — a transport failure marks the notification FAILED, not a crash.
+  LogEmailBackend   default — prints (observable offline). NoopEmailBackend — discards.
+  SmtpEmailBackend  real send via stdlib smtplib (lazy). SesEmailBackend — Amazon SES (lazy boto3).
+  get_notifier() -> EmailBackend   the configured singleton (defaults to log).
+      CALLED FROM: bom.notification_service (the 2-hour BOM escalation email) and
+      supplier_po.po_service (the PO dispatch email with the PDF attached).
+  reset_notifier_cache()   test hook — drop the cached backend.
 ================================================================================
 """
 from __future__ import annotations

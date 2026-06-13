@@ -1,10 +1,19 @@
 """
 ================================================================================
-modules/procurement/po_presenters.py — Stage-5 response shapes (§1–§9)
+modules/supplier_po/presenters.py — Stage-5 response shapes (§1–§9)
 ================================================================================
 
 PURE serialization (ORM rows → the JSON the FE renders). Split out of the services
 so they stay focused on orchestration. No DB, no business rules.
+
+FUNCTION GUIDE  (pure + sync; called by PoService / SupplierService / ProductionTrackingService)
+  _f(v) / _iso(dt)   [private] None-safe float / ISO-timestamp.
+  supplier_block(s, *, history?, open_pos?) -> dict   one supplier (+ optional history + open POs).
+  po_item_block(i) -> dict      one PO line (keeps the bom_item/inventory_item back-links).
+  po_view(po, *, include_supplier=True) -> dict   the full PO envelope (money + status + tracking
+      + escalation + items + supplier). Used by every PO endpoint + the editable recompute echo.
+  po_list_block(pos) -> dict    {purchase_orders, count}. → list_pos.
+  tracking_view(t, *, order?, style?, client_name?) -> dict   one production_tracking row. → board.
 ================================================================================
 """
 from __future__ import annotations

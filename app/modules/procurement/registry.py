@@ -20,6 +20,20 @@ SCORING (the §3a heuristic, made concrete against the real /data files)
     client; if none clears a minimal bar we fall back to `_generic` (stricter
     thresholds, no client prior). The matched profile's thresholds drive the §3
     accept/reject/escalate bands.
+
+FUNCTION GUIDE  (pure + sync; called by the validator)
+  ProfileView   a session-free view of one client_template row; .accept_high/.reject_low
+                expose the thresholds.
+  ProfileScore  the scoring result (confidence + fingerprint hits + matched signals).
+  _find_term(blob_low, term, kind) -> bool   [private] token-aware presence test ("S" ≠ "DELIVERS").
+  score_profile(feats, profile) -> ProfileScore
+      Score one profile: weighted anchors + fingerprint regexes + a spec grid-shape bonus.
+  best_match(feats, profiles) -> ProfileScore
+      Pick the best client profile (fingerprints first, then confidence); fall back to
+      `_generic` if nothing shows a real signal. CALLED FROM: validate_document.
+  detect_spec_type(feats) -> str
+      Cheap MEASUREMENT_GRID vs NARRATIVE_TECHPACK discriminator (wide+numeric vs tall+narrow).
+      CALLED FROM: the validator (on accept) + extraction.select_adapter inputs.
 ================================================================================
 """
 from __future__ import annotations

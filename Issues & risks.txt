@@ -1,4 +1,51 @@
-Issues & risks
-None blocking. Minor observations only:
-claim_revision returning rowcount inherits the DBAPI caveat that some drivers report -1 for "unknown" — harmless here (asyncpg and sqlite3 both report exact counts for UPDATE, and == 0 is the only branch that matters), but if a future backend is added, rowcount == 0 rather than <= 0 is the intended check and is correct.
-The Bom(client_order_id=uuid4(), style_id=uuid4()) test row relies on SQLite FK enforcement being off (it is, by default, in the test engine) — fine, and documented in the test comment.
+Procurement (Stage-1 intake)
+🔴 Cross-submission sha dedupe returns false "success" without filling the slot — service.py:166-171
+get_document_by_sha is a global lookup (repository.py:62, and Document.sha256 is globally unique — core/models.py:108). In _handle_existing, when an accepted document with the same bytes belongs to a different submission, the code returns success_envelope(sub, existing) but the if existing.submission_id == sub.id guard skips _accept_into_slot. The user gets HTTP 201 "accepted", yet the current submission's slot stays empty and can never reach COMPLETE / ready_for_stage_2. Re-uploading the same order sheet across two clients/submissions silently dead-ends.
+
+🔴 Idempotency cache ignores kind → spec validation bypass — service.py:166-171
+The dedupe key is sha alone, not (sha, kind). Upload file X to the order-sheet slot (accepted), then upload the same bytes to the spec-sheet slot of the same submission: _handle_existing finds it accepted + same submission → _accept_into_slot(sub, 'spec_sheet', existing) repoints the spec slot at the order document. The submission flips to COMPLETE with one physical file masquerading as both sheets, and spec-sheet validation never runs. The cache lookup must be scoped to kind (or reject on kind mismatch).
+
+🟡 Minor — A byte-collision with a non-procurement Document (BOM export / PO PDF sharing the global sha table) routes into _handle_existing's else-branch and yields a spurious NEEDS_MANUAL_REVIEW rejection. Very unlikely (identical bytes), but the global dedupe surface is wider than the module intends.
+
+BOM (Stage-2/3)
+🔴 confirm_cutting can walk an approved BOM backwards — service.py:447-456
+The only guard is if bom.status == LOCKED. But approve_bom sets status to APPROVED when lock=False (service.py:514) — and that's the default path (router passes lock=bool(body and body.lock), router.py:81). So an approved-but-not-"locked" BOM still satisfies status != LOCKED, and a cutting manager can re-run confirm_cutting, which re-stamps cutting_confirmed_at, flips status back to READY_FOR_REVIEW, re-backfills DCM templates, and re-fires review notifications — undoing a completed MD approval. Every other lifecycle method (reject/reopen/export) guards its full state set; confirm_cutting should reject APPROVED/EXPORTED/REJECTED too, not just LOCKED.
+
+🟡 Unresolved-DCM material lines get a phantom cost — costing.py:67 + service.py:278
+When _resolve_dcm returns (None, None), the item's qty_per_garment is stored None (correctly signalling "manual confirm needed"), but compute_line coerces None → Decimal("1"). So an unresolved leather line that should be ~34 dm² silently contributes 1 × unit_price to garment_fob_price and gets a bulk_qty of order_qty × 1. The view shows qty_per_garment: null while the rollup already baked in a bogus number. Consider excluding unresolved lines from the FOB rollup (or surfacing them as 0/flagged) until confirmed.
+
+🟡 Silent exception swallowing on approval side-effects — service.py:524-542
+The production-board advance and auto inventory-check are wrapped in bare except Exception: pass with no logging. "Best-effort, never roll back a valid approval" is the right intent, but if the inventory check throws every time, nobody ever finds out. At minimum log the exception.
+
+Inventory (Stage-4)
+The check engine is the best-engineered piece here — FOR UPDATE candidate locking serializes concurrent checks so two approvals can't double-spend the same lot (repository.py:105-118), reservations are a proper soft ledger, and reads re-render from persisted rows (no recompute-on-read). Two scalability notes, no correctness bugs:
+
+🟡 latest_checks() loads the entire check history — repository.py:170-181 — selects all InventoryCheck rows ever, then dedupes to latest-per-BOM in Python. Fine now, O(history) later; wants a DISTINCT ON (bom_id) / window function.
+
+🟡 N+1 in dashboard / _rebuild_view / board reads — service.py:324-347 — per check: _bom_dto + get_order + get_style. Same pattern in supplier_po's board. Acceptable at current scale; batch the client/order/style lookups when the board grows.
+
+🟢 Subtle — available = on_hand(UOM-converted) − reserved_other(raw qty) mixes units only if two BOMs reserve the same item in different UOMs (service.py:254-256). Consistent-UOM is a safe assumption today; worth a comment.
+
+Supplier-PO (Stage-5)
+🔴 Cross-check approval is bypassable via post-approval edit — po_service.py:301-377
+edit_po only blocks _SENT_STATES (SENT/RESPONDED/CONFIRMED/ESCALATED). APPROVED is not in that set, so an approved PO is still editable. Approval is reset only when the supplier changes (po_service.py:361-363) — editing qty or unit_price upward leaves status=APPROVED and approved_by intact, and send_po then dispatches it. So you can get a cheap PO cross-check-approved, inflate quantities/prices, and send without re-approval. The BOM editor correctly restricts edits to draft/ready_for_review; the PO editor should reset approval on any material (item/qty/price) change, not just supplier swaps.
+
+🔴 PO number allocation has a check-then-act race — repository.py:181-191
+next_po_number does SELECT max(...) + 1, and po_number is index=True but not unique (models.py:103). Two concurrent send_po calls in the same FY can read the same max and mint duplicate PO numbers on a financial document. Needs a unique constraint on po_number (+ retry) or a locked sequence/counter row.
+
+🟠 Unauthenticated webhooks can forge supplier acknowledgement — router.py:247-270
+The comment says it outright: "provider-signed (verification TODO)". /webhooks/twilio/whatsapp and /voice call acknowledge_by_token, which sets status=CONFIRMED and halts the escalation ladder (po_service.py:616-646). The tracking_token is exposed in plaintext open-pixel/click URLs (/t/o/{token}.gif, /t/c/{token}), so anyone who observes one can POST a forged confirmation, and /webhooks/ses can be used to mark a supplier email INVALID. Before production: verify Twilio signatures and SNS message signatures.
+
+🟡 Dead/duplicated logic
+
+supplier_service.py:97-98: email_status=(UNKNOWN if s.email else UNKNOWN) — both branches identical; the if email branch almost certainly meant VALID.
+production_tracking_service.py:146-147: role not in _MANUAL_ROLES and role != MANAGING_DIRECTOR — MD is already in _MANUAL_ROLES, so the second clause is dead.
+supplier_service.py:205-222: update_supplier doesn't re-check name uniqueness (create does), so a rename can collide with an existing supplier name despite the unique constraint — that'll surface as a 500 on commit rather than a clean 409.
+🟢 Concurrency — generate_for_bom's "already generated?" guard (po_service.py:164-169) is a check-then-insert with no lock; two simultaneous calls could double-generate PO sets. Low likelihood (DM-gated manual action).
+
+Priorities
+PO approval-bypass via edit and confirm_cutting approved-walk-back — both let a governance gate be circumvented after the fact. Fix the editable-state guards.
+PO number uniqueness race — add the unique constraint; it's a financial identifier.
+Procurement sha-dedupe (cross-submission dead-end + kind-blind cache) — both produce silently-wrong submission state.
+Webhook signature verification before any real supplier traffic.
+The GST math (po_costing.py), BOM cost rollup, optimistic-locking CAS, and inventory reservation engine are all correct and well-tested in shape — no issues there. Want me to write fixes for the four 🔴 items, or open them as tracked issues?

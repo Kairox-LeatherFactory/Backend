@@ -7,6 +7,27 @@ The only place that talks to the DB for inventory-owned tables (inventory_item,
 inventory_check[_line], inventory_reservation, material_alias, uom_conversion). BOM
 data the check needs is fetched through bom.service (a DTO), never via the bom
 repository/models.
+
+FUNCTION GUIDE  (all async; called only by InventoryService)
+  commit()   flush the session.
+  inventory_item:
+    get_inventory_item_by_key(key) / get_inventory_item(id) -> InventoryItem | None.
+    upsert_inventory_item(...)        sheet-wins-on-qty upsert keyed on normalized_key.
+    deactivate_keys_not_in(keep_keys) -> count   soft-deactivate rows absent from a re-sync.
+    list_inventory_items(*, search, limit, offset)   the paged stock list.
+  matching:
+    fetch_inventory_candidates(*, exact_keys, like_terms, lock=True) -> [InventoryItem]
+        the set-based candidate pull (NOT the whole table); with_for_update() locks the
+        rows for the reservation claim (race-safety, §7).
+    active_aliases() -> [MaterialAlias]              the curated synonyms.
+    uom_conversions() -> {(from,to): factor}         the unit reference.
+  reservations (the soft ledger):
+    active_reservation_sums(item_ids, exclude_bom_id?) -> {item_id: Σ active qty}   the
+        "committed by other BOMs" subtracted from on-hand to get `available`.
+    release_reservations(bom_id, *, reason) -> count   free a BOM's claims (re-run/cancel).
+  inventory_check:
+    get_inventory_check(id) / latest_check_for_bom(bom_id) -> InventoryCheck | None (lines eager).
+    latest_checks() -> [InventoryCheck]   one latest per BOM (for the dashboard).
 ================================================================================
 """
 from __future__ import annotations

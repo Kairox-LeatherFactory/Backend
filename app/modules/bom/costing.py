@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/costing.py — BOM cost math (Stage 2 §5, grounded in BMO-1)
+modules/bom/costing.py — BOM cost math (Stage 2 §5, grounded in BMO-1)
 ================================================================================
 
 The worked reference is BMO-1 (CRIMIE / CRI 02F5 PL02, FOB US$107.25). Pure math —
@@ -20,6 +20,23 @@ PER BOM (header rollup)
 A material line's qty_per_garment IS its DCM (§2). Non-material lines (manufacturing
 30.00, packaging 3.00, FOB charge 5.00) have qty_per_garment 1 and the cost in
 unit_price. Buyer-supplied accessories carry unit_price 0 (BMO-1 buttons).
+
+FUNCTION GUIDE
+  _d(v) / _money(v) / _qty(v)   [private]
+      Coercion + rounding helpers. `_d` turns anything (None/str/float) into a
+      Decimal; `_money` quantizes to 0.01 (paise/cents), `_qty` to 0.001. Keep all
+      arithmetic in Decimal so money never drifts. Called only inside this file.
+  compute_line(qty_per_garment, unit_price, order_qty) -> dict
+      Recompute ONE line's derived numbers. qty_per_garment defaults to 1 for
+      non-material lines. Returns {total_cost, bulk_qty, line_bulk}. Called by
+      recompute_bom (below) once per line.
+  recompute_bom(lines, order_qty) -> dict
+      Roll the per-line math up to the header. `lines` = list of
+      {qty_per_garment, unit_price}. Returns {order_qty, garment_fob_price,
+      bulk_total, lines:[derived...]} — the full recomputed tree.
+      CALLED FROM: BomService._recompute (generation + every bulk-PATCH edit);
+      supplier_po/po_costing reuses the same shape for PO totals. Pure + sync —
+      no DB, no I/O — so it is trivially unit-testable.
 ================================================================================
 """
 from __future__ import annotations

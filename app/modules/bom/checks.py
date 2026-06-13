@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/checks.py — per-client BOM cross-checks (Stage 2 §8)
+modules/bom/checks.py — per-client BOM cross-checks (Stage 2 §8)
 ================================================================================
 
 Validation rules live in config/bom_checks.yaml (loaded + cached here), extending
@@ -16,6 +16,27 @@ Rule KINDS are generic engine primitives; the which/where is config:
     pattern_reference_exists   the spec's pattern_reference resolved
 
 This is PURE + SYNC; the service builds the `context` from DB rows and runs it.
+
+FUNCTION GUIDE
+  load_checks(path?) -> tuple        [lru_cached]
+      Read + cache config/bom_checks.yaml. Returns the parsed rule list (one entry
+      per client_code). Called by run_checks when no explicit config is passed.
+  _flag(rule, ok, message) -> dict   [private]
+      Build one result flag {id, kind, severity, ok, message}. Used by every primitive.
+  _check_range / _check_pitch_monotonic / _check_qty_sum / _check_pattern_ref
+      [private rule-kind primitives] Each takes (rule, ctx) and returns a _flag:
+        range                     numeric field within [lo, hi]
+        pom_pitch_monotonic       grading non-decreasing across sizes
+        size_qty_sum_equals_total Σ per-size qty == order total
+        pattern_reference_exists  the spec's pattern reference resolved
+      Dispatched via the _KINDS table; never called directly from outside.
+  run_checks(client_code, ctx, checks_cfg?) -> list[dict]
+      Run every configured rule for this client against `ctx`. Returns the flag list.
+      CALLED FROM: BomService.generate_bom (ctx built from spec attrs/POMs/per-size qty).
+      Unknown client → empty list (no checks).
+  has_blocking_error(flags) -> bool
+      True iff any flag is severity 'error' AND failed — the service uses this to
+      refuse finalization. CALLED FROM: BomService / the finalization gate.
 ================================================================================
 """
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/seed_stage2.py — Seed the Stage-2 reference registries (§3)
+modules/bom/seed_stage2.py — Seed the Stage-2 reference registries (§3)
 ================================================================================
 
 Idempotently loads the two DB-backed Stage-2 configs (the same replace-on-key
@@ -12,6 +12,20 @@ pattern as seed_templates.py):
 The other two Stage-2 configs (extraction_adapters.yaml, bom_checks.yaml) are
 BEHAVIOUR config read straight off disk at runtime (extraction.py / checks.py),
 not DB rows — so they have no seed here. Used by scripts/seed.py and tests.
+
+NOTE: these are SYNC functions (plain Session), because seeding runs via scripts/seed.py
+on the sync engine — the only non-async path in the app (CLAUDE.md §3.3).
+
+FUNCTION GUIDE
+  _load(path) -> list[dict]   [private] read a YAML file into a list of dicts.
+  seed_garment_types(db, path?) -> int
+      Upsert each garment_type by `code` (replace-on-key). Returns the count. Run FIRST.
+  seed_pom_dictionary(db, path?) -> int
+      Upsert each term by (language, source_term, garment_type_id). Resolves an optional
+      garment_type code → id. Returns the count.
+  seed_stage2(db) -> {garment_types, pom_dictionary}
+      Run both in dependency order (types before the dictionary that FKs them).
+      CALLED FROM: scripts/seed.py + tests.
 ================================================================================
 """
 from __future__ import annotations

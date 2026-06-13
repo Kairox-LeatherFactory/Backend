@@ -48,14 +48,15 @@ async def main():
     from app.modules.users import schemas
     async with dbmod.AsyncSessionLocal() as db:
         await UserService(db).create_user(schemas.UserCreate(
-            name="Smoke Manager", phone="9000000001", role=UserRole.DIRECT_MANAGER))
+            name="Smoke Manager", phone="9000000001", role=UserRole.DIRECT_MANAGER,
+            password="9000000001"))
 
     checks = []
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.get("/health"); checks.append(("health", r.status_code == 200))
 
         r = await c.post("/api/v1/auth/login",
-                         data={"username": "9000000001", "password": "9000000001"})
+                         json={"username": "9000000001", "password": "9000000001"})
         checks.append(("login", r.status_code == 200))
         h = {"Authorization": f"Bearer {r.json()['access_token']}"}
 

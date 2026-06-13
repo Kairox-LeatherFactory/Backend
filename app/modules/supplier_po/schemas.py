@@ -1,6 +1,14 @@
 """
 modules/supplier_po/schemas.py — Stage-5 supplier-PO API contracts (§1–§9).
 Only request bodies are typed; rich response shapes are assembled by the services.
+
+SCHEMA GUIDE (Pydantic request bodies; FastAPI validates at the router boundary)
+  SupplierCreate / SupplierUpdate   POST/PATCH /suppliers bodies → create/update_supplier.
+  PoItemEdit / PoAddItem            building blocks of the PO bulk patch.
+  PoBulkPatch                       PATCH /pos/{id}/items body → edit_po.
+  PoRejectRequest                   POST /pos/{id}/reject body {reason} → reject_po.
+  PoAcknowledgeRequest              POST /pos/{id}/acknowledge body → acknowledge_po.
+  ProductionTransitionRequest       POST /production-tracking/{id}/transition {status} → transition.
 """
 from __future__ import annotations
 

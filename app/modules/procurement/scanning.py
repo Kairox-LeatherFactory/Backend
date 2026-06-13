@@ -24,6 +24,17 @@ TESTABILITY
     (e.g. detect the EICAR string) without a running clamd — mirroring how the
     intelligence module injects a fake chat model. The EICAR test string must be
     reported INFECTED when the flag is ON (acceptance §9.7).
+
+FUNCTION GUIDE  (pure-ish + sync; called by pipeline.process_upload)
+  EICAR   the standard harmless test signature — the fake-scanner trigger + test fixture.
+  ScannerUnavailable   raised when clamd is unreachable while required → the pipeline maps to 503.
+  Scanner   the callable type: bytes → (is_infected, signature_or_None).
+  clamd_instream_scanner(host, port, timeout?) -> Scanner
+      Build a scanner that speaks clamd's INSTREAM wire protocol over TCP (no `clamd` dep).
+  _default_scanner() -> Scanner   [private] the configured real clamd scanner.
+  scan_bytes(data, *, scanner?) -> (ScanStatus, signature)
+      THE ENTRY POINT. Disabled → (SKIPPED, None); enabled → run the scanner, fail CLOSED on
+      unreachable. CALLED FROM: pipeline.process_upload (step 1).
 ================================================================================
 """
 from __future__ import annotations

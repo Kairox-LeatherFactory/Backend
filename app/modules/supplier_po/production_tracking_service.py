@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/production_tracking_service.py — Stage-5 §8 production board
+modules/supplier_po/production_tracking_service.py — Stage-5 §8 production board
 ================================================================================
 
 One `production_tracking` row per style/order advancing through the §8c status ladder.
@@ -10,6 +10,23 @@ bom_service / inventory_service / po_service) + manually nudgeable by DM/Cutting
 LAYERING. Owns only `production_tracking` (procurement). Style/order/client identity the
 board groups by resolves through clients.service (CLAUDE.md §3.2). The order's POs are
 read through the procurement repository (same module).
+
+FUNCTION / METHOD GUIDE
+  _LADDER / _RANK   the §8c status order + an index for "advance only forward" checks.
+  ProductionTrackingService(db)   session + SupplierPoRepository.
+  ensure_for_bom(bom_id) -> ProductionTracking | None   get-or-create the tracker for a BOM's style/order.
+  _advance(t, target, *, actor?, force?)   [private] move forward (never back unless force),
+      stamp material_ready_at/released_at, audit PRODUCTION_TRACKING_UPDATE.
+  System edges (service→service side-effects, each commits):
+    on_bom_approved(bom_id)        → BOM_APPROVED        (called by BomService.approve_bom)
+    on_inventory_checked(bom_id)   → INVENTORY_CHECKED   (called by InventoryService.run_check)
+    on_po_raised(bom_id)           → PO_RAISED           (called by PoService.send_po)
+    on_po_confirmed(bom_id)        → PO_CONFIRMED → MATERIAL_READY when ALL POs confirmed
+                                                          (called by PoService._acknowledge)
+  transition(user, tracking_id, target) -> dict
+      The MANUAL nudge (DM/MD/Cutting) — may move forward or correct a stuck status (force);
+      the human go/no-go for RELEASED_TO_PRODUCTION. → the board transition endpoint.
+  board(*, client_id?, order_id?) -> dict   the grouped client→order→style board read.
 ================================================================================
 """
 from __future__ import annotations

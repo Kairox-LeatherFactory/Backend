@@ -4,6 +4,15 @@ modules/supplier_po/enums.py — Stage-5 supplier-PO value-sets (str-Enum + VARC
 Domain-specific to supplier matching, the PO cross-check/approval state machine, open
 tracking, and the escalation ladder. Cross-cutting Notification* vocab lives in
 app/core/enums.py.
+
+ENUM GUIDE (each str-Enum; the model stores `.value` in a VARCHAR column)
+  POStatus                 the PO cross-check + send + escalation state machine.
+  POResponseChannel        email / whatsapp / call — how a contact attempt was made.
+  POResponseStatus         pending/opened/confirmed/no_response/failed (a contact attempt's result).
+  POTrackingEventType      open/click/delivery/bounce/complaint/whatsapp/call (the engagement log).
+  SupplierEmailStatus      unknown/valid/invalid — set by bounce feedback; gates email send.
+  SupplierType             leather/accessory/service — drives PO template + approver routing.
+  ProductionTrackingStatus the §8c production ladder (awaiting_bom → ... → completed).
 """
 import enum
 

@@ -13,6 +13,14 @@ bom, inventory, and supplier_po too, so hosting them in core keeps a module from
 importing another just to persist one. `Submission.documents` still relates to the
 core `Document` by class-name string (the shared registry resolves it); no Python
 import of core models is needed for the FK.
+
+TABLE GUIDE (each class is one table; the cross-cutting Document/Notification/AuditLog
+live in app/core/models.py)
+  Submission       the upload-batch that PAIRS an order sheet + spec sheet (the surrogate
+                   that becomes the client_order link in Stage 2). order/spec_document_id are
+                   the current slot pointers; Document.submission_id keeps every version.
+  ClientTemplate   a per-client × doc-kind validation profile (anchors/fingerprints/thresholds),
+                   seeded from config/client_templates.yaml. Onboard a client = one row.
 ================================================================================
 """
 import uuid

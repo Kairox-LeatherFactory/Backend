@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/seed_inventory.py — Seed the Stage-4 reference data (§10)
+modules/inventory/seed_inventory.py — Seed the Stage-4 reference data (§10)
 ================================================================================
 
 Idempotently loads the two DB-backed Stage-4 configs (the same replace-on-key
@@ -13,6 +13,16 @@ It can also load the real inventory MASTER (`data/INVENTORY (1).xlsx`) into
 `inventory_item` for a dev/demo DB — the same normalizing parse the live
 `POST /inventory/commit` runs, but through the sync Session (seeding is a one-shot
 batch job; the live sync stays on the async importer). Used by scripts/seed.py.
+
+FUNCTION GUIDE  (all SYNC — seeding runs on the sync engine via scripts/seed.py)
+  _load(path) -> list[dict]   [private] read a YAML file.
+  seed_material_aliases(db, path?) -> int    upsert each alias by bom_term. Returns count.
+  seed_uom_conversions(db, path?) -> int     upsert each conversion by (from,to). Returns count.
+  seed_inventory_master(db, path?) -> int    load+normalize+dedup the real INVENTORY xlsx into
+      inventory_item (same parse as the live importer; sheet-wins; absent rows soft-deactivate).
+      No-op if the file is absent (CI). Returns count upserted.
+  seed_inventory(db) -> {material_aliases, uom_conversions, inventory_items}
+      Run all three. CALLED FROM: scripts/seed.py + tests.
 ================================================================================
 """
 from __future__ import annotations

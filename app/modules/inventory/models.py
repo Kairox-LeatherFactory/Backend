@@ -6,6 +6,14 @@ modules/inventory/models.py — Stage-4 inventory schema
 The inventory master, the per-BOM stock check + its lines, the soft reservation
 ledger, and the alias / UOM reference tables. Split out of the former procurement
 monolith. Cross-module FKs (bom, bom_item, app_user) are table-name strings only.
+
+TABLE GUIDE (each class is one table; see the per-class docstring for column detail)
+  InventoryItem         the normalized, deduped stock master (live, mutable). normalized_key matches.
+  InventoryCheck        one stock-status report per approved BOM (running → complete).
+  InventoryCheckLine    per-BOM-item result (required/on_hand/shortfall/status + flags).
+  InventoryReservation  a SOFT allocation — available = qty_on_hand − Σ active; never mutates stock.
+  MaterialAlias         curated BOM-term → inventory-key synonym (seeded; promote-by-config).
+  UomConversion         stock-UOM → BOM-UOM factor (seeded; identity rows included).
 ================================================================================
 """
 import uuid

@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/inventory_normalize.py — inventory text normalization (§2b/§5)
+modules/inventory/inventory_normalize.py — inventory text normalization (§2b/§5)
 ================================================================================
 
 PURE helpers, no DB, no I/O — the single place the messy `INVENTORY (1).xlsx`
@@ -13,6 +13,21 @@ The raw sheet is `DESCRIPTION | NOM | PCS | RATE`:
   - PCS the on-hand qty (frequently blank),
   - and the file is full of duplicate lots + section/ledger NOISE rows
     (FACTORY NETWORK…, MARCH MONTH-2025 USAGE, I-CATEGORY MEMBERSHIP FEE, …).
+
+FUNCTION GUIDE  (all pure + sync; shared by the importer AND the matcher)
+  canonical_uom(raw) -> str | None
+      Map a sheet UOM cell to the canonical vocabulary (DM²/SQDM→DCM, KG→KGS, …),
+      None if blank/unknown. Used by the importer + is_noise_row + the matcher's converter.
+  normalize_key(text) -> str
+      THE matching key: uppercase, drop "(...)" + boilerplate suffixes, collapse
+      punctuation to spaces, trim. Run on BOTH the inventory description and the BOM line
+      so they compare equal. CALLED FROM: inventory_import, the service, supplier_match.
+  extract_color(text) -> str | None   first recognised colour token → inventory_item.color.
+  tokens(key) -> set[str]   the word set of a key — the unit of containment matching.
+  bom_line_key(name, color) -> str   the normalized key for a BOM line with colour folded in.
+  is_noise_row(description, uom, qty, rate) -> bool
+      True for a non-stock row (banner/ledger marker, or no uom+qty+rate). CALLED FROM:
+      inventory_import (drops these into the preview's `dropped` list, never silently).
 ================================================================================
 """
 from __future__ import annotations

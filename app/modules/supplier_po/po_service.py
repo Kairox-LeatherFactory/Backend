@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/po_service.py — Stage-5 supplier-PO orchestration
+modules/supplier_po/po_service.py — Stage-5 supplier-PO orchestration (PoService)
 ================================================================================
 
 The business brain of Stage 5. Consumes the Stage-4 shortfall lines and drives a
@@ -26,6 +26,42 @@ supplier PO through its whole life:
 LAYERING. Reads only procurement-owned tables; order/style identity resolves via
 clients.service, recipients via users.service (permitted service→service calls). Blocking
 render/send run in a threadpool.
+
+FUNCTION / METHOD GUIDE  (router → PoService; sweeper → sweep_escalations)
+  module helpers: _financial_year(d) (Apr–Mar FY string for PO numbers);
+                  _po_template_cfg(supplier_type) (registry → template cfg).
+  PoService(db)  session + SupplierPoRepository.
+  cross-module DTO reads: _bom_dto / _latest_check / _alias_pairs (via the owning services).
+  generate_for_bom(user, bom_id) -> dict
+      THE GENERATOR. Reads the latest inventory check, takes the shortfall lines, matches
+      each to a supplier (SupplierService.match_line), GROUPS by supplier into one PO each
+      (unresolved → a held needs_supplier draft), builds po_items with back-links, recomputes
+      GST, audits PO_GENERATE. → POST /boms/{id}/supplier-pos.
+  _new_item(no, payload) -> PoItem   [static] build one PO line.
+  get_po(id) / list_pos(*, filters) -> dict   read endpoints.
+  edit_po(user, po_id, base_revision, item_edits, po_edits, add_items, remove_item_ids) -> dict
+      The §4 editable contract: bulk edit + optimistic revision CAS (409 stale/locked); a
+      supplier change re-routes the approver + resets approval; recompute; audit PO_EDIT.
+  submit_po / approve_po / reject_po / cancel_po
+      The §3 cross-check state machine. submit → pending_approval (notifies the routed
+      approvers); approve/reject enforce _assert_router_role (leather→Cutting; accessory→MD/DM/HR;
+      MD superuser); each audits.
+  send_po(user, po_id) -> dict
+      The §5 send: allocate the FY po_number, render+store the PDF (threadpool, sha-deduped),
+      route by contact (email → _send_email; else short-circuit to the WhatsApp rung), set
+      next_escalation_at, audit PO_SEND, advance the board to PO_RAISED.
+  _send_email(...)   [private] build the HTML+text (inject tracking pixel/links), send via
+      the Notifier, write the PoResponse + Notification rows.
+  record_open / record_click / record_ses_event   §6 tracking webhooks (a hard bounce
+      flags the email invalid + short-circuits escalation).
+  acknowledge_po / acknowledge_by_token / _acknowledge   §7d STOP: any-channel ack →
+      acknowledged_at, status=confirmed, ladder halts, board → PO_CONFIRMED.
+  sweep_escalations() -> int
+      The §7 ladder, one rung per due PO per sweep (idempotent): rung0→WhatsApp, 1→auto-call,
+      2→exhausted in-app notice. CALLED FROM: the main.py lifespan sweeper.
+  Helpers [private]: _load (404), _recompute (po_costing.compute_totals), _po_type,
+      _assert_router_role, _notify_approvers, _identity (clients.service), _buyer_ref/_block,
+      _supplier_block, _snap (audit diff), _audit, _on_po_raised/_confirmed (board side-effects).
 ================================================================================
 """
 from __future__ import annotations

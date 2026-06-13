@@ -17,6 +17,35 @@ Endpoints (under /api/v1/procurement, preserving the module-prefix convention):
 The tracking + webhook routes are intentionally UNAUTHENTICATED (a supplier's mail
 client / Twilio / SNS call them); they carry an opaque per-send token, not a session.
 This module is the resume point for the in-progress Stage-5 build.
+
+LAYERING: thin HTTP shell → PoService / SupplierService / ProductionTrackingService.
+Role gates: _DMMD (mutating PO/supplier), _MD (soft-delete/reactivate supplier), _VIEW
+(reads), _APPROVERS (cross-check candidates; the service enforces the exact routing),
+_BOARD (manual board transitions). The /t/* + /webhooks/* routes have NO auth dependency.
+
+FUNCTION GUIDE  (path → handler → service call)
+  _read_capped(file)            stream the upload, abort past MAX_UPLOAD_MB (413).
+  Suppliers (§9):
+    POST /suppliers/import/preview|commit → SupplierService.preview / .commit
+    GET  /suppliers[/{id}]                → list_suppliers / get_supplier
+    POST /suppliers                       → create_supplier            [DM/MD]
+    PATCH/suppliers/{id}                  → update_supplier            [DM/MD]
+    DELETE /suppliers/{id}                → deactivate_supplier        [MD]
+    POST /suppliers/{id}/reactivate       → reactivate_supplier        [MD]
+  POs (§1–§7):
+    POST /boms/{id}/generate-pos          → PoService.generate_for_bom
+    GET  /pos[/{id}]                      → list_pos / get_po
+    PATCH/pos/{id}/items                  → edit_po (bulk + revision lock)
+    POST /pos/{id}/submit|approve|reject|send|cancel|acknowledge → the state machine
+  Tracking (§6, no auth):
+    GET  /t/o/{token}.gif                 → record_open  (returns the 1×1 pixel)
+    GET  /t/c/{token}                     → record_click (verifies sig, 302 → target)
+  Webhooks (§5b/§7, no auth):
+    POST /webhooks/ses                    → record_ses_event (bounce/complaint/delivery)
+    POST /webhooks/twilio/whatsapp|voice  → acknowledge_by_token (supplier reply / press-1)
+  Board (§8):
+    GET  /production-tracking             → ProductionTrackingService.board
+    POST /production-tracking/{id}/transition → .transition  [DM/MD/Cutting]
 ================================================================================
 """
 from __future__ import annotations

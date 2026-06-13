@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/supplier_service.py — Stage-5 supplier import, CRUD, matching
+modules/supplier_po/supplier_service.py — Stage-5 supplier import, CRUD, matching
 ================================================================================
 
 Owns the supplier side of Stage 5:
@@ -13,6 +13,21 @@ Owns the supplier side of Stage 5:
 
 LAYERING. Reads only procurement-owned tables. Blocking openpyxl work runs in a
 threadpool (house async rule).
+
+FUNCTION / METHOD GUIDE  (router → SupplierService; * = called by PoService)
+  SupplierService(db)  session + SupplierPoRepository.
+  preview(data) -> dict        dry-run parse of the supplier .xlsx. → POST /suppliers/import/preview.
+  commit(user, data) -> dict   upsert suppliers (sheet-wins-if-present), REBUILD supply history,
+      soft-deactivate absent rows, audit SUPPLIER_IMPORT. Idempotent. → .../commit.
+  _preview_block(prev) -> dict [static] the importer summary (counts/warnings/sample history).
+  list_suppliers / get_supplier   read endpoints (get includes history + open POs).
+  create_supplier / update_supplier / deactivate_supplier / reactivate_supplier
+      §9 CRUD — soft-delete only; each writes a SUPPLIER_* audit row. Editing a contact onto
+      a contactless vendor unblocks §5 send.
+  match_line(*, name, color, category, aliases, today?) -> MatchResult  *
+      Resolve ONE shortfall line to a supplier: build the line key, fetch a small candidate
+      pool set-based, run supplier_match.match_shortfall. CALLED FROM: PoService.generate_for_bom.
+  _snap(s) [static] audit diff;  _audit(...) write one AuditLog row.
 ================================================================================
 """
 from __future__ import annotations

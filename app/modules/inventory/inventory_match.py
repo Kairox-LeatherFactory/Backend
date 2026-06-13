@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/inventory_match.py — BOM line → stock matching (§5/§6)
+modules/inventory/inventory_match.py — BOM line → stock matching (§5/§6)
 ================================================================================
 
 PURE matching logic (no DB): given a BOM line's normalized key + colour and a small
@@ -15,6 +15,19 @@ whole table), decide the match deterministically-first:
 "No LLM, no silent guess" (stage-0 §4): an unmatched line is reported as out-of-stock
 with diagnostics, not force-bound to a wrong article. The UOM helper reconciles the
 matched stock unit with the BOM line unit (§6.2); an unconvertible clash is flagged.
+
+FUNCTION GUIDE  (pure + sync; called by InventoryService._check_line per line)
+  Alias            dataclass {bom_term, inventory_key} (both normalized) — the synonym row.
+  MatchResult      dataclass {rows, method, suggestion} — the matcher's verdict.
+  _color_ok(bom_color, inv_key) -> bool   [private] colour gate (BLACK ≠ BROWN).
+  _jaccard(a, b) -> float   [private] token-overlap score for the fuzzy step.
+  match_line(bom_key, bom_color, candidates, aliases) -> MatchResult
+      Resolve one line: (1) exact key → (2) alias → (3) fuzzy suggestion (advisory) →
+      (4) unmatched. Lots sharing a key are returned together so the caller sums on-hand.
+  convert_on_hand(on_hand, stock_uom, bom_uom, conversions) -> (qty, mismatch)
+      Reconcile units: identity when they agree (dm²≡DCM), a seeded factor otherwise, or
+      (0, True) when no conversion exists — so an unconvertible unit never falsely reads
+      'sufficient'. CALLED FROM: _check_line (both the on-hand sum and the lot reservation).
 ================================================================================
 """
 from __future__ import annotations

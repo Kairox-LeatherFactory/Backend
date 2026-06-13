@@ -1,6 +1,6 @@
 """
 ================================================================================
-modules/procurement/storage.py — Pluggable object storage (Stage 1 §6)
+core/storage.py — Pluggable object storage (Stage 1 §6)
 ================================================================================
 
 WHY AN ABSTRACTION (not a direct Supabase call)
@@ -24,6 +24,18 @@ KEY LAYOUT (identical across backends, §6)
     is written to quarantine first; only a clean/skipped scan promotes it to
     submissions/, and the DB storage_url is written only after promotion — so a
     half-uploaded / infected file is never referenced by an accepted document.
+
+FUNCTION GUIDE
+  quarantine_key / submission_key(submission_id, kind/slot, sha256, ext) -> str
+      Build the object key for the two prefix trees. CALLED FROM: pipeline.process_upload.
+  StorageBackend   the interface: put/get/delete/exists (abstract) + move/url_for/presign
+      (defaults). `move` promotes quarantine → submissions (copy+delete unless overridden).
+  LocalStorageBackend   default (dev/tests) — local filesystem, path-traversal guarded.
+  S3StorageBackend      s3/minio — lazy boto3; real presigned URLs.
+  SupabaseStorageBackend production — lazy SDK; private bucket via the service key.
+  get_storage() -> StorageBackend   the configured singleton (defaults to local).
+      CALLED FROM: pipeline (Stage 1), bom.export, supplier_po.send (store the rendered PDFs).
+  reset_storage_cache()   test hook — drop the cached backend.
 ================================================================================
 """
 from __future__ import annotations
