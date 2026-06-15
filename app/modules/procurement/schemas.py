@@ -27,6 +27,15 @@ class OpenSubmissionRequest(BaseModel):
     client_id: uuid.UUID | None = Field(default=None)
 
 
+class GenerateBomRequest(BaseModel):
+    """DEPRECATED body for POST /submissions/{id}/generate-bom. The trigger now takes NO
+    body — the BOM is built from the order + spec sheets alone and the order/style
+    hierarchy is created from the parsed order sheet at MD approval. Retained (all fields
+    optional) only so an old client posting `{}` or stale ids does not 422."""
+    client_order_id: uuid.UUID | None = None
+    style_id: uuid.UUID | None = None
+
+
 class SlotStatus(BaseModel):
     present: bool
     validation_status: str | None

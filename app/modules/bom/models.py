@@ -50,7 +50,11 @@ class SpecSheet(Base, UUIDMixin, TimestampMixin):
     narrative tech pack) share almost no columns, so the data lives in JSON with a
     `spec_type` discriminator; only universal fields are typed."""
     __tablename__ = "spec_sheet"
-    client_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("client.id"), index=True)
+    # Nullable: a submission-anchored spec sheet is parsed BEFORE a client is resolved
+    # (the client comes off the order sheet at MD approval). Mirrors Bom.client_id.
+    client_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("client.id"), nullable=True, index=True
+    )
     style_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("style.id"), nullable=True, index=True
     )
@@ -74,11 +78,31 @@ class Bom(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "bom"
     __table_args__ = (
         UniqueConstraint("client_order_id", "style_id", name="uq_bom_order_style"),
+        UniqueConstraint("submission_id", name="uq_bom_submission"),
     )
-    client_order_id: Mapped[uuid.UUID] = mapped_column(
-        GUID(), ForeignKey("client_order.id"), index=True
+    # A Stage-2 BOM is now born from the order + spec sheets ALONE, anchored on the
+    # submission. The Client→Order→Style→SKU breakdown is created (and back-linked into
+    # client_order_id/style_id) only after the MD approves — so both stay NULL until then.
+    # uq_bom_order_style still guarantees one BOM per (order, style) once populated;
+    # NULL/NULL rows are distinct on both Postgres and SQLite, so unmaterialised BOMs
+    # never collide. submission_id is the opaque link back to procurement (FK by table
+    # name only — no Python import, no layering break).
+    submission_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("submission.id"), nullable=True, index=True
     )
-    style_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("style.id"), index=True)
+    client_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("client.id"), nullable=True, index=True
+    )
+    client_order_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("client_order.id"), nullable=True, index=True
+    )
+    style_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("style.id"), nullable=True, index=True
+    )
+    # The parsed order-sheet snapshot (order_number, refs, per-size qty, colour lines,
+    # season, price). What _resolve_identity + breakdown materialisation read while
+    # style_id is NULL — there are no SKUs yet to read the quantities off.
+    order_identity: Mapped[dict | None] = mapped_column(JSON_VARIANT)
     status: Mapped[str] = mapped_column(String(20), default=BomStatus.DRAFT.value, index=True)
     currency: Mapped[str | None] = mapped_column(String(3))
     garment_fob_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
@@ -195,7 +219,11 @@ class StyleConsumptionTemplate(Base, UUIDMixin, TimestampMixin):
                          "material_category", "size",
                          name="uq_style_consumption_identity"),
     )
-    client_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("client.id"), index=True)
+    # Nullable: the DCM memory can be back-filled from a still-client-less BOM (the
+    # client is resolved at approval). Mirrors Bom.client_id / SpecSheet.client_id.
+    client_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("client.id"), nullable=True, index=True
+    )
     style_signature: Mapped[str] = mapped_column(String(120), index=True)
     garment_type_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("garment_type.id"), nullable=True
@@ -217,7 +245,11 @@ class PatternReference(Base, UUIDMixin, TimestampMixin):
     """"Follow existing pattern X in size Y" (§3d). Resolved to a base style / DCM
     template, NOT parsed as new POMs."""
     __tablename__ = "pattern_reference"
-    client_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("client.id"), index=True)
+    # Nullable: a pattern reference can be recorded on a still-client-less BOM (the
+    # client is resolved at approval). Mirrors Bom.client_id / SpecSheet.client_id.
+    client_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("client.id"), nullable=True, index=True
+    )
     spec_sheet_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("spec_sheet.id"), nullable=True, index=True
     )

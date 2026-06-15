@@ -206,6 +206,16 @@ class BomRepository:
         )
         return res.scalar_one_or_none()
 
+    async def get_bom_by_submission(self, submission_id) -> Bom | None:
+        """The (at-most-one, via uq_bom_submission) BOM anchored on a submission. Used by
+        the Stage-1→2 trigger to make re-generation idempotent — a prior run that created
+        the BOM but didn't flip the submission to consumed is replayed, not duplicated."""
+        res = await self.db.execute(
+            select(Bom).where(Bom.submission_id == submission_id)
+            .options(selectinload(Bom.items))
+        )
+        return res.scalar_one_or_none()
+
     async def claim_revision(self, bom_id, base_revision: int) -> int:
         from sqlalchemy import update
         res = await self.db.execute(

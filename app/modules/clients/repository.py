@@ -57,3 +57,45 @@ class ClientRepository:
     async def get_skus_for_style(self, style_id: uuid.UUID) -> list[SKU]:
         res = await self.db.execute(select(SKU).where(SKU.style_id == style_id))
         return list(res.scalars())
+
+    async def create_order_with_breakdown(
+        self, *, client_id: uuid.UUID, order: dict, style: dict,
+        lines: list[dict], per_size: dict,
+    ) -> tuple[uuid.UUID, uuid.UUID]:
+        """Insert ClientOrder → Style → SKU rows from a parsed order sheet. SKUs are keyed
+        on (style_id, color_code, size) — duplicate (colour, size) cells are summed so the
+        uq_sku_identity constraint never trips."""
+        co = ClientOrder(
+            client_id=client_id,
+            order_number=str(order.get("order_number") or "UNKNOWN")[:50],
+            currency=order.get("currency"),
+            source_document_id=order.get("source_document_id"),
+        )
+        self.db.add(co)
+        await self.db.flush()
+        st = Style(
+            client_order_id=co.id, name=str(style.get("name") or "UNSPECIFIED")[:120],
+            customer_ref=style.get("customer_ref"), internal_ref=style.get("internal_ref"),
+            season=style.get("season"), unit_price=style.get("unit_price"),
+            currency=style.get("currency"),
+        )
+        self.db.add(st)
+        await self.db.flush()
+
+        # Aggregate to (color_code, color_name, size) → qty so duplicate cells don't
+        # violate uq_sku_identity. Fall back to a single "NA" colour from per_size.
+        agg: dict[tuple[str, str | None, str], int] = {}
+        for ln in (lines or []):
+            color_name = ln.get("color_name") or ln.get("color")
+            color_code = str(ln.get("color_code") or color_name or "NA")[:40]
+            for size, qty in (ln.get("sizes") or {}).items():
+                key = (color_code, color_name, str(size)[:10])
+                agg[key] = agg.get(key, 0) + int(qty)
+        if not agg:
+            for size, qty in (per_size or {}).items():
+                agg[("NA", None, str(size)[:10])] = int(qty)
+        for (color_code, color_name, size), qty in agg.items():
+            self.db.add(SKU(style_id=st.id, color_code=color_code,
+                            color_name=color_name, size=size, qty_ordered=int(qty)))
+        await self.db.commit()
+        return co.id, st.id

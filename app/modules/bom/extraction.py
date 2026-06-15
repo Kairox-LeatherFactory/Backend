@@ -445,3 +445,366 @@ def build_default_extractor() -> AttributeExtractor | None:
         return None
 
     return _extract
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Order-sheet content extraction (Stage 2: order qty + per-size breakdown)
+# ════════════════════════════════════════════════════════════════════════════
+# The order sheet drives a BOM's order_qty / per-size breakdown + customer refs (the
+# spec sheet drives materials/POMs). XLSX/CSV are parsed deterministically with the same
+# "detect the header wherever it is, read whatever size columns it declares" approach as
+# the legacy imports.parse_orders. The real client order sheets are SCANNED PDFs (no text
+# layer — they need OCR/vision at classification time), so the PDF path is best-effort on
+# whatever text pypdf can pull; anything unparsed is a non-blocking WARNING, never a
+# reject (surface, don't reject — same posture as bom.checks). One submission = one
+# style, so the lines are aggregated into a single style's per-(colour,size) breakdown.
+# MIME constants are duplicated (not imported from procurement.sniffing) so this pure
+# extraction module keeps no cross-module dependency.
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+CSV_MIME = "text/csv"
+PDF_MIME = "application/pdf"
+_ALPHA_SIZES = {"XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL", "3XL", "4XL"}
+_NON_SIZE_HEADERS = {
+    "S.NO", "SNO", "STYLE", "COLOUR", "COLOR", "SUEDE COLOUR", "SUEDE COLOR", "ARTICLE",
+    "TOTAL", "TOTAL QTY", "DATE", "SEASON", "ORDER", "ORDER NO", "REF", "CUSTOMER REF",
+}
+
+
+def _is_order_size_token(text) -> bool:
+    if text is None:
+        return False
+    t = str(text).strip().upper()
+    if not t or t in _NON_SIZE_HEADERS:
+        return False
+    if t in _ALPHA_SIZES:
+        return True
+    return t.replace(".", "").isdigit()      # "38", "46" …
+
+
+def _order_int(v) -> int:
+    try:
+        s = str(v).strip()
+        return int(float(s)) if s else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _order_str(cells: list, idx) -> str | None:
+    if idx is None or idx >= len(cells) or cells[idx] is None:
+        return None
+    s = str(cells[idx]).strip()
+    return s or None
+
+
+def _aggregate_order_lines(lines: list[dict], warnings: list[str]) -> dict:
+    """Collapse parsed (style, colour, sizes) rows into one style's breakdown: a list of
+    {colour → sizes} lines (deduped on colour+size) + the aggregate per-size totals."""
+    by_color: dict[str, dict[str, int]] = {}
+    color_names: dict[str, str | None] = {}
+    per_size: dict[str, int] = {}
+    style_name = None
+    for ln in lines:
+        style_name = style_name or ln.get("style")
+        ckey = (ln.get("color") or "NA").strip().upper()
+        color_names.setdefault(ckey, ln.get("color"))
+        sizes = by_color.setdefault(ckey, {})
+        for size, qty in (ln.get("sizes") or {}).items():
+            s = str(size).strip().upper()
+            sizes[s] = sizes.get(s, 0) + int(qty)
+            per_size[s] = per_size.get(s, 0) + int(qty)
+    out_lines = [
+        {"color_code": ckey, "color_name": color_names.get(ckey), "sizes": sizes}
+        for ckey, sizes in by_color.items()
+    ]
+    order_qty = sum(per_size.values())
+    if order_qty == 0:
+        warnings.append("order_sheet_no_quantities: no per-size quantities parsed.")
+    return {
+        "order_number": None, "style_name": style_name,
+        "customer_ref": None, "internal_ref": None, "season": None,
+        "unit_price": None, "currency": None,
+        "order_qty": order_qty, "per_size_qty": per_size,
+        "lines": out_lines, "warnings": warnings,
+    }
+
+
+def _extract_order_xlsx(data: bytes) -> dict:
+    import openpyxl
+
+    wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+    lines: list[dict] = []
+    warnings: list[str] = []
+    for ws in wb.worksheets:
+        col_map: dict = {}
+        size_cols: dict = {}
+        last_style = None
+        for row in ws.iter_rows(values_only=True):
+            cells = list(row)
+            upper = [str(c).strip().upper() if c is not None else "" for c in cells]
+            is_header = (
+                any(u in ("S.NO", "SNO", "DATE") for u in upper[:2])
+                or ("STYLE" in upper and any(_is_order_size_token(c) for c in cells))
+            )
+            if is_header:
+                col_map, size_cols = {}, {}
+                for idx, u in enumerate(upper):
+                    if u == "STYLE":
+                        col_map["style"] = idx
+                    elif u in ("COLOUR", "COLOR", "SUEDE COLOUR", "SUEDE COLOR"):
+                        col_map["color"] = idx
+                    elif u == "ARTICLE":
+                        col_map["article"] = idx
+                    elif _is_order_size_token(cells[idx]):
+                        size_cols[idx] = u
+                continue
+            if not size_cols:
+                continue
+            style = _order_str(cells, col_map.get("style"))
+            color = _order_str(cells, col_map.get("color"))
+            sizes = {label: _order_int(cells[idx])
+                     for idx, label in size_cols.items()
+                     if idx < len(cells) and _order_int(cells[idx]) > 0}
+            row_total = sum(sizes.values())
+            if not style and color and row_total > 0:
+                style = last_style          # continuation row inherits the style
+            if style and row_total > 0:
+                last_style = style
+                lines.append({"style": style, "color": color, "sizes": sizes})
+    wb.close()
+    return _aggregate_order_lines(lines, warnings)
+
+
+def _extract_order_csv(data: bytes) -> dict:
+    import csv as _csv
+
+    text = data.decode("utf-8", errors="replace")
+    rows = list(_csv.reader(io.StringIO(text)))
+    lines: list[dict] = []
+    warnings: list[str] = []
+    col_map: dict = {}
+    size_cols: dict = {}
+    for cells in rows:
+        upper = [str(c).strip().upper() for c in cells]
+        if "STYLE" in upper and any(_is_order_size_token(c) for c in cells):
+            col_map, size_cols = {}, {}
+            for idx, u in enumerate(upper):
+                if u == "STYLE":
+                    col_map["style"] = idx
+                elif u in ("COLOUR", "COLOR"):
+                    col_map["color"] = idx
+                elif _is_order_size_token(cells[idx]):
+                    size_cols[idx] = u
+            continue
+        if not size_cols:
+            continue
+        style = _order_str(cells, col_map.get("style"))
+        color = _order_str(cells, col_map.get("color"))
+        sizes = {label: _order_int(cells[idx])
+                 for idx, label in size_cols.items()
+                 if idx < len(cells) and _order_int(cells[idx]) > 0}
+        if style and sum(sizes.values()) > 0:
+            lines.append({"style": style, "color": color, "sizes": sizes})
+    return _aggregate_order_lines(lines, warnings)
+
+
+_PDF_SIZE_QTY = re.compile(r"\b(XS|S|M|L|XL|XXL|XXXL)\b\s*[:\-]?\s*(\d{1,4})", re.IGNORECASE)
+
+
+def _extract_order_pdf(data: bytes) -> dict:
+    warnings: list[str] = []
+    text = ""
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(data))
+        text = "\n".join((p.extract_text() or "") for p in reader.pages)
+    except Exception as exc:                          # noqa: BLE001 — best-effort
+        warnings.append(f"order_pdf_unreadable: {exc}")
+    per_size: dict[str, int] = {}
+    for m in _PDF_SIZE_QTY.finditer(text or ""):
+        per_size[m.group(1).upper()] = per_size.get(m.group(1).upper(), 0) + int(m.group(2))
+    if not per_size:
+        warnings.append(
+            "order_sheet_no_text_layer: per-size breakdown could not be parsed from the "
+            "PDF (scanned/handwritten order sheets need OCR) — fill the quantities by hand.")
+    lines = [{"style": None, "color": None, "sizes": per_size}] if per_size else []
+    return _aggregate_order_lines(lines, warnings)
+
+
+# ── Gemini-first extraction (vision for scanned PDFs, text for digital sheets) ──
+# Mirrors procurement.build_vision_classifier: the SAME _init_model + _coerce + PDF→PNG
+# rasterisation, but asking for a structured ORDER result instead of a classification.
+# Used first for PDFs (the scanned/handwritten case the deterministic parser can't read)
+# and as a last resort for machine-readable sheets that yielded nothing. Returns None
+# whenever no Gemini key is configured / the model errors / the output is unusable, so the
+# caller falls back to the deterministic parser (graceful degradation, same as the spec
+# attribute extractor — a model outage never stalls BOM generation).
+_ORDER_SCHEMA_HINT = """Return ONLY a JSON object with this exact shape (use null when \
+unsure, omit unknown keys):
+{
+  "order_number": "...",
+  "style_name": "...",
+  "customer_ref": "...",
+  "internal_ref": "...",
+  "season": "...",
+  "currency": "...",
+  "unit_price": 0.0,
+  "lines": [ { "color": "BLACK", "sizes": { "S": 4, "M": 17, "L": 23 } } ]
+}
+Each `lines` entry is ONE colour with its per-size quantities. Read EVERY size column and \
+report the printed cell values; do not invent or total them."""
+
+
+def _order_llm_prompt() -> str:
+    return (
+        "You are extracting a leather-garment buyer ORDER SHEET for a factory's BOM "
+        "procurement workflow. Pull the order number, style name, customer/internal "
+        "references, season, currency, per-garment price, and the PER-SIZE quantity "
+        "breakdown for each colour exactly as printed (these sheets are often scanned or "
+        "handwritten).\n\n" + _ORDER_SCHEMA_HINT
+    )
+
+
+def _order_text_blob(data: bytes, mime: str, name: str) -> str:
+    """Flatten a digital order sheet (XLSX/CSV) to text for the non-vision LLM path."""
+    try:
+        if mime == CSV_MIME or name.endswith(".csv"):
+            return data.decode("utf-8", errors="replace")
+        import openpyxl
+
+        wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+        rows = []
+        for ws in wb.worksheets:
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c) for c in row if c is not None and str(c).strip()]
+                if cells:
+                    rows.append("\t".join(cells))
+        wb.close()
+        return "\n".join(rows)
+    except Exception:                                 # noqa: BLE001 — best-effort
+        return ""
+
+
+def _llm_order_to_result(parsed) -> dict | None:
+    """Normalise the model's order JSON into the same shape _aggregate_order_lines emits."""
+    if not isinstance(parsed, dict):
+        return None
+    norm: list[dict] = []
+    for ln in (parsed.get("lines") or []):
+        if not isinstance(ln, dict):
+            continue
+        sizes = {}
+        for size, qty in (ln.get("sizes") or {}).items():
+            q = _order_int(qty)
+            if q > 0:
+                sizes[str(size).strip().upper()] = q
+        if sizes:
+            norm.append({"style": parsed.get("style_name"),
+                         "color": ln.get("color"), "sizes": sizes})
+    if not norm:
+        return None                                   # nothing usable → caller falls back
+    result = _aggregate_order_lines(norm, ["order_extracted_by_llm"])
+    for k in ("order_number", "customer_ref", "internal_ref", "season", "currency"):
+        if parsed.get(k) is not None:
+            result[k] = parsed[k]
+    if parsed.get("style_name"):
+        result["style_name"] = parsed["style_name"]
+    if parsed.get("unit_price") is not None:
+        try:
+            result["unit_price"] = float(parsed["unit_price"])
+        except (TypeError, ValueError):
+            pass
+    return result
+
+
+def _extract_order_llm(data: bytes, filename: str, mime: str | None) -> dict | None:
+    """Gemini-first order extraction. PDF → vision (page images via PyMuPDF); digital →
+    text. None when vision/keys are unavailable or the output is unusable (→ fall back)."""
+    try:
+        from app.modules.procurement.classifier import _coerce, _init_model
+    except Exception:                                 # noqa: BLE001
+        return None
+    m = (mime or "").lower()
+    name = (filename or "").lower()
+    is_pdf = m == PDF_MIME or name.endswith(".pdf")
+
+    content: list[dict] = []
+    if is_pdf:
+        if not settings.vision_classifier_enabled:
+            return None
+        model = _init_model(settings.vision_model)
+        if model is None:
+            return None
+        try:
+            import base64
+
+            from app.modules.procurement.sniffing import render_pdf_pages
+
+            images = render_pdf_pages(data, max_pages=settings.vision_max_pages,
+                                      dpi=settings.ocr_dpi)
+        except Exception:                             # noqa: BLE001
+            return None
+        if not images:
+            return None
+        content.append({"type": "text", "text": _order_llm_prompt()})
+        for png in images:
+            b64 = base64.b64encode(png).decode("ascii")
+            content.append({"type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{b64}"}})
+    else:
+        model = (_init_model(settings.extraction_model)
+                 or _init_model(settings.extraction_fallback_model))
+        if model is None:
+            return None
+        blob = _order_text_blob(data, m, name)[:12000]
+        if not blob.strip():
+            return None
+        content.append({"type": "text", "text": _order_llm_prompt()
+                        + f"\n\n--- order sheet content ---\n{blob}\n--- end ---"})
+
+    try:
+        from langchain_core.messages import HumanMessage
+
+        resp = model.invoke([HumanMessage(content=content)])
+        parsed = _coerce(getattr(resp, "content", "") or "")
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("LLM order extraction failed (%s) → deterministic fallback", exc)
+        return None
+    return _llm_order_to_result(parsed)
+
+
+def extract_order(data: bytes, filename: str, mime: str | None = None,
+                  client_match_code: str | None = None) -> dict:
+    """Parse an order sheet into {order_qty, per_size_qty, lines[colour→sizes], style_name,
+    refs, warnings}. PDFs (usually scanned) go to Gemini VISION first, falling back to a
+    pypdf-text best-effort; machine-readable XLSX/CSV are parsed deterministically (exact,
+    no LLM needed — CLAUDE.md §4 'NO LLM unless required'), escalating to the LLM only if
+    they yield nothing. NEVER raises — an unparseable sheet returns zero quantities + a
+    warning so Stage 2 still produces a (hand-correctable) BOM. `client_match_code` is
+    accepted for future per-client adapters."""
+    m = (mime or "").lower()
+    name = (filename or "").lower()
+    is_pdf = m == PDF_MIME or name.endswith(".pdf")
+    try:
+        if is_pdf:
+            llm = _extract_order_llm(data, filename, mime)
+            return llm if llm is not None else _extract_order_pdf(data)
+        if m == XLSX_MIME or name.endswith((".xlsx", ".xlsm")):
+            result = _extract_order_xlsx(data)
+        elif m == CSV_MIME or name.endswith(".csv"):
+            result = _extract_order_csv(data)
+        else:
+            llm = _extract_order_llm(data, filename, mime)
+            if llm is not None:
+                return llm
+            logger.warning("extract_order: unsupported order-sheet type %s / %s", mime, filename)
+            return _aggregate_order_lines([], [f"order_sheet_unsupported_type: {mime or name}"])
+        # A machine-readable sheet that parsed to nothing → last-resort LLM escalation.
+        if result.get("order_qty", 0) == 0:
+            llm = _extract_order_llm(data, filename, mime)
+            if llm is not None:
+                return llm
+        return result
+    except Exception as exc:                          # noqa: BLE001 — best-effort
+        logger.warning("extract_order failed for %s (%s): %s", filename, mime, exc)
+        return _aggregate_order_lines([], [f"order_parse_error: {exc}"])

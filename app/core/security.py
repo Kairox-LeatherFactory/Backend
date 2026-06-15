@@ -95,10 +95,12 @@ def get_password_hash(password: str) -> str:
     pw = password.encode("utf-8")[:72]
     return bcrypt.hashpw(pw, bcrypt.gensalt()).decode("utf-8")
 
+print(get_password_hash("9000000001"))
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # JWT helpers
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════
 def create_access_token(*, user_id: uuid.UUID, role: UserRole, name: str,
                         expires_delta: Optional[timedelta] = None) -> str:
     """Mint a signed access token. `role` is stored as its string value."""

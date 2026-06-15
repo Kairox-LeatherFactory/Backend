@@ -24,9 +24,9 @@ Cross-cutting tables that EVERY stage writes — `document`, `notification`, `au
 core imports nothing from app.modules). Cross-module data flows through the owning
 module's SERVICE returning plain DTOs, never another module's repository/models.
 
-IMPORT DIRECTION (acyclic except a deliberate lazy bom↔inventory service pair):
-    procurement → core, clients.service              (never imports bom/inventory/supplier_po)
-    bom         → core, clients.service, inventory.service
+IMPORT DIRECTION (acyclic except the deliberate lazy bom↔inventory service pair):
+    procurement → core, clients.service, bom.service (Stage-1 → Stage-2 generate trigger, lazy)
+    bom         → core, clients.service, inventory.service   (never imports procurement)
     inventory   → core, bom.service, clients.service
     supplier_po → core, bom.service, inventory.service, clients.service, users.service
 """

@@ -110,8 +110,8 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60 * 24      # 24 hours
 
     # Login rate-limit (defends the login endpoint from brute force).
-    login_max_attempts: int = 5
-    login_window_seconds: int = 600                  # 10 minutes
+    login_max_attempts: int = 10
+    login_window_seconds: int = 60                 # 10 minutes
 
     # ── Stage 1: upload, storage & virus scan (BOM Procurement Workflow) ─────
     # Pluggable storage backend so the repo keeps NO hard Supabase dependency and

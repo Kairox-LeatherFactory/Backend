@@ -74,10 +74,14 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
+
+import yaml
 
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -100,6 +104,8 @@ from app.modules.bom.enums import (
 from app.modules.bom.extraction import (
     AttributeExtractor,
     PomDict,
+    build_default_extractor,
+    extract_order,
     extract_spec,
     select_adapter,
 )
@@ -110,6 +116,7 @@ from app.modules.bom.models import (
     BomItem,
     PatternReference,
     PomMeasurement,
+    SpecSheet,
 )
 from app.modules.bom.repository import BomRepository
 from app.core.storage import get_storage
@@ -124,6 +131,22 @@ MATERIAL_DCM_CATEGORIES = {
 }
 
 logger = logging.getLogger(__name__)
+
+# Default non-material cost lines (manufacturing/packaging/FOB) seeded onto every
+# generated DRAFT BOM so it is never born empty — the "configured" rows of the §5b
+# provenance table. Keyed by garment_type.code (UPPER), with a `_default` fallback.
+_COST_CATALOG_YAML = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
+    "config", "cost_catalog.yaml",
+)
+
+
+@lru_cache(maxsize=1)
+def load_cost_catalog(path: str | None = None) -> dict:
+    """[lru_cached] read+cache config/cost_catalog.yaml — same posture as
+    extraction.load_adapters. Returns {garment_code|"_default": [line dict, ...]}."""
+    with open(path or _COST_CATALOG_YAML, encoding="utf-8") as fh:
+        return dict(yaml.safe_load(fh) or {})
 
 
 @dataclass
@@ -145,11 +168,12 @@ class LineSeed:
 
 @dataclass
 class StyleIdentity:
-    """The order/style identity passed in by the caller (resolved upstream via
-    clients.service) — procurement does not query the clients module for it."""
-    client_id: uuid.UUID
-    client_order_id: uuid.UUID
-    style_id: uuid.UUID
+    """The order/style identity for a BOM. For a submission-anchored BOM it is built
+    from the PARSED ORDER SHEET (client_order_id/style_id are None — no breakdown exists
+    yet); for a persisted/legacy BOM it is resolved off the clients module."""
+    client_id: uuid.UUID | None
+    client_order_id: uuid.UUID | None = None
+    style_id: uuid.UUID | None = None
     customer_ref: str | None = None
     internal_ref: str | None = None
     name: str | None = None
@@ -180,23 +204,163 @@ class BomService:
                 unit_price=i.unit_price) for i in bom.items],
         )
 
+    async def get_bom_view_for_submission(self, submission_id) -> dict | None:
+        """The _bom_view of the BOM anchored on a submission, or None. Lets procurement's
+        Stage-1→2 trigger replay an already-generated BOM idempotently (it owns the
+        submission lifecycle but must not touch the bom repository — CLAUDE.md §3.2)."""
+        bom = await self.repo.get_bom_by_submission(submission_id)
+        return self._bom_view(bom) if bom is not None else None
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Stage-2 BOM build — the bom-owned half of the Stage-1 → Stage-2 trigger.
+    # The procurement service orchestrates the submission lifecycle and calls this.
+    # ══════════════════════════════════════════════════════════════════════
+    async def generate_for_order(
+        self, user, *, spec_bytes: bytes, filename: str,
+        spec_type: str | None, client_match_code: str | None,
+        client_id: uuid.UUID | None, submission_id: uuid.UUID | None = None,
+        order_bytes: bytes | None = None, order_filename: str | None = None,
+        order_mime: str | None = None, order_match_code: str | None = None,
+        source_document_id: uuid.UUID | None = None,
+    ) -> dict:
+        """Build a DRAFT BOM from the accepted ORDER + SPEC sheets ALONE — no SKU breakdown
+        exists yet. Parses the order sheet for the order qty + per-size + refs, creates the
+        SpecSheet the engine extracts into, and runs generate_bom anchored on the submission.
+        The Client→Order→Style→SKU tree is created later, at MD approval (materialize_breakdown).
+        Knows NOTHING about submissions beyond the opaque id — procurement loads the bytes and
+        marks the submission consumed around this call (CLAUDE.md §3.2: bom owns spec_sheet/bom)."""
+        # Parse the order sheet off the event loop (openpyxl/pypdf are blocking). Best-effort:
+        # anything unparsed is a warning carried in `parsed_order["warnings"]`, never a reject.
+        parsed_order: dict = {}
+        if order_bytes:
+            parsed_order = await run_in_threadpool(
+                extract_order, order_bytes, order_filename or "order",
+                order_mime, order_match_code or client_match_code,
+            )
+        identity = self._identity_from_order(parsed_order, client_id)
+
+        # The SpecSheet row the engine extracts into. style_id is None (no style yet);
+        # spec_type drives adapter selection; attributes start empty and are filled by
+        # extraction inside generate_bom.
+        spec_sheet = SpecSheet(
+            client_id=client_id, style_id=None,
+            source_document_id=source_document_id,
+            spec_type=spec_type or "unknown", attributes={},
+        )
+        await self.repo.add(spec_sheet)
+
+        # line_seeds=None → generate_bom builds them AFTER extraction from the spec's REAL
+        # attributes (the empty-attributes ordering fix; previously they were built off the
+        # empty dict the SpecSheet was born with, so only cost lines ever seeded).
+        # build_default_extractor() wires the Gemini→Groq attribute extractor for narrative
+        # tech packs (None when no key is set → deterministic prose parse; measurement grids
+        # never call it). The order sheet's own Gemini-vision path lives in extract_order.
+        return await self.generate_bom(
+            user, spec_sheet=spec_sheet, spec_bytes=spec_bytes,
+            filename=filename or "spec", identity=identity,
+            client_match_code=client_match_code, line_seeds=None,
+            submission_id=submission_id, order_identity=parsed_order,
+            extractor=build_default_extractor(),
+        )
+
+    def _identity_from_order(self, parsed_order: dict,
+                             client_id: uuid.UUID | None) -> StyleIdentity:
+        """Build StyleIdentity from the parsed order sheet (no SKUs exist yet). order_qty /
+        per_size come straight off the order sheet; client_id is passed in by procurement
+        from the submission. client_order_id / style_id stay None until the breakdown is
+        materialised at approval (materialize_breakdown)."""
+        po = parsed_order or {}
+        return StyleIdentity(
+            client_id=client_id, client_order_id=None, style_id=None,
+            customer_ref=po.get("customer_ref"), internal_ref=po.get("internal_ref"),
+            name=po.get("style_name"), order_qty=int(po.get("order_qty") or 0),
+            per_size_qty=po.get("per_size_qty") or {},
+            order_number=po.get("order_number"),
+        )
+
+    @staticmethod
+    def _order_identity_snapshot(identity: StyleIdentity,
+                                 parsed_order: dict | None) -> dict:
+        """The persisted order snapshot read back by _resolve_identity + breakdown
+        materialisation while style_id is NULL. Merges the parsed order sheet (colour
+        lines, season, price) with the resolved identity fields; `warnings` are dropped
+        (they surface in the generate response, not the stored record)."""
+        oi = dict(parsed_order or {})
+        oi.pop("warnings", None)
+        oi["client_id"] = str(identity.client_id) if identity.client_id else None
+        oi["order_qty"] = identity.order_qty
+        oi["per_size_qty"] = identity.per_size_qty
+        oi["order_number"] = identity.order_number
+        oi["style_name"] = identity.name
+        oi["customer_ref"] = identity.customer_ref
+        oi["internal_ref"] = identity.internal_ref
+        return oi
+
+    @staticmethod
+    def _build_line_seeds(spec_attributes: dict | None,
+                          garment_code: str | None) -> list[LineSeed]:
+        """Minimal seed builder (§5b): material/accessory lines from the spec's extracted
+        attributes (when present) + the configured cost lines from cost_catalog.yaml.
+        Unit prices on material lines are left blank for the cutting manager to fill."""
+        attrs = spec_attributes or {}
+        seeds: list[LineSeed] = []
+
+        leather = attrs.get("leather_quality")
+        if leather:
+            seeds.append(LineSeed(
+                category=BomItemCategory.MAIN_MATERIAL.value, name=str(leather),
+                material_color=attrs.get("primary_color"), uom="dm²",
+                source_ref="spec.attributes.leather_quality"))
+        lining = attrs.get("lining")
+        if lining and "unlined" not in str(lining).lower():
+            seeds.append(LineSeed(
+                category=BomItemCategory.LINING.value, name=str(lining), uom="dm²",
+                source_ref="spec.attributes.lining"))
+        for acc in attrs.get("accessories") or []:
+            if not isinstance(acc, dict):
+                continue
+            name = acc.get("spec") or acc.get("type") or "accessory"
+            seeds.append(LineSeed(
+                category=BomItemCategory.ACCESSORY.value, name=str(name),
+                material_color=acc.get("finish"), uom="pc", qty_per_garment=1,
+                supplied_by=acc.get("supplied_by"),
+                source_ref="spec.attributes.accessories"))
+
+        catalog = load_cost_catalog()
+        cost_lines = catalog.get((garment_code or "").upper()) or catalog.get("_default") or []
+        for ln in cost_lines:
+            # A malformed cost_catalog.yaml row (missing category/name) is a config error,
+            # not a reason to 500 the whole generation — skip it with a warning.
+            category, name = ln.get("category"), ln.get("name")
+            if not category or not name:
+                logger.warning("skipping malformed cost_catalog line (need category+name): %r", ln)
+                continue
+            seeds.append(LineSeed(
+                category=category, name=name, uom=ln.get("uom"),
+                unit_price=ln.get("unit_price"),
+                qty_per_garment=ln.get("qty_per_garment", 1)))
+        return seeds
+
     # ══════════════════════════════════════════════════════════════════════
     # Generation (§1, §2, §5, §6)
     # ══════════════════════════════════════════════════════════════════════
     async def generate_bom(
         self, user, *, spec_sheet, spec_bytes: bytes, filename: str,
         identity: StyleIdentity, client_match_code: str | None,
-        line_seeds: list[LineSeed], currency: str | None = None,
+        line_seeds: list[LineSeed] | None = None, currency: str | None = None,
         extractor: AttributeExtractor | None = None,
         adapters: list | tuple | None = None, checks_cfg: tuple | None = None,
+        submission_id: uuid.UUID | None = None, order_identity: dict | None = None,
     ) -> dict:
         # `adapters`/`checks_cfg` default to None → the shipped YAML registries.
         # Passing them in lets a brand-new client be onboarded by CONFIG ALONE (the
         # prod path being a YAML entry the loaders read) — proves §11.6 end-to-end.
+        # `line_seeds=None` → build them below from the EXTRACTED attributes (the trigger
+        # path); a non-None list (legacy/direct callers) is honoured as-is.
         # ── 1. extract POMs / attributes / pattern ref (threadpool) ───────────
-        logger.info("generate_bom start: order=%s style=%s spec_type=%s client_match=%s seeds=%d",
+        logger.info("generate_bom start: order=%s style=%s spec_type=%s client_match=%s seeds=%s",
                     identity.client_order_id, identity.style_id, spec_sheet.spec_type,
-                    client_match_code, len(line_seeds))
+                    client_match_code, len(line_seeds) if line_seeds is not None else "auto")
         adapter = select_adapter(spec_sheet.spec_type, client_match_code, adapters)
         pom_dict = PomDict(await self.repo.pom_dictionary_rows())
         intermediate = await run_in_threadpool(
@@ -224,6 +388,20 @@ class BomService:
                                      **intermediate["attributes"]}
             await self.repo.save(spec_sheet)
 
+        # ── 3b. seed the BOM lines AFTER extraction (the ordering fix) ────────
+        # Material/lining/accessory seeds now come from the spec's REAL attributes (not
+        # the empty dict the SpecSheet was born with), and the cost lines are keyed by the
+        # detected garment type. An explicit line_seeds (legacy/direct callers) is kept.
+        if line_seeds is None:
+            line_seeds = self._build_line_seeds(
+                spec_sheet.attributes, garment_code=intermediate.get("garment_type_guess"))
+
+        # Resolve the garment type up-front: the pattern-template lookup below and the
+        # DCM memory back-fill both key templates on garment_type_id, so the lookup MUST
+        # use the same gt_id the back-fill writes (was hard-coded None → never matched).
+        gt = await self.repo.get_garment_type(intermediate.get("garment_type_guess"))
+        gt_id = gt.id if gt else None
+
         # ── 4. pattern reference (resolve to template memory if possible) ─────
         pattern_template_id = None
         pr_block = None
@@ -236,10 +414,11 @@ class BomService:
             ))
             # Try to resolve to a confirmed template keyed on the pattern code as a
             # signature (the base style's confirmed consumption — §2 Source 1 path).
+            # The base style was back-filled under THIS garment type, so key on gt_id.
             tmpl = await self.repo.find_consumption_template(
                 client_id=identity.client_id,
                 style_signature=pr["pattern_code"].strip().upper(),
-                garment_type_id=None, material_category=BomItemCategory.MAIN_MATERIAL.value,
+                garment_type_id=gt_id, material_category=BomItemCategory.MAIN_MATERIAL.value,
                 size=pr.get("base_size") or "",
             )
             if tmpl:
@@ -251,8 +430,6 @@ class BomService:
                         or ref.resolved_style_id is not None}
 
         # ── 5. resolution context ─────────────────────────────────────────────
-        gt = await self.repo.get_garment_type(intermediate.get("garment_type_guess"))
-        gt_id = gt.id if gt else None
         sig = style_signature(customer_ref=identity.customer_ref,
                               internal_ref=identity.internal_ref, name=identity.name)
         sizes = intermediate.get("sizes") or []
@@ -263,10 +440,12 @@ class BomService:
 
         # ── 6. build bom_items with DCM resolution + costing ──────────────────
         bom = Bom(
+            submission_id=submission_id, client_id=identity.client_id,
             client_order_id=identity.client_order_id, style_id=identity.style_id,
             status=BomStatus.DRAFT.value, currency=currency,
             order_qty=identity.order_qty, revision=1,
             garment_type_id=gt_id, dcm_base_size=base_size,
+            order_identity=self._order_identity_snapshot(identity, order_identity),
         )
 
         items: list[BomItem] = []
@@ -320,6 +499,9 @@ class BomService:
                     bom.id, len(bom.items), bom.garment_fob_price, len(flags),
                     len(intermediate["unresolved"]))
         return {"bom": self._bom_view(bom), "flags": flags,
+                "order": {"order_qty": identity.order_qty,
+                          "per_size_qty": identity.per_size_qty,
+                          "warnings": (order_identity or {}).get("warnings", [])},
                 "extraction": {"poms": len(pom_rows), "unresolved": intermediate["unresolved"],
                                "pattern_reference": pr_block}}
 
@@ -327,27 +509,30 @@ class BomService:
     async def _resolve_dcm(self, *, client_id, style_signature, garment_type_id,
                            garment_type_row, material_category, size, poms_for_size,
                            pattern_template_id):
+        # Normalise the lookup key: confirm_cutting back-fills templates under
+        # `base_size or ""`, so a missing base size is stored under "". Read under the
+        # SAME key (was guarded on `size is not None` + raw size → a no-base-size value
+        # written under "" was never reachable). Source 3 still uses the raw `size`.
+        size_key = size if size is not None else ""
         # Source 1 — the DCM memory (exact, confirmed)
-        if size is not None:
-            tmpl = await self.repo.find_consumption_template(
-                client_id=client_id, style_signature=style_signature,
-                garment_type_id=garment_type_id, material_category=material_category, size=size,
-            )
-            if tmpl:
-                return Decimal(str(tmpl.dcm_value)), DcmSource.TEMPLATE
+        tmpl = await self.repo.find_consumption_template(
+            client_id=client_id, style_signature=style_signature,
+            garment_type_id=garment_type_id, material_category=material_category, size=size_key,
+        )
+        if tmpl:
+            return Decimal(str(tmpl.dcm_value)), DcmSource.TEMPLATE
         # Source 1b — via a resolved pattern reference's template
         if pattern_template_id is not None:
             tmpl = await self.repo.get_consumption_template(pattern_template_id)
             if tmpl and tmpl.material_category == material_category:
                 return Decimal(str(tmpl.dcm_value)), DcmSource.TEMPLATE
         # Source 2 — similar style (rule-based nearest neighbour)
-        if size is not None:
-            sim = await self.repo.find_similar_template(
-                client_id=client_id, garment_type_id=garment_type_id,
-                material_category=material_category, size=size, exclude_signature=style_signature,
-            )
-            if sim:
-                return Decimal(str(sim.dcm_value)), DcmSource.SIMILAR_STYLE
+        sim = await self.repo.find_similar_template(
+            client_id=client_id, garment_type_id=garment_type_id,
+            material_category=material_category, size=size_key, exclude_signature=style_signature,
+        )
+        if sim:
+            return Decimal(str(sim.dcm_value)), DcmSource.SIMILAR_STYLE
         # Source 3 — AI heuristic from POM area (last resort, FLAGGED)
         est = estimate_area_dcm(
             getattr(garment_type_row, "area_formula", None) if garment_type_row else None,
@@ -407,12 +592,22 @@ class BomService:
                 raise HTTPException(422, detail={"error": "invalid_value",
                                                  "bom_item_id": e.get("bom_item_id"),
                                                  "field": field_, "value": e.get("value")})
+            # DCM, qty and price are physical magnitudes — never negative.
+            if value < 0:
+                raise HTTPException(422, detail={"error": "negative_value",
+                                                 "bom_item_id": e.get("bom_item_id"),
+                                                 "field": field_, "value": e.get("value")})
             if field_ in ("dcm", "qty_per_garment"):
                 item.qty_per_garment = value
-                # a human-entered DCM is Source 4 (manual, conf 1.00) — §2 source of truth
-                item.dcm_source = DcmSource.MANUAL.value
-                item.dcm_confidence = CONFIDENCE[DcmSource.MANUAL]
-                dcm_changed = True
+                # The DCM stamp + gate re-open apply ONLY to leather AREA material lines
+                # (the lines DCM resolution governs). A quantity edit on a non-material
+                # line (accessory/manufacturing/packaging/FOB) is just a qty change — it
+                # must not write a bogus dcm_source nor bounce a confirmed BOM out of review.
+                if item.category in MATERIAL_DCM_CATEGORIES:
+                    # a human-entered DCM is Source 4 (manual, conf 1.00) — §2 source of truth
+                    item.dcm_source = DcmSource.MANUAL.value
+                    item.dcm_confidence = CONFIDENCE[DcmSource.MANUAL]
+                    dcm_changed = True
             elif field_ == "unit_price":
                 item.unit_price = value
 
@@ -456,8 +651,16 @@ class BomService:
     async def confirm_cutting(self, user, bom_id: uuid.UUID,
                               identity: StyleIdentity | None = None) -> dict:
         bom = await self._load_bom(bom_id)
-        if bom.status == BomStatus.LOCKED.value:
-            raise HTTPException(409, detail={"error": "bom_locked"})
+        # State guard: cutting confirmation is only valid from DRAFT (the pre-confirm
+        # state) or, idempotently, from READY_FOR_REVIEW (a re-confirm). Confirming an
+        # APPROVED/LOCKED/EXPORTED BOM would silently un-approve it (reset to
+        # ready_for_review, re-fire MD notices, re-run the template back-fill); a
+        # REJECTED BOM must go through reopen_bom (which bumps the revision) first.
+        if bom.status not in (BomStatus.DRAFT.value, BomStatus.READY_FOR_REVIEW.value):
+            raise HTTPException(409, detail={
+                "error": "invalid_state_for_confirmation",
+                "current_status": bom.status,
+                "message": "Cutting confirmation is only allowed on a draft BOM."})
         now = datetime.now(timezone.utc)
         bom.cutting_confirmed_by = getattr(user, "id", None)
         bom.cutting_confirmed_at = now
@@ -517,6 +720,13 @@ class BomService:
                 "message": "The cutting manager must confirm the BOM before approval."})
         before = self._bom_snapshot(bom)
         now = datetime.now(timezone.utc)
+        # The client has signed off (the internal MD/cutting approval IS that sign-off):
+        # materialise the Client→Order→Style→SKU breakdown from the parsed order sheet
+        # and back-link it onto the BOM FIRST. A breakdown failure must abort the whole
+        # approval (downstream depends on the order/style), so it runs BEFORE the approval
+        # is stamped/committed — otherwise the approval commits and a later breakdown
+        # failure leaves a locked BOM with no order/style. Idempotent on re-approval.
+        await self._materialize_breakdown(user, bom)
         # Stage 3 (§1a): approval ALWAYS locks (the approved BOM is immutable —
         # `locked_at` stamped regardless). The `lock` flag only selects the surfaced
         # status label (LOCKED vs APPROVED); both reject edits via _EDITABLE_STATES.
@@ -528,15 +738,22 @@ class BomService:
         await self._audit(user, "BOM_APPROVE", bom.id, before=before,
                           after={"status": bom.status, "approved_at": now.isoformat(),
                                  "locked_at": now.isoformat(), "revision": bom.revision})
+        # Capture before the best-effort side-effects: a failure there triggers a session
+        # rollback which would expire `bom`, and re-reading an expired attribute under
+        # async raises MissingGreenlet.
+        bom_id_str, bom_status = str(bom.id), bom.status
         # Stage 5 (§8c): advance the production board BOM_APPROVED edge as a service→service
-        # side-effect. Best-effort — the board never blocks a valid approval.
+        # side-effect. Best-effort — the board never blocks a valid approval. On failure we
+        # roll back (so a half-written board edge doesn't poison the session for the next
+        # call) and log; the approval itself is already committed above and stands.
         try:
             from app.modules.supplier_po.production_tracking_service import (
                 ProductionTrackingService,
             )
             await ProductionTrackingService(self.db).on_bom_approved(bom.id)
         except Exception:
-            pass
+            logger.exception("production board advance failed for bom=%s", bom_id_str)
+            await self.repo.rollback()
         # Stage 4 (§8c): approval auto-fires the inventory check so the freshly approved
         # BOM lands on the procurement dashboard with its stock badge without a manual
         # step. Best-effort — a check failure must not roll back a valid approval; the
@@ -545,12 +762,67 @@ class BomService:
         try:
             from app.modules.inventory.service import InventoryService
 
-            res = await InventoryService(self.db).run_check(user, bom.id)
+            res = await InventoryService(self.db).run_check(user, uuid.UUID(bom_id_str))
             inventory_check_id = res.get("inventory_check_id")
         except Exception:
-            pass
-        return {"bom_id": str(bom.id), "status": bom.status,
+            logger.exception("inventory check failed for bom=%s", bom_id_str)
+            await self.repo.rollback()
+        return {"bom_id": bom_id_str, "status": bom_status,
                 "inventory_check_id": inventory_check_id}
+
+    async def _materialize_breakdown(self, user, bom: Bom) -> None:
+        """Create the Client→Order→Style→SKU tree from the BOM's parsed order snapshot and
+        back-link it onto the BOM (and the submission). Idempotent: a BOM that already has a
+        style is left alone (re-approval / export). The client tables are written via
+        clients.service — bom never writes them directly (CLAUDE.md §3.2 table ownership)."""
+        if bom.style_id is not None:
+            return                                       # already materialised
+        # Capture everything off the BOM BEFORE create_order_with_breakdown commits — that
+        # commit expires this instance, and reading an expired attribute afterwards would
+        # trigger a lazy load (MissingGreenlet under async). We only WRITE bom after.
+        oi = bom.order_identity or {}
+        cid = oi.get("client_id")
+        client_id = bom.client_id or (uuid.UUID(cid) if isinstance(cid, str) else cid)
+        bom_id = bom.id
+        submission_id = bom.submission_id
+        source_document_id = bom.source_document_id
+        if client_id is None:
+            logger.warning("breakdown skipped: bom=%s has no client_id (order sheet did not "
+                           "resolve a client) — order/style not created", bom_id)
+            return
+        from app.modules.clients.service import ClientService
+
+        order_id, style_id = await ClientService(self.db).create_order_with_breakdown(
+            client_id=client_id,
+            order={"order_number": oi.get("order_number") or f"BOM-{str(bom_id)[:8]}",
+                   "currency": oi.get("currency"),
+                   "source_document_id": source_document_id},
+            style={"name": oi.get("style_name") or "UNSPECIFIED",
+                   "customer_ref": oi.get("customer_ref"),
+                   "internal_ref": oi.get("internal_ref"),
+                   "season": oi.get("season"), "unit_price": oi.get("unit_price"),
+                   "currency": oi.get("currency")},
+            lines=oi.get("lines") or [],
+            per_size=oi.get("per_size_qty") or {},
+        )
+        bom.client_order_id = order_id
+        bom.style_id = style_id
+        await self.repo.save(bom)
+        # Denormalised convenience link on the submission (table owned by procurement, so
+        # written through its service — a lazy import avoids a module-load cycle, mirroring
+        # how procurement lazily imports bom.service). Best-effort: the order is always
+        # resolvable via bom.submission_id, so a link failure must not fail approval.
+        if submission_id is not None:
+            try:
+                from app.modules.procurement.service import ProcurementService
+
+                await ProcurementService(self.db).link_submission_to_order(
+                    submission_id, order_id)
+            except Exception:
+                logger.exception("failed to link submission %s → order %s",
+                                 submission_id, order_id)
+        await self._audit(user, "BOM_BREAKDOWN", bom_id,
+                          after={"client_order_id": str(order_id), "style_id": str(style_id)})
 
     async def reject_bom(self, user, bom_id: uuid.UUID, *, reason: str) -> dict:
         """Stage-3 MD reject (§1b). Only from `ready_for_review`; a reason is
@@ -686,9 +958,22 @@ class BomService:
         return bom
 
     async def _resolve_identity(self, bom: Bom) -> "StyleIdentity | None":
-        """Resolve order/style identity for the DCM back-fill via the clients service
-        (a permitted service→service call) when the caller didn't pass it in. Reads
-        the style's stable refs + the order's client + the per-size quantities."""
+        """Resolve order/style identity for the DCM back-fill / export when the caller
+        didn't pass it in. A submission-anchored BOM (style_id still NULL) reads it off the
+        persisted order snapshot; a materialised/legacy BOM reads it via clients.service
+        (a permitted service→service call)."""
+        if bom.style_id is None:
+            oi = bom.order_identity or {}
+            cid = oi.get("client_id")
+            client_id = bom.client_id or (uuid.UUID(cid) if isinstance(cid, str) else cid)
+            return StyleIdentity(
+                client_id=client_id, client_order_id=None, style_id=None,
+                customer_ref=oi.get("customer_ref"), internal_ref=oi.get("internal_ref"),
+                name=oi.get("style_name"),
+                order_qty=bom.order_qty or int(oi.get("order_qty") or 0),
+                per_size_qty=oi.get("per_size_qty") or {},
+                order_number=oi.get("order_number"),
+            )
         from app.modules.clients.service import ClientService
 
         cs = ClientService(self.db)
