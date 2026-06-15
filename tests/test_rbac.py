@@ -16,8 +16,8 @@ from app.modules.users.models import User
 
 async def _seed_min(db):
     client = cm.Client(name="C"); db.add(client); await db.flush()
-    po = cm.PurchaseOrder(client_id=client.id, po_number="PO1"); db.add(po); await db.flush()
-    style = cm.Style(purchase_order_id=po.id, name="CARNABY"); db.add(style); await db.flush()
+    po = cm.ClientOrder(client_id=client.id, order_number="PO1"); db.add(po); await db.flush()
+    style = cm.Style(client_order_id=po.id, name="CARNABY"); db.add(style); await db.flush()
     sku = cm.SKU(style_id=style.id, color_code="57", size="M", qty_ordered=10)
     db.add(sku); await db.flush()
     cut = pm.Operation(code="CUTTING", label="Cutting", sequence=1)

@@ -1,0 +1,115 @@
+# =============================================================================
+# config/client_templates.yaml — per-client validation registry (Stage 1 §4)
+# =============================================================================
+# Seeded idempotently into the `client_template` table by scripts/seed.py. The
+# Stage-1 validator reads these rows at REQUEST time, so onboarding a new client
+# is ONE entry here + a re-seed — no source change, no redeploy (acceptance §9.3).
+#
+# Per entry (client_code × doc_kind):
+#   anchors       weighted keyword/phrase groups; `kind: size_tokens` matches a
+#                 token at word boundaries (so "S" ≠ "DELIVERS").
+#   fingerprints  regexes that STRONGLY identify this client's docs.
+#   grid_signals  spec-sheet shape hint (measurement_grid vs narrative_techpack).
+#   thresholds    accept_high / reject_low bands for the §3 hybrid decision.
+#   expected_layout  scanned_pdf → validator escalates straight to the LLM.
+# =============================================================================
+
+# ── Beau Geste / CRIMIE (Japan) — scanned PDF order + JP measurement grid ────
+- client_code: beau_geste
+  display_name: "Beau Geste / CRIMIE"
+  doc_kind: order_sheet
+  language: ja
+  size_system: letter
+  currency: USD
+  expected_layout: scanned_pdf        # handwritten/scanned → escalate to LLM
+  accepted_mime: [application/pdf]
+  anchors:
+    - { any: ["株式会社ボージェスト", "BEAU GESTE", "CRIMIE"], weight: 3 }
+    - { any: ["No.", "ORDER", "発注", "注文"], weight: 1 }
+    - { any: ["S", "M", "L", "XL", "XXL"], weight: 1, kind: size_tokens }
+  fingerprints:
+    - 'CR\d-?0?2F5[ -]?PL0?2'          # customer ref CR1-02F5-PL02
+    - 'A\d{5}-\d{2}'                    # internal ref A32073-44
+    - 'No\.?\s*\d{3,5}'                 # order number 1579
+  thresholds: { accept_high: 0.80, reject_low: 0.30 }
+
+- client_code: beau_geste
+  display_name: "Beau Geste / CRIMIE"
+  doc_kind: spec_sheet
+  language: ja
+  size_system: letter
+  currency: USD
+  expected_layout: spreadsheet
+  spec_type_hint: measurement_grid
+  accepted_mime: [application/vnd.openxmlformats-officedocument.spreadsheetml.sheet]
+  anchors:
+    - { any: ["CRIMIE", "BEAU GESTE", "REALIZEWORKS"], weight: 3 }
+    - { any: ["縫製仕様書", "規格寸法", "仕様", "寸法", "tolerance", "measurement"], weight: 1 }
+    - { any: ["S", "M", "L", "XL", "XXL"], weight: 1, kind: size_tokens }
+  fingerprints:
+    - 'CR\d-?0?2F5[ -]?PL0?2'
+  grid_signals: { spec_type: measurement_grid, min_cols: 8, has_tolerance_column: true }
+  thresholds: { accept_high: 0.75, reject_low: 0.30 }
+
+# ── The Jackie / John Peter (Italy) — many-style PDF + narrative tech pack ───
+- client_code: the_jackie
+  display_name: "The Jackie / John Peter"
+  doc_kind: order_sheet
+  language: it
+  size_system: eu
+  currency: EUR
+  expected_layout: digital_pdf
+  accepted_mime: [application/pdf, text/csv,
+                  application/vnd.openxmlformats-officedocument.spreadsheetml.sheet]
+  anchors:
+    - { any: ["THE JACKIE", "JOHN PETER", "LINEA", "Proposta"], weight: 3 }
+    - { any: ["ORDER", "ORDINE", "QTY", "QUANTITA", "DELIVERY"], weight: 1 }
+    - { any: ["38","40","42","44","46","48","50","52","54","56","58","60","62"],
+        weight: 1, kind: size_tokens }
+  fingerprints:
+    - 'Proposta\s*N'
+    - 'LINEA\s*\d+'
+  thresholds: { accept_high: 0.75, reject_low: 0.30 }
+
+- client_code: the_jackie
+  display_name: "The Jackie / John Peter"
+  doc_kind: spec_sheet
+  language: it
+  size_system: eu
+  currency: EUR
+  expected_layout: spreadsheet
+  spec_type_hint: narrative_techpack
+  accepted_mime: [application/vnd.openxmlformats-officedocument.spreadsheetml.sheet]
+  anchors:
+    - { any: ["THE JACKIE", "JOHN PETER", "JACKIE"], weight: 3 }
+    - { any: ["TECH SHEET", "SEASON", "CUSTOMER", "LABEL", "STYLE NAME"], weight: 1 }
+    - { any: ["LEATHER", "SUEDE", "STITCH", "POCKET", "LINING", "PATTERN"], weight: 1 }
+  fingerprints:
+    - 'THE\s+JACKIE'
+  grid_signals: { spec_type: narrative_techpack, free_text_ratio: 0.6 }
+  thresholds: { accept_high: 0.70, reject_low: 0.30 }
+
+# ── Generic fallback profiles — universal kind signals, STRICTER thresholds ──
+- client_code: _generic
+  display_name: "Unknown client (generic)"
+  doc_kind: order_sheet
+  expected_layout: digital_pdf
+  anchors:
+    - { any: ["ORDER", "ORDINE", "ORDER SHEET", "PURCHASE ORDER"], weight: 2 }
+    - { any: ["QTY", "QUANTITY", "PCS", "PIECES", "UNITS"], weight: 2 }
+    - { any: ["SIZE", "SIZES", "TAGLIA"], weight: 1 }
+    - { any: ["DELIVERY", "DELIVERY DATE", "SHIP", "DEADLINE"], weight: 1 }
+    - { any: ["STYLE", "SKU", "ARTICLE", "ART.", "REF"], weight: 1 }
+  thresholds: { accept_high: 0.85, reject_low: 0.40 }
+
+- client_code: _generic
+  display_name: "Unknown client (generic)"
+  doc_kind: spec_sheet
+  expected_layout: spreadsheet
+  anchors:
+    - { any: ["SPEC", "SPECIFICATION", "TECH SHEET", "TECH PACK", "仕様書"], weight: 2 }
+    - { any: ["MEASUREMENT", "TOLERANCE", "寸法", "規格", "GRADING"], weight: 2 }
+    - { any: ["LEATHER", "SUEDE", "STITCH", "POCKET", "LINING", "PATTERN", "MATERIAL"], weight: 1 }
+    - { any: ["STYLE NAME", "SEASON", "CUSTOMER", "LABEL", "COLOUR", "COLOR"], weight: 1 }
+  grid_signals: { spec_type: measurement_grid }
+  thresholds: { accept_high: 0.85, reject_low: 0.40 }

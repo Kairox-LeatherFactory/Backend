@@ -1,13 +1,22 @@
 # ──────────────────────────────────────────────────────────────
 # Leather Factory backend — docker-compose.yml
 # ──────────────────────────────────────────────────────────────
-#   docker compose up --build   → Postgres + Backend API (migrate + seed + uvicorn)
+# ZERO-SETUP DEV ONBOARDING. A fresh clone needs nothing but Docker:
+#
+#   docker compose up --build   → Postgres + Backend API
+#                                 (entrypoint: wait-for-db → migrate → seed → uvicorn)
 #   docker compose down         → stop, KEEP data (volume persists)
 #   docker compose down -v      → stop AND wipe the DB (next `up` re-migrates + reseeds)
 #
-# The API talks to the bundled `db` service, NOT the Supabase URL in .env —
-# the DATABASE_URL / ASYNC_DATABASE_URL below override .env on purpose (compose
-# `environment:` wins over `env_file:`).
+# No `.env` is required — every setting has a safe dev default baked in below and in
+# app/core/config.py. If a `.env` exists (e.g. with real GEMINI/GROQ keys) it is loaded
+# and overrides these; if it's absent, the stack still boots. The DB URLs below always
+# point at the bundled `db` service (compose `environment:` wins over `env_file:`).
+#
+# OPTIONAL virus scanning (Stage-1 upload gate) is OFF by default so the first `up` is
+# fast and never fails-closed. To turn it on:
+#   docker compose --profile scan up        # starts the clamav sidecar
+#   …and set VIRUS_SCAN_ENABLED=true (in .env or your shell env).
 # ──────────────────────────────────────────────────────────────
 
 services:
@@ -36,6 +45,28 @@ services:
       start_period: 10s
 
   # ────────────────────────────────────────────────────────────
+  # ClamAV — virus scanner sidecar (Stage-1 upload gate, §7) — OPT-IN.
+  # Behind the `scan` profile so the default `docker compose up` does NOT start it
+  # (its first boot downloads virus definitions, ~1-2 min). Enable with
+  # `docker compose --profile scan up` + VIRUS_SCAN_ENABLED=true. When ON in
+  # staging/prod a malware hit is rejected (422) and the API fails CLOSED (503) if
+  # clamd is unreachable — an unscanned file is never stored.
+  # ────────────────────────────────────────────────────────────
+  clamav:
+    image: clamav/clamav:latest
+    container_name: factory_clamav
+    profiles: ["scan"]
+    restart: unless-stopped
+    ports:
+      - "${CLAMD_HOST_PORT:-3310}:3310"
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --version || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s   # first boot downloads virus definitions (freshclam)
+
+  # ────────────────────────────────────────────────────────────
   # Backend API — FastAPI / uvicorn
   # entrypoint.sh runs: wait-for-db → migrate → seed → uvicorn
   # ────────────────────────────────────────────────────────────
@@ -46,33 +77,50 @@ services:
     container_name: factory_api
     restart: unless-stopped
     command: ["api"]
-    # Pull non-DB config (SECRET_KEY, CHAT_MODEL, GROQ_API_KEY, rate-limit knobs)
-    # from .env, then override the DB URLs to point at the compose `db` service.
+    # Load .env if present (real API keys, custom knobs), but DON'T require it — a
+    # fresh clone boots on the defaults below + app/core/config.py.
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       # Sync URL (Alembic + seed) and async URL (live API), both at the `db` host.
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-factory}:${POSTGRES_PASSWORD:-factory}@db:5432/${POSTGRES_DB:-factory}
       ASYNC_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-factory}:${POSTGRES_PASSWORD:-factory}@db:5432/${POSTGRES_DB:-factory}
-      DEBUG: "true"
-      RUN_MIGRATIONS: "true"
-      RUN_SEED: "true"
-      UVICORN_RELOAD: "true"   # hot-reload in dev; remove for a production-like run
+      # Alembic owns the schema (a single verified baseline). DEBUG stays false so the
+      # app never builds tables behind Alembic's back (CLAUDE.md §7).
+      DEBUG: "false"
+      RUN_MIGRATIONS: "true"      # alembic upgrade head before serving
+      RUN_SEED: "true"            # idempotent seed from the bundled spreadsheets
+      UVICORN_RELOAD: "true"      # hot-reload in dev; remove for a production-like run
+      # Auth: a dev-only signing key so a fresh clone has working JWTs out of the box.
+      # OVERRIDE with a long random SECRET_KEY in .env / real deployments.
+      SECRET_KEY: "${SECRET_KEY:-dev-only-insecure-change-me-in-prod}"
+      # Stage-1 upload gate. OFF by default (uploads record scan_status=skipped) so the
+      # stack boots without the clamav sidecar. Turn on with `--profile scan` + true.
+      VIRUS_SCAN_ENABLED: "${VIRUS_SCAN_ENABLED:-false}"
+      CLAMD_HOST: clamav
+      CLAMD_PORT: "3310"
+      # Storage stays on the local driver inside the container by default; set
+      # STORAGE_BACKEND=supabase + the SUPABASE_* vars in prod (see .env.example).
+      STORAGE_BACKEND: "${STORAGE_BACKEND:-local}"
+      LOCAL_STORAGE_DIR: "/app/var/procurement-documents"
+      MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-25}"
     ports:
       - "${BACKEND_HOST_PORT:-8000}:8000"
     depends_on:
       db:
         condition: service_healthy
     volumes:
-      # Bind-mount the source for hot-reload during dev.
-      # COMMENT THIS OUT to test the baked image as it ships.
+      # Bind-mount the source for hot-reload during dev (*.sh are pinned to LF in
+      # .gitattributes so the bind-mounted entrypoint runs on Windows too).
+      # COMMENT THIS OUT to test the baked image exactly as it ships.
       - ./:/app
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 60s   # first boot runs migrations + seed
+      start_period: 90s   # first boot runs migrations + seed (≈ 870 inventory rows)
 
 volumes:
   pgdata:

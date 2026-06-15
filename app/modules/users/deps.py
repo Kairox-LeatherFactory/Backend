@@ -61,10 +61,18 @@ async def get_current_user(
     return user
 
 
+# Roles that bypass every per-endpoint role gate (the superusers).
+# Spec target: MANAGING_DIRECTOR is the superuser and DIRECT_MANAGER is
+# operational-only. During the MD rollout we keep DIRECT_MANAGER bypassing too so
+# the existing seeded god-account (phone 9000000001) does not lose access — drop
+# DIRECT_MANAGER from this set once an MD owner is confirmed in every environment.
+SUPERUSER_ROLES = (UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER)
+
+
 def require_roles(*allowed: UserRole):
-    """Dependency factory: restrict an endpoint to roles. DIRECT_MANAGER passes."""
+    """Dependency factory: restrict an endpoint to roles. Superusers always pass."""
     async def checker(user: User = Depends(get_current_user)) -> User:
-        if user.role == UserRole.DIRECT_MANAGER:
+        if user.role in SUPERUSER_ROLES:
             return user
         if user.role not in allowed:
             raise HTTPException(

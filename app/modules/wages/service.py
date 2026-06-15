@@ -3,7 +3,9 @@
 modules/wages/service.py — Wage-calc engine (async)
 ================================================================================
 Forks on wage_type:
-  piece_rate : sum(qty * effective_rate(style, op, period_end)) from production
+  piece_rate : sum(qty * effective_rate(style, op, work_date)) from production —
+               each day's pieces are priced at the rate effective on THAT day, so
+               a mid-period rate change splits correctly across earlier/later work.
   monthly    : a single line of monthly_salary, independent of production
 Results are FROZEN into wage_line rows so a closed run never recomputes.
 ================================================================================
@@ -15,6 +17,7 @@ from datetime import date
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.enums import WageType
 from app.modules.employees.service import EmployeeService
 from app.modules.production.service import ProductionService
 from app.modules.wages.models import WageLine, WageRun
@@ -31,18 +34,26 @@ class WageService:
     async def set_rate(self, style_id, operation_id, rate, effective_from):
         return await self.repo.upsert_rate(style_id, operation_id, rate, effective_from)
 
-    async def compute_run(self, period_start: date, period_end: date) -> WageRun:
+    async def compute_run(self, period_start: date, period_end: date) -> WageRun | None:
         """Compute and FREEZE payroll for a window. Returns a closed run."""
         run = await self.repo.create_run(period_start, period_end)
-
+        
         lines: list[WageLine] = []
         per_emp_amount: dict[uuid.UUID, float] = defaultdict(float)
         per_emp_pieces: dict[uuid.UUID, int] = defaultdict(int)
 
-        # piece-rate population
+        # piece-rate population. Rows are grouped per (emp, style, op, work_date) so
+        # each day is priced at the rate effective on THAT day — a rate change inside
+        # the period prices earlier work at the old rate and later work at the new one.
+        # rate_cache collapses the per-row effective_rate lookups: most employees
+        # share the same (style, op, work_date), so we hit the DB only once per key.
+        rate_cache: dict[tuple[uuid.UUID, uuid.UUID, date], float | None] = {}
         rows = await self.production.piece_counts(period_start, period_end)
-        for emp_id, style_id, op_id, qty in rows:
-            rate = await self.repo.effective_rate(style_id, op_id, period_end)
+        for emp_id, style_id, op_id, work_date, qty in rows:
+            key = (style_id, op_id, work_date)
+            if key not in rate_cache:
+                rate_cache[key] = await self.repo.effective_rate(style_id, op_id, work_date)
+            rate = rate_cache[key]
             if rate is None:
                 continue          # no rate configured — skip
             per_emp_amount[emp_id] += float(qty) * rate
@@ -50,48 +61,21 @@ class WageService:
 
         for emp_id, amount in per_emp_amount.items():
             lines.append(WageLine(
-                wage_run_id=run.id, employee_id=emp_id, wage_type="piece_rate",
+                wage_run_id=run.id, employee_id=emp_id, wage_type=WageType.PIECE_RATE,
                 pieces=per_emp_pieces[emp_id], amount=round(amount, 2),
             ))
 
         # monthly population (independent of production)
         for emp in await self.employees.monthly_employees():
             lines.append(WageLine(
-                wage_run_id=run.id, employee_id=emp.id, wage_type="monthly",
+                wage_run_id=run.id, employee_id=emp.id, wage_type=WageType.MONTHLY,
                 pieces=0, amount=float(emp.monthly_salary or 0),
             ))
-
-        # daily-wage population (driven by ATTENDANCE, not production).
-        # Pay = number of days the worker actually checked in within the
-        # period * the employee's daily_rate. If attendance isn't installed
-        # the import will fail silently and we just skip the daily-wage block.
-        try:
-            from app.core.enums import WageType
-            from app.modules.attendance.service import AttendanceService
-            att = AttendanceService(self.db)
-            from sqlalchemy import select
-            from app.modules.employees.models import Employee
-            dw = (await self.db.execute(
-                select(Employee).where(Employee.wage_type == WageType.DAILY_WAGE,
-                                       Employee.is_active.is_(True)))).scalars().all()
-            for emp in dw:
-                if not emp.daily_rate:
-                    continue
-                days = await att.days_present(emp.id, period_start, period_end)
-                if days == 0:
-                    continue
-                lines.append(WageLine(
-                    wage_run_id=run.id, employee_id=emp.id, wage_type="daily_wage",
-                    pieces=days,          # repurpose `pieces` to mean days-present
-                    amount=round(float(emp.daily_rate) * days, 2),
-                ))
-        except ImportError:
-            pass        # attendance module not installed; skip silently
 
         await self.repo.add_lines(lines)
         return await self.repo.close_run(run)
 
-    async def get_run(self, run_id: uuid.UUID) -> WageRun:
+    async def get_run(self, run_id: uuid.UUID) -> WageRun | None:
         run = await self.repo.get_run(run_id)
         if not run:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Wage run not found")

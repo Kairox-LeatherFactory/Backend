@@ -23,11 +23,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 #   - curl            : used by the HEALTHCHECK below
 #   - dos2unix        : entrypoint.sh is edited on Windows; normalise CRLF so
 #                       the shebang resolves (otherwise: "no such file or directory")
+#   - tesseract-ocr   : the OCR binary pytesseract shells out to, for the scanned-PDF
+#                       rung of identity validation (sniffing._ocr_pdf). Absent → OCR
+#                       silently no-ops and the upload escalates to the Gemini vision rung.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc \
         libpq-dev \
         curl \
         dos2unix \
+        tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -17,7 +17,8 @@ PURPOSE
       3. Employees, with MOCKED phone/email (real files have no contact data).
       4. Piece-rate Rates from the production cards.
       5. USER LOGINS for everyone:
-           - 1 direct manager, 1 cutting manager, 1 stitching manager, 1 viewer
+           - 1 managing director (superuser), 1 direct manager, 1 cutting manager,
+             1 stitching manager, 1 viewer, 1 HR
            - 1 EMPLOYEE login per employee   (linked via employee_id)
            - 1 CLIENT login per client       (linked via client_id)
          Password defaults to the user's phone (bcrypt-hashed) and
@@ -67,16 +68,24 @@ from app.core.security import get_password_hash
 # Import models (registers tables on Base.metadata).
 from app.modules.users.models import User
 from app.modules.employees.models import Employee
-from app.modules.clients.models import Client, PurchaseOrder, Style
+from app.modules.clients.models import Client, Style
 from app.modules.production.models import Operation, OperationAccess
 from app.modules.wages.models import Rate
 from app.modules.attendance.models import AttendanceLog, ShiftConfig  # noqa: F401
+from app.core import models as _core_models  # noqa: F401  (cross-cutting tables)
+from app.modules.procurement import models as _procurement  # noqa: F401
+from app.modules.bom import models as _bom  # noqa: F401
+from app.modules.inventory import models as _inv  # noqa: F401
+from app.modules.supplier_po import models as _spo  # noqa: F401
+from app.modules.procurement.seed_templates import seed_client_templates
+from app.modules.bom.seed_stage2 import seed_stage2
+from app.modules.inventory.seed_inventory import seed_inventory
 
 # Import engine (sync) for the spreadsheets.
 from app.modules.imports.import_engine import build_preview
 from app.modules.imports.parse_orders import parse_order_sheet
 from app.modules.imports.load_to_db import (
-    load_preview, _get_or_create_client, _get_or_create_po,
+    load_preview, _get_or_create_client, _get_or_create_order,
     _get_or_create_style, _upsert_sku,
 )
 
@@ -147,9 +156,9 @@ def seed_orders(db: Session) -> None:
     wb = openpyxl.load_workbook(JOHNPETER_FILE, data_only=True)
     lines, _ = parse_order_sheet(wb.active)
     jp = _get_or_create_client(db, "John Peter", "Italy")
-    po = _get_or_create_po(db, jp, "JOHNPETER-PO")
+    order = _get_or_create_order(db, jp, "JOHNPETER-PO")
     for line in lines:
-        style = _get_or_create_style(db, po, line.style, line.article)
+        style = _get_or_create_style(db, order, line.style, line.article)
         for size, qty in line.sizes.items():
             _upsert_sku(db, style, line.color, size, qty)
     db.commit()
@@ -266,12 +275,16 @@ def _make_user(db: Session, *, name: str, phone: str, role: UserRole,
 def seed_users(db: Session, employees: list[Employee]) -> dict[str, int]:
     stats = {"staff": 0, "employees": 0, "clients": 0}
 
-    # Management / viewer accounts.
+    # Management / viewer accounts. MANAGING_DIRECTOR is the new superuser / BOM
+    # approver; DIRECT_MANAGER stays as operational lead (still bypasses role gates
+    # during the MD transition — see users/deps.py::SUPERUSER_ROLES).
     staff = [
+        ("Managing Director", "9000000000", UserRole.MANAGING_DIRECTOR),
         ("Direct Manager", "9000000001", UserRole.DIRECT_MANAGER),
         ("Cutting Manager", "9000000002", UserRole.CUTTING_MANAGER),
         ("Stitching Manager", "9000000003", UserRole.STITCHING_MANAGER),
         ("Office Viewer", "9000000004", UserRole.VIEWER),
+        ("HR / Accounts", "9000000005", UserRole.HR),
     ]
     for nm, ph, role in staff:
         _make_user(db, name=nm, phone=ph, role=role,
@@ -309,6 +322,9 @@ def main():
         employees = seed_employees(db)
         n_rates = seed_rates(db, ops)
         user_stats = seed_users(db, employees)
+        n_templates = seed_client_templates(db)   # Stage-1 validation registry (§4)
+        stage2_stats = seed_stage2(db)             # Stage-2 garment types + POM dict (§3)
+        stage4_stats = seed_inventory(db)          # Stage-4 aliases + uom + inventory master
 
         n_clients = db.scalar(select(__import__("sqlalchemy").func.count(Client.id)))
         n_styles = db.scalar(select(__import__("sqlalchemy").func.count(Style.id)))
@@ -319,9 +335,13 @@ def main():
         print(f"   styles     : {n_styles}")
         print(f"   employees  : {len(employees)}")
         print(f"   rates      : {n_rates}")
+        print(f"   templates  : {n_templates}")
+        print(f"   stage2     : {stage2_stats}")
+        print(f"   stage4     : {stage4_stats}")
         print(f"   users      : {user_stats}")
         print("─" * 60)
         print("   Login (Swagger Authorize / POST /api/v1/auth/login):")
+        print("     username=9000000000  password=9000000000  (managing director / superuser)")
         print("     username=9000000001  password=9000000001  (direct manager)")
         print("   All seeded users must change password on first login.")
     finally:

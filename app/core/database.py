@@ -36,7 +36,7 @@ DEPENDENCY USAGE (in routers)
 """
 from collections.abc import AsyncGenerator, Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import MetaData, create_engine
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -48,11 +48,34 @@ from app.core.config import settings
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Constraint naming convention.
+#
+# Without an explicit convention SQLAlchemy lets the database autogenerate
+# constraint names (e.g. Postgres "sku_style_id_fkey"). Those names are
+# unpredictable, so an Alembic downgrade or a later rename can't reliably refer
+# to them. Declaring a convention on the shared MetaData makes every constraint
+# name deterministic, which is what reversible migrations depend on.
+#
+# FORWARD-ONLY (deliberate): adding this does NOT rename constraints that already
+# exist on the live DB. It only governs constraints created from here on (new
+# tables, new columns). We intentionally do not churn the existing constraint
+# names — the benefit is marginal and the rewrite is risky against live data.
+# ──────────────────────────────────────────────────────────────────────────
+NAMING_CONVENTION = {
+    "ix": "ix_%(column_0_label)s",
+    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Declarative base — every module's models inherit from this.
 # ──────────────────────────────────────────────────────────────────────────
 class Base(DeclarativeBase):
     """Shared declarative base. One metadata object => Alembic sees every table."""
-    pass
+    metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
 # ──────────────────────────────────────────────────────────────────────────

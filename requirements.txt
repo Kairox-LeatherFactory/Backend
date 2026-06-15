@@ -43,6 +43,29 @@ bcrypt==5.0.0            # used DIRECTLY in core/security.py. passlib was remove
 # ── Excel import ───────────────────────────────────────────────────────────
 openpyxl==3.1.5
 
+# ── Stage-1 document upload & validation (BOM procurement) ──────────────────
+pypdf==6.13.2             # PDF text-layer probe + page count (identity validation)
+PyYAML==6.0.3            # client_template registry seed (config/client_templates.yaml)
+# Scanned-PDF OCR + page rasterisation (identity validation, §3a fallback). PyMuPDF
+# renders PDF pages to PNG with NO poppler/cairo native dep (Windows-dev friendly);
+# pytesseract wraps the Tesseract binary (must be installed on the host/image — the
+# code degrades gracefully to "needs manual review" when the binary is absent).
+PyMuPDF==1.27.2.3         # fitz — PDF page → PNG for OCR + Gemini vision (cp310-abi3 wheel: 3.10–3.13)
+pytesseract==0.3.13       # OCR over rasterised scanned pages (needs system tesseract)
+Pillow>=11.0.0            # image handling for OCR + base64 data-URI to Gemini vision (3.13 wheels)
+
+# ── Stage-3 BOM PDF export (approval) ───────────────────────────────────────
+reportlab==4.2.5         # pure-Python PDF render — the FALLBACK that runs everywhere
+                         # (Windows dev + SQLite tests), no native deps. WeasyPrint is
+                         # the documented PRIMARY (HTML/CSS, better BMO-1 layout) but
+                         # needs cairo/pango; it is imported lazily ONLY in the Docker/
+                         # Linux runtime where those libs exist. See export.py precedence.
+# weasyprint             # OPTIONAL primary — install in the Docker image (+ cairo/pango)
+# python-magic           # OPTIONAL libmagic MIME sniff; a signature sniffer is the
+#                        # cross-platform fallback (libmagic is absent on Windows).
+# boto3                  # OPTIONAL — only if STORAGE_BACKEND=s3/minio
+# supabase               # OPTIONAL — only if STORAGE_BACKEND=supabase (prod)
+
 # ── Tests ──────────────────────────────────────────────────────────────────
 pytest==9.0.3
 pytest-asyncio==1.4.0
@@ -61,8 +84,10 @@ sentence-transformers==5.5.1
 langchain-community==0.4.2       # 0.4.x = the core-1.x-compatible series (the fix)
 faiss-cpu==1.14.2
 python-docx==1.2.0               # read the workflow .docx for RAG
-# Chat model providers (install the ONE you use):
+# Chat / extraction model providers (install the ONE(s) you use):
 langchain-groq==1.1.2            # Groq hosted models (set GROQ_API_KEY + CHAT_MODEL=groq:...)
+langchain-google-genai==3.0.1    # Gemini — PRIMARY for BOM doc extraction (multimodal PDF/image
+                                 # + long-context spec grids). Set GEMINI_API_KEY + EXTRACTION_MODEL=gemini:...
 # langchain-ollama>=0.2          # local/free
 # langchain-anthropic            # hosted
 # langchain-openai               # hosted

@@ -39,7 +39,7 @@ async def compute_run(
     return await WageService(db).compute_run(body.period_start, body.period_end)
 
 
-@router.get("/runs/{run_id}", response_model=schemas.WageRunRead)
+@router.get("/runs/{run_id}", response_model=schemas.WageRunRead)#extracting the attributes from the ORM object and returning them as a dict that can be serialized to JSON. By defining the model_config with from_attributes=True.
 async def get_run(
     run_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),

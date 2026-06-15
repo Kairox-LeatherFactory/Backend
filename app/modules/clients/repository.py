@@ -2,7 +2,7 @@
 ================================================================================
 modules/clients/repository.py — Async data access for the order hierarchy
 ================================================================================
-Only this module touches Client / PurchaseOrder / Style / SKU. All methods are
+Only this module touches Client / ClientOrder / Style / SKU. All methods are
 async and operate on an AsyncSession. selectinload is used for eager-loading
 the styles->skus tree so the API can return a full order in one round trip
 without triggering lazy loads (which are unsafe under async).
@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.modules.clients.models import SKU, Client, PurchaseOrder, Style
+from app.modules.clients.models import SKU, Client, ClientOrder, Style
 
 
 class ClientRepository:
@@ -35,18 +35,21 @@ class ClientRepository:
         await self.db.refresh(c)
         return c
 
-    async def get_pos_for_client(self, client_id: uuid.UUID) -> list[PurchaseOrder]:
+    async def get_orders_for_client(self, client_id: uuid.UUID) -> list[ClientOrder]:
         stmt = (
-            select(PurchaseOrder)
-            .where(PurchaseOrder.client_id == client_id)
-            .options(selectinload(PurchaseOrder.styles).selectinload(Style.skus))
-            .order_by(PurchaseOrder.po_number)
+            select(ClientOrder)
+            .where(ClientOrder.client_id == client_id)
+            .options(selectinload(ClientOrder.styles).selectinload(Style.skus))
+            .order_by(ClientOrder.order_number)
         )
         res = await self.db.execute(stmt)
         return list(res.scalars())
 
     async def get_style(self, style_id: uuid.UUID) -> Style | None:
         return await self.db.get(Style, style_id)
+
+    async def get_order(self, order_id: uuid.UUID) -> ClientOrder | None:
+        return await self.db.get(ClientOrder, order_id)
 
     async def get_sku(self, sku_id: uuid.UUID) -> SKU | None:
         return await self.db.get(SKU, sku_id)

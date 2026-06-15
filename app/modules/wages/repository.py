@@ -46,12 +46,12 @@ class WageRepository:
             await self.db.refresh(existing)
             return existing
         r = Rate(style_id=style_id, operation_id=operation_id,
-                 rate=rate, effective_from=effective_from)
+                rate=rate, effective_from=effective_from)
         self.db.add(r)
         await self.db.commit()
         await self.db.refresh(r)
         return r
-
+    
     async def create_run(self, period_start: date, period_end: date) -> WageRun:
         run = WageRun(period_start=period_start, period_end=period_end)
         self.db.add(run)
@@ -67,7 +67,7 @@ class WageRepository:
         self.db.add_all(lines)
         await self.db.commit()
 
-    async def close_run(self, run: WageRun) -> WageRun:
+    async def close_run(self, run: WageRun) -> WageRun | None:
         run.status = RunStatus.CLOSED
         await self.db.commit()
         # Re-load with lines eagerly so the response serialises cleanly.

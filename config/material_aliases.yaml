@@ -1,0 +1,27 @@
+# config/material_aliases.yaml — curated BOM-term → inventory-key synonyms (stage-4 §5.2)
+#
+# The BOM names a material the way the buyer/quote does (SHEEP GLASS); the inventory
+# master names it the way the warehouse does (SHEEP NAPPA …). An alias resolves the gap
+# on the FREE deterministic path so no LLM/fuzzy guess is needed. Both sides are
+# normalized at load time (uppercased, punctuation collapsed), so write them readably.
+# Onboarding a synonym = one row + re-seed; confirming a fuzzy suggestion writes one too.
+#
+#   bom_term       all its tokens must be present in the BOM line's normalized key
+#   inventory_key  all its tokens must be present in the stock row's normalized key
+
+- bom_term: "SHEEP GLASS"
+  inventory_key: "SHEEP NAPPA"
+- bom_term: "GOAT SUEDE"
+  inventory_key: "GOAT SUEDE"
+- bom_term: "INTERLINING"
+  inventory_key: "INTER LINING"
+- bom_term: "FUSING"
+  inventory_key: "PERMESS"
+- bom_term: "THREADS"
+  inventory_key: "TKT30"
+- bom_term: "THREAD"
+  inventory_key: "TKT30"
+- bom_term: "PACKAGING"
+  inventory_key: "PLASTIC"
+- bom_term: "BUTTER PAPER"
+  inventory_key: "GLAZED WHITE PAPER"

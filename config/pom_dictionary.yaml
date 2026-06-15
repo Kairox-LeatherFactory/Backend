@@ -1,0 +1,57 @@
+# =============================================================================
+# config/pom_dictionary.yaml — term → standard POM code (Stage 2 §1b/§3a)
+# =============================================================================
+# Seeded idempotently into the `pom_dictionary` table by scripts/seed.py. POM
+# extraction (§1) standardizes EVERY client/native term to a stable `pom_code`;
+# an unmapped term is surfaced for a one-click "map this term", NEVER dropped or
+# guessed into an existing code. Adding a client's Italian / Japanese synonym is
+# ONE entry here + a re-seed — no source change (acceptance §11.6).
+#
+# Per entry:
+#   language      ja / it / en  (matches client_template.language)
+#   source_term   the ORIGINAL label as it appears on the sheet (渡り幅, inseam)
+#   pom_code      the standardized code everything downstream joins on
+#   garment_type  optional scoping (a term can mean different POMs per type)
+#   weight        tie-break when two terms collide
+# =============================================================================
+
+# ── The 14 Beau Geste (Japanese) track-pant POMs — the real CRPL-004 grid ────
+- { language: ja, source_term: "ウェスト上り", pom_code: WAIST_FINISHED }
+- { language: ja, source_term: "ウェスト実寸", pom_code: WAIST_ACTUAL }
+- { language: ja, source_term: "ヒップ位置",   pom_code: HIP_HEIGHT }
+- { language: ja, source_term: "ヒップ",       pom_code: HIP }
+- { language: ja, source_term: "渡り幅",       pom_code: THIGH_WIDTH }
+- { language: ja, source_term: "膝丈",         pom_code: KNEE_LENGTH }
+- { language: ja, source_term: "膝幅",         pom_code: KNEE_WIDTH }
+- { language: ja, source_term: "裾幅",         pom_code: HEM_WIDTH }
+- { language: ja, source_term: "前股上",       pom_code: FRONT_RISE }
+- { language: ja, source_term: "前股ぐり",     pom_code: FRONT_CROTCH }
+- { language: ja, source_term: "後股ぐり",     pom_code: BACK_CROTCH }
+- { language: ja, source_term: "内股下",       pom_code: INSEAM }
+- { language: ja, source_term: "ベルト幅",     pom_code: BELT_WIDTH }
+- { language: ja, source_term: "脇総丈",       pom_code: OUTSEAM }
+
+# ── EN / IT synonyms (so a future client's sheet maps for free) ──────────────
+- { language: en, source_term: "waist", pom_code: WAIST_FINISHED }
+- { language: en, source_term: "waist finished", pom_code: WAIST_FINISHED }
+- { language: it, source_term: "girovita", pom_code: WAIST_FINISHED }
+- { language: en, source_term: "waist actual", pom_code: WAIST_ACTUAL }
+- { language: en, source_term: "hip height", pom_code: HIP_HEIGHT }
+- { language: en, source_term: "hip drop", pom_code: HIP_HEIGHT }
+- { language: en, source_term: "hip", pom_code: HIP }
+- { language: it, source_term: "fianchi", pom_code: HIP }
+- { language: en, source_term: "thigh", pom_code: THIGH_WIDTH }
+- { language: en, source_term: "thigh width", pom_code: THIGH_WIDTH }
+- { language: en, source_term: "knee length", pom_code: KNEE_LENGTH }
+- { language: en, source_term: "knee width", pom_code: KNEE_WIDTH }
+- { language: en, source_term: "hem", pom_code: HEM_WIDTH }
+- { language: en, source_term: "leg opening", pom_code: HEM_WIDTH }
+- { language: en, source_term: "front rise", pom_code: FRONT_RISE }
+- { language: en, source_term: "front crotch", pom_code: FRONT_CROTCH }
+- { language: en, source_term: "back crotch", pom_code: BACK_CROTCH }
+- { language: en, source_term: "inseam", pom_code: INSEAM }
+- { language: it, source_term: "interno gamba", pom_code: INSEAM }
+- { language: en, source_term: "belt width", pom_code: BELT_WIDTH }
+- { language: en, source_term: "waistband width", pom_code: BELT_WIDTH }
+- { language: en, source_term: "outseam", pom_code: OUTSEAM }
+- { language: en, source_term: "side length", pom_code: OUTSEAM }

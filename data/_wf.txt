@@ -1,0 +1,392 @@
+End-to-End Automated Bill of Materials & Supplier Procurement Process 
+ 
+Document Type Version Date Classification 
+ 
+Confidential 
+ 
+ 
+Executive Summary 
+This document describes the full end-to-end BOM Procurement Workflow — a six-stage automated system 
+that transforms client order and specification inputs into a production -ready material confirmation. The  
+workflow integrates AI-driven document analysis, live inventory reconciliation, and automated supplier 
+communication to eliminate manual bottlenecks and accelerate production release timelines. 
+ 
+Workflow at a Glance 
+ 
+Stag 
+e 
+ 
+Name 
+ 
+Owner 
+ 
+Automation Level 
+ 
+Key Output 
+1 MD/Direct Manager 
+Submission 
+MD/Direct Manager Manual Upload Order + Spec Files 
+2 AI Analysis & BOM Gen. AI Engine Fully Automated Draft BOM Table 
+3 MD Review & Approval Managing Director Human Decision Approved BOM 
+4 Inventory Check System Fully Automated Stock Status Report 
+Scope of this Document 
+This specification covers the complete operational workflow from MD document submission through to 
+production queue release. It is intended for review by senior management and system stakeholders to 
+align on process design, approval authorities, and automation boundaries. 
+BOM PROCUREMENT WORKFLOW — PROCESS DOCUMENT CONFIDENTIAL 
+Procurement Operations Division | Internal Use Only Page 2 
+ 
+ 
+ 
+ 
+ 
+5 Supplier Call & Procurement System Fully Automated Confirmed Quantities 
+6 Completion & Prod. Release System / MD Automated Alert Production Queue Entry 
+BOM PROCUREMENT WORKFLOW — PROCESS DOCUMENT CONFIDENTIAL 
+Procurement Operations Division | Internal Use Only Page 3 
+ 
+ 
+1 
+ 
+MD/Direct Manager Submission 
+Secure document upload initiating the procurement cycle 
+ 
+The workflow is initiated when the MD/Direct Manager authenticates and logs into the application. Upon 
+access, the MD/Direct Manager is presented with a dedicated upload screen designed to accept two 
+mandatory documents simultaneously. 
+ 
+Key Inputs & Functions 
+ 
+Order Sheet Contains item quantities, SKUs (Stock Keeping Unit), and delivery dates required for 
+fulfillment. 
+Specification Sheet Contains physical and technical parameters including dimensions, materials, and 
+tolerances. 
+Process Steps 
+ 
+ 
+ 
+AI Analysis and BOM Generation 
+Automated extraction and structured BOM compilation from submitted documents 
+ 
+Once both documents are received, the AI engine begins parallel analysis. It performs cross -document 
+reconciliation — reading the Order Sheet for procurement quantities and the Specification Sheet for material 
+requirements — then compiles these into a unified, structured Bill of Materials. 
+ 
+Key Inputs & Functions 
+ 
+Data Extraction The AI extracts item codes, descriptions, quantities, material, color, sizes, thickness as 
+well as comments from the Order Sheet. 
+Specification Mapping Specification requirements are mapped to corresponding material and component 
+needs from the Spec Sheet. 
+Process Steps 
+AI engine reads the Order Sheet and identifies all line items, SKUs (Stock Keeping Unit), quantities, and delivery 
+dates. 
+STAGE 1 
+STAGE 2 
+1 MD/Direct Manager logs in through the secure application portal. 
+ 
+2 The upload interface is presented with clearly labelled fields for each document type. 
+ 
+3 Both documents are submitted through the in-app upload mechanism. 
+ 
+4 Upon successful submission, both files are immediately passed to the AI engine for processing. 
+ 
+5 The system confirms receipt and initiates Stage 2 automatically. 
+Document Integrity 
+Both documents must be submitted together in a single transaction. The system will not proceed to AI 
+analysis until both files are present and validated for format compliance. Accepted formats include PDF, 
+XLSX, and CSV. 
+BOM PROCUREMENT WORKFLOW — PROCESS DOCUMENT CONFIDENTIAL 
+Procurement Operations Division | Internal Use Only Page 4 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Source Documents Used in AI Analysis 
+The AI engine processes two primary source documents at Stage 2: the Order Sheet and the Specification Sheet 
+(issued by Beau Geste / the buyer). Both documents are submitted simultaneously at Stage 1 and are available to 
+the AI engine as soon as Stage 2 begins. The actual documents used for this production run are reproduced below 
+for reference. 
+ 
+Order Sheet — Beau Geste (No. 1579) 
+This is the buyer-issued production order from Beau Geste (株式会社ボージェスト) confirming a bulk production 
+run for CRIMIE brand leather trousers. The AI engine extracts the following key fields: manufacturer (PAKKAR), 
+article name (Leather Pants), material (Sheep skin / Sheep Glass), customer reference (CR1-02F5-PL02), internal 
+reference (A32073-44), total quantity (60 pcs), size breakdown (S:4, M:17, L:23, XL:10, XXL:6), and the unit price 
+($104). The handwritten note on the order also instructs special attention to the placement of goat suede panels, 
+which the AI flags as a specification annotation. 
+ 
+ 
+2 AI engine reads the Specification Sheet and extracts material grades, dimensions, and tolerances per item. 
+ 
+3 Cross-document mapping is performed to align each order line with its specification requirements. 
+ 
+4 A structured, editable BOM table is generated with all extracted fields populated and a single BOM for a single 
+style. And there’s only one BOM per style and one for an order as well. 
+ 
+5 The draft BOM is presented to the Managing Director in the review interface. 
+ 
+Output Format 
+The AI -generated BOM is presented as a structured, editable table. Fields include: Item Code, 
+Description, Quantity Required, Unit of Measure, Material Specification, Tolerance Class and Price. All 
+fields are pre -populated from the source documents and remain fully editable by the MD prior to 
+approval. 
+BOM PROCUREMENT WORKFLOW — PROCESS DOCUMENT CONFIDENTIAL 
+Procurement Operations Division | Internal Use Only Page 5 
+ 
+ 
+ 
+BOM / Price Quotation Sheet — Pakkar Tanveer Exports 
+This is the factory-prepared Yardage and Price Quotation for style CRI 02F5 PL02 (CRIMIE brand), produced by 
+Pakkar Tanveer Exports. The AI engine reads this document to populate the Bill of Materials with the following 
+detail: main materials (Sheep Glass Col Black — 34.5 dm² at $1.80/unit, and Goat Suede — 2.6 dm² at $1.75/unit), 
+sub-materials (Polyster Lining for pockets — 0.4 dm² at $1.50/unit, Fusing Interlining — 1 unit at $1.00, Thread — 1 
+unit at $1.00), accessories (Buttons SGT-10 20mm — qty 4, Buttons SGT-10 15mm — qty 2, Support Buttons 
+10mm — qty 6), and cost components (Cutting and Stitching $30.00, Packaging $3.00, FOB Charge / Buyer 
+Material Duty and Clearing Charges $5.00). The total FOB garment price extracted is US$107.25. The following are 
+the columns of BOM sheet: No. or Name, Yardage, Unit, Price and Mass. The following are the rows of BOM sheet: 
+Main material, Sub-Material(lining, etc), Threads, Accessories, Manufacturing cost, Packaging cost, FOB(Freight 
+On Board) charge and also Total. 
+ 
+ 
+AI Cross-Document Reconciliation Logic 
+Once both documents are ingested, the AI engine performs a structured reconciliation across four dimensions: (1) 
+Style / Reference Matching — the customer reference CR1-02F5-PL02 on the Order Sheet is cross-matched 
+against style CRI 02F5 PL02 on the BOM sheet to confirm both documents relate to the same garment; (2) 
+Quantity Propagation — the total order quantity (60 pcs) is multiplied against each material yardage figure to 
+calculate bulk material requirements (e.g. 34.5 dm²/garment x 60 = 2,070 dm² of Sheep Glass required); (3) 
+Specification Annotation — freeform notes on the Order Sheet (such as the handwritten instruction regarding 
+goat suede panel placement, and the material thickness specification of 0.6–0.7 m/m) are extracted and appended 
+as annotations on the relevant BOM line items; (4) Price Capture — unit prices for all materials and cost 
+components are captured from the BOM sheet and recorded against each line item in the draft BOM, providing cost 
+visibility at the point of MD/DIRECT MANAGER review. 
+Category Item Description Qty/Garment Bulk Qty 
+(60 pcs) 
+Unit Price Total Cost 
+Main Material Sheep Glass Col Black 34.5 dm² 2,070 
+dm² 
+$1.80/dm² $3,726.00 
+Main Material Goat Suede 2.6 dm² 156 dm² $1.75/dm² $273.00 
+
+BOM PROCUREMENT WORKFLOW — PROCESS DOCUMENT CONFIDENTIAL 
+Procurement Operations Division | Internal Use Only Page 6 
+ 
+ 
+Category Item Description Qty/Garment Bulk Qty 
+(60 pcs) 
+Unit Price Total Cost 
+Sub-Material 
+(Lining) 
+Polyster Lining — Pockets 0.4 dm² 24 dm² $1.50/dm² $36.00 
+Interlining Fusing Interlining 1 pc 60 pcs $1.00/pc $60.00 
+Threads Thread 1 pc 60 pcs $1.00/pc $60.00 
+Accessories Buttons SGT-10 20mm / 
+15mm, Support Buttons 10mm 
+12 pcs 720 pcs TBC TBC 
+Manufacturing Cutting and Stitching 1 60 $30.00 $1,800.00 
+Packaging Box, Poly Cover, Tissue Paper 1 60 $3.00 $180.00 
+FOB Charge Buyer Material Duty + Clearing 
+Charges 
+1 60 $5.00 $300.00 
+TOTAL FOB (60 pcs) $6,435.00 
+ 
+ 
+MD Review and Approval 
+Human oversight gate — review, edit, and formal BOM approval 
+ 
+The Managing Director receives a notification and opens the AI-generated BOM in the review interface. This 
+stage represents the primary human decision point in the workflow, where the MD exercises full editorial 
+control over the BOM before committing it for procurement action. 
+ 
+Key Inputs & Functions 
+ 
+Edit Capability The MD can adjust quantities, swap materials, or add and remove line items as 
+required. 
+Approval Action Once satisfied with the BOM content, the MD formally approves the document. 
+Process Steps 
+ 
+ 
+ 
+ 
+ 
+ 
+STAGE 3 
+1 MD receives an in-app notification and automail within 5 hours of no response and an autocall within 5 hours of no 
+response to the mail that the draft BOM is awaiting review. 
+ 
+2 MD opens the BOM in the review interface and inspects all line items. 
+ 
+3 Adjustments are made as required — modifying quantities, specifications, or line items. 
+ 
+4 MD approves the BOM via the formal approval action. 
+ 
+5 Approval locks the document, preventing further edits, and automatically triggers the inventory check. 
+Approval Lock 
+Upon MD approval, the BOM is cryptographically locked. No further modifications can be made to the 
+approved version. A full revision history is maintained, including all edits made during the review period, 
+the approving user identity, and the timestamp of approval. 
+BOM PROCUREMENT WORKFLOW — PROCESS DOCUMENT CONFIDENTIAL 
+Procurement Operations Division | Internal Use Only Page 7 
+ 
+ 
+ 
+ 
+ 
+Inventory Check 
+Real-time stock reconciliation against approved BOM requirements 
+ 
+With the BOM approved and locked, the system automatically initiates a live inventory check. Each line item 
+in the approved BOM is cross -referenced against current warehouse stock levels. The system calculates 
+the exact shortfall for any item that cannot be fulfilled from existing stock. 
+ 
+Key Inputs & Functions 
+ 
+Stock Comparison Required quantity per BOM line is compared against quantity currently on hand in the 
+warehouse system. 
+Status Assignment Each line is assigned a status — SUFFICIENT, PARTIAL, or OUT OF STOCK — 
+based on availability. 
+Process Steps 
+ 
+ 
+ 
+ PO-Based Supplier Communication with Escalation 
+Email-driven supplier communication with fallback automated calling 
+ 
+For every item identified as having a shortfall, the system generates a Purchase Order (PO) form and sends 
+it to the designated supplier via email instead of initiating an immediate automated call. If the supplier does 
+not respond within 5 hours of the email being sent, the system triggers an automated outbound call to follow 
+up and obtain confirmation. 
+ 
+Key Inputs & Functions 
+ 
+Supplier Lookup The system identifies the designated supplier for each shortfall item based on the 
+article code. 
+STAGE 4 
+STAGE 5 
+1 Approved BOM is passed to the inventory management module. 
+ 
+2 For every line item, the system queries live stock levels. 
+ 
+3 A status is assigned : SUFFICIENT (full quantity available), PARTIAL (some stock exists but shortfall present), or 
+OUT OF STOCK (zero stock available). 
+ 
+4 For SUFFICIENT, PARTIAL, BALANCE & OUT OF STOCK items, the exact quantity is calculated. 
+ 
+5 All shortfall items are compiled into a procurement list and passed to Stage 5. 
+Status Definitions 
+SUFFICIENT — Full required quantity is available in stock; no procurement action needed. PARTIAL 
+— Some stock exists but is insufficient; the shortfall quantity is forwarded for procurement. OUT OF 
+STOCK — Zero units available; the full required quantity is forwarded for procurement. 
+BOM PROCUREMENT WORKFLOW — PROCESS DOCUMENT CONFIDENTIAL 
+Procurement Operations Division | Internal Use Only Page 8 
+ 
+ 
+ 
+ 
+ 
+PO Generation & Email 
+Dispatch 
+A PO form is automatically created and sent to the supplier’s registered email address 
+with material requirements. 
+Response Monitoring The system tracks supplier response status within a defined 5-hour window. 
+Escalation via Call 
+Execution 
+If no response is received within the timeframe, an automated call is placed to the 
+supplier to communicate requirements and capture confirmation. 
+Process Steps 
+ 
+ 
+Tools Used For Tracking : 
+ 
+Use tools like Mailtrack, HubSpot, Streak, or Yesware — these add a tiny invisible pixel to your email, and notify 
+you when the recipient opens it. 
+Gmail users can install the Mailtrack Chrome extension for free read receipts. 
+ 
+ 
+ 
+ 
+ 
+ 
+1 Identify shortfall item. 
+ 
+2 Map supplier using article code. 
+ 
+3 Generate PO form. 
+ 
+4 Send PO via email PO via email 
+ 
+5 Wait for supplier response (5 hours). 
+ 
+6 If no response → trigger automated call. 
+ 
+7 Record supplier confirmation. 
+BOM PROCUREMENT WORKFLOW — PROCESS DOCUMENT CONFIDENTIAL 
+Procurement Operations Division | Internal Use Only Page 9 
+ 
+ 
+2 
+1 
+3 
+4 
+5 
+ 
+ 
+ 
+Completion and Production Release 
+Final material-readiness confirmation and queue handoff 
+ 
+Once every line item in the approved BOM has been either fulfilled from existing warehouse stock or 
+confirmed by a supplier through the automated response, the system evaluates overall material readiness 
+and executes the final stage actions to release the job to production. 
+ 
+Key Inputs & Functions 
+ 
+Readiness Assessment The system verifies that 100% of BOM line items are covered — either by stock on 
+hand or confirmed supplier delivery. 
+Production Release The job is marked as material-ready, an MD alert is triggered, and the job enters the 
+production scheduling queue. 
+Process Steps 
+System verifies all BOM line items have either SUFFICIENT stock or confirmed supplier quantities. 
+ 
+Overall material readiness status is set to READY. 
+ 
+The MD receives an automated alert confirming material readiness. 
+ 
+The job is formally released to the production scheduling queue. 
+ 
+All procurement records, supplier confirmations, and inventory data are archived against the job record. 
+STAGE 6 
+BOM PROCUREMENT WORKFLOW — PROCESS DOCUMENT CONFIDENTIAL 
+Procurement Operations Division | Internal Use Only Page 10 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Roles and Responsibilities 
+ 
+ 
+Role Stage Involvement Responsibilities 
+MD/Direct Manager Stage 1 Upload Order Sheet and Specification Sheet accurately and in 
+full. 
+AI Engine Stage 2 Parse submitted documents, extract BOM data, map 
+specifications, generate structured draft BOM. 
+Managing Director Stages 2, 3, 6 Review AI-generated BOM, make amendments, formally 
+approve, receive material-ready alerts. 
+Inventory System Stage 4 Perform live stock comparison, assign statuses, calculate 
+shortfalls. 
+Procurement System Stage 5 Look up suppliers, execute automated calls, record 
+confirmations. 
+Production System Stage 6 Receive released job, schedule manufacturing based on 
+material availability. 
+ 
+Production Queue Entry 
+The production scheduling queue entry includes: the approved BOM reference, confirmed material 
+availability dates, supplier delivery schedules, and the original client delivery dates from the Order 
+Sheet. This allows production planning to schedule manufacturing operations with full material visibility. 
