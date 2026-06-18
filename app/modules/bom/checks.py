@@ -41,6 +41,7 @@ FUNCTION GUIDE
 """
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 import os
 from functools import lru_cache
 
@@ -71,15 +72,28 @@ def _flag(rule: dict, ok: bool, message: str) -> dict:
 # ── rule-kind primitives ─────────────────────────────────────────────────────
 def _check_range(rule: dict, ctx: dict) -> dict:
     field = rule.get("field")
-    lo, hi = rule.get("range", [None, None])
+    # 1. Defensively unpack the range to prevent 'NoneType' unpacking crashes
+    # This protects against empty `range:` keys in the YAML file
+    range_config = rule.get("range")
+    if not isinstance(range_config, (list, tuple)):
+        range_config = [None, None]
+    lo, hi = (list(range_config) + [None, None])[:2]
+
     val = (ctx.get("attributes") or {}).get(field)
+    
+    # 2. Allow skipping ONLY if the field is genuinely missing from the context
     if val is None:
         return _flag(rule, True, f"{field}: not present (skipped)")
     values = val if isinstance(val, (list, tuple)) else [val]
     try:
-        nums = [float(v) for v in values]
-    except (TypeError, ValueError):
-        return _flag(rule, True, f"{field}: non-numeric (skipped)")
+        nums = [Decimal(str(v)) for v in values]
+    except (TypeError, InvalidOperation):
+        return _flag(rule, False, f"{field}: non-numeric value '{val}' provided")
+    out = [v for v in nums if (lo is not None and v < lo - 1e-9) or (hi is not None and v > hi + 1e-9)]
+    if out:
+        return _flag(rule, False, f"{field}={nums} outside [{lo}, {hi}]")
+        
+    return _flag(rule, True, f"{field}={nums} within [{lo}, {hi}]")
     
 # The Scenario: A client sets a strict, blocking severity: error rule that "Fabric Weight" must be in the range [100, 300]. 
 # A user inputs "N/A", "TBD", or leaves it as an empty string.
@@ -88,11 +102,6 @@ def _check_range(rule: dict, ctx: dict) -> dict:
 
 # The Impact: The validation evaluates as ok: True. 
 # The user successfully bypasses a blocking, required severity check by deliberately entering invalid alphabetic data.
-
-    out = [v for v in nums if (lo is not None and v < lo - 1e-9) or (hi is not None and v > hi + 1e-9)]
-    if out:
-        return _flag(rule, False, f"{field}={nums} outside [{lo}, {hi}]")
-    return _flag(rule, True, f"{field}={nums} within [{lo}, {hi}]")
 
 
 def _check_pitch_monotonic(rule: dict, ctx: dict) -> dict:
@@ -116,10 +125,15 @@ def _check_qty_sum(rule: dict, ctx: dict) -> dict:
     total = ctx.get("order_qty")
     if total is None:
         return _flag(rule, True, "order_qty unknown (skipped)")
-    s = sum(per_size.values())
-    if int(s) != int(total):
-        return _flag(rule, False, f"Σ per-size qty ({s}) != order total ({total})")
-    return _flag(rule, True, f"Σ per-size qty == order total ({total})")
+    try:
+        s = sum(Decimal(str(v)) for v in per_size.values())
+        t = Decimal(str(total))
+    except (TypeError, InvalidOperation):
+        return _flag(rule, False, "per-size quantity configuration contains non-numeric values")
+        
+    if s != t:
+        return _flag(rule, False, f"Σ per-size qty ({s}) != order total ({t})")
+    return _flag(rule, True, f"Σ per-size qty == order total ({t})")
 
 
 def _check_pattern_ref(rule: dict, ctx: dict) -> dict:

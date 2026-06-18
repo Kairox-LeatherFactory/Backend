@@ -41,7 +41,7 @@ FUNCTION GUIDE
 """
 from __future__ import annotations
 
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 _CENTS = Decimal("0.01")
 _QTY = Decimal("0.001")
@@ -50,7 +50,23 @@ _QTY = Decimal("0.001")
 def _d(v) -> Decimal:
     if v is None:
         return Decimal("0")
-    return v if isinstance(v, Decimal) else Decimal(str(v))   #might need exception handling in case person forgets to put into fields
+    if isinstance(v, Decimal):
+        return v
+        
+    try:
+        # 1. Strip whitespace to handle accidental spaces (e.g. "   ")
+        cleaned_str = str(v).strip()
+        
+        # 2. If the field was left completely blank, safely return 0
+        if not cleaned_str:
+            return Decimal("0")
+            
+        # 3. Attempt the conversion
+        return Decimal(cleaned_str)
+        
+    except InvalidOperation:
+        # 4. Catch invalid text inputs (like "N/A" or "TBD") and fallback to 0
+        return Decimal("0")   #might need exception handling in case person forgets to put into fields
 
 
 def _money(v: Decimal) -> Decimal:

@@ -41,7 +41,7 @@ FUNCTION GUIDE
 from __future__ import annotations
 
 import re
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from app.modules.bom.enums import DcmSource
 
@@ -99,24 +99,34 @@ def estimate_area_dcm(area_formula: dict | None, wastage_pct, poms_for_size: dic
                 return 0.0
         return total 
     
-# The Scenario: A back panel's length formula requires two POMs: back_length (weight 1.0) and collar_height (weight 1.0). 
-# In the uploaded spec, back_length = 80cm, but collar_height is missing (None).
+    # The Scenario: A back panel's length formula requires two POMs: back_length (weight 1.0) and collar_height (weight 1.0). 
+    # In the uploaded spec, back_length = 80cm, but collar_height is missing (None).
 
-# The Flaw: The code sees back_length, sets seen = True, and successfully computes the weighted length as 80.0. 
-# It completely ignores the missing collar_height and returns 80.0 instead of rejecting the formula.
+    # The Flaw: The code sees back_length, sets seen = True, and successfully computes the weighted length as 80.0. 
+    # It completely ignores the missing collar_height and returns 80.0 instead of rejecting the formula.
 
-# The Impact: The system silently under-calculates the fabric surface area. 
-# For a large production run (e.g., 5,000 units), this minor omission can translate to thousands of meters of missing fabric,
-#    resulting in major financial losses.
+    # The Impact: The system silently under-calculates the fabric surface area. 
+    # For a large production run (e.g., 5,000 units), this minor omission can translate to thousands of meters of missing fabric,
+    #    resulting in major financial losses.
 
 
     length = _weighted(area_formula.get("length_poms", {}))
     width = _weighted(area_formula.get("width_poms", {}))
     if length <= 0 or width <= 0:
         return None
-    panels = float(area_formula.get("panels", 1) or 1)
-    calibration = float(area_formula.get("calibration", 1.0) or 1.0)        #float might cause decimal error so maybe use Decimal instead of float
-    wastage = float(wastage_pct or 0) / 100.0
-    area_cm2 = panels * length * width * calibration
-    dcm = area_cm2 / 100.0 * (1.0 + wastage)
-    return Decimal(str(round(dcm, 3)))
+    dec_length = Decimal(str(length))
+    dec_width = Decimal(str(width))
+
+    dec_panels = Decimal(str(area_formula.get("panels", 1) or 1))
+    dec_calibration = Decimal(str(area_formula.get("calibration", 1.0) or 1.0))
+    dec_wastage = Decimal(str(wastage_pct or 0)) / Decimal("100")
+
+    # 3. Perform pure Decimal arithmetic
+    area_cm2 = dec_panels * dec_length * dec_width * dec_calibration
+
+    # Convert cm² to dm² (divide by 100) and apply wastage
+    dcm = (area_cm2 / Decimal("100")) * (Decimal("1") + dec_wastage)
+
+    # 4. Quantize to exactly 3 decimal places using Banker's or Standard rounding
+    # This eliminates Python's floating-point round() quirks entirely
+    return dcm.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
