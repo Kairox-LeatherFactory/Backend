@@ -220,6 +220,42 @@ async def test_jackiee_pattern_ref_and_attributes(db):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# §11.2b — the deterministic prose floor (no LLM) now structures labelling +
+# accessories, so a missing Gemini key keeps the richer attribute shape.
+# ════════════════════════════════════════════════════════════════════════════
+def test_prose_attributes_extracts_labelling_and_accessories():
+    from app.modules.bom.extraction import _prose_attributes
+
+    fields = {
+        "LEATHER QUALITY": "Soft nappa, 0.45/0.50 mm, aniline",
+        "COLOUR": "BLACK, with magenta piping",
+        "LABEL": "embossed main label at neck",
+        "ACCESSORIES": "YKK zipper supplied by factory, metal snaps supplied by client",
+    }
+    attrs = _prose_attributes(fields)
+
+    # existing regex-able facts still resolve
+    assert attrs["leather_substance_mm"] == [0.45, 0.5]
+    assert attrs["primary_color"] == "BLACK"
+    # newly structured deterministically
+    assert attrs["labelling"] == "embossed main label at neck"
+    assert attrs["accessories"] == [
+        {"type": "zipper", "supplied_by": "factory"},
+        {"type": "snap", "supplied_by": "client"},
+    ]
+
+
+def test_prose_attributes_omits_empty_accessories():
+    """No trims / no label in the prose → the keys are omitted (not [] / ''), so the
+    LLM-merge filter and downstream consumers never see an empty list."""
+    from app.modules.bom.extraction import _prose_attributes
+
+    attrs = _prose_attributes({"LEATHER QUALITY": "Goat suede", "COLOUR": "TAN"})
+    assert "accessories" not in attrs
+    assert "labelling" not in attrs
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # §11.4 — Cost math reproduces BMO-1 (and §11.3 stamping via Source-1 template)
 # ════════════════════════════════════════════════════════════════════════════
 async def test_cost_math_reproduces_bmo1(db):
@@ -415,7 +451,7 @@ async def test_cross_checks_fire(db):
     # direct check engine: Jackiee unresolved pattern → error; substance out of band → warn
     from app.modules.bom.checks import run_checks, has_blocking_error
     jackiee_flags = run_checks("the_jackie", {
-        "attributes": {"substance_mm": [0.60, 0.62]},        # outside [0.45, 0.50]
+        "attributes": {"leather_substance_mm": [0.60, 0.62]},   # outside [0.45, 0.50]
         "pattern_reference": {"pattern_code": "MIMI", "resolved": False},
     })
     by_id = {f["id"]: f for f in jackiee_flags}

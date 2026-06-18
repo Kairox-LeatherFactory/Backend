@@ -136,12 +136,12 @@ class PomDict:
 
 # ── grid POM extraction (Beau Geste — deterministic openpyxl, NO LLM) ───────
 def _col_idx(letter: str) -> int:
-    """'A'->1, 'B'->2, ... 'AA'->27 (openpyxl 1-based)."""
+    """'A'->1, 'B'->2, ... 'AA'->27 (openpyxl 1-based). used to get the column number based on the cloumn value"""
     n = 0
     for ch in letter.strip().upper():
         n = n * 26 + (ord(ch) - 64)
     return n
-
+ 
 
 def _num(v) -> float | None:
     """Coerce a cell to a number. Tolerates string-typed numerics ('5') and pulls the
@@ -175,6 +175,7 @@ def extract_poms_grid(wb, adapter: dict, pom_dict: PomDict) -> tuple[list[dict],
         term = ws.cell(r, term_c).value
         if term is None or not str(term).strip():
             continue
+        
         term = str(term).strip()
         by_size: dict[str, float] = {}
         for sz, c in size_cols.items():
@@ -222,6 +223,74 @@ _SUBSTANCE_RE = re.compile(r'(\d+[.,]\d+)\s*/\s*(\d+[.,]\d+)\s*mm', re.IGNORECAS
 _SMS_QTY_RE = re.compile(r'TOTAL\s+(\d+)\s+SMS', re.IGNORECASE)
 _SMS_SIZE_RE = re.compile(r'SIZE\s+(\w+)', re.IGNORECASE)
 
+# Common leather-garment trim keywords → canonical accessory type. The deterministic
+# accessories floor emits {type, supplied_by?}; the LLM enriches each with
+# placement/spec/finish (and replaces the whole list on merge when it has one).
+_ACCESSORY_TYPES = {
+    "zipper": "zipper", "zip": "zipper",
+    "button": "button",
+    "snap": "snap",
+    "rivet": "rivet",
+    "buckle": "buckle",
+    "eyelet": "eyelet",
+    "stud": "stud",
+    "hook": "hook",
+    "velcro": "velcro",
+    "d-ring": "d-ring",
+    "drawcord": "drawcord", "cord": "drawcord",
+    "elastic": "elastic",
+}
+# Field labels that describe trims/hardware — searched in addition to the whole blob.
+_ACCESSORY_FIELD_HINTS = ("ACCESSOR", "TRIM", "HARDWARE", "CLOSURE")
+# "...supplied by factory/client/buyer" or "factory/client-supplied" → who supplies it.
+_SUPPLIED_BY_RE = re.compile(
+    r'(?:supplied\s+by\s+(factory|client|buyer)|(factory|client|buyer)[-\s]*supplied)',
+    re.IGNORECASE,
+)
+
+
+def _supplied_by_near(text: str, start: int, end: int) -> str | None:
+    """Who supplies the accessory matched at [start, end)? English puts the supplier
+    clause AFTER the noun ("zipper supplied by factory"), so search forward first; fall
+    back to a short backward window bounded at the previous comma so it can't bleed into
+    the prior accessory's clause. Maps buyer→client (the buyer IS the client)."""
+    fwd = text[end:end + 60]
+    m = _SUPPLIED_BY_RE.search(fwd)
+    if not m:
+        back = text[max(0, start - 30):start].rsplit(",", 1)[-1]
+        m = _SUPPLIED_BY_RE.search(back)
+    if not m:
+        return None
+    who = (m.group(1) or m.group(2)).lower()
+    return "factory" if who == "factory" else "client"
+
+
+def _prose_accessories(fields: dict, blob: str) -> list[dict]:
+    """Best-effort deterministic accessories list from the prose — {type, supplied_by?}
+    per detected trim, deduped by type. Coarse on purpose (the LLM adds
+    placement/spec/finish); returns [] when nothing matches."""
+    haystack = blob
+    for k, v in fields.items():
+        if any(h in k for h in _ACCESSORY_FIELD_HINTS):
+            haystack += " \n" + str(v)
+    low = haystack.lower()
+    accessories: list[dict] = []
+    seen: set[str] = set()
+    for kw, canon in _ACCESSORY_TYPES.items():
+        if canon in seen:
+            continue
+        # word-boundary match (so "cord" ≠ "record"), tolerating a trailing plural "s".
+        m = re.search(rf"(?<![a-z0-9]){re.escape(kw)}s?(?![a-z0-9])", low)
+        if not m:
+            continue
+        entry: dict = {"type": canon}
+        who = _supplied_by_near(haystack, m.start(), m.end())
+        if who:
+            entry["supplied_by"] = who
+        accessories.append(entry)
+        seen.add(canon)
+    return accessories
+
 
 def _prose_attributes(fields: dict) -> dict:
     """Deterministic best-effort attributes from the prose (the no-LLM fallback).
@@ -250,6 +319,13 @@ def _prose_attributes(fields: dict) -> dict:
             if "LINING" in k:
                 attrs["lining"] = fields[k][:120]
                 break
+    for k in fields:
+        if "LABEL" in k or "BRANDING" in k:          # LABEL / LABELLING / LABELING / BRANDING
+            attrs["labelling"] = str(fields[k]).strip()[:120]
+            break
+    accessories = _prose_accessories(fields, blob)
+    if accessories:                                  # omit the key entirely when empty
+        attrs["accessories"] = accessories
     return attrs
 
 

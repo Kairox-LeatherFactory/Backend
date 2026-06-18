@@ -187,7 +187,6 @@ class PomDictionary(Base, UUIDMixin, TimestampMixin):
     )
     weight: Mapped[int] = mapped_column(Integer, default=1)
 
-
 class PomMeasurement(Base, UUIDMixin, TimestampMixin):
     """One standardized POM, per spec sheet, per size (§3b). The Beau Geste grid yields
     14 POMs × 5 sizes = 70 rows; Jackiee (no grid) yields none."""
@@ -239,7 +238,6 @@ class StyleConsumptionTemplate(Base, UUIDMixin, TimestampMixin):
     source_bom_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("bom.id"), nullable=True
     )
-
 
 class PatternReference(Base, UUIDMixin, TimestampMixin):
     """"Follow existing pattern X in size Y" (§3d). Resolved to a base style / DCM
