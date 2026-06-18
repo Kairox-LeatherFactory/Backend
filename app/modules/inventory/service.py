@@ -135,6 +135,13 @@ class InventoryService:
             )
             keep.add(r.normalized_key)
         deactivated = await self.repo.deactivate_keys_not_in(keep)
+
+# The Scenario: A warehouse manager is updating the inventory, but they only upload a partial sheet called "April_Leather_Updates.xlsx".
+
+# The Flaw: The keep set will only contain leather items. 
+# The system will promptly soft-deactivate every single zipper, thread, button, 
+# and packaging material in the database because they weren't in that specific spreadsheet.
+
         await self.repo.commit()
         return {**present.preview_block(prev), "committed": len(prev.rows),
                 "deactivated": deactivated}
@@ -189,6 +196,7 @@ class InventoryService:
         reserved_other = await self.repo.active_reservation_sums(
             cand_ids, exclude_bom_id=bom_id)
 
+#What about multiple quantities of same item? The reserved_other sums across all other BOMs, so if two lines in this BOM match the same inventory item, the first line will reserve the quantity, and if the second line exceeds the available quantity, it will not be able to reserve the additional amount.This is a potential issue if the BOM has multiple lines that match the same inventory item, as it could lead to a situation where the second line cannot reserve the required quantity due to the first line's reservation. The current implementation does not account for this scenario, and it may need to be addressed to ensure accurate reservation handling across multiple lines in the same BOM.
         # ── header ────────────────────────────────────────────────────────────
         now = datetime.now(timezone.utc)
         check = InventoryCheck(bom_id=bom_id, status=InventoryCheckStatus.RUNNING.value,
@@ -243,6 +251,13 @@ class InventoryService:
                 else:
                     on_hand += conv
             matched_primary = max(result.rows, key=lambda r: (r.qty_on_hand or _ZERO))
+
+# The Scenario: You have two lots of "Cotton Canvas". Lot A has 1,000 PCS (a UOM mismatch that cannot be converted to the BOM's required DCM).
+# Lot B has 5 DCM (perfectly valid and convertible).
+
+# The Flaw: The max() function looks strictly at raw numerical values without converting them first. 
+# Because 1,000 > 5, it selects Lot A as the matched_primary, even though convert_on_hand flagged Lot A as a mismatch and excluded its quantity from the on_hand sum.
+            
             if mismatch and on_hand == _ZERO:
                 flags.append("uom_mismatch")
         elif result.suggestion:

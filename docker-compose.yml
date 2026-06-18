@@ -34,7 +34,7 @@ services:
     ports:
       # Exposed on the host so devs can connect with psql/DBeaver.
       # Drop this in production — Docker-internal access only.
-      - "${POSTGRES_HOST_PORT:-5432}:5432"
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

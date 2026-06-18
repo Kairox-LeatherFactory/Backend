@@ -119,7 +119,7 @@ def parse_inventory(data: bytes, *, sheet_name: str | None = None) -> InventoryP
     uom_seen: dict[str, set[str]] = {}
 
     rows = ws.iter_rows(values_only=True)
-    header = next(rows, None)
+    header = next(rows, None)     #what if header is actual value? Won't it get skipped?
     cols = _resolve_columns(header)
     preview.raw_count = 0
 
@@ -162,7 +162,7 @@ def parse_inventory(data: bytes, *, sheet_name: str | None = None) -> InventoryP
             # qty-weighted average where qty is known; else remember the last rate.
             if qty > 0:
                 bucket["rate_num"] += rate * qty
-                bucket["rate_den"] += qty
+                bucket["rate_den"] += qty        #accounting error for different values of same key
             bucket["rate_last"] = rate
 
     for key, b in acc.items():

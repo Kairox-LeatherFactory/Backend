@@ -80,6 +80,15 @@ def _check_range(rule: dict, ctx: dict) -> dict:
         nums = [float(v) for v in values]
     except (TypeError, ValueError):
         return _flag(rule, True, f"{field}: non-numeric (skipped)")
+    
+# The Scenario: A client sets a strict, blocking severity: error rule that "Fabric Weight" must be in the range [100, 300]. 
+# A user inputs "N/A", "TBD", or leaves it as an empty string.
+
+# The Flaw: In _check_range, the try/except block catches the ValueError from float(v) and returns _flag(rule, True, "non-numeric (skipped)").
+
+# The Impact: The validation evaluates as ok: True. 
+# The user successfully bypasses a blocking, required severity check by deliberately entering invalid alphabetic data.
+
     out = [v for v in nums if (lo is not None and v < lo - 1e-9) or (hi is not None and v > hi + 1e-9)]
     if out:
         return _flag(rule, False, f"{field}={nums} outside [{lo}, {hi}]")

@@ -60,7 +60,7 @@ def _color_ok(bom_color: str | None, inv_key: str) -> bool:
     leather isn't matched to BROWN). No BOM colour → colour is not a constraint."""
     if not bom_color:
         return True
-    return bom_color.upper() in tokens(inv_key)
+    return bom_color.upper() in tokens(inv_key)      #double word colours are a problem
 
 
 def _jaccard(a: set[str], b: set[str]) -> float:
@@ -92,6 +92,14 @@ def match_line(bom_key: str, bom_color: str | None, candidates: list,
                     and _color_ok(bom_color, c.normalized_key)]
             if hits:
                 return MatchResult(rows=hits, method=MatchMethod.ALIAS.value)
+            
+# If the application fetches these aliases from a database query without a strict ORDER BY clause, the database will return them in whatever order is fastest for it at that exact millisecond.
+
+# Outcome 1 (Database returns A, then B):
+# The loop checks Alias A ("TAPE") first. It matches! The system translates the request to look for "WEBBING".
+
+# Outcome 2 (Database returns B, then A):
+# The loop checks Alias B ("COTTON TAPE") first. It matches! The system translates the request to look for "CANVAS STRAP".
 
     # (3) flagged fuzzy suggestion — advisory only, never bound
     best, best_score = None, 0.0
@@ -121,7 +129,7 @@ def convert_on_hand(on_hand: Decimal, stock_uom: str | None, bom_uom: str | None
     # The BOM uses dm²/pc; the master uses DCM/NOS|PCS. Canonicalize the BOM side.
     b_canon = {"DM²": "DCM", "DM2": "DCM", "DCM": "DCM", "PC": "PCS",
                "UNIT": "PCS", "NOS": "PCS", "PCS": "PCS"}.get(b, b)
-    s_canon = {"NOS": "PCS"}.get(s, s)
+    s_canon = {"NOS": "PCS"}.get(s, s)                      #only two present but isn't more needed
     if not s or s_canon == b_canon or s == b:
         return on_hand, False
     factor = conversions.get((s, b_canon)) or conversions.get((s, b))

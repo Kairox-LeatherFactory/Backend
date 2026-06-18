@@ -50,7 +50,7 @@ _QTY = Decimal("0.001")
 def _d(v) -> Decimal:
     if v is None:
         return Decimal("0")
-    return v if isinstance(v, Decimal) else Decimal(str(v))
+    return v if isinstance(v, Decimal) else Decimal(str(v))   #might need exception handling in case person forgets to put into fields
 
 
 def _money(v: Decimal) -> Decimal:

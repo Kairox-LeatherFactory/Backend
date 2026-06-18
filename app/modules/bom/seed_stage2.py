@@ -18,7 +18,7 @@ on the sync engine — the only non-async path in the app (CLAUDE.md §3.3).
 
 FUNCTION GUIDE
   _load(path) -> list[dict]   [private] read a YAML file into a list of dicts.
-  seed_garment_types(db, path?) -> int
+  seed_garment_type(db, path?) -> int
       Upsert each garment_type by `code` (replace-on-key). Returns the count. Run FIRST.
   seed_pom_dictionary(db, path?) -> int
       Upsert each term by (language, source_term, garment_type_id). Resolves an optional
@@ -51,7 +51,7 @@ def _load(path: str) -> list[dict]:
         return yaml.safe_load(fh) or []
 
 
-def seed_garment_types(db: Session, path: str | None = None) -> int:
+def seed_garment_type(db: Session, path: str | None = None) -> int:
     """Upsert every garment type by `code`. Returns the count seeded."""
     rows = _load(path or _GARMENT_YAML)
     count = 0
@@ -106,6 +106,6 @@ def seed_pom_dictionary(db: Session, path: str | None = None) -> int:
 
 def seed_stage2(db: Session) -> dict[str, int]:
     """Seed both Stage-2 registries (garment types first — the dictionary FKs them)."""
-    n_gt = seed_garment_types(db)
+    n_gt = seed_garment_type(db)
     n_pom = seed_pom_dictionary(db)
     return {"garment_types": n_gt, "pom_dictionary": n_pom}
