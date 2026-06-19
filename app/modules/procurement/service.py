@@ -113,7 +113,7 @@ class ProcurementService:
             client_id=client_id, created_by=getattr(user, "id", None),
             status=SubmissionStatus.OPEN.value,
         )
-
+    # consumed means lock 
     async def _load_submission(self, submission_id: uuid.UUID) -> Submission:
         sub = await self.repo.get_submission(submission_id)
         if sub is None:
@@ -125,6 +125,7 @@ class ProcurementService:
     # ══════════════════════════════════════════════════════════════════════
     async def upload_order_sheet(self, user, submission_id, data, filename,
                                  override_manual_review: bool = False) -> dict:
+        # check already exist
         return await self._upload_slot(user, submission_id, DocumentKind.ORDER_SHEET.value,
                                        data, filename, override_manual_review)
 
@@ -154,6 +155,7 @@ class ProcurementService:
         # verdict is "unresolved", and the OCR/vision rungs may now settle it).
         existing = await self.repo.get_document_by_sha(sha)
         if existing is not None:
+            # helps to remove duplicate files
             replay = await self._handle_existing(sub, kind, existing)
             if replay is not None:
                 return replay
