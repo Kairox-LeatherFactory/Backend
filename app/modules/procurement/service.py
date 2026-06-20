@@ -113,7 +113,7 @@ class ProcurementService:
             client_id=client_id, created_by=getattr(user, "id", None),
             status=SubmissionStatus.OPEN.value,
         )
-
+    # consumed means lock 
     async def _load_submission(self, submission_id: uuid.UUID) -> Submission:
         sub = await self.repo.get_submission(submission_id)
         if sub is None:
@@ -125,6 +125,7 @@ class ProcurementService:
     # ══════════════════════════════════════════════════════════════════════
     async def upload_order_sheet(self, user, submission_id, data, filename,
                                  override_manual_review: bool = False) -> dict:
+        # check already exist
         return await self._upload_slot(user, submission_id, DocumentKind.ORDER_SHEET.value,
                                        data, filename, override_manual_review)
 
@@ -153,11 +154,11 @@ class ProcurementService:
         # is evicted and returns None so we fall through and RE-RUN the pipeline (that
         # verdict is "unresolved", and the OCR/vision rungs may now settle it).
         existing = await self.repo.get_document_by_sha(sha)
-        # if existing is not None:
-            #replay = await self._handle_existing(sub, kind, existing)
-            # if replay is not None:
-            #     return replay
-        replay = None  # ID reuse is a non-goal for now; skip the complexity of cross-kind/submission checks and just re-run the pipeline on every hit.
+        if existing is not None:
+            # helps to remove duplicate files
+            replay = await self._handle_existing(sub, kind, existing)
+            if replay is not None:
+                return replay
 
         # ── run the blocking pipeline off the event loop ─────────────────────
         templates = await self.repo.active_templates(kind)

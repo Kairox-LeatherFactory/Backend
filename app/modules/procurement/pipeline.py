@@ -117,7 +117,7 @@ def process_upload(
         raise UploadError(RejectReason.EMPTY_OR_CORRUPT, str(exc),
                           payload={"sha256": sha}) from exc
 
-    # Write to quarantine first; promote only after a clean validation.
+    # Write to quarantine first; promote only after a clean validation. for temp file
     qkey = quarantine_key(submission_id, _SLOT_DIR.get(expected_kind, expected_kind),
                           sha, feats.ext)
     storage.put(qkey, data)
