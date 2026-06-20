@@ -68,7 +68,8 @@ def style_signature(*, customer_ref: str | None, internal_ref: str | None,
         return customer_ref.strip().upper()
     if internal_ref and internal_ref.strip():
         return internal_ref.strip().upper()
-    return slugify(name or "unknown") or "unknown"
+    slug = slugify(name or "")
+    return slug if slug else None
 
 
 def estimate_area_dcm(area_formula: dict | None, wastage_pct, poms_for_size: dict) -> Decimal | None:

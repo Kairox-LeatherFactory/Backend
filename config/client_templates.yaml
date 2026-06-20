@@ -100,7 +100,7 @@
     - { any: ["SIZE", "SIZES", "TAGLIA"], weight: 1 }
     - { any: ["DELIVERY", "DELIVERY DATE", "SHIP", "DEADLINE"], weight: 1 }
     - { any: ["STYLE", "SKU", "ARTICLE", "ART.", "REF"], weight: 1 }
-  thresholds: { accept_high: 0.85, reject_low: 0.40 }
+  thresholds: { accept_high: 0.70, reject_low: 0.40 }
 
 - client_code: _generic
   display_name: "Unknown client (generic)"
@@ -112,4 +112,4 @@
     - { any: ["LEATHER", "SUEDE", "STITCH", "POCKET", "LINING", "PATTERN", "MATERIAL"], weight: 1 }
     - { any: ["STYLE NAME", "SEASON", "CUSTOMER", "LABEL", "COLOUR", "COLOR"], weight: 1 }
   grid_signals: { spec_type: measurement_grid }
-  thresholds: { accept_high: 0.85, reject_low: 0.40 }
+  thresholds: { accept_high: 0.70, reject_low: 0.40 }

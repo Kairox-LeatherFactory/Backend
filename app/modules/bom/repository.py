@@ -29,6 +29,11 @@ FUNCTION GUIDE  (all async; every method is called only by BomService)
     add_pattern_reference(ref) -> PatternReference.
   spec_sheet:
     get_spec_sheet(id) -> SpecSheet | None.
+  spec_extraction:
+    add_spec_extraction(row) -> SpecExtraction.
+  order_extraction:
+    add_order_extraction(row) -> OrderExtraction.
+    get_order_extraction(oe_id) -> OrderExtraction | None.
   bom:
     add_bom(bom) / get_bom(id, selectinload items) -> Bom | None.
     claim_revision(bom_id, base_revision) -> rowcount    atomic optimistic-lock CAS;
@@ -56,6 +61,8 @@ from app.modules.bom.models import (
     PomMeasurement,
     SpecSheet,
     StyleConsumptionTemplate,
+    SpecExtraction,
+    OrderExtraction
 )
 
 
@@ -270,3 +277,23 @@ class BomRepository:
         )
         res = await self.db.execute(stmt)
         return list(res.scalars())
+    
+    async def add_spec_extraction(self, row: SpecExtraction) -> SpecExtraction:
+        """Insert a SpecExtraction row + flush so it has an id. No commit — the
+        enclosing service call commits at the right boundary."""
+        self.db.add(row)
+        await self.db.flush()
+        return row
+    
+    
+    async def add_order_extraction(self, row: OrderExtraction) -> OrderExtraction:
+        """Insert an OrderExtraction row + flush."""
+        self.db.add(row)
+        await self.db.flush()
+        return row
+    
+    
+    async def get_order_extraction(self, oe_id: uuid.UUID) -> OrderExtraction | None:
+        """Lookup by primary key — used to stamp promoted_at after the Bom row
+        is created."""
+        return await self.db.get(OrderExtraction, oe_id)

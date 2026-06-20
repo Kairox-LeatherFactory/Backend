@@ -101,23 +101,20 @@ from app.modules.bom.enums import (
     DcmSource,
     ExtractionSource,
 )
-from app.modules.bom.extraction import (
-    AttributeExtractor,
-    PomDict,
-    build_default_extractor,
-    extract_order,
-    extract_spec,
-    select_adapter,
-)
+import re
+from app.modules.bom.extraction import extract_order, extract_spec
 from app.modules.bom.export import render_bom_pdf
 from app.core.models import AuditLog, Document
 from app.modules.bom.models import (
     Bom,
     BomItem,
+    OrderExtraction,
     PatternReference,
     PomMeasurement,
+    SpecExtraction,
     SpecSheet,
 )
+ 
 from app.modules.bom.repository import BomRepository
 from app.core.storage import get_storage
 
@@ -131,6 +128,69 @@ MATERIAL_DCM_CATEGORIES = {
 }
 
 logger = logging.getLogger(__name__)
+
+
+# ── native-term → pom_code resolution (moved here from extraction) ──────────────
+# The new extractor emits NATIVE source terms only (e.g. 'ウェスト上り'). The DB
+# `pom_dictionary` table is now the single source of truth for term → code. Terms
+# the dictionary doesn't know are surfaced as `unresolved` — they feed the future
+# admin POST /pom-dictionary endpoint so non-technical staff can add new mappings
+# without a developer edit + redeploy.
+_WS_RE = re.compile(r"\s+")
+
+
+def _norm_term(t: str) -> str:
+    """Match the dictionary seeding exactly: strip ALL whitespace, lowercase."""
+    return _WS_RE.sub("", str(t)).strip().lower()
+
+
+def _term_language(term: str) -> str | None:
+    """Cheap language hint for lookup: any kana or CJK ideograph -> 'ja', else None."""
+    for ch in term or "":
+        o = ord(ch)
+        if 0x3040 <= o <= 0x30FF or 0x3400 <= o <= 0x9FFF:
+            return "ja"
+    return None
+
+
+class PomDict:
+    """Session-free native-term → pom_code map built from `pom_dictionary` rows
+    (language, source_term, pom_code). Tries the term's detected language first,
+    then any language — a JP-only sheet whose term also exists under 'en' still
+    resolves. Resolution moved out of extraction since dictionary access requires
+    a DB session that the pure-functional extractor doesn't carry."""
+
+    def __init__(self, rows: list[tuple[str, str, str]]):
+        self._by_lang_term: dict[tuple[str, str], str] = {}
+        self._by_term: dict[str, str] = {}
+        for lang, term, code in rows:
+            key = _norm_term(term)
+            self._by_lang_term[(lang, key)] = code
+            self._by_term.setdefault(key, code)
+
+    def resolve(self, term: str, language: str | None = None) -> str | None:
+        key = _norm_term(term)
+        if language and (language, key) in self._by_lang_term:
+            return self._by_lang_term[(language, key)]
+        return self._by_term.get(key)
+
+
+# ── content sniff so extract_* routes correctly even with a missing extension ──
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_PDF_MIME = "application/pdf"
+
+
+def _sniff_mime(data: bytes | None) -> str | None:
+    """Identify uploaded file type from magic bytes when the upload arrives without
+    a usable extension or mime. Returns the canonical mime string or None."""
+    if not data:
+        return None
+    if data[:4] == b"%PDF":
+        return _PDF_MIME
+    if data[:2] == b"PK":          # zip container → xlsx/xlsm
+        return _XLSX_MIME
+    return None
+
 
 # Default non-material cost lines (manufacturing/packaging/FOB) seeded onto every
 # generated DRAFT BOM so it is never born empty — the "configured" rows of the §5b
@@ -235,8 +295,24 @@ class BomService:
         if order_bytes:
             parsed_order = await run_in_threadpool(
                 extract_order, order_bytes, order_filename or "order",
-                order_mime, order_match_code or client_match_code,
+                order_mime or _sniff_mime(order_bytes),
+                order_match_code or client_match_code,
             )
+        
+        logger.info("return full detail from generate_for_order", parsed_order=parsed_order)
+            
+        order_extraction_row: OrderExtraction | None = None
+        if order_bytes:
+            order_extraction_row = self._build_order_extraction_row(
+                parsed_order, source_document_id=source_document_id,
+            )
+            await self.repo.add_order_extraction(order_extraction_row)
+            # Promotion stamp happens later, after the Bom row is created (in
+            # generate_bom). We pass the row's id in via order_identity so the
+            # downstream code can find it. (Alternative: pass the row itself
+            # through the call chain — pick whichever is cleaner for your code.)
+            parsed_order["_order_extraction_id"] = str(order_extraction_row.id)
+        
         identity = self._identity_from_order(parsed_order, client_id)
 
         # The SpecSheet row the engine extracts into. style_id is None (no style yet);
@@ -260,7 +336,6 @@ class BomService:
             filename=filename or "spec", identity=identity,
             client_match_code=client_match_code, line_seeds=None,
             submission_id=submission_id, order_identity=parsed_order,
-            extractor=build_default_extractor(),
         )
 
     def _identity_from_order(self, parsed_order: dict,
@@ -287,6 +362,7 @@ class BomService:
         (they surface in the generate response, not the stored record)."""
         oi = dict(parsed_order or {})
         oi.pop("warnings", None)
+        oi.pop("_order_extraction_id", None)
         oi["client_id"] = str(identity.client_id) if identity.client_id else None
         oi["order_qty"] = identity.order_qty
         oi["per_size_qty"] = identity.per_size_qty
@@ -348,8 +424,7 @@ class BomService:
         self, user, *, spec_sheet, spec_bytes: bytes, filename: str,
         identity: StyleIdentity, client_match_code: str | None,
         line_seeds: list[LineSeed] | None = None, currency: str | None = None,
-        extractor: AttributeExtractor | None = None,
-        adapters: list | tuple | None = None, checks_cfg: tuple | None = None,
+        checks_cfg: tuple | None = None,
         submission_id: uuid.UUID | None = None, order_identity: dict | None = None,
     ) -> dict:
         # `adapters`/`checks_cfg` default to None → the shipped YAML registries.
@@ -361,24 +436,62 @@ class BomService:
         logger.info("generate_bom start: order=%s style=%s spec_type=%s client_match=%s seeds=%s",
                     identity.client_order_id, identity.style_id, spec_sheet.spec_type,
                     client_match_code, len(line_seeds) if line_seeds is not None else "auto")
-        adapter = select_adapter(spec_sheet.spec_type, client_match_code, adapters)
-        pom_dict = PomDict(await self.repo.pom_dictionary_rows())
+        # AFTER (steps 1 + 2):
+        # ── 1. extract POMs (NATIVE terms) / attributes / pattern ref ─────────
+        # LLM-primary (Gemini → Groq → manual fallback). Emits native source terms
+        # only — no pom_code. Term → code resolution is THIS service's job (the DB
+        # `pom_dictionary` is the single source of truth). Never raises: failures
+        # surface as `manual_entry_required` in `intermediate["warnings"]`.
         intermediate = await run_in_threadpool(
-            extract_spec, spec_bytes, filename, adapter, pom_dict,
-            spec_sheet_id=str(spec_sheet.id), extractor=extractor,
+            extract_spec, spec_bytes, filename, _sniff_mime(spec_bytes),
+            spec_sheet_id=str(spec_sheet.id),
         )
+        
+        logger.info("return full detail from generate_for_spec", intermediate=intermediate)
+        
+        spec_extraction_row = self._build_spec_extraction_row(
+            intermediate, source_document_id=spec_sheet.source_document_id,
+        )
+        await self.repo.add_spec_extraction(spec_extraction_row)
 
-        # ── 2. persist pom_measurement rows (replace-on-key) ──────────────────
-        pom_rows: list[PomMeasurement] = []
+        # ── 1b. detect total extraction failure (LLM unavailable / both failed) ─
+        # When extraction fails entirely, we still build a DRAFT BOM (with the
+        # configured cost lines from cost_catalog.yaml) so the cutting manager has
+        # a place to enter materials manually. The caller (router → frontend) sees
+        # `manual_entry_required: True` in the response and surfaces the prompt.
+        ext_warnings = intermediate.get("warnings") or []
+        manual_entry_required = "manual_entry_required" in ext_warnings
+
+        # ── 2. resolve native terms → pom_code, then persist (replace-on-key) ─
+        pom_dict = PomDict(await self.repo.pom_dictionary_rows())
+        resolved_poms: list[dict] = []
+        unresolved: list[dict] = []
         for p in intermediate["poms"]:
+            term = p.get("source_term") or ""
+            code = pom_dict.resolve(term, _term_language(term))
+            if not code:
+                unresolved.append({"source_term": term, "by_size": p.get("by_size")})
+                continue
+            resolved_poms.append({**p, "pom_code": code})
+
+        pom_rows: list[PomMeasurement] = []
+        seen: set[tuple[str, str]] = set()
+        for p in resolved_poms:
             for size, value in p["by_size"].items():
+                key = (str(size), p["pom_code"])
+                if key in seen:           # guard the (spec_sheet_id, size, pom_code) unique constraint
+                    logger.warning("duplicate (size=%s pom=%s) — keeping first", size, p["pom_code"])
+                    continue
+                seen.add(key)
+                conf = p.get("confidence")
                 pom_rows.append(PomMeasurement(
                     spec_sheet_id=spec_sheet.id, size=size, pom_code=p["pom_code"],
                     value=Decimal(str(value)),
                     pitch=Decimal(str(p["pitch"])) if p.get("pitch") is not None else None,
                     source_term=p.get("source_term"),
-                    extracted_by=p.get("extracted_by", ExtractionSource.DETERMINISTIC.value),
-                    confidence=Decimal(str(p.get("confidence", 0.99))),
+                    extracted_by=p.get("extracted_by") or intermediate.get("extracted_by")
+                    or ExtractionSource.MANUAL.value,
+                    confidence=Decimal(str(conf)) if conf is not None else Decimal("0.99"),
                 ))
         await self.repo.replace_pom_measurements(spec_sheet.id, pom_rows)
 
@@ -436,7 +549,7 @@ class BomService:
         base_size = (intermediate.get("pattern_reference") or {}).get("base_size") \
             or (sizes[0] if sizes else None) \
             or (intermediate.get("attributes") or {}).get("sms_size")
-        poms_for_size = self._poms_by_size(intermediate["poms"])
+        poms_for_size = self._poms_by_size(resolved_poms)
 
         # ── 6. build bom_items with DCM resolution + costing ──────────────────
         bom = Bom(
@@ -488,23 +601,76 @@ class BomService:
         # ── 7. cross-checks (§8) ──────────────────────────────────────────────
         ctx = {
             "attributes": spec_sheet.attributes or {},
-            "poms": intermediate["poms"], "sizes": sizes,
+            "poms": resolved_poms, "sizes": sizes,
             "per_size_qty": identity.per_size_qty, "order_qty": identity.order_qty,
             "pattern_reference": pr_block,
         }
         flags = checks_mod.run_checks(client_match_code, ctx, checks_cfg)
 
-        await self._audit(user, "BOM_GENERATE", bom.id, after=self._bom_snapshot(bom))
-        logger.info("generate_bom done: bom=%s items=%d fob=%s flags=%d unresolved=%d",
-                    bom.id, len(bom.items), bom.garment_fob_price, len(flags),
-                    len(intermediate["unresolved"]))
-        return {"bom": self._bom_view(bom), "flags": flags,
-                "order": {"order_qty": identity.order_qty,
-                          "per_size_qty": identity.per_size_qty,
-                          "warnings": (order_identity or {}).get("warnings", [])},
-                "extraction": {"poms": len(pom_rows), "unresolved": intermediate["unresolved"],
-                               "pattern_reference": pr_block}}
+        # Prepend a clear flag when the extractor couldn't read the spec — this
+        # supersedes the cascade of "missing X" check warnings the user would
+        # otherwise see, and tells the cutting manager up-front: enter manually.
+        if manual_entry_required:
+            flags = [{
+                "code": "extraction_failed",
+                "severity": "error",
+                "message": ("Spec sheet could not be read automatically. "
+                            "Please enter material lines manually before submitting for review."),
+                "details": ext_warnings,
+            }] + flags
+            
+        # Also surface order-sheet extraction warnings (manual_entry_required on the
+        # order side, dropped negative qtys, etc.) as a flag — these affect the
+        # quantities the cutting manager will plan against.
+        order_warnings = (order_identity or {}).get("warnings", [])
+        if "manual_entry_required" in order_warnings:
+            flags = [{
+                "code": "order_extraction_failed",
+                "severity": "error",
+                "message": ("Order sheet could not be read automatically. "
+                            "Order quantities must be entered manually."),
+                "details": order_warnings,
+            }] + flags
 
+        await self._audit(user, "BOM_GENERATE", bom.id, after=self._bom_snapshot(bom))
+        logger.info("generate_bom done: bom=%s items=%d fob=%s flags=%d unresolved=%d manual=%s",
+                    bom.id, len(bom.items), bom.garment_fob_price, len(flags),
+                    len(unresolved), manual_entry_required)
+        
+        now = datetime.now(timezone.utc)
+        spec_extraction_row.promoted_to_spec_sheet_id = spec_sheet.id
+        spec_extraction_row.promoted_at = now
+        await self.repo.save(spec_extraction_row)
+ 
+        # Order side — find the row we wrote earlier via the id we tucked into
+        # parsed_order (above in generate_for_order). Only present when there
+        # was an order to extract.
+        order_extraction_id = (order_identity or {}).get("_order_extraction_id")
+        if order_extraction_id:
+            order_extraction_row = await self.repo.get_order_extraction(
+                uuid.UUID(order_extraction_id),
+            )
+            if order_extraction_row is not None:
+                order_extraction_row.promoted_to_bom_id = bom.id
+                order_extraction_row.promoted_at = now
+                await self.repo.save(order_extraction_row)
+            
+        return {
+            "bom": self._bom_view(bom),
+            "flags": flags,
+            "order": {
+                "order_qty": identity.order_qty,
+                "per_size_qty": identity.per_size_qty,
+                "warnings": (order_identity or {}).get("warnings", []),
+            },
+            "extraction": {
+                "poms": len(pom_rows),
+                "unresolved": unresolved,
+                "pattern_reference": pr_block,
+                "warnings": ext_warnings,
+                "manual_entry_required": manual_entry_required,
+            },
+        }
     # ── the ordered DCM fallback (§2 Sources 1→3; Source 4 is the edit/confirm) ─
     async def _resolve_dcm(self, *, client_id, style_signature, garment_type_id,
                            garment_type_row, material_category, size, poms_for_size,
@@ -1046,7 +1212,65 @@ class BomService:
                 "annotation": i.annotation,
             } for i in bom.items],
         }
-
+        
+    @staticmethod
+    def _build_spec_extraction_row(
+        intermediate: dict,
+        source_document_id: uuid.UUID | None,
+    ) -> SpecExtraction:
+        """Turn an extract_spec intermediate dict into a SpecExtraction row. The
+        full intermediate becomes raw_payload (audit truth); a handful of fields
+        are denormalized as columns for dashboard queries.
+    
+        Called BEFORE the operational tables (spec_sheet, pom_measurement) are
+        written, so the staging row exists even when promotion fails. The caller
+        stamps promoted_at + promoted_to_spec_sheet_id once promotion completes."""
+        warnings = intermediate.get("warnings") or []
+        measurements = intermediate.get("measurements") or intermediate.get("poms") or []
+        accessories = (intermediate.get("attributes") or {}).get("accessories") or []
+        conf = intermediate.get("confidence_overall")
+        return SpecExtraction(
+            source_document_id=source_document_id,
+            extracted_by=intermediate.get("extracted_by") or "manual",
+            confidence_overall=Decimal(str(conf)) if conf is not None else None,
+            raw_payload=intermediate,
+            style_no=intermediate.get("style_no"),
+            client_name=intermediate.get("client_name"),
+            garment_type_guess=intermediate.get("garment_type_guess"),
+            num_measurements=len(measurements),
+            num_accessories=len(accessories),
+            num_warnings=len(warnings),
+            manual_entry_required="manual_entry_required" in warnings,
+        )
+        
+        
+    @staticmethod
+    def _build_order_extraction_row(
+        parsed_order: dict,
+        source_document_id: uuid.UUID | None,
+    ) -> OrderExtraction:
+        """Turn an extract_order intermediate dict into an OrderExtraction row.
+        Same shape as the spec version above."""
+        warnings = parsed_order.get("warnings") or []
+        lines = parsed_order.get("lines") or []
+        conf = parsed_order.get("confidence_overall")
+        return OrderExtraction(
+            source_document_id=source_document_id,
+            extracted_by=parsed_order.get("extracted_by") or "manual",
+            confidence_overall=Decimal(str(conf)) if conf is not None else None,
+            raw_payload=parsed_order,
+            order_number=parsed_order.get("order_number"),
+            style_no=parsed_order.get("style_no") or parsed_order.get("style_name"),
+            client_name=parsed_order.get("client_name"),
+            season=parsed_order.get("season"),
+            currency=parsed_order.get("currency"),
+            order_qty=int(parsed_order.get("order_qty") or 0),
+            num_lines=len(lines),
+            num_warnings=len(warnings),
+            manual_entry_required="manual_entry_required" in warnings,
+        )
+    
+    
     async def _audit(self, user, action: str, entity_id, *, before=None, after=None) -> None:
         self.db.add(AuditLog(
             actor_user_id=getattr(user, "id", None), action=action,

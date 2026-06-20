@@ -260,3 +260,108 @@ class PatternReference(Base, UUIDMixin, TimestampMixin):
         GUID(), ForeignKey("style_consumption_template.id"), nullable=True
     )
     notes: Mapped[str | None] = mapped_column(Text)
+    
+"""
+================================================================================
+APPEND TO: app/modules/bom/models.py
+================================================================================
+Two new staging tables that capture the RAW extraction output before promotion
+into the operational tables (spec_sheet / pom_measurement / bom). Same column
+conventions as the rest of the module — UUIDMixin + TimestampMixin, GUID PKs,
+JSON_VARIANT for free-shape payloads, VARCHAR for enum values.
+
+Paste this block AFTER the PatternReference class. No other changes to the file.
+
+The matching Alembic migration is in the next file.
+================================================================================
+"""
+
+# (imports at the top of the file already cover everything we need:
+#  UUIDMixin, TimestampMixin, GUID, JSON_VARIANT, Numeric, String, Integer,
+#  DateTime, ForeignKey, Mapped, mapped_column)
+
+
+class SpecExtraction(Base, UUIDMixin, TimestampMixin):
+    """The RAW spec-extraction output, before promotion into spec_sheet +
+    pom_measurement. One row per extraction attempt (including failed/manual
+    ones). The full Pydantic dump lives in raw_payload; the hot columns are
+    denormalized copies so dashboards can group/filter without JSON parsing.
+
+    Lifecycle: created at the start of generate_bom; promoted_at + promoted_to_*
+    are stamped once the operational tables are written. A row with promoted_at
+    NULL is an extraction the service hasn't (yet) committed to the operational
+    schema — either still in flight, failed mid-promotion, or a future async/
+    preview flow that extracts without promoting.
+
+    The retention story is up to ops: orphan rows (promoted_at NULL, older than
+    N days) can be GC'd; promoted rows are kept for audit per BOM retention policy."""
+    __tablename__ = "spec_extraction"
+
+    # The source upload this came from. Nullable for the rare flow where the
+    # bytes were passed in without a corresponding Document row (tests).
+    source_document_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("document.id"), nullable=True, index=True,
+    )
+    # Engine that produced raw_payload. Matches ExtractedSpec.extracted_by
+    # ('gemini' | 'groq' | 'manual'). Kept as String(20) for back-compat with old
+    # rows that may carry 'heuristic' or 'deterministic'.
+    extracted_by: Mapped[str] = mapped_column(String(20), index=True)
+    confidence_overall: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+
+    # The FULL Pydantic dump — the audit truth. Includes warnings, accessories,
+    # technical_details, etc. — anything model_dump(mode='json') produced.
+    raw_payload: Mapped[dict] = mapped_column(JSON_VARIANT)
+
+    # Denormalized hot columns for dashboards / analytics. Nullable because a
+    # failed extraction has none of these. NEVER read these for business logic —
+    # always read from the operational tables (spec_sheet etc.) for that. These
+    # are query-fast copies only.
+    style_no: Mapped[str | None] = mapped_column(String(120), index=True)
+    client_name: Mapped[str | None] = mapped_column(String(120))
+    garment_type_guess: Mapped[str | None] = mapped_column(String(60))
+    num_measurements: Mapped[int] = mapped_column(Integer, default=0)
+    num_accessories: Mapped[int] = mapped_column(Integer, default=0)
+    num_warnings: Mapped[int] = mapped_column(Integer, default=0)
+    manual_entry_required: Mapped[bool] = mapped_column(default=False, index=True)
+
+    # Promotion stamps. NULL until the service has written through to spec_sheet
+    # (and pom_measurement). Two columns so we can audit "extracted but not
+    # promoted" (orphan) and "extracted AND promoted to X" cases.
+    promoted_to_spec_sheet_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("spec_sheet.id"), nullable=True, index=True,
+    )
+    promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OrderExtraction(Base, UUIDMixin, TimestampMixin):
+    """The RAW order-extraction output, before promotion into bom (and, at
+    approval, the Client→Order→Style→SKU tree via clients.service). Same
+    lifecycle pattern as SpecExtraction — raw_payload is the audit truth, hot
+    columns are denormalized for query speed."""
+    __tablename__ = "order_extraction"
+
+    source_document_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("document.id"), nullable=True, index=True,
+    )
+    extracted_by: Mapped[str] = mapped_column(String(20), index=True)
+    confidence_overall: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+
+    raw_payload: Mapped[dict] = mapped_column(JSON_VARIANT)
+
+    # Denormalized hot columns
+    order_number: Mapped[str | None] = mapped_column(String(120), index=True)
+    style_no: Mapped[str | None] = mapped_column(String(120), index=True)
+    client_name: Mapped[str | None] = mapped_column(String(120))
+    season: Mapped[str | None] = mapped_column(String(20))
+    currency: Mapped[str | None] = mapped_column(String(3))
+    order_qty: Mapped[int] = mapped_column(Integer, default=0)
+    num_lines: Mapped[int] = mapped_column(Integer, default=0)
+    num_warnings: Mapped[int] = mapped_column(Integer, default=0)
+    manual_entry_required: Mapped[bool] = mapped_column(default=False, index=True)
+
+    # Promoted into a Bom (and eventually a client_order at MD approval — but
+    # bom.id is the immediate target). NULL until the service writes the Bom row.
+    promoted_to_bom_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("bom.id"), nullable=True, index=True,
+    )
+    promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
