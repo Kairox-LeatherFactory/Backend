@@ -299,7 +299,7 @@ class BomService:
                 order_match_code or client_match_code,
             )
         
-        logger.info("return full detail from generate_for_order", parsed_order=parsed_order)
+        logger.info(f"return full detail from generate_for_order: {parsed_order}")
             
         order_extraction_row: OrderExtraction | None = None
         if order_bytes:

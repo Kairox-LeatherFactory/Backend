@@ -254,51 +254,51 @@ class ProcurementService:
             payload=envelope,
         )
 
-    # ── idempotent re-hit on an already-seen sha256 ──────────────────────────
-    # async def _handle_existing(self, sub, kind, existing: Document) -> dict | None:
-    #     # The sha cache is a valid short-circuit ONLY for a TRUE idempotent re-upload:
-    #     # the same bytes, into the SAME slot (kind), of the SAME submission. Two reasons
-    #     # it must be scoped this tightly — both are silently-wrong otherwise:
-    #     #   • cross-submission — `Document.sha256` is globally unique and
-    #     #     `Document.submission_id` pins each row to ONE submission, so the bytes can
-    #     #     neither be re-stored here nor borrow another submission's row. The old code
-    #     #     returned success_envelope yet skipped _accept_into_slot → HTTP 201 "accepted"
-    #     #     with an empty slot that can never reach COMPLETE (dead-end).
-    #     #   • cross-kind (same submission, other slot) — repointing the spec slot at an
-    #     #     accepted ORDER doc let one physical file masquerade as both sheets and the
-    #     #     submission flipped COMPLETE with spec validation never run.
-    #     # A byte-collision with a non-procurement Document (BOM/PO PDF: submission_id NULL,
-    #     # kind bom_quote/supplier_po_pdf) also lands here and is correctly a clean 409.
-    #     if existing.submission_id != sub.id or existing.kind != kind:
-    #         raise UploadError(
-    #             RejectReason.DUPLICATE_CONTENT,
-    #             "A byte-identical file is already on record and cannot be reused for this slot.",
-    #             payload=presenters.duplicate_envelope(sub, existing, kind),
-    #         )
+    #── idempotent re-hit on an already-seen sha256 ──────────────────────────
+    async def _handle_existing(self, sub, kind, existing: Document) -> dict | None:
+        # The sha cache is a valid short-circuit ONLY for a TRUE idempotent re-upload:
+        # the same bytes, into the SAME slot (kind), of the SAME submission. Two reasons
+        # it must be scoped this tightly — both are silently-wrong otherwise:
+        #   • cross-submission — `Document.sha256` is globally unique and
+        #     `Document.submission_id` pins each row to ONE submission, so the bytes can
+        #     neither be re-stored here nor borrow another submission's row. The old code
+        #     returned success_envelope yet skipped _accept_into_slot → HTTP 201 "accepted"
+        #     with an empty slot that can never reach COMPLETE (dead-end).
+        #   • cross-kind (same submission, other slot) — repointing the spec slot at an
+        #     accepted ORDER doc let one physical file masquerade as both sheets and the
+        #     submission flipped COMPLETE with spec validation never run.
+        # A byte-collision with a non-procurement Document (BOM/PO PDF: submission_id NULL,
+        # kind bom_quote/supplier_po_pdf) also lands here and is correctly a clean 409.
+        if existing.submission_id != sub.id or existing.kind != kind:
+            raise UploadError(
+                RejectReason.DUPLICATE_CONTENT,
+                "A byte-identical file is already on record and cannot be reused for this slot.",
+                payload=presenters.duplicate_envelope(sub, existing, kind),
+            )
 
-    #     if existing.validation_status == ValidationStatus.ACCEPTED.value:
-    #         # Genuine same-slot re-upload → re-point the slot (no new row, no LLM bill).
-    #         await self._accept_into_slot(sub, kind, existing)
-    #         return presenters.success_envelope(sub, existing)
+        if existing.validation_status == ValidationStatus.ACCEPTED.value:
+            # Genuine same-slot re-upload → re-point the slot (no new row, no LLM bill).
+            await self._accept_into_slot(sub, kind, existing)
+            return presenters.success_envelope(sub, existing)
 
-    #     # NEEDS_MANUAL_REVIEW is NOT terminal — it means "automated gates were inconclusive,
-    #     # look again". Pinning it in the sha cache would make every re-upload replay the same
-    #     # stalemate (and silently skip the OCR/vision rungs added later). Evict the stale row
-    #     # and return None so the caller re-runs the full pipeline. Re-billing the LLM/vision is
-    #     # the intended cost of resolving an unresolved doc; a hard reject below stays cached.
-    #     if existing.validation_status == ValidationStatus.NEEDS_MANUAL_REVIEW.value:
-    #         await self.repo.delete_document(existing)
-    #         return None
+        # NEEDS_MANUAL_REVIEW is NOT terminal — it means "automated gates were inconclusive,
+        # look again". Pinning it in the sha cache would make every re-upload replay the same
+        # stalemate (and silently skip the OCR/vision rungs added later). Evict the stale row
+        # and return None so the caller re-runs the full pipeline. Re-billing the LLM/vision is
+        # the intended cost of resolving an unresolved doc; a hard reject below stays cached.
+        if existing.validation_status == ValidationStatus.NEEDS_MANUAL_REVIEW.value:
+            await self.repo.delete_document(existing)
+            return None
 
-    #     # A previously HARD-rejected file (not_an_order_sheet / wrong_slot / …) → replay
-    #     # the cached diagnostics; that verdict is deterministic, no point re-billing.
-    #     sig = existing.validation_signals or {}
-    #     reason = sig.get("reason_code") or RejectReason.NEEDS_MANUAL_REVIEW.value
-    #     raise UploadError(
-    #         RejectReason(reason),
-    #         "Document previously failed validation (cached result).",
-    #         payload=presenters.rejection_envelope_from_row(sub, existing),
-    #     )
+        # A previously HARD-rejected file (not_an_order_sheet / wrong_slot / …) → replay
+        # the cached diagnostics; that verdict is deterministic, no point re-billing.
+        sig = existing.validation_signals or {}
+        reason = sig.get("reason_code") or RejectReason.NEEDS_MANUAL_REVIEW.value
+        raise UploadError(
+            RejectReason(reason),
+            "Document previously failed validation (cached result).",
+            payload=presenters.rejection_envelope_from_row(sub, existing),
+        )
 
     # ══════════════════════════════════════════════════════════════════════
     # Reads
@@ -358,7 +358,7 @@ class ProcurementService:
             return {"submission_id": str(sub.id), "status": "consumed",
                     "replayed": True, "bom": existing_bom}
 
-        if sub.status != SubmissionStatus.COMPLETE.value:
+        if sub.status != SubmissionStatus.OPEN.value:
             raise HTTPException(409, detail={
                 "error": "submission_not_ready",
                 "message": "Stage 2 requires a COMPLETE submission (both slots accepted).",

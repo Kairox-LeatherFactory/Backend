@@ -363,6 +363,8 @@ def extract_order(data: bytes, filename: str, mime: str | None = None,
                   client_match_code: str | None = None) -> dict:
     """Extract a leather order sheet into the legacy intermediate dict the service
     layer reads. Never raises — failures surface as `manual_entry_required`."""
+    logger.info("calling extract_order with filename=%r mime=%r client_match_code=%r "
+                "data_length=%d", filename, mime, client_match_code, len(data))
     order: ExtractedOrder | None = None
     try:
         kind = _resolve_kind(data, filename, mime)
