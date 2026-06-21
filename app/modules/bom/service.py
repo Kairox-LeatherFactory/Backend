@@ -344,6 +344,7 @@ class BomService:
     # ══════════════════════════════════════════════════════════════════════
     # Generation (§1, §2, §5, §6)
     # ══════════════════════════════════════════════════════════════════════
+    
     async def generate_bom(
         self, user, *, spec_sheet, spec_bytes: bytes, filename: str,
         identity: StyleIdentity, client_match_code: str | None,
@@ -361,38 +362,150 @@ class BomService:
         logger.info("generate_bom start: order=%s style=%s spec_type=%s client_match=%s seeds=%s",
                     identity.client_order_id, identity.style_id, spec_sheet.spec_type,
                     client_match_code, len(line_seeds) if line_seeds is not None else "auto")
+        
+        # Extract Data From Spec Sheet
+        # Looks for:
+
+        # client_code == "NIKE"
+        # and
+        # spec_type == "measurement"
+
+        # If found:
+
+        # {"client_code": "NIKE", "spec_type": "measurement"}
+
+        # returns immediately.
+        
         adapter = select_adapter(spec_sheet.spec_type, client_match_code, adapters)
+        
+        # language	source_term	    pom_code
+        # EN	        Chest Width	    CHEST
+        # EN	        Body Length	    LENGTH
+        # TR	        Göğüs	        CHEST
+        
+        # [
+        # ("EN", "Chest Width", "CHEST"),
+        # ("EN", "Body Length", "LENGTH"),
+        # ("TR", "Göğüs", "CHEST"),
+        #  IT CONVERT THE TABLE INTO TUPLES
+
         pom_dict = PomDict(await self.repo.pom_dictionary_rows())
+        
+        # intermediate = extract_spec(
+        # spec_bytes,
+        # filename,
+        # adapter,
+        # pom_dict,
+        # spec_sheet_id=str(spec_sheet.id),
+        # extractor=extractor,
+        # )
+        # WITHOUT THRESHOLD IT LOOK LIKE THIS WE PUT A PARAMETER IN EXTRACT SPEC SHEET
+        
         intermediate = await run_in_threadpool(
             extract_spec, spec_bytes, filename, adapter, pom_dict,
             spec_sheet_id=str(spec_sheet.id), extractor=extractor,
         )
+        
+    # IT RETURN SOME LIKE THIS
+        
+    #     {
+    #    "poms": [
+    #     {
+    #         "pom_code": "CHEST",
+    #         "by_size": {
+    #             "S": 20,
+    #             "M": 21
+    #         }
+    #     }
+    # ],
+    #   "attributes": [
+    #     {
+    #         "name": "Fabric",
+    #         "value": "Cotton"
+    #     }
+    #     ],
+    #     "warnings": []
+    #     }
+        
 
         # ── 2. persist pom_measurement rows (replace-on-key) ──────────────────
         pom_rows: list[PomMeasurement] = []
-        for p in intermediate["poms"]:
-            for size, value in p["by_size"].items():
+        for p in intermediate["poms"]: # TAKE A POMS ONLY AND PUT A LOOP 
+            for size, value in p["by_size"].items(): # Loop through all sizes and values. INSIDE A POMS
+    #            "by_size": {
+    #             "S": 20,
+    #             "M": 21
+    #         }
+            
+            # FIRST ITERATION
+            # size = "S"
+            # value = 20
+
+            # Second iteration:
+
+            # size = "M"
+            # value = 21
                 pom_rows.append(PomMeasurement(
                     spec_sheet_id=spec_sheet.id, size=size, pom_code=p["pom_code"],
                     value=Decimal(str(value)),
+                    # Store pitch if available.
                     pitch=Decimal(str(p["pitch"])) if p.get("pitch") is not None else None,
+                    
+                    # Store the original text found in Excel.
                     source_term=p.get("source_term"),
+                    # Store how the value was extracted.
+                    
+                    #EXTRACT USING DETERMINISTIC VALUE
                     extracted_by=p.get("extracted_by", ExtractionSource.DETERMINISTIC.value),
                     confidence=Decimal(str(p.get("confidence", 0.99))),
                 ))
+                
+                # DELETE A OLD MEASUREMENTS AND ADD NEW MEASUREMENTS
         await self.repo.replace_pom_measurements(spec_sheet.id, pom_rows)
 
         # ── 3. merge extracted attributes into the spec sheet ─────────────────
+        #   ATTRIBUTES :  {
+        # "fabric": "Cotton",
+        # "color": "Blue"
+        #     }
         if intermediate.get("attributes"):
+        
+        # Suppose the database already has:
+
+        # spec_sheet.attributes = {
+        #     "brand": "Nike",
+        #     "season": "Summer"
+        #     }
+        
+        # intermediate["attributes"] = {
+        # "fabric": "Cotton",
+        # "color": "Blue"
+        # }
+        
+        # becomes:
+
+        # {
+        #     "brand": "Nike",
+        #     "season": "Summer",
+        #     "fabric": "Cotton",
+        #     "color": "Blue"
+        # }
             spec_sheet.attributes = {**(spec_sheet.attributes or {}),
                                      **intermediate["attributes"]}
+            
+            # SAVE TO DB
             await self.repo.save(spec_sheet)
 
         # ── 3b. seed the BOM lines AFTER extraction (the ordering fix) ────────
         # Material/lining/accessory seeds now come from the spec's REAL attributes (not
         # the empty dict the SpecSheet was born with), and the cost lines are keyed by the
         # detected garment type. An explicit line_seeds (legacy/direct callers) is kept.
+        
+        # Check if line seeds were provided
         if line_seeds is None:
+            # IF NONE then build them automatically
+            # GENERATING A HOW MUCH PRICE FOR EACH STAGE 
+            # Take the extracted spec attributes and garment type, then create initial BOM (Bill of Materials) line items. GET THE BILL
             line_seeds = self._build_line_seeds(
                 spec_sheet.attributes, garment_code=intermediate.get("garment_type_guess"))
 
@@ -400,13 +513,32 @@ class BomService:
         # DCM memory back-fill both key templates on garment_type_id, so the lookup MUST
         # use the same gt_id the back-fill writes (was hard-coded None → never matched).
         gt = await self.repo.get_garment_type(intermediate.get("garment_type_guess"))
+        
+        # CHECKING THIS TYPE IS AVAILABKLE IN DB IF NOT NONE
         gt_id = gt.id if gt else None
 
         # ── 4. pattern reference (resolve to template memory if possible) ─────
         pattern_template_id = None
         pr_block = None
+        
+        # Nothing has been found yet.
+        
+    #     intermediate = {
+    # "pattern_reference": {
+    #     "pattern_code": "JKT-001",
+    #     "base_size": "M",
+    #     "source_term": "Pattern Ref"
+    #         }
+    #     }
+        
         if intermediate.get("pattern_reference"):
             pr = intermediate["pattern_reference"]
+            
+    #         "pattern_code": "JKT-001",
+    # #     "base_size": "M",
+    # #     "source_term": "Pattern Ref"
+            
+            # SAVE PATTERN IN DB 
             ref = await self.repo.add_pattern_reference(PatternReference(
                 client_id=identity.client_id, spec_sheet_id=spec_sheet.id,
                 pattern_code=pr["pattern_code"], base_size=pr.get("base_size"),
@@ -415,6 +547,11 @@ class BomService:
             # Try to resolve to a confirmed template keyed on the pattern code as a
             # signature (the base style's confirmed consumption — §2 Source 1 path).
             # The base style was back-filled under THIS garment type, so key on gt_id.
+            
+            # Find a matching consumption template
+            
+            # Searches for an already-confirmed template.
+            
             tmpl = await self.repo.find_consumption_template(
                 client_id=identity.client_id,
                 style_signature=pr["pattern_code"].strip().upper(),
@@ -430,15 +567,31 @@ class BomService:
                         or ref.resolved_style_id is not None}
 
         # ── 5. resolution context ─────────────────────────────────────────────
+        
+        # GETTING INTO CORRECT FORMAT FROM STYLE SIG
         sig = style_signature(customer_ref=identity.customer_ref,
                               internal_ref=identity.internal_ref, name=identity.name)
+        
+        # GETTING INTERMEDIATE SIZE
         sizes = intermediate.get("sizes") or []
+        
+        # GETTING A INTERMEDIATE PATTEN_REF INSIDE BASE SIZE
         base_size = (intermediate.get("pattern_reference") or {}).get("base_size") \
             or (sizes[0] if sizes else None) \
             or (intermediate.get("attributes") or {}).get("sms_size")
         poms_for_size = self._poms_by_size(intermediate["poms"])
+    # I GET LIKE THIS FROM POMS_BY_SIZE
+    #     {
+    # "S": {"CHEST": 20},
+    # "M": {"CHEST": 21},
+    # "L": {"CHEST": 22}
+    #     }
 
         # ── 6. build bom_items with DCM resolution + costing ──────────────────
+        
+        # This is the BOM creation section.
+        
+        # Create BOM Header
         bom = Bom(
             submission_id=submission_id, client_id=identity.client_id,
             client_order_id=identity.client_order_id, style_id=identity.style_id,
@@ -448,13 +601,60 @@ class BomService:
             order_identity=self._order_identity_snapshot(identity, order_identity),
         )
 
+        # Create item list
         items: list[BomItem] = []
         for seed in line_seeds:
+            # Loop through BOM seeds
+            # EXAMPLE LINE SEED
+    #         LineSeed(
+    #     category="MAIN_MATERIAL",
+    #     name="Cow Leather"
+    # ),
+
+    # LineSeed(
+    #     category="LINING",
+    #     name="Polyester"
+    # ),
+
+    # LineSeed(
+    #     category="ACCESSORY",
+    #     name="Button",
+    #     supplied_by="buyer"
+    # ),
+
+    # LineSeed(
+    #     category="ACCESSORY",
+    #     name="Zip"
+    # ),
+
+    # LineSeed(
+    #     category="COST",
+    #     name="Stitching",
+    #     unit_price=0.50
+    # ),
+
+    # LineSeed(
+    #     category="COST",
+    #     name="Packing",
+    #     unit_price=0.20
+    # )
+            
+            
             price = Decimal("0") if (seed.supplied_by or "").lower() in ("client", "buyer") \
                 else (Decimal(str(seed.unit_price)) if seed.unit_price is not None else Decimal("0"))
             dcm_source = None
             dcm_conf = None
-            if seed.category in MATERIAL_DCM_CATEGORIES:
+            if seed.category in MATERIAL_DCM_CATEGORIES: # MAIN MATERIAL 
+                
+                # Find the DCM (Direct Consumption Measurement / material consumption per garment) using a priority ordeR
+                # Suppose database finds:
+
+                # Leather Jacket
+                # Consumption = 18.5 dm²
+                
+                # RETURNS FROM DB
+                # dcm = Decimal("18.5")
+                # src = TEMPLATE
                 dcm, src = await self._resolve_dcm(
                     client_id=identity.client_id, style_signature=sig, garment_type_id=gt_id,
                     garment_type_row=gt, material_category=seed.category, size=base_size,
@@ -467,7 +667,18 @@ class BomService:
             else:
                 qpg = Decimal(str(seed.qty_per_garment)) if seed.qty_per_garment is not None \
                     else Decimal("1")
+                    # Zipper
+                    # Button
+                    # Label
+                    # Hang Tag
+                    # Packaging
+                    # Labor
 
+                    # These don't need DCM.
+
+                    # So we use the quantity already stored in the seed.
+                    
+            # Create BomItem
             item = BomItem(
                 category=seed.category, name=seed.name, material_color=seed.material_color,
                 qty_per_garment=qpg, uom=seed.uom, unit_price=price,
@@ -475,8 +686,53 @@ class BomService:
                 dcm_source=dcm_source, dcm_confidence=dcm_conf,
             )
             items.append(item)
+            
+            # FINALLY WE WILL GET
+            
+#             items = [
+
+#     BomItem(
+#         name="Cow Leather",
+#         qty_per_garment=18.5,
+#         unit_price=0,
+#         dcm_source="TEMPLATE"
+#     ),
+
+#     BomItem(
+#         name="Polyester",
+#         qty_per_garment=12,
+#         unit_price=0,
+#         dcm_source="SIMILAR_STYLE"
+#     ),
+
+#     BomItem(
+#         name="Button",
+#         qty_per_garment=1,
+#         unit_price=0
+#     ),
+
+#     BomItem(
+#         name="Zip",
+#         qty_per_garment=1,
+#         unit_price=0
+#     ),
+
+#     BomItem(
+#         name="Stitching",
+#         qty_per_garment=1,
+#         unit_price=0.50
+#     ),
+
+#     BomItem(
+#         name="Packing",
+#         qty_per_garment=1,
+#         unit_price=0.20
+#     )
+# ]
 
         # cost rollup
+        # CALCULATING THE COST USING RECOMPUTE BOM
+        
         self._recompute(bom, items, base_size)
         bom.items = items
         bom.source_document_id = spec_sheet.source_document_id
@@ -486,18 +742,42 @@ class BomService:
         bom = await self.repo.get_bom(bom.id)
 
         # ── 7. cross-checks (§8) ──────────────────────────────────────────────
+        
+        # This collects all extracted information into one dictionary.
+        
         ctx = {
             "attributes": spec_sheet.attributes or {},
             "poms": intermediate["poms"], "sizes": sizes,
             "per_size_qty": identity.per_size_qty, "order_qty": identity.order_qty,
             "pattern_reference": pr_block,
         }
+        
+        # MATCH THE CLIENT OTHERWISE RETURN FLAGS
         flags = checks_mod.run_checks(client_match_code, ctx, checks_cfg)
-
+        
+        # User: Ismail
+        # Action: BOM_GENERATE
+        # BOM ID: 101
+        # Time: 2026-06-20
+        
+        # # STORE A HISTORY RECORD
         await self._audit(user, "BOM_GENERATE", bom.id, after=self._bom_snapshot(bom))
         logger.info("generate_bom done: bom=%s items=%d fob=%s flags=%d unresolved=%d",
                     bom.id, len(bom.items), bom.garment_fob_price, len(flags),
                     len(intermediate["unresolved"]))
+        
+        # Log becomes:
+
+        # generate_bom done:
+        # bom=101
+        # items=6
+        # fob=15.25
+        # flags=2
+        # unresolved=1
+
+        # Useful for debugging.
+        
+        # RETURN A RESPONSE
         return {"bom": self._bom_view(bom), "flags": flags,
                 "order": {"order_qty": identity.order_qty,
                           "per_size_qty": identity.per_size_qty,
@@ -1054,3 +1334,4 @@ class BomService:
             at=datetime.now(timezone.utc),
         ))
         await self.repo.commit()
+        

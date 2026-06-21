@@ -149,16 +149,15 @@ class ProcurementService:
         logger.info("upload received: submission=%s kind=%s filename=%s size=%d sha=%s force=%s",
                     submission_id, kind, filename, len(data), sha[:12], override_manual_review)
 
-        # ── idempotency: byte-identical re-upload → cached result, no re-bill ─
-        # A cached ACCEPT or hard REJECT short-circuits here; a cached NEEDS_MANUAL_REVIEW
-        # is evicted and returns None so we fall through and RE-RUN the pipeline (that
-        # verdict is "unresolved", and the OCR/vision rungs may now settle it).
-        existing = await self.repo.get_document_by_sha(sha)
-        if existing is not None:
-            # helps to remove duplicate files
-            replay = await self._handle_existing(sub, kind, existing)
-            if replay is not None:
-                return replay
+        # ── TESTING PHASE: dedupe/idempotency check disabled ──────────────────
+        # Re-uploading byte-identical content now always re-runs the full pipeline as
+        # if it were a brand-new file (no duplicate_content 409, no sha-cache replay).
+        # To restore production dedupe behavior, uncomment the block below.
+        # existing = await self.repo.get_document_by_sha(sha)
+        # if existing is not None:
+        #     replay = await self._handle_existing(sub, kind, existing)
+        #     if replay is not None:
+        #         return replay
 
         # ── run the blocking pipeline off the event loop ─────────────────────
         templates = await self.repo.active_templates(kind)
