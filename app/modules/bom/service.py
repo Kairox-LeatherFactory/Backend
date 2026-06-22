@@ -298,7 +298,7 @@ class BomService:
                 order_mime or _sniff_mime(order_bytes),
                 order_match_code or client_match_code,
             )
-        
+        print("extract_order result:", parsed_order)
         logger.info(f"return full detail from generate_for_order: {parsed_order}")
             
         order_extraction_row: OrderExtraction | None = None
@@ -447,7 +447,7 @@ class BomService:
             spec_sheet_id=str(spec_sheet.id),
         )
         
-        logger.info("return full detail from generate_for_spec", intermediate=intermediate)
+        logger.info("return full detail from generate_for_spec",intermediate)
         
         spec_extraction_row = self._build_spec_extraction_row(
             intermediate, source_document_id=spec_sheet.source_document_id,
