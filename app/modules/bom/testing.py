@@ -48,3 +48,6 @@
 # )
 
 # print(result)
+
+import app.core.config
+print(app.core.config.settings.virus_scan_enabled)
