@@ -317,6 +317,8 @@ def extract_spec(data: bytes, filename: str, mime: str | None = None, *,
       XLSX / XLSM           -> markdown -> text LLM
       CSV / TSV             -> text -> text LLM
       everything else       -> manual_entry_required"""
+    logger.info("calling extract_spec with filename=%r mime=%r spec_sheet_id=%r "
+                "data_length=%d", filename, mime, spec_sheet_id, len(data))
     spec: ExtractedSpec | None = None
     try:
         kind = _resolve_kind(data, filename, mime)
@@ -407,6 +409,7 @@ def extract_order(data: bytes, filename: str, mime: str | None = None,
     return _order_to_intermediate(order, client_match_code)
 
 
+
 # ════════════════════════════════════════════════════════════════════════════
 # LEGACY INTERMEDIATE SHIMS
 # The service layer reads specific keys (poms, attributes, sizes, unresolved,
@@ -478,6 +481,8 @@ def _order_to_intermediate(order: ExtractedOrder, client_match_code: str | None)
     d["internal_ref"] = None
     if client_match_code is not None:
         d["client_match_code"] = client_match_code
+        
+    print("it is from the extraction file in order_to_intermediate:", d)
 
     return d
 

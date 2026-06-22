@@ -358,7 +358,7 @@ class ProcurementService:
             return {"submission_id": str(sub.id), "status": "consumed",
                     "replayed": True, "bom": existing_bom}
 
-        if sub.status != SubmissionStatus.OPEN.value:
+        if sub.status != SubmissionStatus.COMPLETE.value:
             raise HTTPException(409, detail={
                 "error": "submission_not_ready",
                 "message": "Stage 2 requires a COMPLETE submission (both slots accepted).",
