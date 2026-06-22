@@ -15,7 +15,7 @@
 
 - client_code: beau_geste
   checks:
-    - { id: leather_thickness, kind: range, field: substance_mm,
+    - { id: leather_thickness, kind: range, field: leather_substance_mm,
         range: [0.6, 0.7], severity: warn }                 # 規格 column
     - { id: size_pitch_monotonic, kind: pom_pitch_monotonic, severity: warn }
     - { id: qty_sum, kind: size_qty_sum_equals_total, severity: error }
@@ -23,5 +23,5 @@
 - client_code: the_jackie
   checks:
     - { id: pattern_resolves, kind: pattern_reference_exists, severity: error }
-    - { id: leather_substance, kind: range, field: substance_mm,
+    - { id: leather_substance, kind: range, field: leather_substance_mm,
         range: [0.45, 0.50], severity: warn }

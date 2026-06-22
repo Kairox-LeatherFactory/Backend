@@ -46,11 +46,8 @@ class DcmSource(str, enum.Enum):
     SIMILAR_STYLE = "similar_style"
     AI_ESTIMATE = "ai_estimate"
     MANUAL = "manual"
-
-
+    
 class ExtractionSource(str, enum.Enum):
-    """Who produced an extracted value — the audit trail for the LLM policy."""
-    DETERMINISTIC = "deterministic"
     GEMINI = "gemini"
     GROQ = "groq"
     MANUAL = "manual"

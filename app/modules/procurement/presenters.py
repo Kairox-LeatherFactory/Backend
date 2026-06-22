@@ -51,6 +51,8 @@ def signals_blob(outcome) -> dict:
         "spec_type": outcome.spec_type,
         "client_match": outcome.client_match,
         "method": outcome.method.value,
+        "llm_label": getattr(outcome, "llm_label", None),
+        "llm_model": getattr(outcome, "llm_model", None),
     }
 
 
@@ -73,6 +75,8 @@ def document_block(doc) -> dict:
             "client_match": doc.client_match_code,
             "confidence": float(doc.classification_confidence) if doc.classification_confidence is not None else None,
             "method": doc.classification_method,
+            "llm_label": sig.get("llm_label"),
+            "llm_model": sig.get("llm_model"),
             "signals_matched": sig.get("matched", []),
             "signals_expected": sig.get("expected", []),
             "signals_found": sig.get("found", []),

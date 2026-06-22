@@ -1,3 +1,6 @@
+
+
+
 Procurement (Stage-1 intake)
 🔴 Cross-submission sha dedupe returns false "success" without filling the slot — service.py:166-171
 get_document_by_sha is a global lookup (repository.py:62, and Document.sha256 is globally unique — core/models.py:108). In _handle_existing, when an accepted document with the same bytes belongs to a different submission, the code returns success_envelope(sub, existing) but the if existing.submission_id == sub.id guard skips _accept_into_slot. The user gets HTTP 201 "accepted", yet the current submission's slot stays empty and can never reach COMPLETE / ready_for_stage_2. Re-uploading the same order sheet across two clients/submissions silently dead-ends.
@@ -128,3 +131,69 @@ Only ONE person autogenerates migrations, or you coordinate so two people never 
 Generate every migration against a DB that's already at head (not a create_all'd one), so the diff is a true delta, never a baseline-with-drops.
 
 Want me to go ahead and (a) generate the squashed baseline now — I'd need you to confirm I can drop your local factory DB — or (b) just fix the circular-FK ordering in the existing procurement migrations so the current chain at least applies cleanly without a squash? The squash is the real fix; the FK-ordering patch is a band-aid.
+
+
+
+
+[
+  {
+    "file": "app/modules/bom/service.py",
+    "line": 302,
+    "summary": "logger.info() is called with a structlog-style keyword arg ('parsed_order='/'intermediate=') which stdlib logging.Logger forwards to _log() and rejects with TypeError.",
+    "failure_scenario": "With INFO logging enabled (it is — the module emits many other info logs), `logger.info(\"...\", parsed_order=parsed_order)` raises `TypeError: Logger._log() got an unexpected keyword argument 'parsed_order'`, crashing every order-anchored generate. Same bug at service.py:450 (`intermediate=intermediate`) crashes every spec generate. Reproduced: `logging.basicConfig(level=INFO); log.info('m', x=1)` → TypeError."
+  },
+  {
+    "file": "app/modules/bom/dcm.py",
+    "line": 71,
+    "summary": "style_signature now returns None (was a guaranteed non-empty 'unknown' fallback); the value is inserted into the NOT NULL style_consumption_template.style_signature column.",
+    "failure_scenario": "Order-anchored BOMs hardcode customer_ref=internal_ref=None and name=order.style_no; when the LLM didn't extract a style number, sig=None. At confirm_cutting, upsert_consumption_template inserts StyleConsumptionTemplate(style_signature=None) into a non-nullable column → IntegrityError. At generation the None filter also never matches, silently disabling Source-1/Source-2 DCM template reuse."
+  },
+  {
+    "file": "app/modules/bom/models.py",
+    "line": 285,
+    "summary": "New SpecExtraction/OrderExtraction tables have no Alembic migration (only 3 migrations exist, none reference them), yet generate_bom writes to both on every run.",
+    "failure_scenario": "In any Alembic-owned environment (DEBUG=false production), the spec_extraction/order_extraction tables don't exist; the first add_spec_extraction flush raises ProgrammingError 'relation \"spec_extraction\" does not exist', failing every BOM generation. Violates CLAUDE.md §7 'Production schema is owned by Alembic.'"
+  },
+  {
+    "file": "app/core/config.py",
+    "line": 105,
+    "summary": "ocr_language default changed to 'eng+jap' but Tesseract's Japanese language code is 'jpn', not 'jap'.",
+    "failure_scenario": "pytesseract.image_to_string(img, lang='eng+jap') (procurement/sniffing.py:238) fails with 'Failed loading language \"jap\"' / TesseractError, disabling OCR for exactly the Japanese spec sheets (Beau Geste) this change was meant to support."
+  },
+  {
+    "file": "app/modules/bom/service.py",
+    "line": 492,
+    "summary": "pom_measurement.extracted_by resolves to the per-POM value first, which always defaults to 'heuristic', so the real engine label is never used.",
+    "failure_scenario": "POMRow.extracted_by defaults to 'heuristic' and the LLM measurement JSON doesn't set it per-row, so `p.get(\"extracted_by\")` is truthy ('heuristic') and `intermediate.get(\"extracted_by\")` ('gemini'/'groq') is never reached. Every LLM-extracted measurement is stamped 'heuristic' — not even a valid ExtractionSource value — corrupting the LLM-policy audit trail."
+  },
+  {
+    "file": "tests/test_procurement_stage2.py",
+    "line": 227,
+    "summary": "Tests import _prose_attributes from bom.extraction, which the rewrite deleted.",
+    "failure_scenario": "test_prose_attributes_extracts_labelling_and_accessories (line 227) and test_prose_attributes_omits_empty_accessories (line 251) do `from app.modules.bom.extraction import _prose_attributes` → ImportError at runtime; the diff removed the symbol without updating/removing these tests."
+  },
+  {
+    "file": "app/modules/bom/pdf_content.py",
+    "line": 132,
+    "summary": "pdf_to_llm_input parses the same PDF up to three times for a digital PDF.",
+    "failure_scenario": "pdf_is_scanned() opens the PDF twice (pdf_page_count + pdf_extract_text); when not scanned, pdf_to_llm_input calls pdf_extract_text a third time. Each call is a full fitz.open + text extraction — 3× redundant I/O/parse per extraction on the hot path. Extract once and reuse pages/text."
+  },
+  {
+    "file": "app/modules/bom/extraction.py",
+    "line": 487,
+    "summary": "validate_intermediate is defined and documented as 'called by service.py' but has no callers — the structural/range validation never runs.",
+    "failure_scenario": "The module advertises structural + range-warning validation of the intermediate, but grep shows zero call sites; out-of-range / malformed-row checks the design relies on are dead code, so no validation actually executes after extraction."
+  },
+  {
+    "file": "app/modules/bom/service.py",
+    "line": 183,
+    "summary": "_sniff_mime is duplicated verbatim in service.py and extraction.py.",
+    "failure_scenario": "Identical magic-byte sniffer exists at extraction.py:278; the service redefines it instead of importing, so the two copies can drift (e.g. one gains xlsm/zip handling the other lacks)."
+  },
+  {
+    "file": "app/modules/bom/models.py",
+    "line": 264,
+    "summary": "A pasted AI-instruction block is left as a no-op module-level string literal.",
+    "failure_scenario": "The triple-quoted block ('APPEND TO: app/modules/bom/models.py … Paste this block AFTER the PatternReference class') ships as a stray statement in models.py — dead noise that misleads readers into thinking the classes belong elsewhere."
+  }
+]

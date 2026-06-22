@@ -161,6 +161,8 @@ class ValidationOutcome:
     # Internal only (never serialised by presenters): a deliberate structural reject we
     # TRUST (the narrative-document guard) sets this so the vision rung can't re-open it.
     escalate_blocked: bool = False
+    llm_label: str | None = None
+    llm_model: str | None = None
 
     @property
     def accepted(self) -> bool:
@@ -399,6 +401,8 @@ def _interpret_result(
     doc_kind = result.get("doc_kind")
     evidence = [str(e) for e in (result.get("evidence") or [])][:8]
     client_guess = result.get("client_guess") or None
+    llm_label = result.get("llm_label")
+    llm_model = result.get("llm_model")
     logger.info("LLM verdict: expected=%s doc_kind=%s conf=%.2f accept_bar=%.2f client_guess=%s",
                 expected_kind, doc_kind, conf, accept_bar, client_guess)
 
@@ -434,6 +438,7 @@ def _interpret_result(
             client_match=client_guess, closest_profile=closest,
             signals_matched=evidence, signals_expected=expected_signals,
             evidence=evidence,
+            llm_label=llm_label, llm_model=llm_model,
         )
 
     # The model is confident it's NOT the expected kind → reject with its reason.

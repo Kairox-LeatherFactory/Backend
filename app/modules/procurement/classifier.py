@@ -82,7 +82,7 @@ _SCHEMA_HINT = """Return ONLY a JSON object with this exact shape:
 def _build_prompt(feats: DocFeatures, expected_kind: str, profiles: list[ProfileView]) -> str:
     known = ", ".join(sorted({p.client_code for p in profiles if p.client_code != "_generic"}))
     layout = "scanned/handwritten PDF (no text layer)" if feats.is_scanned_pdf else feats.mime
-    blob = (feats.text_blob or "")[:6000]
+    blob = (feats.text_blob or "")
     return (
         "You are a document-intake validator for a leather-garment factory's BOM "
         "procurement workflow. Decide whether the uploaded file is genuinely the "
@@ -99,19 +99,33 @@ def _build_prompt(feats: DocFeatures, expected_kind: str, profiles: list[Profile
     )
 
 
-def _coerce(raw: str) -> dict | None:
-    """Parse the model's JSON, tolerating ```json fences and surrounding prose."""
+def _coerce(raw) -> dict | None:
     if not raw:
         return None
-    s = raw.strip()
+
+    if isinstance(raw, list):
+        text_parts = []
+
+        for item in raw:
+            if isinstance(item, dict):
+                text_parts.append(item.get("text", ""))
+            else:
+                text_parts.append(str(item))
+
+        raw = "\n".join(text_parts)
+
+    s = str(raw).strip()
+
     if "```" in s:
         s = s.split("```", 2)[1]
         s = s[4:] if s.lower().startswith("json") else s
+
     start, end = s.find("{"), s.rfind("}")
     if start == -1 or end == -1:
         return None
+
     try:
-        return json.loads(s[start : end + 1])
+        return json.loads(s[start:end + 1])
     except json.JSONDecodeError:
         return None
 
@@ -134,7 +148,7 @@ def _init_model(spec: str):
             from langchain_google_genai import ChatGoogleGenerativeAI
 
             return ChatGoogleGenerativeAI(model=model, google_api_key=settings.gemini_api_key,
-                                          temperature=0, timeout=timeout, max_retries=retries)
+                                          temperature=0, timeout=100, max_retries=retries)
         if provider == "groq":
             if not settings.groq_api_key:
                 return None
@@ -149,22 +163,33 @@ def _init_model(spec: str):
 
 def build_default_classifier() -> Classifier | None:
     """Build the real Gemini→Groq classifier, or None if neither key is set."""
-    primary = _init_model(settings.extraction_model)
-    fallback = _init_model(settings.extraction_fallback_model)
+    primary_spec = settings.extraction_model
+    fallback_spec = settings.extraction_fallback_model
+    primary = _init_model(primary_spec)
+    fallback = _init_model(fallback_spec)
     if primary is None and fallback is None:
         return None
 
     def _classify(feats: DocFeatures, expected_kind: str,
                   profiles: list[ProfileView]) -> dict | None:
         prompt = _build_prompt(feats, expected_kind, profiles)
-        for label, model in (("gemini-primary", primary), ("groq-fallback", fallback)):
+        for label, model, spec in (("gemini-primary", primary, primary_spec),
+                            ("groq-fallback", fallback, fallback_spec)):
+
             if model is None:
                 continue
             try:
                 logger.info("classifying document via %s (expected_kind=%s)", label, expected_kind)
                 resp = model.invoke(prompt)
+                if label == "groq-fallback":
+                    logger.info(
+        "GROQ RESPONSE:\n%s",
+        getattr(resp, "content", "")
+    )
                 parsed = _coerce(getattr(resp, "content", "") or "")
                 if parsed is not None:
+                    parsed["llm_label"] = label
+                    parsed["llm_model"] = spec
                     return parsed
                 logger.warning("%s returned unparseable output → trying next rung", label)
             except Exception as exc:
@@ -210,7 +235,8 @@ def build_vision_classifier() -> VisionClassifier | None:
     CALLED FROM: ProcurementService._get_vision_classifier."""
     if not settings.vision_classifier_enabled:
         return None
-    model = _init_model(settings.vision_model)
+    spec = settings.vision_model
+    model = _init_model(spec)
     if model is None:
         return None
 
@@ -245,7 +271,11 @@ def build_vision_classifier() -> VisionClassifier | None:
 
         try:
             resp = model.invoke([HumanMessage(content=content)])
-            return _coerce(getattr(resp, "content", "") or "")
+            parsed = _coerce(getattr(resp, "content", "") or "")
+            if parsed is not None:
+                parsed["llm_label"] = "vision"
+                parsed["llm_model"] = spec
+            return parsed
         except Exception:
             return None         # provider/transport error → defer to a human
 

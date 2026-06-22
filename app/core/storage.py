@@ -106,7 +106,10 @@ class LocalStorageBackend(StorageBackend):
         # key is a forward-slash relative path; never allow escaping the root.
         safe = os.path.normpath(key).replace("\\", "/").lstrip("/")
         full = os.path.normpath(os.path.join(self.root, safe))
-        if not full.startswith(self.root):
+        # Guard against traversal. A bare `startswith(self.root)` is bypassable
+        # (root "/data/store" would accept "/data/store-evil/x"), so require an exact
+        # match or a real path-separator boundary.
+        if full != self.root and not full.startswith(self.root + os.sep):
             raise ValueError(f"unsafe storage key: {key!r}")
         return full
 

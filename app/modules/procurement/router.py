@@ -9,6 +9,7 @@ Endpoints (all under /api/v1/procurement; DM/MD-gated, MD bypasses as superuser)
   POST /submissions/{id}/order-sheet                 upload + validate order slot
   POST /submissions/{id}/spec-sheet                  upload + validate spec slot
   GET  /submissions/{id}                             status + Stage-2 readiness gate
+  POST /submissions/{id}/generate-bom                Stage-1 → Stage-2 trigger (→ DRAFT bom)
   GET  /submissions/{id}/documents/{document_id}     full per-document report
 
 The BOM (/boms), inventory (/inventory), and supplier-PO (/suppliers, /pos) routes
@@ -23,6 +24,7 @@ FUNCTION GUIDE  (path → handler → service call; all gated by _DMMD = DM+MD)
   POST /submissions/{id}/order-sheet     upload_order_sheet → upload_order_sheet (201 / 4xx diagnostics)
   POST /submissions/{id}/spec-sheet      upload_spec_sheet  → upload_spec_sheet
   GET  /submissions/{id}                 submission_status  → get_submission_status (the gate)
+  POST /submissions/{id}/generate-bom    generate_bom       → generate_bom_from_submission ({submission_id, status:consumed, bom, flags, extraction})
   GET  /submissions/{id}/documents/{id}  document_report    → get_document_report
 ================================================================================
 """
@@ -132,6 +134,20 @@ async def submission_status(
     user: User = Depends(_DMMD),
 ):
     return await ProcurementService(db).get_submission_status(submission_id)
+
+
+@router.post("/submissions/{submission_id}/generate-bom", status_code=201)
+async def generate_bom(
+    submission_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_DMMD),
+):
+    """Stage-1 → Stage-2 trigger: consume a COMPLETE submission into a DRAFT BOM and lock
+    it (CONSUMED). DM/MD only — matches the upload gate. 409 unless the submission is
+    COMPLETE with both slots accepted. No body: the BOM is built from the order + spec
+    sheets alone; the order/style breakdown is created at MD approval."""
+    return await ProcurementService(db).generate_bom_from_submission(user, submission_id)
+
 
 
 @router.get("/submissions/{submission_id}/documents/{document_id}")

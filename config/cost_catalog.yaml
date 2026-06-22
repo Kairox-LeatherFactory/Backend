@@ -1,0 +1,35 @@
+# =============================================================================
+# config/cost_catalog.yaml — default non-material BOM cost lines (Stage 2 §5b)
+# =============================================================================
+# The Stage-1 → Stage-2 trigger (BomService.generate_for_order) seeds every
+# generated DRAFT BOM with these configured cost lines so a BOM is never born
+# empty. They are the "configured" rows in the §5b provenance table
+# (Manufacturing / Packaging / FOB charge) — NOT extracted, NOT DCM-resolved.
+#
+# Material lines (main/sub/lining/interlining/accessory) are seeded from the
+# spec's extracted attributes, not from here; their unit prices and any lines the
+# spec text didn't surface are filled by the cutting manager via the bulk-PATCH
+# editor (config decision: minimal line_seeds).
+#
+#   key  = garment_type.code (UPPER) or `_default` when the type is unknown/missing
+#   each line: category (BomItemCategory value) · name · uom · unit_price · qty_per_garment
+#
+# Prices here are catalog DEFAULTS (overridable per BOM at the §10 gate); they
+# mirror the BMO-1 worked example (Cutting & Stitching 30.00, Packaging 3.00,
+# FOB charge 5.00).
+# =============================================================================
+
+_default:
+  - { category: manufacturing, name: "Cutting & Stitching", uom: pc, unit_price: 30.00, qty_per_garment: 1 }
+  - { category: packaging,     name: "Packaging",           uom: pc, unit_price: 3.00,  qty_per_garment: 1 }
+  - { category: fob_charge,    name: "FOB Charge",          uom: pc, unit_price: 5.00,  qty_per_garment: 1 }
+
+TRACK_PANT:
+  - { category: manufacturing, name: "Cutting & Stitching", uom: pc, unit_price: 30.00, qty_per_garment: 1 }
+  - { category: packaging,     name: "Packaging",           uom: pc, unit_price: 3.00,  qty_per_garment: 1 }
+  - { category: fob_charge,    name: "FOB Charge",          uom: pc, unit_price: 5.00,  qty_per_garment: 1 }
+
+JACKET:
+  - { category: manufacturing, name: "Cutting & Stitching", uom: pc, unit_price: 45.00, qty_per_garment: 1 }
+  - { category: packaging,     name: "Packaging",           uom: pc, unit_price: 4.00,  qty_per_garment: 1 }
+  - { category: fob_charge,    name: "FOB Charge",          uom: pc, unit_price: 6.00,  qty_per_garment: 1 }

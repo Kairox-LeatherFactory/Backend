@@ -113,7 +113,7 @@ class ProcurementService:
             client_id=client_id, created_by=getattr(user, "id", None),
             status=SubmissionStatus.OPEN.value,
         )
-
+    # consumed means lock 
     async def _load_submission(self, submission_id: uuid.UUID) -> Submission:
         sub = await self.repo.get_submission(submission_id)
         if sub is None:
@@ -125,6 +125,7 @@ class ProcurementService:
     # ══════════════════════════════════════════════════════════════════════
     async def upload_order_sheet(self, user, submission_id, data, filename,
                                  override_manual_review: bool = False) -> dict:
+        # check already exist
         return await self._upload_slot(user, submission_id, DocumentKind.ORDER_SHEET.value,
                                        data, filename, override_manual_review)
 
@@ -154,6 +155,7 @@ class ProcurementService:
         # verdict is "unresolved", and the OCR/vision rungs may now settle it).
         existing = await self.repo.get_document_by_sha(sha)
         if existing is not None:
+            # helps to remove duplicate files
             replay = await self._handle_existing(sub, kind, existing)
             if replay is not None:
                 return replay
@@ -204,6 +206,22 @@ class ProcurementService:
             sig["manual_override_by"] = str(getattr(user, "id", None))
             sig["original_status"] = o.status.value
             doc.validation_signals = sig
+            # The pipeline only PROMOTES bytes (quarantine → submissions/) when the verdict
+            # is `accepted`; for a needs_manual_review verdict it DELETES the quarantined
+            # object and leaves storage_url=None. A force-accepted doc must still have its
+            # bytes in submissions/ or Stage-2 generation can't load them (FileNotFoundError).
+            # Promote the in-memory bytes here so the override→generate flow works end-to-end.
+            slot_dir = {DocumentKind.ORDER_SHEET.value: "order-sheet",
+                        DocumentKind.SPEC_SHEET.value: "spec-sheet"}.get(kind, kind)
+            from app.core.storage import get_storage, submission_key
+            from app.modules.procurement.sniffing import _EXT_FOR_MIME
+            skey = submission_key(str(sub.id), slot_dir, sha,
+                                  _EXT_FOR_MIME.get(result.feats.mime, ""))
+            try:
+                doc.storage_url = await run_in_threadpool(get_storage().put, skey, data)
+            except Exception:
+                logger.exception("failed to promote force-accepted %s bytes for submission=%s",
+                                 kind, submission_id)
             logger.warning("MANUAL-REVIEW OVERRIDE accepted: submission=%s kind=%s sha=%s by=%s "
                            "(was %s, conf=%.2f)", submission_id, kind, sha[:12],
                            getattr(user, "id", None), o.status.value, o.confidence)
@@ -236,7 +254,7 @@ class ProcurementService:
             payload=envelope,
         )
 
-    # ── idempotent re-hit on an already-seen sha256 ──────────────────────────
+    #── idempotent re-hit on an already-seen sha256 ──────────────────────────
     async def _handle_existing(self, sub, kind, existing: Document) -> dict | None:
         # The sha cache is a valid short-circuit ONLY for a TRUE idempotent re-upload:
         # the same bytes, into the SAME slot (kind), of the SAME submission. Two reasons
@@ -301,6 +319,95 @@ class ProcurementService:
         if doc is None or doc.submission_id != sub.id:
             raise HTTPException(404, "Document not found in this submission.")
         return {"submission_id": str(sub.id), "document": presenters.document_block(doc)}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Stage-1 → Stage-2 trigger (the production entry point)
+    # ══════════════════════════════════════════════════════════════════════
+    async def generate_bom_from_submission(
+        self, user, submission_id: uuid.UUID,
+    ) -> dict:
+        """Consume a COMPLETE submission into a DRAFT BOM and lock it. The submission
+        lifecycle (open → complete → consumed) is procurement's, so the orchestration
+        lives here: validate the Stage-2 gate, load BOTH accepted slots' bytes (the key
+        layout is procurement's), hand off to bom.service to build the BOM (which owns the
+        spec_sheet/bom tables), then write the `complete → consumed` transition Stage 1
+        never had. The BOM is anchored on this submission and built from the order + spec
+        sheets ALONE — no order/style is required up front; the Client→Order→Style→SKU
+        breakdown is created (and the submission's client_order link set) only at MD
+        approval. bom stays ignorant of submissions beyond the id; we pass it only
+        primitives — a permitted procurement → bom.service edge (procurement/__init__.py)."""
+        from app.modules.bom.service import BomService
+        from app.modules.procurement.sniffing import _EXT_FOR_MIME
+        from app.core.storage import get_storage, submission_key
+
+        sub = await self._load_submission(submission_id)
+        if sub.status == SubmissionStatus.CONSUMED.value:
+            raise HTTPException(409, detail={
+                "error": "submission_already_consumed",
+                "message": "This submission has already generated a BOM."})
+
+        # Idempotent retry: a prior run may have created the BOM but died/failed BEFORE
+        # flipping the submission to consumed (the two are separate commits). Re-running
+        # would re-extract and re-insert a BOM with the same submission_id → uq_bom_submission
+        # IntegrityError + orphaned spec_sheet/pom rows. Detect the existing BOM, finish the
+        # missed `consumed` transition, and replay it instead of duplicating.
+        existing_bom = await BomService(self.db).get_bom_view_for_submission(submission_id)
+        if existing_bom is not None:
+            sub.status = SubmissionStatus.CONSUMED.value
+            await self.repo.save(sub)
+            return {"submission_id": str(sub.id), "status": "consumed",
+                    "replayed": True, "bom": existing_bom}
+
+        if sub.status != SubmissionStatus.COMPLETE.value:
+            raise HTTPException(409, detail={
+                "error": "submission_not_ready",
+                "message": "Stage 2 requires a COMPLETE submission (both slots accepted).",
+                "current_status": sub.status})
+        spec = await self._slot_doc(sub.spec_document_id)
+        if spec is None or spec.validation_status != ValidationStatus.ACCEPTED.value:
+            raise HTTPException(409, detail={
+                "error": "spec_sheet_missing",
+                "message": "No accepted spec sheet on this submission."})
+        order = await self._slot_doc(sub.order_document_id)
+        if order is None or order.validation_status != ValidationStatus.ACCEPTED.value:
+            raise HTTPException(409, detail={
+                "error": "order_sheet_missing",
+                "message": "No accepted order sheet on this submission."})
+
+        # Load the promoted bytes for BOTH slots off the event loop (storage.get blocks).
+        spec_key = submission_key(str(sub.id), "spec-sheet", spec.sha256,
+                                  _EXT_FOR_MIME.get(spec.mime, ""))
+        order_key = submission_key(str(sub.id), "order-sheet", order.sha256,
+                                   _EXT_FOR_MIME.get(order.mime, ""))
+        spec_bytes = await run_in_threadpool(get_storage().get, spec_key)
+        order_bytes = await run_in_threadpool(get_storage().get, order_key)
+
+        result = await BomService(self.db).generate_for_order(
+            user, spec_bytes=spec_bytes, filename=spec.filename,
+            spec_type=spec.classified_spec_type,
+            client_match_code=spec.client_match_code,
+            client_id=sub.client_id, submission_id=sub.id,
+            order_bytes=order_bytes, order_filename=order.filename,
+            order_mime=order.mime, order_match_code=order.client_match_code,
+            source_document_id=spec.id,
+        )
+
+        # The missing `complete → consumed` transition: lock the submission (further
+        # uploads → 409). The client_order link is written later, at approval, by
+        # link_submission_to_order once the breakdown materialises.
+        sub.status = SubmissionStatus.CONSUMED.value
+        await self.repo.save(sub)
+        return {"submission_id": str(sub.id), "status": "consumed", **result}
+
+    async def link_submission_to_order(self, submission_id: uuid.UUID,
+                                       client_order_id: uuid.UUID) -> None:
+        """Set the submission's client_order link once bom.service materialises the
+        breakdown at approval. The submission table is procurement-owned, so bom routes
+        this write through here (a permitted bom.service → procurement.service edge)."""
+        sub = await self.repo.get_submission(submission_id)
+        if sub is not None:
+            sub.client_order_id = client_order_id
+            await self.repo.save(sub)
 
     async def _slot_doc(self, doc_id) -> Document | None:
         return await self.repo.get_document(doc_id) if doc_id else None

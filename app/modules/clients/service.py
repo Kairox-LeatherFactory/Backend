@@ -41,3 +41,16 @@ class ClientService:
 
     async def get_skus_for_style(self, style_id: uuid.UUID) -> list[SKU]:
         return await self.repo.get_skus_for_style(style_id)
+
+    async def create_order_with_breakdown(
+        self, *, client_id: uuid.UUID, order: dict, style: dict,
+        lines: list[dict] | None = None, per_size: dict | None = None,
+    ) -> tuple[uuid.UUID, uuid.UUID]:
+        """Materialise a ClientOrder + Style + SKU breakdown in one shot — the public
+        entry point bom.service calls at MD approval, once the order+spec sheets have been
+        signed off (clients owns these tables, so the write lives here). `lines` is the
+        parsed per-colour breakdown ([{color_code, color_name, sizes}]); `per_size` is the
+        aggregate fallback when no colour dimension was parsed. Returns (order_id, style_id)."""
+        return await self.repo.create_order_with_breakdown(
+            client_id=client_id, order=order, style=style,
+            lines=lines or [], per_size=per_size or {})

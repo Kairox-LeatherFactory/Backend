@@ -58,7 +58,7 @@ _MD = require_roles(UserRole.MANAGING_DIRECTOR)
 
 @router.get("/boms/{bom_id}")
 async def get_bom(bom_id: uuid.UUID, db: AsyncSession = Depends(get_db),
-                  user: User = Depends(_CUTTING)):
+                  _: User = Depends(_CUTTING)):
     return await BomService(db).get_bom(bom_id)
 
 

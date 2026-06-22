@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     # Chat model for the LangGraph agent. Blank => deterministic router (no model).
     # Examples: "ollama:qwen2.5:3b-instruct", "anthropic:claude-3-5-haiku", "openai:gpt-4o-mini"
     chat_model: str = ""
+    
+    # PDF "is this scanned?" threshold. A page with fewer than this many extracted
+    # text characters routes to the vision LLM instead of the text LLM. 40 chars per
+    # page reliably distinguishes a real text-layer PDF from one with noise leak.
+    pdf_text_density_min: int = 40
 
     # ── Document extraction (BOM Procurement Workflow) ───────────────────────
     # Policy: NO LLM unless extraction/classification genuinely requires it (scanned
@@ -97,7 +102,7 @@ class Settings(BaseSettings):
     # Each rung degrades gracefully: no tesseract binary / no Gemini key → the rung
     # is skipped and we defer to a human rather than crash or fabricate a verdict.
     ocr_enabled: bool = True
-    ocr_language: str = "eng"                       # tesseract language pack(s), e.g. "eng+fra"
+    ocr_language: str = "eng+jap"                       # tesseract language pack(s), e.g. "eng+fra"
     ocr_max_pages: int = 5                           # cap pages OCR'd (cost/latency bound)
     ocr_dpi: int = 200                               # rasterisation DPI for OCR + vision
     vision_classifier_enabled: bool = True
@@ -110,8 +115,8 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60 * 24      # 24 hours
 
     # Login rate-limit (defends the login endpoint from brute force).
-    login_max_attempts: int = 5
-    login_window_seconds: int = 600                  # 10 minutes
+    login_max_attempts: int = 10
+    login_window_seconds: int = 60                 # 10 minutes
 
     # ── Stage 1: upload, storage & virus scan (BOM Procurement Workflow) ─────
     # Pluggable storage backend so the repo keeps NO hard Supabase dependency and
