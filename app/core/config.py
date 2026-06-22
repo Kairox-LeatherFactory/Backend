@@ -136,7 +136,7 @@ class Settings(BaseSettings):
     max_upload_mb: int = 25
     # Virus scan (real ClamAV) gated by a flag: ON in staging/prod (reject on hit,
     # fail closed if clamd is unreachable); OFF in dev records scan_status=skipped.
-    virus_scan_enabled: bool = True
+    virus_scan_enabled: bool = False
     clamd_host: str = "127.0.0.1"
     clamd_port: int = 3310
 

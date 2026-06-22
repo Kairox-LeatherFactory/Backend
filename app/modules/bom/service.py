@@ -491,14 +491,13 @@ class BomService:
                     source_term=p.get("source_term"),
                     extracted_by=p.get("extracted_by") or intermediate.get("extracted_by")
                     or ExtractionSource.MANUAL.value,
-                    confidence=Decimal(str(conf)) if conf is not None else Decimal("0.99"),
+                    confidence=Decimal(str(conf)) if conf is not None else Decimal("0.00"),
                 ))
         await self.repo.replace_pom_measurements(spec_sheet.id, pom_rows)
 
         # ── 3. merge extracted attributes into the spec sheet ─────────────────
         if intermediate.get("attributes"):
-            spec_sheet.attributes = {**(spec_sheet.attributes or {}),
-                                     **intermediate["attributes"]}
+            spec_sheet.attributes = {**(spec_sheet.attributes or {}),**intermediate["attributes"]}
             await self.repo.save(spec_sheet)
 
         # ── 3b. seed the BOM lines AFTER extraction (the ordering fix) ────────
