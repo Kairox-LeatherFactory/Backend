@@ -12,7 +12,7 @@ Revises: b1f3a2c9e7d4
 Create Date: 2026-06-15 15:00:00.000000
 """
 from alembic import op
-import app.core.models  # GUID() custom type referenced in column defs
+from sqlalchemy.dialects.postgresql import UUID
 
 revision = 'c7a2d5b81f60'
 down_revision = 'b1f3a2c9e7d4'
@@ -22,18 +22,18 @@ depends_on = None
 
 def upgrade():
     op.alter_column('spec_sheet', 'client_id',
-                    existing_type=app.core.models.GUID(), nullable=True)
+                    UUID(), nullable=True)
     op.alter_column('pattern_reference', 'client_id',
-                    existing_type=app.core.models.GUID(), nullable=True)
+                    UUID(), nullable=True)
     op.alter_column('style_consumption_template', 'client_id',
-                    existing_type=app.core.models.GUID(), nullable=True)
+                    UUID(), nullable=True)
 
 
 def downgrade():
     # NOTE: will fail if any client-less rows exist; backfill before downgrading.
     op.alter_column('style_consumption_template', 'client_id',
-                    existing_type=app.core.models.GUID(), nullable=False)
+                    UUID(), nullable=False)
     op.alter_column('pattern_reference', 'client_id',
-                    existing_type=app.core.models.GUID(), nullable=False)
+                    UUID(), nullable=False)
     op.alter_column('spec_sheet', 'client_id',
-                    existing_type=app.core.models.GUID(), nullable=False)
+                    UUID(), nullable=False)
