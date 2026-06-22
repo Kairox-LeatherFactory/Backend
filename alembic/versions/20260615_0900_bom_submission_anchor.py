@@ -12,7 +12,7 @@ Create Date: 2026-06-15 09:00:00.000000
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
-import app.core.models  # GUID() custom type referenced in column defs
+from sqlalchemy.dialects.postgresql import UUID
 
 revision = 'b1f3a2c9e7d4'
 down_revision = '3e54e129d9aa'
@@ -23,12 +23,12 @@ depends_on = None
 def upgrade():
     # order/style are populated only when the breakdown is materialised at approval
     op.alter_column('bom', 'client_order_id',
-                    existing_type=app.core.models.GUID(), nullable=True)
+                    UUID(), nullable=True)
     op.alter_column('bom', 'style_id',
-                    existing_type=app.core.models.GUID(), nullable=True)
+                    UUID(), nullable=True)
 
-    op.add_column('bom', sa.Column('submission_id', app.core.models.GUID(), nullable=True))
-    op.add_column('bom', sa.Column('client_id', app.core.models.GUID(), nullable=True))
+    op.add_column('bom', sa.Column('submission_id', UUID(), nullable=True))
+    op.add_column('bom', sa.Column('client_id', UUID(), nullable=True))
     op.add_column('bom', sa.Column(
         'order_identity',
         sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'),
@@ -53,6 +53,6 @@ def downgrade():
     op.drop_column('bom', 'client_id')
     op.drop_column('bom', 'submission_id')
     op.alter_column('bom', 'style_id',
-                    existing_type=app.core.models.GUID(), nullable=False)
+                    UUID(), nullable=False)
     op.alter_column('bom', 'client_order_id',
-                    existing_type=app.core.models.GUID(), nullable=False)
+                    UUID(), nullable=False)
