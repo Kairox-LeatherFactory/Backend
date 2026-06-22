@@ -326,8 +326,8 @@ class BomService:
         await self.repo.add(spec_sheet)
 
         # line_seeds=None → generate_bom builds them AFTER extraction from the spec's REAL
-        # attributes (the empty-attributes ordering fix; previously they were built off the
         # empty dict the SpecSheet was born with, so only cost lines ever seeded).
+        # attributes (the empty-attributes ordering fix; previously they were built off the
         # build_default_extractor() wires the Gemini→Groq attribute extractor for narrative
         # tech packs (None when no key is set → deterministic prose parse; measurement grids
         # never call it). The order sheet's own Gemini-vision path lives in extract_order.
