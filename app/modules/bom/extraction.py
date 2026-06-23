@@ -11,20 +11,30 @@ clients will silently return mostly-empty results for the third, fourth, fifth
 client without warning that anything was missed. That's the "silent wrong data"
 failure mode, which is worse than no data.
 
-Instead: the LLM is the SOLE extractor. The chain is availability- and
-parse-success-based:
+Instead: the LLM is the SOLE extractor, with each rung RETRIED (exponential
+backoff) before falling through:
 
-    Gemini (primary)  ->  Groq (text fallback)  ->  manual_entry_required
+    Gemini (primary, retried)  ->  Groq (text fallback, retried)  ->  manual_entry_required
 
-If both LLMs are unavailable, or both fail to produce a usable result, the
-public functions return an empty result with `extracted_by="manual"` and the
-warning `manual_entry_required`. The caller (service layer) sees this and
-either prompts the cutting manager to enter data manually, or holds the BOM in
-a "pending extraction" state for retry.
+If both LLMs are unavailable, or both exhaust their retries, the public
+functions return an empty result with `extracted_by="manual"` and the warning
+`manual_entry_required`. The caller (service layer) sees this and either
+prompts the cutting manager to enter data manually, or holds the BOM in a
+"pending extraction" state for retry.
+
+TYPED CONTRACT (the #3/#4 change)
+    The public entry points now return the Pydantic models DIRECTLY
+    (ExtractedSpec / ExtractedOrder) — the legacy intermediate-dict shim is gone
+    (_spec_to_intermediate / _legacy_attributes / _order_to_intermediate /
+    validate_intermediate all removed). The service layer consumes the typed
+    objects, does its own native-term -> pom_code resolution and attribute
+    flattening, and writes the staging rows from `model.model_dump(mode="json")`.
+    Range/coherence warnings live in the contract (ExtractedSpec validators).
 
 ARCHITECTURE (CLAUDE.md — unchanged posture)
   * PURE + SYNC. model.invoke() is blocking; the async service threadpools the
-    whole call. No DB session in this module.
+    whole call. No DB session in this module. (The retry time.sleep() blocks the
+    threadpool worker, not the event loop — fine at our concurrency.)
   * No path EVER raises. Failures -> a valid ExtractedSpec/ExtractedOrder with
     `warnings=["...reason...", "manual_entry_required"]`.
   * POM-dictionary term resolution + garment_type mapping happen in the SERVICE
@@ -32,18 +42,17 @@ ARCHITECTURE (CLAUDE.md — unchanged posture)
   * Reuses classifier._init_model / classifier._coerce and the existing settings.
 
 FUNCTION GUIDE
-  extract_spec(data, filename, mime, *, spec_sheet_id=None) -> dict   PUBLIC entry.
-  extract_order(data, filename, mime, client_match_code=None) -> dict PUBLIC entry.
-  llm_extract_spec(kind, payload) -> ExtractedSpec | None   Gemini->Groq, never raises.
+  extract_spec(data, filename, mime) -> ExtractedSpec     PUBLIC entry. Never raises.
+  extract_order(data, filename, mime, client_match_code=None) -> ExtractedOrder PUBLIC.
+  llm_extract_spec(kind, payload) -> ExtractedSpec | None  Gemini->Groq, never raises.
   llm_extract_order(kind, payload) -> ExtractedOrder | None Gemini->Groq, never raises.
-  validate_intermediate(d) -> None  structural raise; range/coherence -> WARN (mutates).
-  ExtractionError                   raised only on a structural contract violation.
 ================================================================================
 """
 from __future__ import annotations
 
 import base64
 import logging
+import time
 from typing import Any
 
 from app.core.config import settings
@@ -62,11 +71,11 @@ XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 CSV_MIME = "text/csv"
 PDF_MIME = "application/pdf"
 
-
-class ExtractionError(ValueError):
-    """Raised only by validate_intermediate on a structural contract violation
-    (missing required keys, wrong row types). Range/coherence problems are
-    surfaced as warnings, never as exceptions."""
+# Per-rung retry policy. Blanket retry (we don't classify retryable vs fatal
+# exceptions because the langchain/Gemini/Groq error taxonomy isn't stable) — kept
+# cheap so a guaranteed failure (auth) costs ~1.5s, not minutes.
+_LLM_RETRY_ATTEMPTS = 3
+_LLM_RETRY_BASE_DELAY = 0.5  # seconds; exponential: 0.5, 1.0, 2.0
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -89,10 +98,18 @@ do NOT invent values):
 - measurements: list of {source_term (native language), by_size {size: cm}, pitch}
 - materials: dict with keys leather_quality, leather_substance_mm (list of
   allowed thicknesses), and any other material attributes named in the document
+- sub_materials: list of {name (native term, e.g. 別布), material} for any
+  SECONDARY leather/fabric that is NOT the main shell and NOT the lining
+  (e.g. a contrast panel). Omit if there are none.
+- interlining: dict with present (boolean), material, placement — the
+  fusible/non-fusible interlining if the document names one; omit if none.
 - color_details: dict with primary, secondary, and any finish/colour notes
 - lining: dict with lined (boolean), details (text), material
 - accessories: list of {type, supplied_by (factory|client|null), placement,
-  spec, finish}
+  spec, finish, qty_per_garment}
+  - qty_per_garment is the INTEGER count of THIS accessory per single garment
+    (e.g. 2 if there are two rear zippers, 1 for a single front zipper). If the
+    document does not state a count, omit it (the system defaults to 1).
 - brand_label: dict with type, text, placement
 - size_label: text on the size label
 - pattern_reference: {pattern_code, base_size} only if the document says
@@ -152,13 +169,34 @@ def _build_content(kind: str, payload: Any, prompt: str) -> list[dict]:
     return blocks
 
 
+def _invoke_with_retry(model, message, label: str, *,
+                       attempts: int = _LLM_RETRY_ATTEMPTS,
+                       base_delay: float = _LLM_RETRY_BASE_DELAY):
+    """Invoke a single model with bounded exponential-backoff retry. Returns the
+    raw response on success or None when every attempt failed. Never raises — a
+    failure here just means the caller falls to the next rung."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return model.invoke([message])
+        except Exception as exc:                                # noqa: BLE001
+            if attempt < attempts:
+                delay = base_delay * (2 ** (attempt - 1))
+                logger.warning("LLM (%s) attempt %d/%d failed: %s — retrying in %.1fs",
+                               label, attempt, attempts, exc, delay)
+                time.sleep(delay)
+            else:
+                logger.warning("LLM (%s) failed after %d attempts: %s",
+                               label, attempts, exc)
+    return None
+
+
 def _llm_invoke(kind: str, content: list[dict]) -> tuple[str, str] | None:
-    """Invoke the configured LLM. Tries the primary model first (Gemini), falls
-    back to the text-only fallback (Groq) for text payloads — vision payloads
-    have no text fallback because Groq doesn't currently support image input.
+    """Invoke the configured LLM. Primary (Gemini) with retry, then the text-only
+    fallback (Groq) with retry for text payloads — vision payloads have no text
+    fallback because Groq doesn't currently support image input.
 
     Returns (engine_name, raw_response) on success, None when no model is
-    available or both attempts failed. Never raises."""
+    available or both rungs exhausted their retries. Never raises."""
     try:
         from langchain_core.messages import HumanMessage
     except ImportError:
@@ -167,17 +205,17 @@ def _llm_invoke(kind: str, content: list[dict]) -> tuple[str, str] | None:
 
     from app.modules.procurement.classifier import _init_model
 
+    message = HumanMessage(content=content)
+
     # Vision payloads use the vision-capable model; text uses extraction_model.
     primary_spec = (settings.vision_model if kind == "images"
                     else settings.extraction_model)
     primary = _init_model(primary_spec)
     if primary is not None:
-        try:
-            resp = primary.invoke([HumanMessage(content=content)])
+        resp = _invoke_with_retry(primary, message, primary_spec)
+        if resp is not None:
             engine = "gemini" if "gemini" in primary_spec.lower() else "groq"
             return engine, str(getattr(resp, "content", resp))
-        except Exception as exc:                                # noqa: BLE001
-            logger.warning("primary LLM (%s) failed: %s", primary_spec, exc)
 
     # Groq fallback only meaningful for text payloads
     if kind == "images":
@@ -186,12 +224,10 @@ def _llm_invoke(kind: str, content: list[dict]) -> tuple[str, str] | None:
     fb_spec = settings.extraction_fallback_model
     fallback = _init_model(fb_spec)
     if fallback is not None:
-        try:
-            resp = fallback.invoke([HumanMessage(content=content)])
+        resp = _invoke_with_retry(fallback, message, fb_spec)
+        if resp is not None:
             engine = "groq" if "groq" in fb_spec.lower() else "gemini"
             return engine, str(getattr(resp, "content", resp))
-        except Exception as exc:                                # noqa: BLE001
-            logger.warning("fallback LLM (%s) failed: %s", fb_spec, exc)
 
     return None
 
@@ -302,14 +338,12 @@ def _resolve_kind(data: bytes, filename: str, mime: str | None) -> str:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# PUBLIC ENTRY POINTS
+# PUBLIC ENTRY POINTS — return the typed contract directly.
 # ════════════════════════════════════════════════════════════════════════════
 
-def extract_spec(data: bytes, filename: str, mime: str | None = None, *,
-                 spec_sheet_id: str | None = None) -> dict:
-    """Extract a leather spec sheet into the legacy intermediate dict the service
-    layer reads. Never raises — failures surface as `manual_entry_required` in
-    the returned warnings list.
+def extract_spec(data: bytes, filename: str, mime: str | None = None) -> ExtractedSpec:
+    """Extract a leather spec sheet into an ExtractedSpec. Never raises — failures
+    surface as `manual_entry_required` in `warnings`.
 
     Routing:
       PDF (digital text)    -> text LLM
@@ -317,199 +351,75 @@ def extract_spec(data: bytes, filename: str, mime: str | None = None, *,
       XLSX / XLSM           -> markdown -> text LLM
       CSV / TSV             -> text -> text LLM
       everything else       -> manual_entry_required"""
-    logger.info("calling extract_spec with filename=%r mime=%r spec_sheet_id=%r "
-                "data_length=%d", filename, mime, spec_sheet_id, len(data))
-    spec: ExtractedSpec | None = None
+    logger.info("calling extract_spec with filename=%r mime=%r data_length=%d",
+                filename, mime, len(data))
     try:
         kind = _resolve_kind(data, filename, mime)
 
         if kind == "pdf":
             payload_kind, payload = pdf_to_llm_input(data)
             if not payload:
-                spec = _empty_spec("pdf_unreadable")
-            elif (payload_kind == "images"
-                  and not getattr(settings, "vision_classifier_enabled", True)):
-                spec = _empty_spec("vision_disabled_for_scanned_pdf")
-            else:
-                spec = llm_extract_spec(payload_kind, payload) \
-                    or _empty_spec("llm_extraction_failed")
+                return _empty_spec("pdf_unreadable")
+            if (payload_kind == "images"
+                    and not getattr(settings, "vision_classifier_enabled", True)):
+                return _empty_spec("vision_disabled_for_scanned_pdf")
+            return llm_extract_spec(payload_kind, payload) or _empty_spec("llm_extraction_failed")
 
-        elif kind == "xlsx":
+        if kind == "xlsx":
             markdown = xlsx_to_markdown(data)
             if not markdown.strip():
-                spec = _empty_spec("xlsx_unreadable")
-            else:
-                spec = llm_extract_spec("text", markdown) \
-                    or _empty_spec("llm_extraction_failed")
+                return _empty_spec("xlsx_unreadable")
+            return llm_extract_spec("text", markdown) or _empty_spec("llm_extraction_failed")
 
-        elif kind == "csv":
+        if kind == "csv":
             try:
                 text = data.decode("utf-8", errors="replace")
             except Exception:                                   # noqa: BLE001
-                spec = _empty_spec("csv_unreadable")
-            else:
-                spec = llm_extract_spec("text", text) \
-                    or _empty_spec("llm_extraction_failed")
+                return _empty_spec("csv_unreadable")
+            return llm_extract_spec("text", text) or _empty_spec("llm_extraction_failed")
 
-        else:
-            spec = _empty_spec(f"unsupported_file_type: mime={mime!r} name={filename!r}")
+        return _empty_spec(f"unsupported_file_type: mime={mime!r} name={filename!r}")
 
     except Exception as exc:                                    # noqa: BLE001
         logger.exception("extract_spec degraded for %s (%s): %s", filename, mime, exc)
-        spec = _empty_spec(f"extract_spec_exception: {type(exc).__name__}")
-
-    return _spec_to_intermediate(spec, spec_sheet_id)
+        return _empty_spec(f"extract_spec_exception: {type(exc).__name__}")
 
 
 def extract_order(data: bytes, filename: str, mime: str | None = None,
-                  client_match_code: str | None = None) -> dict:
-    """Extract a leather order sheet into the legacy intermediate dict the service
-    layer reads. Never raises — failures surface as `manual_entry_required`."""
+                  client_match_code: str | None = None) -> ExtractedOrder:
+    """Extract a leather order sheet into an ExtractedOrder. Never raises — failures
+    surface as `manual_entry_required`. `client_match_code` is accepted for caller
+    signature stability but is informational only (the service already holds it; the
+    typed order model does not carry it)."""
     logger.info("calling extract_order with filename=%r mime=%r client_match_code=%r "
                 "data_length=%d", filename, mime, client_match_code, len(data))
-    order: ExtractedOrder | None = None
     try:
         kind = _resolve_kind(data, filename, mime)
 
         if kind == "pdf":
             payload_kind, payload = pdf_to_llm_input(data)
             if not payload:
-                order = _empty_order("pdf_unreadable")
-            elif (payload_kind == "images"
-                  and not getattr(settings, "vision_classifier_enabled", True)):
-                order = _empty_order("vision_disabled_for_scanned_pdf")
-            else:
-                order = llm_extract_order(payload_kind, payload) \
-                    or _empty_order("llm_extraction_failed")
+                return _empty_order("pdf_unreadable")
+            if (payload_kind == "images"
+                    and not getattr(settings, "vision_classifier_enabled", True)):
+                return _empty_order("vision_disabled_for_scanned_pdf")
+            return llm_extract_order(payload_kind, payload) or _empty_order("llm_extraction_failed")
 
-        elif kind == "xlsx":
+        if kind == "xlsx":
             markdown = xlsx_to_markdown(data)
             if not markdown.strip():
-                order = _empty_order("xlsx_unreadable")
-            else:
-                order = llm_extract_order("text", markdown) \
-                    or _empty_order("llm_extraction_failed")
+                return _empty_order("xlsx_unreadable")
+            return llm_extract_order("text", markdown) or _empty_order("llm_extraction_failed")
 
-        elif kind == "csv":
+        if kind == "csv":
             try:
                 text = data.decode("utf-8", errors="replace")
             except Exception:                                   # noqa: BLE001
-                order = _empty_order("csv_unreadable")
-            else:
-                order = llm_extract_order("text", text) \
-                    or _empty_order("llm_extraction_failed")
+                return _empty_order("csv_unreadable")
+            return llm_extract_order("text", text) or _empty_order("llm_extraction_failed")
 
-        else:
-            order = _empty_order(f"unsupported_file_type: mime={mime!r} name={filename!r}")
+        return _empty_order(f"unsupported_file_type: mime={mime!r} name={filename!r}")
 
     except Exception as exc:                                    # noqa: BLE001
         logger.exception("extract_order degraded for %s (%s): %s", filename, mime, exc)
-        order = _empty_order(f"extract_order_exception: {type(exc).__name__}")
-
-    return _order_to_intermediate(order, client_match_code)
-
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# LEGACY INTERMEDIATE SHIMS
-# The service layer reads specific keys (poms, attributes, sizes, unresolved,
-# spec_type, customer_ref, etc.). These shims preserve that contract so the
-# existing service code keeps working unchanged. When the staging-table
-# migration lands, these can go away.
-# ════════════════════════════════════════════════════════════════════════════
-
-def _spec_to_intermediate(spec: ExtractedSpec, spec_sheet_id: str | None) -> dict:
-    """Convert ExtractedSpec to the legacy intermediate dict the service reads."""
-    d = spec.model_dump(mode="json")
-
-    # POMs in the legacy shape (the service iterates these to write pom_measurement)
-    d["poms"] = [
-        {
-            "source_term": m.source_term,
-            "by_size": m.by_size,
-            "pitch": m.pitch,
-            "extracted_by": m.extracted_by,
-            "confidence": m.confidence,
-        }
-        for m in spec.measurements
-    ]
-
-    # Flat attributes dict (legacy service reads leather_quality, primary_color,
-    # lining, accessories from here when building line seeds)
-    d["attributes"] = _legacy_attributes(spec)
-
-    d["sizes"] = list(spec.sizes)
-    d["unresolved"] = []                                        # filled by service after pom_dictionary lookup
-    d["spec_type"] = "unknown"                                  # legacy field; classification moved out
-    if spec_sheet_id is not None:
-        d["spec_sheet_id"] = spec_sheet_id
-    return d
-
-
-def _legacy_attributes(spec: ExtractedSpec) -> dict:
-    """Flatten typed spec fields into the unstructured attributes dict the service
-    layer's _build_line_seeds reads. New code should read the typed fields directly."""
-    attrs: dict[str, Any] = dict(spec.materials or {})
-
-    if spec.color_details:
-        primary = spec.color_details.get("primary")
-        if primary:
-            attrs["primary_color"] = primary
-
-    lining = spec.lining or {}
-    if lining.get("lined") is False:
-        attrs["lining"] = "unlined"
-    elif lining.get("details"):
-        attrs["lining"] = lining["details"]
-    elif lining.get("lined") is True:
-        attrs["lining"] = "lined"
-
-    if spec.accessories:
-        attrs["accessories"] = [a.model_dump() for a in spec.accessories]
-
-    return attrs
-
-
-def _order_to_intermediate(order: ExtractedOrder, client_match_code: str | None) -> dict:
-    """Convert ExtractedOrder to the legacy intermediate dict the service reads."""
-    d = order.model_dump(mode="json")
-
-    # Legacy aliases the service expects
-    d["style_name"] = order.style_no
-    d["unit_price"] = order.price_per_garment
-    d["customer_ref"] = None                                    # not extracted from orders today
-    d["internal_ref"] = None
-    if client_match_code is not None:
-        d["client_match_code"] = client_match_code
-        
-    print("it is from the extraction file in order_to_intermediate:", d)
-
-    return d
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# VALIDATION (called by service.py after intermediate is built)
-# ════════════════════════════════════════════════════════════════════════════
-
-def validate_intermediate(d: dict) -> None:
-    """Structural sanity + range warnings on the intermediate. Raises
-    ExtractionError on structural defects (missing keys, malformed rows).
-    Range / coherence issues are appended to d['warnings'], never raised."""
-    for key in ("poms", "sizes"):
-        if key not in d:
-            raise ExtractionError(f"intermediate result missing '{key}'")
-    if not isinstance(d.get("warnings"), list):
-        d["warnings"] = []
-
-    declared = set(d.get("sizes") or [])
-    for pom in d.get("poms") or []:
-        if not isinstance(pom, dict):
-            raise ExtractionError(f"pom row not a dict: {pom!r}")
-        term = pom.get("source_term") or "?"
-        for size, val in (pom.get("by_size") or {}).items():
-            if not isinstance(val, (int, float)) or val <= 0:
-                raise ExtractionError(f"pom {term!r} size {size} not positive")
-            if val < 1 or val > 300:
-                d["warnings"].append(f"measurement_out_of_range: {term} {size}={val}")
-            if declared and size not in declared:
-                d["warnings"].append(f"size_not_in_declared_set: {size}")
+        return _empty_order(f"extract_order_exception: {type(exc).__name__}")

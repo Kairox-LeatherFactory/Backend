@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     # Examples: "ollama:qwen2.5:3b-instruct", "anthropic:claude-3-5-haiku", "openai:gpt-4o-mini"
     chat_model: str = ""
     
+    celery_broker_url: str = "redis://localhost:6379/0"
+    celery_result_backend: str = "redis://localhost:6379/1"
+    
     # PDF "is this scanned?" threshold. A page with fewer than this many extracted
     # text characters routes to the vision LLM instead of the text LLM. 40 chars per
     # page reliably distinguishes a real text-layer PDF from one with noise leak.

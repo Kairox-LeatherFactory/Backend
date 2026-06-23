@@ -136,17 +136,38 @@ async def submission_status(
     return await ProcurementService(db).get_submission_status(submission_id)
 
 
-@router.post("/submissions/{submission_id}/generate-bom", status_code=201)
+@router.post("/submissions/{submission_id}/generate-bom", status_code=202)
 async def generate_bom(
     submission_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(_DMMD),
 ):
-    """Stage-1 → Stage-2 trigger: consume a COMPLETE submission into a DRAFT BOM and lock
-    it (CONSUMED). DM/MD only — matches the upload gate. 409 unless the submission is
-    COMPLETE with both slots accepted. No body: the BOM is built from the order + spec
-    sheets alone; the order/style breakdown is created at MD approval."""
-    return await ProcurementService(db).generate_bom_from_submission(user, submission_id)
+    """Stage-1 → Stage-2 trigger. Validates synchronously, then enqueues the heavy
+    extraction+build as a Celery task. Returns 202 + job_id; the result arrives over
+    Realtime on submission:{id}. DM/MD only."""
+    claim = await ProcurementService(db).claim_submission_for_bom(user, submission_id)
+
+    # Already built (replay) — return it synchronously, nothing to enqueue.
+    if not claim.get("enqueue"):
+        return {"status": claim["status"], "replayed": True, "bom": claim.get("bom")}
+
+    from app.modules.bom.tasks import generate_bom_for_submission
+    async_result = generate_bom_for_submission.delay(
+        user_id=str(user.id),
+        submission_id=claim["submission_id"],
+        client_id=claim["client_id"],
+        spec_storage_key=claim["spec_key"],
+        spec_filename=claim["spec_filename"],
+        spec_type=claim["spec_type"],
+        client_match_code=claim["client_match_code"],
+        order_storage_key=claim["order_key"],
+        order_filename=claim["order_filename"],
+        order_mime=claim["order_mime"],
+        order_match_code=claim["order_match_code"],
+        source_document_id=claim["source_document_id"],
+    )
+    return {"status": "queued", "job_id": async_result.id,
+            "submission_id": claim["submission_id"]}
 
 
 

@@ -63,6 +63,7 @@ from app.modules.procurement.enums import (
     SubmissionStatus,
     ValidationStatus,
 )
+from app.modules.bom.service import BomService
 from app.modules.procurement import presenters
 from app.modules.procurement.errors import UploadError
 from app.core.models import AuditLog, Document
@@ -323,78 +324,73 @@ class ProcurementService:
     # ══════════════════════════════════════════════════════════════════════
     # Stage-1 → Stage-2 trigger (the production entry point)
     # ══════════════════════════════════════════════════════════════════════
-    async def generate_bom_from_submission(
-        self, user, submission_id: uuid.UUID,
-    ) -> dict:
-        """Consume a COMPLETE submission into a DRAFT BOM and lock it. The submission
-        lifecycle (open → complete → consumed) is procurement's, so the orchestration
-        lives here: validate the Stage-2 gate, load BOTH accepted slots' bytes (the key
-        layout is procurement's), hand off to bom.service to build the BOM (which owns the
-        spec_sheet/bom tables), then write the `complete → consumed` transition Stage 1
-        never had. The BOM is anchored on this submission and built from the order + spec
-        sheets ALONE — no order/style is required up front; the Client→Order→Style→SKU
-        breakdown is created (and the submission's client_order link set) only at MD
-        approval. bom stays ignorant of submissions beyond the id; we pass it only
-        primitives — a permitted procurement → bom.service edge (procurement/__init__.py)."""
-        from app.modules.bom.service import BomService
-        from app.modules.procurement.sniffing import _EXT_FOR_MIME
-        from app.core.storage import get_storage, submission_key
+    async def claim_submission_for_bom(self, user, submission_id: uuid.UUID) -> dict:
+        """Synchronous part: validate the Stage-2 gate + handle idempotency, then mark the
+        submission as QUEUED. Returns enough for the router to enqueue the heavy task.
+        Does NOT load bytes or extract — that's the worker's job."""
 
         sub = await self._load_submission(submission_id)
-        if sub.status == SubmissionStatus.CONSUMED.value:
-            raise HTTPException(409, detail={
-                "error": "submission_already_consumed",
-                "message": "This submission has already generated a BOM."})
 
-        # Idempotent retry: a prior run may have created the BOM but died/failed BEFORE
-        # flipping the submission to consumed (the two are separate commits). Re-running
-        # would re-extract and re-insert a BOM with the same submission_id → uq_bom_submission
-        # IntegrityError + orphaned spec_sheet/pom rows. Detect the existing BOM, finish the
-        # missed `consumed` transition, and replay it instead of duplicating.
+        if sub.status == SubmissionStatus.CONSUMED.value:
+            # already done — replay
+            existing_bom = await BomService(self.db).get_bom_view_for_submission(submission_id)
+            if existing_bom is not None:
+                return {"submission_id": str(sub.id), "status": "consumed",
+                        "replayed": True, "bom": existing_bom, "enqueue": False}
+            raise HTTPException(409, detail={"error": "submission_already_consumed"})
+
+        # If a prior run already built the BOM but missed the consumed flip, finish it now.
         existing_bom = await BomService(self.db).get_bom_view_for_submission(submission_id)
         if existing_bom is not None:
             sub.status = SubmissionStatus.CONSUMED.value
             await self.repo.save(sub)
             return {"submission_id": str(sub.id), "status": "consumed",
-                    "replayed": True, "bom": existing_bom}
+                    "replayed": True, "bom": existing_bom, "enqueue": False}
 
-        if sub.status != SubmissionStatus.COMPLETE.value:
+        if sub.status not in (SubmissionStatus.COMPLETE.value, SubmissionStatus.QUEUED.value):
             raise HTTPException(409, detail={
                 "error": "submission_not_ready",
                 "message": "Stage 2 requires a COMPLETE submission (both slots accepted).",
                 "current_status": sub.status})
+
         spec = await self._slot_doc(sub.spec_document_id)
         if spec is None or spec.validation_status != ValidationStatus.ACCEPTED.value:
-            raise HTTPException(409, detail={
-                "error": "spec_sheet_missing",
-                "message": "No accepted spec sheet on this submission."})
+            raise HTTPException(409, detail={"error": "spec_sheet_missing"})
         order = await self._slot_doc(sub.order_document_id)
         if order is None or order.validation_status != ValidationStatus.ACCEPTED.value:
-            raise HTTPException(409, detail={
-                "error": "order_sheet_missing",
-                "message": "No accepted order sheet on this submission."})
+            raise HTTPException(409, detail={"error": "order_sheet_missing"})
 
-        # Load the promoted bytes for BOTH slots off the event loop (storage.get blocks).
-        spec_key = submission_key(str(sub.id), "spec-sheet", spec.sha256,
-                                  _EXT_FOR_MIME.get(spec.mime, ""))
-        order_key = submission_key(str(sub.id), "order-sheet", order.sha256,
-                                   _EXT_FOR_MIME.get(order.mime, ""))
-        spec_bytes = await run_in_threadpool(get_storage().get, spec_key)
-        order_bytes = await run_in_threadpool(get_storage().get, order_key)
+        # New QUEUED state — guards against double-enqueue from a double-click.
+        sub.status = SubmissionStatus.QUEUED.value
+        await self.repo.save(sub)
 
+        # Hand the worker the STORAGE KEYS, not the bytes (don't push MBs through Redis).
+        from app.modules.procurement.sniffing import _EXT_FOR_MIME
+        from app.core.storage import submission_key
+        return {
+            "submission_id": str(sub.id),
+            "status": "queued",
+            "enqueue": True,
+            "spec_key": submission_key(str(sub.id), "spec-sheet", spec.sha256,
+                                    _EXT_FOR_MIME.get(spec.mime, "")),
+            "order_key": submission_key(str(sub.id), "order-sheet", order.sha256,
+                                        _EXT_FOR_MIME.get(order.mime, "")),
+            "spec_filename": spec.filename, "spec_type": spec.classified_spec_type,
+            "client_match_code": spec.client_match_code, "client_id": str(sub.client_id),
+            "order_filename": order.filename, "order_mime": order.mime,
+            "order_match_code": order.client_match_code,
+            "source_document_id": str(spec.id),
+        }
+
+
+    async def build_bom_for_submission(self, user, submission_id, *, spec_bytes,
+                                    order_bytes, **kw) -> dict:
+        """Heavy part (called from the worker): extract + generate, then flip to consumed.
+        The byte-loading happens in the task; this just runs the build + transition."""
         result = await BomService(self.db).generate_for_order(
-            user, spec_bytes=spec_bytes, filename=spec.filename,
-            spec_type=spec.classified_spec_type,
-            client_match_code=spec.client_match_code,
-            client_id=sub.client_id, submission_id=sub.id,
-            order_bytes=order_bytes, order_filename=order.filename,
-            order_mime=order.mime, order_match_code=order.client_match_code,
-            source_document_id=spec.id,
-        )
-
-        # The missing `complete → consumed` transition: lock the submission (further
-        # uploads → 409). The client_order link is written later, at approval, by
-        # link_submission_to_order once the breakdown materialises.
+            user, spec_bytes=spec_bytes, order_bytes=order_bytes,
+            submission_id=submission_id, **kw)
+        sub = await self._load_submission(submission_id)
         sub.status = SubmissionStatus.CONSUMED.value
         await self.repo.save(sub)
         return {"submission_id": str(sub.id), "status": "consumed", **result}
