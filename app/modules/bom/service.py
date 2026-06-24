@@ -440,6 +440,7 @@ class BomService:
     # Generation (§1, §2, §5, §6) — orchestrator over the private steps below.
     # ONE TRANSACTION: stage with self.db.add/flush, commit exactly once at the end.
     # ══════════════════════════════════════════════════════════════════════
+    
     async def generate_bom(
         self, user, *, spec_sheet, spec_bytes: bytes, filename: str,
         identity: StyleIdentity, client_match_code: str | None,
@@ -620,7 +621,10 @@ class BomService:
                 pom_rows.append(PomMeasurement(
                     spec_sheet_id=spec_sheet.id, size=size, pom_code=p["pom_code"],
                     value=Decimal(str(value)),
+                    # Store pitch if available.
                     pitch=Decimal(str(p["pitch"])) if p.get("pitch") is not None else None,
+                    
+                    # Store the original text found in Excel.
                     source_term=p.get("source_term"),
                     extracted_by=p.get("extracted_by") or spec.extracted_by
                     or ExtractionSource.MANUAL.value,
@@ -707,11 +711,57 @@ class BomService:
         carrying given qty/price on the rest."""
         items: list[BomItem] = []
         for seed in line_seeds:
+            # Loop through BOM seeds
+            # EXAMPLE LINE SEED
+    #         LineSeed(
+    #     category="MAIN_MATERIAL",
+    #     name="Cow Leather"
+    # ),
+
+    # LineSeed(
+    #     category="LINING",
+    #     name="Polyester"
+    # ),
+
+    # LineSeed(
+    #     category="ACCESSORY",
+    #     name="Button",
+    #     supplied_by="buyer"
+    # ),
+
+    # LineSeed(
+    #     category="ACCESSORY",
+    #     name="Zip"
+    # ),
+
+    # LineSeed(
+    #     category="COST",
+    #     name="Stitching",
+    #     unit_price=0.50
+    # ),
+
+    # LineSeed(
+    #     category="COST",
+    #     name="Packing",
+    #     unit_price=0.20
+    # )
+            
+            
             price = Decimal("0") if (seed.supplied_by or "").lower() in ("client", "buyer") \
                 else (Decimal(str(seed.unit_price)) if seed.unit_price is not None else Decimal("0"))
             dcm_source = None
             dcm_conf = None
-            if seed.category in MATERIAL_DCM_CATEGORIES:
+            if seed.category in MATERIAL_DCM_CATEGORIES: # MAIN MATERIAL 
+                
+                # Find the DCM (Direct Consumption Measurement / material consumption per garment) using a priority ordeR
+                # Suppose database finds:
+
+                # Leather Jacket
+                # Consumption = 18.5 dm²
+                
+                # RETURNS FROM DB
+                # dcm = Decimal("18.5")
+                # src = TEMPLATE
                 dcm, src = await self._resolve_dcm(
                     client_id=identity.client_id, style_signature=sig, garment_type_id=gt_id,
                     garment_type_row=gt, material_category=seed.category, size=base_size,
@@ -724,6 +774,12 @@ class BomService:
             else:
                 qpg = Decimal(str(seed.qty_per_garment)) if seed.qty_per_garment is not None \
                     else Decimal("1")
+                    # Zipper
+                    # Button
+                    # Label
+                    # Hang Tag
+                    # Packaging
+                    # Labor
 
             items.append(BomItem(
                 category=seed.category, name=seed.name, material_color=seed.material_color,

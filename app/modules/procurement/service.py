@@ -126,15 +126,34 @@ class ProcurementService:
     # ══════════════════════════════════════════════════════════════════════
     async def upload_order_sheet(self, user, submission_id, data, filename,
                                  override_manual_review: bool = False) -> dict:
-        # check already exist
-        return await self._upload_slot(user, submission_id, DocumentKind.ORDER_SHEET.value,
+        sub_id = await self._resolve_or_create_submission(user, submission_id)
+        return await self._upload_slot(user, sub_id, DocumentKind.ORDER_SHEET.value,
                                        data, filename, override_manual_review)
 
     async def upload_spec_sheet(self, user, submission_id, data, filename,
                                 override_manual_review: bool = False) -> dict:
-        return await self._upload_slot(user, submission_id, DocumentKind.SPEC_SHEET.value,
+        sub_id = await self._resolve_or_create_submission(user, submission_id)
+        return await self._upload_slot(user, sub_id, DocumentKind.SPEC_SHEET.value,
                                        data, filename, override_manual_review)
 
+    async def _resolve_or_create_submission(
+        self, user, submission_id: uuid.UUID | None
+    ) -> uuid.UUID:
+        """Return an existing submission_id as-is, or create a new OPEN submission
+        when none is provided. The submission is created HERE (before the pipeline)
+        so the document row has a valid submission_id FK. If the pipeline later rejects
+        the file, the empty submission stays in OPEN state — it will never reach COMPLETE
+        and can be ignored or GC'd. Only a successful accept fills a slot and makes the
+        submission useful."""
+        if submission_id is not None:
+            return submission_id
+        sub = await self.repo.create_submission(
+            client_id=None,
+            created_by=getattr(user, "id", None),
+            status=SubmissionStatus.OPEN.value,
+        )
+        return sub.id
+ 
     async def _upload_slot(self, user, submission_id, kind, data, filename,
                            override_manual_review: bool = False) -> dict:
         sub = await self._load_submission(submission_id)
@@ -150,16 +169,15 @@ class ProcurementService:
         logger.info("upload received: submission=%s kind=%s filename=%s size=%d sha=%s force=%s",
                     submission_id, kind, filename, len(data), sha[:12], override_manual_review)
 
-        # ── idempotency: byte-identical re-upload → cached result, no re-bill ─
-        # A cached ACCEPT or hard REJECT short-circuits here; a cached NEEDS_MANUAL_REVIEW
-        # is evicted and returns None so we fall through and RE-RUN the pipeline (that
-        # verdict is "unresolved", and the OCR/vision rungs may now settle it).
-        existing = await self.repo.get_document_by_sha(sha)
-        if existing is not None:
-            # helps to remove duplicate files
-            replay = await self._handle_existing(sub, kind, existing)
-            if replay is not None:
-                return replay
+        # ── TESTING PHASE: dedupe/idempotency check disabled ──────────────────
+        # Re-uploading byte-identical content now always re-runs the full pipeline as
+        # if it were a brand-new file (no duplicate_content 409, no sha-cache replay).
+        # To restore production dedupe behavior, uncomment the block below.
+        # existing = await self.repo.get_document_by_sha(sha)
+        # if existing is not None:
+        #     replay = await self._handle_existing(sub, kind, existing)
+        #     if replay is not None:
+        #         return replay
 
         # ── run the blocking pipeline off the event loop ─────────────────────
         templates = await self.repo.active_templates(kind)
