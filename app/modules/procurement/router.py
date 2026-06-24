@@ -108,6 +108,26 @@ async def upload_order_sheet(
         return _error_response(exc)
 
 
+@router.post("/upload/order-sheet", status_code=201)
+async def upload_order_sheet_direct(
+    file: UploadFile = File(...),
+    force: bool = False,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_DMMD),
+):
+    """Upload an order sheet WITHOUT a pre-existing submission. A new submission is
+    auto-created only when the file passes validation; the returned `submission_id`
+    must be used for the paired spec-sheet upload (and vice-versa). A rejected file
+    returns 4xx diagnostics — no submission is visible to the caller."""
+    try:
+        data = await _read_capped(file)
+        envelope = await ProcurementService(db).upload_order_sheet(
+            user, None, data, file.filename, override_manual_review=force)
+        return JSONResponse(status_code=201, content=envelope)
+    except UploadError as exc:
+        return _error_response(exc)
+
+
 @router.post("/submissions/{submission_id}/spec-sheet")
 async def upload_spec_sheet(
     submission_id: uuid.UUID,
@@ -122,6 +142,26 @@ async def upload_spec_sheet(
         data = await _read_capped(file)
         envelope = await ProcurementService(db).upload_spec_sheet(
             user, submission_id, data, file.filename, override_manual_review=force)
+        return JSONResponse(status_code=201, content=envelope)
+    except UploadError as exc:
+        return _error_response(exc)
+
+
+@router.post("/upload/spec-sheet", status_code=201)
+async def upload_spec_sheet_direct(
+    file: UploadFile = File(...),
+    force: bool = False,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_DMMD),
+):
+    """Upload a spec sheet WITHOUT a pre-existing submission. A new submission is
+    auto-created only when the file passes validation; the returned `submission_id`
+    must be used for the paired order-sheet upload (and vice-versa). A rejected file
+    returns 4xx diagnostics — no submission is visible to the caller."""
+    try:
+        data = await _read_capped(file)
+        envelope = await ProcurementService(db).upload_spec_sheet(
+            user, None, data, file.filename, override_manual_review=force)
         return JSONResponse(status_code=201, content=envelope)
     except UploadError as exc:
         return _error_response(exc)
@@ -158,3 +198,34 @@ async def document_report(
     user: User = Depends(_DMMD),
 ):
     return await ProcurementService(db).get_document_report(submission_id, document_id)
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
