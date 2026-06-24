@@ -437,60 +437,17 @@ class BomService:
         logger.info("generate_bom start: order=%s style=%s spec_type=%s client_match=%s seeds=%s",
                     identity.client_order_id, identity.style_id, spec_sheet.spec_type,
                     client_match_code, len(line_seeds) if line_seeds is not None else "auto")
-<<<<<<< HEAD
         # AFTER (steps 1 + 2):
         # ── 1. extract POMs (NATIVE terms) / attributes / pattern ref ─────────
         # LLM-primary (Gemini → Groq → manual fallback). Emits native source terms
         # only — no pom_code. Term → code resolution is THIS service's job (the DB
         # `pom_dictionary` is the single source of truth). Never raises: failures
         # surface as `manual_entry_required` in `intermediate["warnings"]`.
-=======
-        
-        # Extract Data From Spec Sheet
-        # Looks for:
-
-        # client_code == "NIKE"
-        # and
-        # spec_type == "measurement"
-
-        # If found:
-
-        # {"client_code": "NIKE", "spec_type": "measurement"}
-
-        # returns immediately.
-        
-        adapter = select_adapter(spec_sheet.spec_type, client_match_code, adapters)
-        
-        # language	source_term	    pom_code
-        # EN	        Chest Width	    CHEST
-        # EN	        Body Length	    LENGTH
-        # TR	        Göğüs	        CHEST
-        
-        # [
-        # ("EN", "Chest Width", "CHEST"),
-        # ("EN", "Body Length", "LENGTH"),
-        # ("TR", "Göğüs", "CHEST"),
-        #  IT CONVERT THE TABLE INTO TUPLES
-
-        pom_dict = PomDict(await self.repo.pom_dictionary_rows())
-        
-        # intermediate = extract_spec(
-        # spec_bytes,
-        # filename,
-        # adapter,
-        # pom_dict,
-        # spec_sheet_id=str(spec_sheet.id),
-        # extractor=extractor,
-        # )
-        # WITHOUT THRESHOLD IT LOOK LIKE THIS WE PUT A PARAMETER IN EXTRACT SPEC SHEET
-        
->>>>>>> ac7fcb95c4a26eb48f45fd426a29f19fc8ba9fa3
         intermediate = await run_in_threadpool(
             extract_spec, spec_bytes, filename, _sniff_mime(spec_bytes),
             spec_sheet_id=str(spec_sheet.id),
         )
         
-<<<<<<< HEAD
         logger.info("return full detail from generate_for_spec", intermediate=intermediate)
         
         spec_extraction_row = self._build_spec_extraction_row(
@@ -528,47 +485,6 @@ class BomService:
                     continue
                 seen.add(key)
                 conf = p.get("confidence")
-=======
-    # IT RETURN SOME LIKE THIS
-        
-    #     {
-    #    "poms": [
-    #     {
-    #         "pom_code": "CHEST",
-    #         "by_size": {
-    #             "S": 20,
-    #             "M": 21
-    #         }
-    #     }
-    # ],
-    #   "attributes": [
-    #     {
-    #         "name": "Fabric",
-    #         "value": "Cotton"
-    #     }
-    #     ],
-    #     "warnings": []
-    #     }
-        
-
-        # ── 2. persist pom_measurement rows (replace-on-key) ──────────────────
-        pom_rows: list[PomMeasurement] = []
-        for p in intermediate["poms"]: # TAKE A POMS ONLY AND PUT A LOOP 
-            for size, value in p["by_size"].items(): # Loop through all sizes and values. INSIDE A POMS
-    #            "by_size": {
-    #             "S": 20,
-    #             "M": 21
-    #         }
-            
-            # FIRST ITERATION
-            # size = "S"
-            # value = 20
-
-            # Second iteration:
-
-            # size = "M"
-            # value = 21
->>>>>>> ac7fcb95c4a26eb48f45fd426a29f19fc8ba9fa3
                 pom_rows.append(PomMeasurement(
                     spec_sheet_id=spec_sheet.id, size=size, pom_code=p["pom_code"],
                     value=Decimal(str(value)),
@@ -577,17 +493,9 @@ class BomService:
                     
                     # Store the original text found in Excel.
                     source_term=p.get("source_term"),
-<<<<<<< HEAD
                     extracted_by=p.get("extracted_by") or intermediate.get("extracted_by")
                     or ExtractionSource.MANUAL.value,
                     confidence=Decimal(str(conf)) if conf is not None else Decimal("0.99"),
-=======
-                    # Store how the value was extracted.
-                    
-                    #EXTRACT USING DETERMINISTIC VALUE
-                    extracted_by=p.get("extracted_by", ExtractionSource.DETERMINISTIC.value),
-                    confidence=Decimal(str(p.get("confidence", 0.99))),
->>>>>>> ac7fcb95c4a26eb48f45fd426a29f19fc8ba9fa3
                 ))
                 
                 # DELETE A OLD MEASUREMENTS AND ADD NEW MEASUREMENTS
@@ -709,17 +617,7 @@ class BomService:
         base_size = (intermediate.get("pattern_reference") or {}).get("base_size") \
             or (sizes[0] if sizes else None) \
             or (intermediate.get("attributes") or {}).get("sms_size")
-<<<<<<< HEAD
         poms_for_size = self._poms_by_size(resolved_poms)
-=======
-        poms_for_size = self._poms_by_size(intermediate["poms"])
-    # I GET LIKE THIS FROM POMS_BY_SIZE
-    #     {
-    # "S": {"CHEST": 20},
-    # "M": {"CHEST": 21},
-    # "L": {"CHEST": 22}
-    #     }
->>>>>>> ac7fcb95c4a26eb48f45fd426a29f19fc8ba9fa3
 
         # ── 6. build bom_items with DCM resolution + costing ──────────────────
         
@@ -888,7 +786,6 @@ class BomService:
         
         # MATCH THE CLIENT OTHERWISE RETURN FLAGS
         flags = checks_mod.run_checks(client_match_code, ctx, checks_cfg)
-<<<<<<< HEAD
 
         # Prepend a clear flag when the extractor couldn't read the spec — this
         # supersedes the cascade of "missing X" check warnings the user would
@@ -914,38 +811,6 @@ class BomService:
                             "Order quantities must be entered manually."),
                 "details": order_warnings,
             }] + flags
-=======
-        
-        # User: Ismail
-        # Action: BOM_GENERATE
-        # BOM ID: 101
-        # Time: 2026-06-20
-        
-        # # STORE A HISTORY RECORD
-        await self._audit(user, "BOM_GENERATE", bom.id, after=self._bom_snapshot(bom))
-        logger.info("generate_bom done: bom=%s items=%d fob=%s flags=%d unresolved=%d",
-                    bom.id, len(bom.items), bom.garment_fob_price, len(flags),
-                    len(intermediate["unresolved"]))
-        
-        # Log becomes:
-
-        # generate_bom done:
-        # bom=101
-        # items=6
-        # fob=15.25
-        # flags=2
-        # unresolved=1
-
-        # Useful for debugging.
-        
-        # RETURN A RESPONSE
-        return {"bom": self._bom_view(bom), "flags": flags,
-                "order": {"order_qty": identity.order_qty,
-                          "per_size_qty": identity.per_size_qty,
-                          "warnings": (order_identity or {}).get("warnings", [])},
-                "extraction": {"poms": len(pom_rows), "unresolved": intermediate["unresolved"],
-                               "pattern_reference": pr_block}}
->>>>>>> ac7fcb95c4a26eb48f45fd426a29f19fc8ba9fa3
 
         await self._audit(user, "BOM_GENERATE", bom.id, after=self._bom_snapshot(bom))
         logger.info("generate_bom done: bom=%s items=%d fob=%s flags=%d unresolved=%d manual=%s",
