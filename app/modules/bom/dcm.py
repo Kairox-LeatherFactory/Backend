@@ -58,8 +58,7 @@ def slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
 
 
-def style_signature(*, customer_ref: str | None, internal_ref: str | None,
-                    name: str | None) -> str:
+def style_signature(*, customer_ref: str | None, internal_ref: str | None,name: str | None) -> str:
     """The CROSS-ORDER-STABLE key for the DCM memory (§3c). Style rows are
     order-scoped, so we MUST NOT key on style_id — prefer the buyer's stable
     customer_ref (CR1-02F5-PL02) → internal_ref → a slug of the style name, so the

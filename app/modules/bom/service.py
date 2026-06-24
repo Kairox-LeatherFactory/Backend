@@ -489,8 +489,7 @@ class BomService:
                               internal_ref=identity.internal_ref, name=identity.name)
         sizes = list(spec.sizes)
         base_size = (spec.pattern_reference.base_size if spec.pattern_reference else None) \
-            or (sizes[0] if sizes else None) \
-            or (spec_sheet.attributes or {}).get("sms_size")
+            or (sizes[0] if sizes else None) 
         poms_for_size = self._poms_by_size(resolved_poms)
 
         # ── 6. build bom + items with DCM resolution + costing ────────────────
@@ -631,10 +630,7 @@ class BomService:
         # replace-on-key, inline (single transaction): drop any existing rows for this
         # spec sheet, then stage the new ones. With the idempotency guard upstream the
         # spec sheet is always fresh, so the delete is a harmless no-op here.
-        await self.db.execute(
-            delete(PomMeasurement).where(PomMeasurement.spec_sheet_id == spec_sheet.id))
-        if pom_rows:
-            self.db.add_all(pom_rows)
+        await self.repo.replace_pom_measurements_atomic(spec_sheet, pom_rows)
         return resolved_poms, unresolved, pom_rows
 
     @staticmethod
@@ -648,14 +644,22 @@ class BomService:
             primary = spec.color_details.get("primary")
             if primary:
                 attrs["primary_color"] = primary
+            secondary = spec.color_details.get("secondary")
+            if secondary:
+                attrs["secondary_color"] = secondary
+            if spec.color_details.get("details"):
+                attrs["color_details"] = spec.color_details["details"]
 
         lining = spec.lining or {}
         if lining.get("lined") is False:
             attrs["lining"] = "unlined"
-        elif lining.get("details"):
-            attrs["lining"] = lining["details"]
         elif lining.get("lined") is True:
             attrs["lining"] = "lined"
+        if lining.get("details"):
+            attrs["lining"] = lining["details"]
+        if lining.get("material") is True:
+            attrs["material"] = "material"    
+        
 
         if spec.interlining:
             attrs["interlining"] = dict(spec.interlining)

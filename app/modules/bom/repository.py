@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -122,6 +122,12 @@ class BomRepository:
             select(PomMeasurement).where(PomMeasurement.spec_sheet_id == spec_sheet_id)
         )
         return list(res.scalars())
+    
+    async def replace_pom_measurements_atomic(self, spec_sheet: SpecSheet, pom_rows: list[PomMeasurement]) -> None:
+        await self.db.execute(
+                delete(PomMeasurement).where(PomMeasurement.spec_sheet_id == spec_sheet.id))
+        if pom_rows:
+                self.db.add_all(pom_rows)
 
     # ── garment_type ──────────────────────────────────────────────────────────
     async def get_garment_type(self, code: str | None) -> GarmentType | None:

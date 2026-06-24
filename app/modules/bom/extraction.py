@@ -103,9 +103,9 @@ do NOT invent values):
   (e.g. a contrast panel). Omit if there are none.
 - interlining: dict with present (boolean), material, placement — the
   fusible/non-fusible interlining if the document names one; omit if none.
-- color_details: dict with primary, secondary, and any finish/colour notes
+- color_details: dict with primary, secondary, and any finish/colour notes use attributes details for other color details (e.g. "matte finish", "slightly darker than swatch") — omit if none.
 - lining: dict with lined (boolean), details (text), material
-- accessories: list of {type, supplied_by (factory|client|null), placement,
+- accessories: list of {type, supplied_by (factory|client|if nothing mentioned then factory by default), placement,
   spec, finish, qty_per_garment}
   - qty_per_garment is the INTEGER count of THIS accessory per single garment
     (e.g. 2 if there are two rear zippers, 1 for a single front zipper). If the
