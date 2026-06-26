@@ -4,8 +4,10 @@
 # ──────────────────────────────────────────────────────────────
 # Dispatches based on the CMD passed by docker-compose / docker run:
 #
-#   api       → wait for DB → migrate → seed → uvicorn   (default)
-#   migrate   → run Alembic migrations and exit          (useful in CI)
+#   api       → wait for DB → migrate → seed → uvicorn        (default)
+#   worker    → wait for DB + Redis → celery worker           (BOM extraction jobs)
+#   beat      → wait for Redis → celery beat                   (scheduled jobs)
+#   migrate   → run Alembic migrations and exit                (useful in CI)
 #   seed      → force-run the seed script and exit
 #   shell     → drop into bash (for debugging)
 #
@@ -14,11 +16,21 @@
 #   RUN_SEED=true         → run scripts.seed on boot (api only; seed is idempotent)
 #   UVICORN_RELOAD=true   → start uvicorn with --reload (dev hot-reload)
 #   DB_WAIT_MAX_ATTEMPTS  → how many seconds to wait for Postgres (default 60)
+#   REDIS_WAIT_MAX_ATTEMPTS → how many seconds to wait for Redis (default 30)
+#   CELERY_CONCURRENCY    → worker process count (default 4)
+#   CELERY_LOGLEVEL       → worker/beat log level (default info)
+#
+# MIGRATIONS OWNERSHIP: only `api` migrates + seeds. `worker`/`beat` never do —
+# they wait for `api` to be HEALTHY in compose (which means migrate+seed finished),
+# so the schema exists before the worker touches it. This avoids two processes
+# racing `alembic upgrade head`.
 # ──────────────────────────────────────────────────────────────
 
 set -euo pipefail
 
 CMD="${1:-api}"
+
+CELERY_APP="app.core.celery.celery_app"
 
 # ─── Helpers ──────────────────────────────────────────────────
 
@@ -55,6 +67,33 @@ except Exception:
     log "Postgres is ready (${attempt}s)."
 }
 
+# Wait for Redis (the Celery broker) to answer PING. Uses redis-py (on PATH via
+# requirements) with the SAME CELERY_BROKER_URL the app uses, so success here means
+# the worker/beat can reach the broker. from_url handles rediss:// (Upstash) too.
+wait_for_redis() {
+    log "Waiting for Redis (Celery broker)..."
+    local max_attempts="${REDIS_WAIT_MAX_ATTEMPTS:-30}"
+    local attempt=0
+    until python -c "
+import os, sys
+try:
+    import redis
+    url = os.environ.get('CELERY_BROKER_URL', 'redis://redis:6379/0')
+    redis.Redis.from_url(url, socket_connect_timeout=2).ping()
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null; do
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge "$max_attempts" ]; then
+            err "Redis not reachable after ${max_attempts}s. Giving up."
+            exit 1
+        fi
+        sleep 1
+    done
+    log "Redis is ready (${attempt}s)."
+}
+
 # Run Alembic migrations. A failure here is fatal — a half-migrated schema
 # should not start serving traffic.
 run_migrations() {
@@ -89,6 +128,25 @@ case "$CMD" in
             --port 8000 \
             --proxy-headers \
             ${UVICORN_RELOAD:+--reload}
+        ;;
+
+    worker)
+        # No migrate/seed here (api owns schema; compose makes us wait for it healthy).
+        # The worker hits BOTH Postgres (build_bom_for_submission) and Redis (broker).
+        wait_for_postgres
+        wait_for_redis
+        log "Starting Celery worker (concurrency=${CELERY_CONCURRENCY:-4})..."
+        exec celery -A "$CELERY_APP" worker \
+            --loglevel="${CELERY_LOGLEVEL:-info}" \
+            --concurrency="${CELERY_CONCURRENCY:-4}"
+        ;;
+
+    beat)
+        # Beat only publishes schedule ticks to the broker — Redis is enough.
+        wait_for_redis
+        log "Starting Celery beat (scheduler)..."
+        exec celery -A "$CELERY_APP" beat \
+            --loglevel="${CELERY_LOGLEVEL:-info}"
         ;;
 
     migrate)

@@ -22,18 +22,18 @@ depends_on = None
 
 def upgrade():
     op.alter_column('spec_sheet', 'client_id',
-                    UUID(), nullable=True)
+                    existing_type=UUID(), nullable=True)
     op.alter_column('pattern_reference', 'client_id',
-                    UUID(), nullable=True)
+                    existing_type=UUID(), nullable=True)
     op.alter_column('style_consumption_template', 'client_id',
-                    UUID(), nullable=True)
+                    existing_type=UUID(), nullable=True)
 
 
 def downgrade():
     # NOTE: will fail if any client-less rows exist; backfill before downgrading.
     op.alter_column('style_consumption_template', 'client_id',
-                    UUID(), nullable=False)
+                    existing_type=UUID(), nullable=False)
     op.alter_column('pattern_reference', 'client_id',
-                    UUID(), nullable=False)
+                    existing_type=UUID(), nullable=False)
     op.alter_column('spec_sheet', 'client_id',
-                    UUID(), nullable=False)
+                    existing_type=UUID(), nullable=False)

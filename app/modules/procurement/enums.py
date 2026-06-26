@@ -31,6 +31,7 @@ class SubmissionStatus(str, enum.Enum):
     COMPLETE = "complete"
     CONSUMED = "consumed"
     REJECTED = "rejected"
+    QUEUED = "queued"  # for the rare case of a submission that is complete but not yet picked up by Stage 2
 
 
 class ValidationStatus(str, enum.Enum):

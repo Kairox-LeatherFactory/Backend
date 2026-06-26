@@ -74,7 +74,6 @@ def style_signature(*, customer_ref: str | None, internal_ref: str | None,name: 
 def estimate_area_dcm(area_formula: dict | None, wastage_pct, poms_for_size: dict) -> Decimal | None:
     """Source-3 heuristic (the ONLY place finished measurements touch consumption).
     A rough pattern bounding box per panel:
-
         length_cm = Σ(weight·POM) over length_poms
         width_cm  = Σ(weight·POM) over width_poms
         dcm_dm²   = panels · length_cm · width_cm · calibration / 100 · (1 + wastage)

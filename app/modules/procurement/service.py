@@ -394,7 +394,7 @@ class ProcurementService:
             "order_key": submission_key(str(sub.id), "order-sheet", order.sha256,
                                         _EXT_FOR_MIME.get(order.mime, "")),
             "spec_filename": spec.filename, "spec_type": spec.classified_spec_type,
-            "client_match_code": spec.client_match_code, "client_id": str(sub.client_id),
+            "client_match_code": spec.client_match_code, "client_id": str(sub.client_id) if sub.client_id else None,
             "order_filename": order.filename, "order_mime": order.mime,
             "order_match_code": order.client_match_code,
             "source_document_id": str(spec.id),

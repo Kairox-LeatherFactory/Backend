@@ -132,5 +132,5 @@ langchain-google-genai==3.0.1    # Gemini — PRIMARY for BOM extraction (multim
 #   2. SCHEDULED jobs (Beat): freight-risk deadline scan, 2-hour notification
 #      escalation — periodic work that has no request to hang on.
 # Run THREE processes: uvicorn (API), `celery ... worker`, `celery ... beat`.
-celery[redis]==5.5.3      # task queue + Beat scheduler; [redis] pulls the redis client
-redis==6.4.0              # broker + result backend client (Upstash works: rediss://)
+celery==5.6.2
+redis==7.3.0             # broker + result backend client (Upstash works: rediss://)

@@ -710,58 +710,12 @@ class BomService:
         """Step 6: turn seeds into BomItems, DCM-resolving leather AREA lines (§2) and
         carrying given qty/price on the rest."""
         items: list[BomItem] = []
-        for seed in line_seeds:
-            # Loop through BOM seeds
-            # EXAMPLE LINE SEED
-    #         LineSeed(
-    #     category="MAIN_MATERIAL",
-    #     name="Cow Leather"
-    # ),
-
-    # LineSeed(
-    #     category="LINING",
-    #     name="Polyester"
-    # ),
-
-    # LineSeed(
-    #     category="ACCESSORY",
-    #     name="Button",
-    #     supplied_by="buyer"
-    # ),
-
-    # LineSeed(
-    #     category="ACCESSORY",
-    #     name="Zip"
-    # ),
-
-    # LineSeed(
-    #     category="COST",
-    #     name="Stitching",
-    #     unit_price=0.50
-    # ),
-
-    # LineSeed(
-    #     category="COST",
-    #     name="Packing",
-    #     unit_price=0.20
-    # )
-            
-            
+        for seed in line_seeds: 
             price = Decimal("0") if (seed.supplied_by or "").lower() in ("client", "buyer") \
                 else (Decimal(str(seed.unit_price)) if seed.unit_price is not None else Decimal("0"))
             dcm_source = None
             dcm_conf = None
-            if seed.category in MATERIAL_DCM_CATEGORIES: # MAIN MATERIAL 
-                
-                # Find the DCM (Direct Consumption Measurement / material consumption per garment) using a priority ordeR
-                # Suppose database finds:
-
-                # Leather Jacket
-                # Consumption = 18.5 dm²
-                
-                # RETURNS FROM DB
-                # dcm = Decimal("18.5")
-                # src = TEMPLATE
+            if seed.category in MATERIAL_DCM_CATEGORIES:
                 dcm, src = await self._resolve_dcm(
                     client_id=identity.client_id, style_signature=sig, garment_type_id=gt_id,
                     garment_type_row=gt, material_category=seed.category, size=base_size,
@@ -774,13 +728,6 @@ class BomService:
             else:
                 qpg = Decimal(str(seed.qty_per_garment)) if seed.qty_per_garment is not None \
                     else Decimal("1")
-                    # Zipper
-                    # Button
-                    # Label
-                    # Hang Tag
-                    # Packaging
-                    # Labor
-
             items.append(BomItem(
                 category=seed.category, name=seed.name, material_color=seed.material_color,
                 qty_per_garment=qpg, uom=seed.uom, unit_price=price,

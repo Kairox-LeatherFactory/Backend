@@ -179,6 +179,7 @@ def generate_bom_for_submission(
         "bom_id": result["bom"]["id"],
         "status": result["bom"]["status"],
         "flags": result["flags"],
+        
         "manual_entry_required": result["extraction"].get("manual_entry_required", False),
         "idempotent_replay": result.get("idempotent_replay", False),
     }
