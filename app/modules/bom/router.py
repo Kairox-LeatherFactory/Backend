@@ -37,14 +37,15 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.enums import UserRole
+from app.core.storage import get_storage
 from app.modules.bom.notification_service import NotificationService
-from app.modules.bom.schemas import BomApproveRequest, BomBulkPatch, BomRejectRequest
+from app.modules.bom.schemas import BomApproveRequest, BomBulkPatch, BomRejectRequest, ClientChecksPut, CostCatalogPut, FabricRoleIn, PomMappingIn
 from app.modules.bom.service import BomService
 from app.modules.users.deps import get_current_user, require_roles
 from app.modules.users.models import User
@@ -117,3 +118,59 @@ async def stream_notifications(db: AsyncSession = Depends(get_db),
 async def open_notification(notification_id: uuid.UUID, db: AsyncSession = Depends(get_db),
                             user: User = Depends(get_current_user)):
     return await NotificationService(db).mark_opened(notification_id, user)
+
+@router.post("/patterns", status_code=202)
+async def upload_pattern(file: UploadFile = File(...), style_signature: str | None = None,
+                         db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
+    data = await file.read()
+    key = f"patterns/incoming/{uuid.uuid4()}.dxf"
+    get_storage().put(key, data)                       # store, then hand the KEY to the task
+    from app.modules.bom.tasks import parse_pattern_dxf
+    job = parse_pattern_dxf.delay(user_id=str(user.id), style_signature=style_signature,
+                                  client_id=str(getattr(user,"client_id",None) or "") or None,
+                                  storage_key=key)
+    return {"job_id": job.id, "channel": f"pattern:{style_signature}"}
+
+@router.put("/admin/dxf-yields/{species}")
+async def put_dxf_yield(species: str, body: DxfYieldIn,
+                        db: AsyncSession = Depends(get_db), user: User = Depends(_DMMD)):
+    return await BomService(db).set_dxf_yield(species, body.factor, note=body.note)
+
+@router.post("/admin/fabric-roles")
+async def post_fabric_role(body: FabricRoleIn,
+                           db: AsyncSession = Depends(get_db), user: User = Depends(_DMMD)):
+    return await BomService(db).upsert_fabric_role(body.model_dump())
+
+@router.get("/admin/cost-catalog")
+async def get_cost_catalog(db: AsyncSession = Depends(get_db), user: User = Depends(_DMMD)):
+    from app.modules.bom import config_store
+    return config_store.get_cost_catalog()
+
+@router.put("/admin/cost-catalog/{garment_code}")
+async def put_cost_catalog(garment_code: str, body: CostCatalogPut,
+                           db: AsyncSession = Depends(get_db), user: User = Depends(_DMMD)):
+    return await BomService(db).set_cost_catalog(
+        garment_code, [l.model_dump() for l in body.lines])
+    
+@router.get("/admin/checks")
+async def get_checks(db: AsyncSession = Depends(get_db), user: User = Depends(_DMMD)):
+    from app.modules.bom import config_store
+    return config_store.get_bom_checks()
+
+@router.put("/admin/checks/{client_code}")
+async def put_checks(client_code: str, body: ClientChecksPut,
+                     db: AsyncSession = Depends(get_db), user: User = Depends(_DMMD)):
+    return await BomService(db).set_client_checks(
+        client_code, [r.model_dump() for r in body.rules])
+    
+@router.get("/admin/pom-dictionary")
+async def list_pom_dictionary(db: AsyncSession = Depends(get_db), user: User = Depends(_DMMD)):
+    rows = await BomService(db).repo.list_pom_mappings()
+    return [{"source_term": r.source_term, "pom_code": r.pom_code, "language": r.language,
+             "garment_type_id": str(r.garment_type_id) if r.garment_type_id else None,
+             "weight": r.weight} for r in rows]
+
+@router.post("/admin/pom-dictionary")
+async def add_pom_mapping(body: PomMappingIn, db: AsyncSession = Depends(get_db),
+                          user: User = Depends(_DMMD)):
+    return await BomService(db).add_pom_mapping(body.model_dump())

@@ -1,0 +1,483 @@
+{
+  "order_sheet_no": "1579",
+  "order_date": "2026-06-01",
+  "manufacturer": {
+    "name": "PAKKAR (Pakkar Tanveer Exports)",
+    "factory_code": "CZ"
+  },
+  "buyer": {
+    "name": "Beau Geste Co., Ltd. (株式会社ボージェスト)",
+    "our_ref_no": "A32073-44"
+  },
+  "customer_brand": "CRIMIE",
+  "customer_no": "CR1-02F5-PL02",
+  "style_id": "CR1-02F5-PL02",
+  "internal_style_ref": "Pattern No. CR1-02F5-PL02 (also referenced as CRI 02F5 PL02 / CRI-02F5-PL02 in price quotation)",
+  "season": "2026 AW",
+  "patternmaker": "WITZ",
+  "garment_type": "Trousers / Pants",
+  "garment_subtype": "Side-Panel Suede Leather Track Pants (脇スエードレザートラックパンツ) – Sheep Glass Leather Body with Goat Suede Side Inserts, Elastic/Cord Belt, Zip Pockets",
+  "article_name": "Leather Pants",
+  "gender": "Unisex/Men (no explicit gender stated)",
+  "colour": "Black",
+  "colour_code": "Black (BLACK) – all components",
+  "shipping_limit": "TBC – not specified on order sheet",
+  "order_quantity_total": 60,
+  "size_breakdown": {
+    "S": 4,
+    "M": 17,
+    "L": 23,
+    "XL": 10,
+    "XXL": 6
+  },
+  "unit_price_usd": 104,
+  "total_price_usd": 6240,
+  "garment_price_quotation_fob_usd": 107.25,
+  "leather": {
+    "main_material": {
+      "type": "Sheep Glass (Sheep Leather)",
+      "colour": "Black",
+      "thickness_mm": "0.6–0.7",
+      "supplier": "SHEEP LEATHER",
+      "usage_position": "Main body (BG = main fabric)",
+      "yardage_sqft": 34.5,
+      "unit_price_usd": 1.8,
+      "sample_mass_usd": 62.1,
+      "note": "Note on order sheet specifies 34.5sf (Sheep Glass)"
+    },
+    "sub_material": {
+      "type": "Goat Suede",
+      "colour": "Black",
+      "supplier": "GOAT",
+      "usage_position": "Side panel insert (脇切替え / side seam panel)",
+      "yardage_sqft": 2.6,
+      "unit_price_usd": 1.75,
+      "sample_mass_usd": 4.55,
+      "note": "Note on order sheet specifies 2.6sf (Goat Suede); client instructs to take care where goat suede is used"
+    },
+    "selection_grade": "Approval sample required before bulk production",
+    "anti_dust_treatment": false,
+    "napalan_treatment": false
+  },
+  "pattern": {
+    "base_pattern_ref": "Created based on CR1-O2B5-PL02 (sizing per CRPL-011)",
+    "pattern_type": "Track-pant style trousers with side seam leather/suede paneling, elastic + cord belt waistband",
+    "size_base": "S–XXL (5 sizes, full grading)",
+    "grading_method": "Factory grading per measurement chart (full size run graded)",
+    "shrinkage_note": "Shrinkage rate is per factory finishing",
+    "revision_history": [
+      "2026-03-16: Size correction and full-size re-grading"
+    ]
+  },
+  "measurements_cm": {
+    "size_run": [
+      "S",
+      "M",
+      "L",
+      "XL",
+      "XXL"
+    ],
+    "waist_top_edge_no1": {
+      "S": 72,
+      "M": 77,
+      "L": 82,
+      "XL": 87,
+      "XXL": 92,
+      "grading_pitch": 5
+    },
+    "waist_actual_no2": {
+      "S": 88,
+      "M": 93,
+      "L": 98,
+      "XL": 103,
+      "XXL": 108,
+      "grading_pitch": 5
+    },
+    "hip_position_no3": {
+      "S": 18,
+      "M": 19,
+      "L": 20,
+      "XL": 21,
+      "XXL": 22,
+      "grading_pitch": 1
+    },
+    "hip_circumference_no4": {
+      "S": 101.4,
+      "M": 105.6,
+      "L": 109.8,
+      "XL": 114,
+      "XXL": 118.2,
+      "grading_pitch": 4.2
+    },
+    "thigh_width_no5": {
+      "S": 33,
+      "M": 34,
+      "L": 35,
+      "XL": 36,
+      "XXL": 37,
+      "grading_pitch": 1
+    },
+    "knee_length_no6": {
+      "S": 30,
+      "M": 30.5,
+      "L": 31,
+      "XL": 31.5,
+      "XXL": 31.5,
+      "grading_pitch": 0.5
+    },
+    "knee_width_no7": {
+      "S": 23.5,
+      "M": 24.5,
+      "L": 25.5,
+      "XL": 26.5,
+      "XXL": 27.5,
+      "grading_pitch": 1
+    },
+    "hem_width_no8": {
+      "S": 22,
+      "M": 22.5,
+      "L": 23,
+      "XL": 23.5,
+      "XXL": 24,
+      "grading_pitch": 0.5
+    },
+    "front_rise_no9": {
+      "S": 27.5,
+      "M": 28.5,
+      "L": 29.5,
+      "XL": 30.5,
+      "XXL": 31.5,
+      "grading_pitch": 1
+    },
+    "front_crotch_curve_no10": {
+      "S": 29.2,
+      "M": 30.3,
+      "L": 31.4,
+      "XL": 32.5,
+      "XXL": 33.6,
+      "grading_pitch": 1
+    },
+    "back_crotch_curve_no11": {
+      "S": 41.7,
+      "M": 42.8,
+      "L": 43.9,
+      "XL": 45,
+      "XXL": 46.1,
+      "grading_pitch": 1.1
+    },
+    "inseam_no12": {
+      "S": 76,
+      "M": 77,
+      "L": 79,
+      "XL": 79,
+      "XXL": 79,
+      "grading_pitch": "1/2/0~ (irregular)"
+    },
+    "belt_width_no13": {
+      "S": 4,
+      "M": 4,
+      "L": 4,
+      "XL": 4,
+      "XXL": 4,
+      "grading_pitch": 0
+    },
+    "side_total_length_no14": {
+      "S": 105,
+      "M": 107,
+      "L": 110,
+      "XL": 111,
+      "XXL": 112,
+      "grading_pitch": "irregular"
+    },
+    "accessory_measurements": {
+      "cord_length_strap_no1": {
+        "S": 140,
+        "M": 140,
+        "L": 140,
+        "XL": 150,
+        "XXL": 150,
+        "grading_pitch": "0/5"
+      },
+      "flat_elastic_length_no2": {
+        "S": 74,
+        "M": 79,
+        "L": 84,
+        "XL": 89,
+        "XXL": 94,
+        "grading_pitch": 5
+      },
+      "front_pocket_zip_no3": {
+        "S": 16,
+        "M": 16,
+        "L": 16,
+        "XL": 16,
+        "XXL": 16,
+        "grading_pitch": 0
+      },
+      "back_pocket_zip_no4": {
+        "S": 15,
+        "M": 15,
+        "L": 15,
+        "XL": 15,
+        "XXL": 15,
+        "grading_pitch": 0
+      }
+    }
+  },
+  "construction": {
+    "lining": {
+      "pocket_bag": "Polyester taffeta (ポリエステルタフタ), 100% polyester, Black",
+      "pocket_bag_yardage_mtr": 0.4,
+      "pocket_bag_unit_price_usd": 1.5,
+      "pocket_bag_sample_mass_usd": 0.6,
+      "body": "Unlined (no body lining specified)"
+    },
+    "interlining": {
+      "type": "Fusing interlining",
+      "yardage_mtr": 1.0,
+      "unit_price_usd": 1.0,
+      "position": "Per pattern instruction (型紙に指示あり)",
+      "colour": "Black"
+    },
+    "side_panel": {
+      "type": "Goat suede insert at side seam (脇切替え)",
+      "colour": "Black"
+    },
+    "waistband_belt": {
+      "construction": "Belt with flat cord (D-ring tab) + flat elastic, no traditional buckle",
+      "flat_cord": {
+        "finish": "Tipped/chip-processed ends (チップ加工)",
+        "colour": "Silver tip, Black cord",
+        "position": "Belt",
+        "qty_per_garment": 1
+      },
+      "flat_elastic": {
+        "width_mm": 35,
+        "colour": "Black",
+        "position": "Belt",
+        "qty_per_garment": 1
+      },
+      "d_ring": {
+        "type": "CR Original D-ring",
+        "inner_diameter_mm": 10,
+        "finish": "Silver",
+        "position": "Tab",
+        "qty_per_garment": 1
+      },
+      "belt_width_cm": 4
+    },
+    "front_closure": "No fly button stated; closure via belt + elastic system",
+    "pocket_construction": {
+      "front_pockets": {
+        "type": "Zip pocket",
+        "zip": "YKK 5MA ZA C5, No.5M, closed end, CR pull tab in Silver",
+        "zip_length_cm": 16,
+        "qty_per_garment": 2,
+        "colour_code": "580 / Black"
+      },
+      "back_pockets": {
+        "type": "Zip pocket",
+        "right_back_pocket_zip": "YKK 5MA DABL C5, No.5M, 15cm, 1pc",
+        "right_back_pocket_zip_colour_code": "580 / Black",
+        "critical_note": "Left back pocket zipper slider is DABL (reverse/left-opening type) — factory must take care to use correct slider orientation",
+        "leather_patch_position": "Right back pocket top"
+      },
+      "cargo_pockets": false,
+      "breast_pocket": false
+    },
+    "leather_patch": {
+      "present": true,
+      "type": "CR Original Leather Patch A, thick stock",
+      "rivets": "New rivets – top 4mm, bottom 5mm",
+      "position": "Right back pocket, top",
+      "qty_per_garment": "1 set",
+      "colour": "Black",
+      "backing_washer": {
+        "type": "MORITO packing C4182S, 9x2",
+        "size_mm": 9,
+        "position": "Behind leather patch (reverse side)",
+        "qty_per_garment": 2,
+        "colour": "Black"
+      }
+    },
+    "pattern_layout": "One-direction layout, insert/nested cutting (一方方向・差込)",
+    "pattern_matching": "Yes/No specified per panel – TBC, confirm with factory",
+    "seam_allowance_general_cm": "TBC – not specified",
+    "panel_curvature": "Moderate – fitted trouser through hip/thigh, straight knee-to-hem, side seam panel insert",
+    "panel_pieces_estimated": 10,
+    "secondary_processing": {
+      "washing": "None",
+      "printing": "None",
+      "embroidery": "None",
+      "opp_bag": "None"
+    },
+    "workmanship_notes": [
+      "Based on CR1-O2B5-PL02 pattern base; sizing follows CRPL-011",
+      "Shrinkage rate applied is per factory finishing standard",
+      "2026-03-16 revision: size correction and full-size grading applied to all sizes",
+      "Take care in handling/positioning where goat suede side panel is used (per buyer's handwritten note on order sheet)",
+      "Left back pocket zipper slider is DABL type — do not confuse with right back pocket zipper",
+      "Pattern layout: one-direction, insert/nested cutting",
+      "Approval sample required before bulk production"
+    ]
+  },
+  "accessories": [
+    {
+      "item": "YKK Zip 5MA ZA C5, No.5M, CR Pull Tab",
+      "colour": "Silver tab / Black tape (code 580)",
+      "length_cm": 16,
+      "qty_per_garment": 2,
+      "position": "Front pockets"
+    },
+    {
+      "item": "YKK Zip 5MA DABL C5, No.5M",
+      "colour": "Black tape (code 580)",
+      "length_cm": 15,
+      "qty_per_garment": 1,
+      "position": "Right back pocket",
+      "note": "Left back pocket uses DABL-slider equivalent — verify orientation"
+    },
+    {
+      "item": "D-Ring (CR Original)",
+      "colour": "Silver",
+      "inner_diameter_mm": 10,
+      "qty_per_garment": 1,
+      "position": "Belt tab"
+    },
+    {
+      "item": "Flat Cord (chip-tipped)",
+      "colour": "Silver tip / Black cord",
+      "qty_per_garment": 1,
+      "position": "Belt"
+    },
+    {
+      "item": "Flat Elastic 35mm",
+      "colour": "Black",
+      "qty_per_garment": 1,
+      "position": "Belt"
+    },
+    {
+      "item": "Leather Patch A (thick, CR Original)",
+      "colour": "Black",
+      "qty_per_garment": "1 set",
+      "position": "Right back pocket top"
+    },
+    {
+      "item": "Backing Washer (MORITO C4182S, 9x2)",
+      "colour": "Black",
+      "qty_per_garment": 2,
+      "position": "Behind leather patch"
+    },
+    {
+      "item": "Button SGT-10 20MM",
+      "colour": "TBC",
+      "qty_per_garment": 4,
+      "position": "TBC (per yardage/price sheet)"
+    },
+    {
+      "item": "Button SGT-10 15MM",
+      "colour": "TBC",
+      "qty_per_garment": 2,
+      "position": "TBC (per yardage/price sheet)"
+    },
+    {
+      "item": "Support Button 10MM",
+      "colour": "TBC",
+      "qty_per_garment": 6,
+      "position": "TBC (per yardage/price sheet)"
+    }
+  ],
+  "labels": [
+    {
+      "type": "Main Label (ネーム)",
+      "brand": "CR22D",
+      "qty": 1,
+      "position": "Back belt centre, sewn into inside fold"
+    },
+    {
+      "type": "Size Label",
+      "qty": 1,
+      "position": "Left side, inside fold"
+    },
+    {
+      "type": "Composition Label (品質表示)",
+      "qty": 1,
+      "position": "Left side, inside fold"
+    },
+    {
+      "type": "Hang Tag (下げ札)",
+      "qty": 1,
+      "position": "Right front belt loop, single loop-through"
+    }
+  ],
+  "threads": [
+    {
+      "type": "Thread",
+      "ticket_number": "60s (60番手)",
+      "use": "General construction stitching",
+      "yardage_mtr": 1.0,
+      "unit_price_usd": 1.0
+    }
+  ],
+  "costing": {
+    "currency": "USD",
+    "main_material_sheep_glass": {
+      "yardage_sqft": 34.5,
+      "unit_price": 1.8,
+      "sample_mass_cost": 62.1
+    },
+    "sub_material_goat_suede": {
+      "yardage_sqft": 2.6,
+      "unit_price": 1.75,
+      "sample_mass_cost": 4.55
+    },
+    "lining_pocket_poly": {
+      "yardage_mtr": 0.4,
+      "unit_price": 1.5,
+      "sample_mass_cost": 0.6
+    },
+    "interlining_fusing": {
+      "yardage_mtr": 1,
+      "unit_price": "TBC",
+      "sample_mass_cost": 1.0
+    },
+    "thread": {
+      "yardage_mtr": 1,
+      "unit_price": "TBC",
+      "sample_mass_cost": 1.0
+    },
+    "accessories_buttons": {
+      "qty_20mm": 4,
+      "qty_15mm": 2,
+      "qty_support_10mm": 6,
+      "sample_mass_cost": 0.0
+    },
+    "manufacturing_cost_cutting_stitching": 30.0,
+    "packaging_cost_box_poly_tissue": 3.0,
+    "fob_charge_duty_clearing": 5.0,
+    "total_garment_price_fob_usd": 107.25,
+    "order_unit_price_usd": 104,
+    "order_total_price_usd": 6240,
+    "note": "Order-sheet unit price ($104) differs slightly from yardage/price quotation FOB total ($107.25); confirm final contracted price with buyer"
+  },
+  "yardage_estimation": {
+    "main_leather_sheep_glass_sqft": 34.5,
+    "sub_leather_goat_suede_sqft": 2.6,
+    "pocket_lining_polyester_mtr": 0.4,
+    "fusing_interlining_mtr": 1.0,
+    "thread_mtr": 1.0
+  },
+  "complexity_assessment": {
+    "overall_complexity": "Medium",
+    "rationale": "Dual leather types (sheep glass body + goat suede side insert) requiring panel-matching care; two zip pocket types with a critical left/right slider orientation distinction; leather patch with rivet and backing washer detail; belt system combining D-ring, flat cord, and flat elastic rather than a standard buckle/button waistband; full 5-size grading already finalized.",
+    "complexity_score": 6,
+    "complexity_max": 10
+  },
+  "proto_sample_status": "Approval sample required before bulk production (60 pcs); pattern revised and re-graded 2026-03-16",
+  "label_brand": "CRIMIE",
+  "source_files": [
+    "1782727995298_BMO-1.pdf",
+    "1782727995300_Order-sheet-1.pdf",
+    "1782727995300_spec_sheet_1.xlsx"
+  ]
+}

@@ -215,3 +215,28 @@ def escalate_review_notifications() -> dict[str, Any]:
         return {"escalated": await NotificationService(db).escalate_overdue()}
 
     return _run_async(_with_session(_job))
+
+
+@celery_app.task(bind=True, name="app.modules.bom.tasks.parse_pattern_dxf",
+                 max_retries=2, default_retry_delay=10)
+def parse_pattern_dxf(self, *, user_id=None, style_signature=None, client_id=None,
+                      storage_key=None, b64=None):
+    data = _fetch_bytes(storage_key=storage_key, b64=b64)   # your existing helper
+    if not data:
+        return {"error": "pattern_bytes_missing", "style_signature": style_signature}
+    async def _job(db):
+        from app.modules.bom.service import BomService
+        user = SimpleNamespace(id=uuid.UUID(user_id)) if user_id else None
+        return await BomService(db).ingest_pattern_dxf(
+            user, data=data, style_signature=style_signature,
+            client_id=uuid.UUID(client_id) if client_id else None) 
+    try:
+        result = _run_async(_with_session(_job))            # your existing plumbing
+    except Exception as exc:
+        try: raise self.retry(exc=exc)
+        except self.MaxRetriesExceededError:
+            payload = {"error": "pattern_parse_failed", "style_signature": style_signature, "detail": str(exc)}
+            _run_async(_push_realtime(f"pattern:{style_signature}", "pattern_failed", payload))
+            return payload
+    _run_async(_push_realtime(f"pattern:{style_signature}", "pattern_ready", result))
+    return result

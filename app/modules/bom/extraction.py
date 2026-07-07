@@ -56,7 +56,7 @@ import time
 from typing import Any
 
 from app.core.config import settings
-from app.modules.bom.excel_content import xlsx_to_markdown
+from app.modules.bom.excel_content import xlsx_to_markdown,xls_to_markdown
 from app.modules.bom.extraction_schemas import (
     ExtractedOrder,
     ExtractedSpec,
@@ -266,7 +266,7 @@ def llm_extract_order(kind: str, payload: Any) -> ExtractedOrder | None:
         return None
     engine, raw = result
     parsed = _coerce(raw)
-    if not isinstance(parsed, dict):
+    if not isinstance(parsed, dict): 
         logger.info("LLM (%s) returned non-dict for order: %r", engine, type(parsed))
         return None
     parsed["extracted_by"] = engine
@@ -324,14 +324,15 @@ def _sniff_mime(data: bytes | None) -> str | None:
 
 
 def _resolve_kind(data: bytes, filename: str, mime: str | None) -> str:
-    """Decide the file kind: 'pdf', 'xlsx', 'csv', 'unknown'. Prefers the mime,
-    falls back to extension, then magic-byte sniff."""
+    """Decide the file kind: 'pdf', 'xlsx', 'xls', 'csv', 'unknown'."""
     name = (filename or "").lower()
     sniffed = mime or _sniff_mime(data)
     if sniffed == PDF_MIME or name.endswith(".pdf"):
         return "pdf"
     if sniffed == XLSX_MIME or name.endswith((".xlsx", ".xlsm")):
         return "xlsx"
+    if sniffed == "application/vnd.ms-excel" or name.endswith(".xls"):
+        return "xls"
     if sniffed == CSV_MIME or name.endswith((".csv", ".tsv")):
         return "csv"
     return "unknown"
@@ -365,10 +366,10 @@ def extract_spec(data: bytes, filename: str, mime: str | None = None) -> Extract
                 return _empty_spec("vision_disabled_for_scanned_pdf")
             return llm_extract_spec(payload_kind, payload) or _empty_spec("llm_extraction_failed")
 
-        if kind == "xlsx":
-            markdown = xlsx_to_markdown(data)
+        if kind in ("xlsx", "xls"):
+            markdown = (xlsx_to_markdown if kind == "xlsx" else xls_to_markdown)(data)
             if not markdown.strip():
-                return _empty_spec("xlsx_unreadable")
+                return _empty_spec("xls_unreadable" if kind == "xls" else "xlsx_unreadable")
             return llm_extract_spec("text", markdown) or _empty_spec("llm_extraction_failed")
 
         if kind == "csv":
@@ -405,12 +406,12 @@ def extract_order(data: bytes, filename: str, mime: str | None = None,
                 return _empty_order("vision_disabled_for_scanned_pdf")
             return llm_extract_order(payload_kind, payload) or _empty_order("llm_extraction_failed")
 
-        if kind == "xlsx":
-            markdown = xlsx_to_markdown(data)
+        if kind in ("xlsx", "xls"):
+            markdown = (xlsx_to_markdown if kind == "xlsx" else xls_to_markdown)(data)
             if not markdown.strip():
-                return _empty_order("xlsx_unreadable")
+                return _empty_order("xls_unreadable" if kind == "xls" else "xlsx_unreadable")
             return llm_extract_order("text", markdown) or _empty_order("llm_extraction_failed")
-
+        
         if kind == "csv":
             try:
                 text = data.decode("utf-8", errors="replace")

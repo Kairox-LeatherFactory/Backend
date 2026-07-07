@@ -1,0 +1,339 @@
+{
+  "contract_number": "49/26",
+  "contract_date": "2026-04-01",
+  "seller": {
+    "name": "PAKKAR TANVEER EXPORTS",
+    "address": "No.1 Hyder Garden, 2nd Street Extn., Jamaliya Nagar, Perambur, Chennai 600012, India"
+  },
+  "buyer": {
+    "client_id": "ORFATTI-001",
+    "client_name": "CONFEZIONI ORFATTI SRL",
+    "address": "Via E. e P. Salani 24, 50050 Limite S/Arno FI, Italy"
+  },
+  "agent": {
+    "name": "MEA SRL",
+    "address": "Via Capoquadri 8, 50053 Empoli (FI), Italy",
+    "email": "mea.srl@tin.it"
+  },
+  "delivery_date": "2026-05-15",
+  "delivery_terms": "EX CHENNAI",
+  "currency": "EUR",
+  "total_order_quantity": 168,
+  "size_range": "DONNA 38-56 (XS–XXXL)",
+  "style_id": "SP74008",
+  "internal_style_ref": "SP74008 (listed as 'SP747008' on order sheet 49/26 – likely transcription typo; matches SP74008_NAPALINE.xls)",
+  "collection": "MONTEREGGI",
+  "season": "SS2027",
+  "garment_type": "Jacket",
+  "garment_subtype": "Nappalan Jacket with Pocket Flap Snaps, T8/T5 Zip Combination, Embroidered Back Patch, Round Collar with Zip",
+  "gender": "Women (Donna)",
+  "size_range_ordered": "42 (S)",
+  "order_quantity": 19,
+  "colour": "Dark Red",
+  "colour_code": "Dark Red – confirmed for SMS repetitions",
+  "unit_price_eur": "TBC",
+  "leather": {
+    "type": "Napaline – Goat Napalan",
+    "finish": "Napalan – smooth grain-side",
+    "animal": "Goat",
+    "thickness_mm": "TBC – Napalan typically 0.6–0.9mm",
+    "selection_grade": "Standard Napalan quality – confirmed on SMS",
+    "quality_notes": "Quality of leather confirmed; SMS repetitions should be Dark Red",
+    "colour_direction": "Dark Red – confirmed for SMS",
+    "grain_restriction": "Stitching at 0.7cm where indicated in orange on sketch; net-cut workmanship where indicated in blue on sketch",
+    "anti_dust_treatment": false,
+    "napalan_treatment": true,
+    "DCM_norm": 375,
+    "costing_DCM_lay_avg": 360,
+    "unit_price_inr_per_dcm": 11,
+    "total_leather_cost_inr": 4125,
+    "calibration": {
+      "extra_leather_dcm": 15,
+      "calibration_percent": 4.17,
+      "allocated_dcm": 375,
+      "expected_consumption_dcm": 360,
+      "purpose": "Grace allowance for leather defects, matching, cutting losses and production variation."
+    }
+  },
+  "pattern": {
+    "base_pattern_ref": "Client-supplied PP (paper pattern) – follow for shape and fitting",
+    "pattern_type": "Fitted jacket, round collar with zip closure, pocket flap with snaps",
+    "paper_pattern_source": "Client-supplied PP",
+    "size_base": "42 (labelled S, confirmed by client)",
+    "grading_increment_cm": 2,
+    "grading_method": "Proportional Italian system",
+    "net_cut_zones": "As indicated in blue on client sketch",
+    "stitching_zones": "0.7cm stitching as indicated in orange on client sketch"
+  },
+  "measurements_cm": {
+    "size_reference": "S/42",
+    "back_length_A": {
+      "target": 48.5,
+      "proto": 47.5
+    },
+    "sleeve_length_incl_cuff_D": {
+      "target": 57.0,
+      "proto": 57.0,
+      "comment": "Confirmed OK on proto; client notes underside of sleeve is ~1cm short – check"
+    },
+    "half_bottom_sleeve_circunf_E": {
+      "target": 13.0,
+      "proto": 13.5
+    },
+    "half_muscle_circunf_F2": {
+      "target": 26.5,
+      "proto": 26.2
+    },
+    "half_chest_circunf_G": {
+      "target": 61.0,
+      "proto": 60.5
+    },
+    "half_bottom_hem_L": {
+      "target": 45.0,
+      "proto": 44.0
+    },
+    "collar_height_back_M": {
+      "target": 4.0,
+      "proto": 5.0
+    },
+    "shoulder_to_shoulder_N": {
+      "target": 49.5,
+      "proto": 50.0
+    },
+    "back_width_at_15cm_N1": {
+      "target": 46.5,
+      "proto": 47.0
+    },
+    "breast_width_at_13cm_N2": {
+      "target": 45.0,
+      "proto": 45.3
+    },
+    "round_collar_perimeter_incl_zip": {
+      "target": 47.0,
+      "proto": 47.0,
+      "comment": "Confirmed OK"
+    },
+    "fitting_status": "Size confirmed S; sleeve length OK at 57cm; all other measurements not yet matching target measurement chart – must be corrected to reach scheme as finished garment measure"
+  },
+  "construction": {
+    "lining": {
+      "body": "Satin lining – Black (quality thinner than the one used on proto sample, per client instruction)",
+      "sleeves": "Satin lining – Black",
+      "pocket_sac": "Satin lining – Black",
+      "adhesive_locations": [
+        "Collar",
+        "Stand collar",
+        "Flap pocket",
+        "Shoulder curl",
+        "Inside bottom body hem"
+      ],
+      "lining_colour": "Black",
+      "lining_notes": "Adhesive used must be same as on SMS"
+    },
+    "collar": {
+      "type": "Round collar with integrated zip closure",
+      "construction": "Round collar perimeter includes zip; collar height at CB",
+      "collar_height_back_cm": 4.0
+    },
+    "front_closure": {
+      "primary": "T8 Metal Zip, shiny nickel finishing, open end, double slider – front side",
+      "secondary": "T5 Metal Zip, shiny nickel finishing, close end, single slider – bottom sleeve (x2, one per sleeve)",
+      "zip_puller_front": "Puller T8 – Nickel (x2)",
+      "zip_puller_sleeve": "Puller T5 – Nickel (x2, one per sleeve)",
+      "metal_finishing_critical": "CRITICAL – client flagged wrong metal finishing used on proto; must be NICKEL throughout (zip and snaps)"
+    },
+    "pocket_construction": {
+      "type": "Flap pocket with snap closure",
+      "flap_closure": "Visible head snaps size 20 (2+1 spare) – Nickel, on pocket flap",
+      "underside_snap": "Underside of snaps (2+1 spare) – Nickel, on pocket flap",
+      "plastic_reinforcement": "4+1 spare, on pocket flap",
+      "hidden_head_snap_addition": "Add hidden head snaps on pocket flap – Nickel metal finishing (per SMS comment)",
+      "breast_pocket": false,
+      "cargo_pockets": false
+    },
+    "yoke": false,
+    "back_slit": false,
+    "embroidered_patch": {
+      "present": true,
+      "position": "Outside back centre, at 2cm below/under collar line",
+      "material": "Napaline leather patch – net cut, 4cm×4cm, matching",
+      "embroidery": "Full thread monogram embroidery matching Dark Red – MISSING on proto; client requires development and a photo for confirmation before production",
+      "fixing": "Net cut; sewn on back side with stitching at 2mm"
+    },
+    "main_label_position": "Inside back centre, directly on lining, under collar line at 3cm (added per SMS comment – was missing on proto)",
+    "curl_hanger": {
+      "type": "Leather curl hanger",
+      "snap_underside_shape": "Use flat small shape for the underside (male) part of the snap"
+    },
+    "seam_allowance_general_cm": 1.0,
+    "stitching_detail_cm": 0.7,
+    "panel_curvature": "Moderate – fitted jacket, round collar with zip curve, flap pocket shaping",
+    "panel_pieces_estimated": 14,
+    "decorative_panels": {
+      "back_embroidery_patch": "Net cut leather, 4x4cm, 2mm stitching, full embroidery",
+      "pocket_flap_snap_detail": "Visible + hidden head snaps, Nickel"
+    },
+    "workmanship_notes": [
+      "Leather quality confirmed; SMS repetitions must be Dark Red",
+      "Fitting confirmed size S; sleeve length OK at 57cm per proto; all other measurements must be corrected to match measurement chart as finished garment measure",
+      "Sleeve length appears short – underside of sleeve is missing ~1cm, check and correct",
+      "Metal finishing for zip and snaps MUST be Nickel – wrong finishing used on proto, correct for SMS",
+      "Add hidden head snaps on pocket flap, Nickel metal finishing",
+      "Add main label inside back centre, under collar line at 3cm (was missing on proto)",
+      "Develop back side patch with full thread embroidery matching Dark Red – was missing on proto; send 1 photo for confirmation before production",
+      "Patch must be net cut and sewn on back side with stitching at 2mm",
+      "Follow client-supplied PP (paper pattern) for shape and fitting",
+      "Make stitching at 0.7cm where indicated in orange on sketch; net-cut workmanship where indicated in blue on sketch",
+      "Use good quality zip – shiny and smooth, sliding well, matching original sample",
+      "Follow swatch sent by client for lining quality/knit",
+      "Lining (satin) must be thinner quality than the one used on the proto sample"
+    ]
+  },
+  "accessories": [
+    {
+      "item": "T8 Metal Zip – Open End, Double Slider",
+      "colour": "Matching",
+      "finish": "Nickel (shiny)",
+      "qty_per_garment": 1,
+      "position": "Front side"
+    },
+    {
+      "item": "T5 Metal Zip – Close End, Single Slider",
+      "colour": "Matching",
+      "finish": "Nickel (shiny)",
+      "qty_per_garment": 2,
+      "position": "Bottom sleeve (each sleeve)"
+    },
+    {
+      "item": "Puller T8",
+      "colour": "Nickel",
+      "qty_per_garment": 2,
+      "position": "Front side"
+    },
+    {
+      "item": "Puller T5",
+      "colour": "Nickel",
+      "qty_per_garment": 2,
+      "position": "Bottom sleeves"
+    },
+    {
+      "item": "Visible Head Snap Size 20",
+      "colour": "Nickel",
+      "qty_per_garment": "2+1 spare",
+      "position": "Pocket flap"
+    },
+    {
+      "item": "Underside of Snap",
+      "colour": "Nickel",
+      "qty_per_garment": "2+1 spare",
+      "position": "Pocket flap"
+    },
+    {
+      "item": "Hidden Head Snap",
+      "colour": "Nickel",
+      "qty_per_garment": "TBC",
+      "position": "Pocket flap (added per SMS comment)"
+    },
+    {
+      "item": "Plastic Reinforcement",
+      "colour": "NA",
+      "qty_per_garment": "4+1 spare",
+      "position": "Pocket flap"
+    },
+    {
+      "item": "Napaline Leather Patch 4×4cm with Monogram Embroidery",
+      "colour": "Matching Dark Red",
+      "qty_per_garment": 1,
+      "position": "Outside back centre, 2cm below collar line"
+    },
+    {
+      "item": "Leather Curl Hanger",
+      "colour": "Matching",
+      "qty_per_garment": 1,
+      "position": "Shoulder / back neck"
+    },
+    {
+      "item": "Plastic Polybag for Spare Accessories",
+      "colour": "Clear",
+      "qty_per_garment": 1,
+      "position": "Inside size label"
+    },
+    {
+      "item": "Plastic Pin for Polybag",
+      "colour": "Transparent",
+      "qty_per_garment": 1,
+      "position": "Inside size label"
+    }
+  ],
+  "labels": [
+    {
+      "type": "Main Label (Squared)",
+      "brand": "MONTEREGGI",
+      "qty": 1,
+      "position": "Inside back centre, directly on lining, under collar line at 3cm",
+      "construction": "Woven quality, black ground, white writing"
+    },
+    {
+      "type": "Size Label",
+      "qty": 1,
+      "position": "Left flank, at 10cm from round sleeves"
+    },
+    {
+      "type": "Composition Label",
+      "qty": 1,
+      "position": "Inside left flank, under size label"
+    },
+    {
+      "type": "Care Label + Prodotto Importato",
+      "qty": 1,
+      "position": "Inside left flank, under composition label"
+    }
+  ],
+  "threads": [
+    {
+      "type": "Thread Size 15 (same size as SMS)",
+      "colour": "Matching",
+      "use": "All outside stitching"
+    },
+    {
+      "type": "Thread (adequate to lining)",
+      "colour": "Black",
+      "use": "All inside stitching"
+    }
+  ],
+  "costing": {
+    "leather_inr_no_gst": 4125,
+    "leather_inr_with_gst": 4331.25,
+    "materials_inr_no_gst": "TBC – costing sheet for SP74008 not separately provided; figures aligned to SP74006/SP74018 Napalan reference",
+    "making_cost_inr": 1000,
+    "freight_inr": 450,
+    "commission_pct": 6,
+    "exchange_rate_eur_inr": 85,
+    "fob_price_eur_approx": "TBC",
+    "note": "Costing approximated from closest Napalan-leather reference sheet (SP74006); confirm separately with client/supplier costing sheet for SP74008"
+  },
+  "yardage_estimation": {
+    "leather_DCM": 375,
+    "lay_avg_DCM": 360,
+    "lining_satin_MTR": 1.0,
+    "fusing_MTS": 0.5,
+    "solutions_litre": 0.15,
+    "pakka_tape_MTS": 3.75
+  },
+  "proxy_area_sqft": {
+    "estimated": 40.4,
+    "note": "Derived from 375 DCM / 9.29"
+  },
+  "complexity_assessment": {
+    "overall_complexity": "High",
+    "rationale": "Round collar integrated with zip; dual zip system (T8 front, T5 sleeve) each with separate pullers; pocket flap with multiple snap types (visible, hidden, underside) requiring strict Nickel finishing; embroidered back patch with monogram; multiple SMS corrections (label, metal finishing, embroidery) outstanding.",
+    "complexity_score": 8,
+    "complexity_max": 10
+  },
+  "proto_sample_status": "Proto reviewed; multiple SMS corrections required: metal finishing to Nickel, hidden snaps on pocket flap, main label addition, back embroidery patch development with photo approval, measurement chart compliance",
+  "label_brand": "MONTEREGGI",
+  "source_files": [
+    "SP74008_NAPALINE.xls",
+    "49-26-01-04-2026.pdf"
+  ]
+}

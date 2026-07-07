@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     # / handwritten PDFs, narrative spec sheets, ambiguous classification). The
     # service runs a provider chain Gemini -> Groq -> "needs manual entry"; it never
     # silently guesses. Embeddings remain local HF (intelligence/models_catalog.py).
-    extraction_model: str = "gemini:gemini-2.0-flash"          # primary (multimodal/long-context)
+    extraction_model: str = "gemini:gemini-2.5-flash"          # primary (multimodal/long-context)
     extraction_fallback_model: str = "groq:llama-3.3-70b-versatile"  # fallback (text/structured)
     gemini_api_key: str = ""        # langchain-google-genai
     groq_api_key: str = ""          # langchain-groq (also read from env by ChatGroq)
@@ -109,7 +109,7 @@ class Settings(BaseSettings):
     ocr_max_pages: int = 5                           # cap pages OCR'd (cost/latency bound)
     ocr_dpi: int = 200                               # rasterisation DPI for OCR + vision
     vision_classifier_enabled: bool = True
-    vision_model: str = "gemini:gemini-2.0-flash"    # multimodal model for the vision rung
+    vision_model: str = "gemini:gemini-2.5-flash"    # multimodal model for the vision rung
     vision_conf_threshold: float = 0.5               # below this from the text path → escalate
     vision_max_pages: int = 4                        # cap page-images sent to the vision model
 

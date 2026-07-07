@@ -134,3 +134,6 @@ langchain-google-genai==3.0.1    # Gemini — PRIMARY for BOM extraction (multim
 # Run THREE processes: uvicorn (API), `celery ... worker`, `celery ... beat`.
 celery==5.6.2
 redis==7.3.0             # broker + result backend client (Upstash works: rediss://)
+
+ezdxf>=1.4,<2.0
+shapely>=2.0,<3.0

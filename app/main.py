@@ -254,3 +254,11 @@ async def favicon():
 @app.get("/", tags=["Root"])
 async def root():
     return {"message": f"Welcome to {settings.app_name}", "docs": "/docs", "health": "/health"}
+
+try:
+    from app.core.database import SessionLocal      # your SYNC sessionmaker
+    from app.modules.bom import config_store
+    with SessionLocal() as s:
+        config_store.refresh_from_session(s)
+except Exception:
+    logger.exception("config_store warm-up failed; using built-in defaults")

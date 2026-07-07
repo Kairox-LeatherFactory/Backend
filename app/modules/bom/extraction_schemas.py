@@ -341,7 +341,6 @@ class ExtractedOrder(BaseModel):
     """The full result of parsing an order sheet. order_qty + per_size_qty are DERIVED
     from `lines` on construction and are never trusted from the model directly."""
     model_config = ConfigDict(extra="ignore")
-
     order_number: str | None = None
     style_no: str | None = None
     article: str | None = None

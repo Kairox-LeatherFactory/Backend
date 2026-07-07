@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Kairox — BOM & Procurement Diagrams (Large View)</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
+<style>
+  :root{
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2f3a;
+    --text: #e7e9ee;
+    --muted: #9aa3b2;
+    --accent: #5b9dff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  header {
+    padding: 28px 32px 16px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: rgba(15,17,21,0.95);
+    backdrop-filter: blur(6px);
+    z-index: 10;
+  }
+  header h1 { margin: 0 0 6px; font-size: 22px; }
+  header p { margin: 0; color: var(--muted); font-size: 14px; }
+  nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 14px;
+  }
+  nav a {
+    color: var(--accent);
+    text-decoration: none;
+    font-size: 13px;
+    padding: 5px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel);
+  }
+  nav a:hover { border-color: var(--accent); }
+  main { padding: 24px 32px 80px; max-width: 1400px; margin: 0 auto; }
+  section {
+    margin-bottom: 48px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 20px 12px;
+  }
+  section h2 {
+    margin-top: 0;
+    font-size: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  section p.desc {
+    color: var(--muted);
+    font-size: 14px;
+    margin-top: -6px;
+  }
+  .controls {
+    display: flex;
+    gap: 6px;
+  }
+  .controls button {
+    background: #232834;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 10px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .controls button:hover { border-color: var(--accent); }
+  .diagram-viewport {
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 20px;
+    max-height: 85vh;
+  }
+  .diagram-inner {
+    transform-origin: top left;
+    display: inline-block;
+    transition: transform 0.15s ease-out;
+  }
+  .diagram-inner svg {
+    width: auto !important;
+    height: auto !important;
+    min-width: 900px;
+  }
+  .zoom-label {
+    color: var(--muted);
+    font-size: 12px;
+    align-self: center;
+    min-width: 42px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Kairox — BOM &amp; Procurement Services: Diagrams (Large View)</h1>
+  <p>Same diagrams as the source doc, rendered larger with per-diagram zoom/pan. Use the + / − buttons or scroll inside each panel.</p>
+  <nav id="nav"></nav>
+</header>
+<main id="main"></main>
+
+<script>
+mermaid.initialize({
+  startOnLoad: false,
+  theme: "default",
+  securityLevel: "loose",
+  flowchart: { useMaxWidth: false, htmlLabels: true },
+  sequence: { useMaxWidth: false, wrap: true, boxMargin: 10, messageFontSize: 16, actorFontSize: 16, noteFontSize: 15 },
+  state: { useMaxWidth: false },
+  er: { useMaxWidth: false },
+  themeVariables: {
+    fontSize: "18px"
+  }
+});
+
+const diagrams = [
+  {
+    id: "d1a",
+    title: "1a. Actors → entry points",
+    desc: "Who touches what: Procurement is the only upload path; the cutting manager and MD act on the BOM after it exists.",
+    code: `flowchart LR
+    U1[Procurement /<br/>Merchandiser]
+    U2[Cutting Manager]
+    U3[Direct Manager /<br/>MD]
+
+    PROC[Procurement Service<br/>Stage-1 Intake]
+    BOM[BOM Service<br/>Stage-2 Generation]
+
+    U1 -->|upload order + spec| PROC
+    U2 -->|confirm cutting<br/>upload DXF<br/>regenerate DCM| BOM
+    U3 -->|approve / reject| BOM`
+  },
+  {
+    id: "d1b",
+    title: "1b. Procurement (Stage-1) dependencies",
+    desc: "Scan-first, quarantine, escalate only ambiguous docs to Gemini, persist, then enqueue an id (never file bytes).",
+    code: `flowchart LR
+    PROC[Procurement Service]
+    CAV[ClamAV<br/>virus scan]
+    OBJ[(Object storage<br/>quarantine → submissions)]
+    GEM[Gemini<br/>identity classify]
+    PG[(PostgreSQL)]
+    RMQ[(Redis queue)]
+
+    PROC -->|1. scan| CAV
+    PROC -->|2. quarantine clean bytes| OBJ
+    PROC -->|3. classify ambiguous| GEM
+    PROC -->|4. persist Submission + Document| PG
+    PROC -->|5. enqueue submission id| RMQ`
+  },
+  {
+    id: "d1c",
+    title: "1c. BOM (Stage-2) dependencies",
+    desc: "A worker consumes the id, pulls files from storage, extracts via LLMs, resolves against config_store, persists a DRAFT BOM.",
+    code: `flowchart LR
+    RMQ[(Redis queue)]
+    WRK[Celery worker]
+    BOM[BOM Service]
+    GEM[Gemini<br/>vision extract]
+    GRQ[Groq<br/>text fallback]
+    CFG[config_store<br/>cached DB config]
+    OBJ[(Object storage)]
+    PG[(PostgreSQL)]
+
+    RMQ --> WRK --> BOM
+    BOM -->|read files| OBJ
+    BOM -->|extract spec/order| GEM
+    BOM -->|fallback| GRQ
+    BOM -->|yields · fabric roles<br/>cost · checks| CFG
+    BOM -->|persist BOM DRAFT| PG
+    CFG -. warmed from .-> PG`
+  },
+  {
+    id: "d2",
+    title: "2. Module & Boundary View (modular monolith)",
+    desc: "Internal structure and import-linter-enforced boundaries between core, procurement, and bom modules.",
+    code: `flowchart LR
+    subgraph core [core]
+      DB[database<br/>Base, sessions]
+      SEC[security<br/>JWT auth]
+      STO[storage]
+      NOT[notifier]
+      MOD[models<br/>GUID, mixins, JSON]
+    end
+
+    subgraph procurement [procurement module]
+      P_R[router]
+      P_S[service]
+      P_PIPE[pipeline<br/>sync, threadpooled]
+      P_SNIFF[sniffing]
+      P_VAL[validator<br/>pure gate]
+      P_CLS[classifier<br/>text + vision]
+      P_REG[registry<br/>ClientTemplate match]
+      P_REPO[repository]
+      P_MDL[(models:<br/>Submission, ClientTemplate)]
+    end
+
+    subgraph bom [bom module]
+      B_R[router]
+      B_S[service<br/>orchestrator]
+      B_EXT[extraction<br/>LLM vision/text]
+      B_XL[excel_content<br/>text + images]
+      B_DCM[dcm]
+      B_PAT[pattern + dxf_pattern]
+      B_FAB[fabric_roles]
+      B_CHK[checks]
+      B_CST[config_store]
+      B_REPO[repository]
+      B_MDL[(models:<br/>Bom, BomItem, SpecSheet,<br/>PomMeasurement, Pattern*, config tables)]
+    end
+
+    P_R --> P_S --> P_PIPE
+    P_PIPE --> P_SNIFF & P_VAL & P_REG
+    P_VAL --> P_CLS
+    P_S --> P_REPO --> P_MDL
+    P_S -.enqueue.-> bom
+
+    B_R --> B_S
+    B_S --> B_EXT --> B_XL
+    B_S --> B_DCM --> B_PAT
+    B_DCM --> B_CST
+    B_S --> B_CHK --> B_CST
+    B_S --> B_REPO --> B_MDL
+    B_CST --> B_MDL
+
+    procurement --> core
+    bom --> core`
+  },
+  {
+    id: "d3",
+    title: "3. Stage-1 — Procurement Intake (sequence)",
+    desc: "What happens on POST /submissions/{id}/upload.",
+    code: `sequenceDiagram
+    actor User as Procurement
+    participant API as procurement/router
+    participant Svc as ProcurementService
+    participant Pipe as pipeline (threadpool)
+    participant AV as ClamAV
+    participant Sniff as sniffing
+    participant Val as validator
+    participant LLM as classifier (text→vision)
+    participant Store as object storage
+    participant DB as Postgres
+
+    User->>API: upload(order|spec bytes, slot)
+    API->>Svc: process_upload(...)
+    Svc->>Pipe: run_in_threadpool(process_upload)
+    Pipe->>AV: scan(bytes)
+    alt infected / scanner down
+        AV-->>Pipe: infected / unavailable
+        Pipe-->>Svc: UploadError
+        Svc-->>API: 4xx reject
+    else clean
+        Pipe->>Store: write to quarantine/
+        Pipe->>Sniff: sniff true MIME + extract features
+        Pipe->>Val: validate_document(feats, expected_kind, profiles)
+        Val->>Val: heuristic score
+        alt ambiguous / low-confidence
+            Val->>LLM: escalate (text, then Gemini vision)
+            LLM-->>Val: accept / reject / needs_review
+        end
+        Val-->>Pipe: ValidationOutcome
+        alt accepted
+            Pipe->>Store: promote quarantine/ → submissions/
+        else rejected / needs_review
+            Pipe->>Store: delete quarantined object
+        end
+        Pipe-->>Svc: PipelineResult
+        Svc->>DB: persist Document + Submission status
+        Svc-->>API: envelope (accepted / needs_review / rejected)
+    end`
+  },
+  {
+    id: "d4",
+    title: "4. Stage-2 — BOM Generation (sequence)",
+    desc: "From the enqueued submission to a persisted DRAFT BOM.",
+    code: `sequenceDiagram
+    participant RMQ as Redis
+    participant WRK as Celery worker
+    participant Svc as BomService
+    participant Ext as extraction (LLM)
+    participant POM as PomDict (DB)
+    participant DCM as dcm + pattern
+    participant Cfg as config_store
+    participant Chk as checks
+    participant DB as Postgres
+
+    RMQ->>WRK: build_bom_for_submission(id)
+    WRK->>Svc: generate_for_order(spec+order bytes)
+    Note over Svc,DB: ONE transaction, committed once
+    Svc->>Ext: extract_order + extract_spec (vision→text→manual)
+    Ext-->>Svc: typed ExtractedSpec / ExtractedOrder
+    Svc->>POM: resolve native terms → pom_code
+    POM-->>Svc: resolved_poms + unresolved[]
+    Svc->>Cfg: get_cost_catalog() (seed non-material lines)
+    Svc->>DCM: resolve leather DCM per line
+    alt pattern DXF present
+        DCM->>DCM: net area × learned yield (Source 1c)
+        Note over Svc: dcm_provisional = false
+    else no DXF
+        DCM->>DCM: template / similar / heuristic estimate
+        Note over Svc: dcm_provisional = true
+    end
+    Svc->>Cfg: get_bom_checks()
+    Svc->>Chk: run_checks(client_code, ctx)
+    Chk-->>Svc: flags (warn / blocking error)
+    Svc->>DB: persist Bom(DRAFT) + items + pom rows + staging
+    Svc-->>WRK: bom view (status, dcm_provisional, flags)`
+  },
+  {
+    id: "d5",
+    title: "5. DCM Resolution Ladder (with the DXF gate)",
+    desc: "Decision logic for every leather line's consumption.",
+    code: `flowchart TD
+    START([leather line, size]) --> MANUAL{human-confirmed<br/>MANUAL value?}
+    MANUAL -->|yes| USE_MANUAL[use manual<br/>conf 1.00 · binding]
+    MANUAL -->|no| TMPL{confirmed template<br/>for this style?}
+    TMPL -->|yes| USE_TMPL[template<br/>conf .95 · binding]
+    TMPL -->|no| DXF{pattern DXF<br/>on file?}
+    DXF -->|yes| USE_DXF[net area × learned yield<br/>conf .88 · binding · Source 1c]
+    DXF -->|no| SIM{similar style<br/>found?}
+    SIM -->|yes| USE_SIM[similar-style estimate<br/>conf .70 · PROVISIONAL]
+    SIM -->|no| HEUR{POM area<br/>heuristic possible?}
+    HEUR -->|yes| USE_HEUR[geometric estimate<br/>conf .50 · PROVISIONAL]
+    HEUR -->|no| NONE[no value<br/>manual entry required]
+
+    USE_MANUAL --> GATE
+    USE_TMPL --> GATE
+    USE_DXF --> GATE
+    USE_SIM --> GATE
+    USE_HEUR --> GATE
+    GATE{all leather lines<br/>binding?} -->|yes| BIND[BOM dcm_provisional = false<br/>costing/PO eligible]
+    GATE -->|no| PROV[BOM dcm_provisional = true<br/>ESTIMATE only]`
+  },
+  {
+    id: "d6",
+    title: "6. BOM Lifecycle (state machine)",
+    desc: "DRAFT → review → approved/rejected, with materialization deferred to approval.",
+    code: `stateDiagram-v2
+    [*] --> DRAFT: generate_for_order
+    DRAFT --> DRAFT: edit_bom_items / regenerate_dcm_from_dxf
+    note right of DRAFT
+      dcm_provisional flips
+      false when DXF-backed
+    end note
+    DRAFT --> READY_FOR_REVIEW: submit for review
+    READY_FOR_REVIEW --> DRAFT: send back
+    READY_FOR_REVIEW --> APPROVED: MD approve
+    READY_FOR_REVIEW --> REJECTED: reject
+    APPROVED --> [*]: materialize_breakdown<br/>(Client→Order→Style→SKU)
+    REJECTED --> [*]
+    DRAFT --> DRAFT: confirm_cutting<br/>(learn yield, MANUAL truth)`
+  },
+  {
+    id: "d7",
+    title: "7. Data Flow Diagram (Level-1)",
+    desc: "External entities, processes, and data stores, including the learning feedback loop.",
+    code: `flowchart LR
+    E1[/Client documents<br/>order + spec/] --> P1((1. Intake<br/>scan+sniff+validate))
+    P1 --> D1[(quarantine)]
+    P1 --> D2[(submissions store)]
+    P1 --> D3[(submission table)]
+    P1 --> P2((2. Extract<br/>LLM vision/text))
+    D2 --> P2
+    P2 --> D4[(spec/order<br/>extraction staging)]
+    P2 --> P3((3. Resolve<br/>POM + DCM + cost))
+    D5[(pom_dictionary)] --> P3
+    D6[(config: yields,<br/>fabric_role, cost)] --> P3
+    D7[(pattern DXF)] --> P3
+    P3 --> P4((4. Validate<br/>checks))
+    D8[(client_check_rule)] --> P4
+    P4 --> D9[(bom + bom_item)]
+    D9 --> P5((5. Confirm+Approve))
+    P5 --> D10[(consumption template<br/>+ yield observation)]
+    P5 --> D11[(client→order→style→sku)]`
+  },
+  {
+    id: "d8",
+    title: "8. Data Model (ER)",
+    desc: "Core entities of both modules and their relationships.",
+    code: `erDiagram
+    CLIENT ||--o{ CLIENT_ORDER : places
+    CLIENT ||--o{ SUBMISSION : owns
+    SUBMISSION ||--o| DOCUMENT : order_doc
+    SUBMISSION ||--o| DOCUMENT : spec_doc
+    SUBMISSION ||--o| BOM : yields
+    CLIENT_ORDER ||--o{ STYLE : contains
+    STYLE ||--o{ SKU : sized
+    CLIENT ||--o{ CLIENT_TEMPLATE : has_profile
+    CLIENT ||--o{ CLIENT_CHECK_RULE : has_checks
+
+    BOM ||--o{ BOM_ITEM : has
+    BOM }o--|| GARMENT_TYPE : typed_as
+    BOM ||--o| SPEC_SHEET : from
+    SPEC_SHEET ||--o{ POM_MEASUREMENT : has
+    GARMENT_TYPE ||--o{ POM_DICTIONARY : defines_terms
+    STYLE ||--o| STYLE_CONSUMPTION_TEMPLATE : dcm_memory
+    STYLE ||--o| PATTERN_REFERENCE : has_pattern
+    PATTERN_REFERENCE ||--o| PATTERN_EXTRACTION : parsed
+    PATTERN_EXTRACTION ||--o{ PATTERN_PIECE : pieces
+    PATTERN_EXTRACTION ||--o{ DXF_YIELD_OBSERVATION : learns
+
+    DXF_YIELD ||..|| CONFIG : runtime
+    FABRIC_ROLE ||..|| CONFIG : runtime
+    COST_CATALOG_LINE ||..|| CONFIG : runtime
+
+    BOM {
+        uuid id PK
+        uuid submission_id FK
+        uuid client_id FK
+        uuid garment_type_id FK
+        string status
+        bool dcm_provisional
+        string dcm_base_size
+        int revision
+        json order_identity
+    }
+    BOM_ITEM {
+        uuid id PK
+        uuid bom_id FK
+        string category
+        string name
+        decimal qty_per_garment
+        string dcm_source
+        decimal dcm_confidence
+        decimal unit_price
+    }
+    SUBMISSION {
+        uuid id PK
+        uuid client_id FK
+        string status
+        uuid order_document_id FK
+        uuid spec_document_id FK
+    }
+    CLIENT_TEMPLATE {
+        uuid id PK
+        string client_code
+        string doc_kind
+        json anchors
+        json fingerprints
+        json thresholds
+    }`
+  },
+  {
+    id: "d9",
+    title: "9. Deployment (recommended, cost-aware)",
+    desc: "Stateless API replicas + independently scaled Celery workers on a managed platform (not K8s).",
+    code: `flowchart TB
+    subgraph edge [Edge]
+      CDN[CDN / static]
+    end
+    subgraph platform [Managed platform — Render/Railway/Fly/Cloud Run]
+      API1[API replica 1]
+      API2[API replica 2]
+      W1[Celery worker]
+      LB[Load balancer<br/>GET /health]
+    end
+    subgraph managed [Managed data]
+      PG[(Managed Postgres<br/>+ PgBouncer)]
+      RS[(Managed Redis)]
+      OS[(Object storage<br/>S3/R2/GCS)]
+    end
+    CDN --> LB --> API1 & API2
+    API1 & API2 --> PG
+    API1 & API2 --> RS
+    RS --> W1
+    W1 --> PG
+    API1 & API2 --> OS
+    W1 --> OS`
+  }
+];
+
+const nav = document.getElementById("nav");
+const main = document.getElementById("main");
+const zoomState = {};
+
+diagrams.forEach(d => {
+  const a = document.createElement("a");
+  a.href = "#" + d.id;
+  a.textContent = d.title.split(".")[0] + ".";
+  nav.appendChild(a);
+
+  const section = document.createElement("section");
+  section.id = d.id;
+  section.innerHTML = `
+    <h2>
+      <span>${d.title}</span>
+      <span class="controls">
+        <button data-act="out" data-id="${d.id}">−</button>
+        <span class="zoom-label" id="zl-${d.id}">100%</span>
+        <button data-act="in" data-id="${d.id}">+</button>
+        <button data-act="reset" data-id="${d.id}">Reset</button>
+      </span>
+    </h2>
+    <p class="desc">${d.desc}</p>
+    <div class="diagram-viewport">
+      <div class="diagram-inner" id="inner-${d.id}">
+        <div class="mermaid">${d.code}</div>
+      </div>
+    </div>
+  `;
+  main.appendChild(section);
+  zoomState[d.id] = 1.4;
+});
+
+function applyZoom(id) {
+  document.getElementById("inner-" + id).style.transform = `scale(${zoomState[id]})`;
+  document.getElementById("zl-" + id).textContent = Math.round(zoomState[id] * 100) + "%";
+}
+
+main.addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const act = btn.dataset.act;
+  if (act === "in") zoomState[id] = Math.min(zoomState[id] + 0.2, 4);
+  if (act === "out") zoomState[id] = Math.max(zoomState[id] - 0.2, 0.4);
+  if (act === "reset") zoomState[id] = 1.4;
+  applyZoom(id);
+});
+
+mermaid.run({ querySelector: ".mermaid" }).then(() => {
+  diagrams.forEach(d => applyZoom(d.id));
+});
+</script>
+</body>
+</html>

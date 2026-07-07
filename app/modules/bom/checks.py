@@ -135,7 +135,11 @@ def run_checks(client_code: str | None, ctx: dict, checks_cfg: tuple | None = No
     """Run the configured checks for `client_code` against `ctx`. Returns a list of
     flags; the service blocks finalization iff any flag has severity 'error' and ok
     is False. Unknown client → no checks (empty list)."""
-    cfg = checks_cfg if checks_cfg is not None else load_checks()
+    if checks_cfg is not None:
+        cfg = checks_cfg
+    else:
+        from app.modules.bom import config_store
+        cfg = config_store.get_bom_checks()
     flags: list[dict] = []
     for entry in cfg:
         if entry.get("client_code") != client_code:

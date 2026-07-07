@@ -365,11 +365,22 @@ class ProcurementService:
             return {"submission_id": str(sub.id), "status": "consumed",
                     "replayed": True, "bom": existing_bom, "enqueue": False}
 
-        if sub.status not in (SubmissionStatus.COMPLETE.value, SubmissionStatus.QUEUED.value):
-            raise HTTPException(409, detail={
-                "error": "submission_not_ready",
-                "message": "Stage 2 requires a COMPLETE submission (both slots accepted).",
-                "current_status": sub.status})
+        if sub.status == SubmissionStatus.QUEUED.value:
+            return {
+                "submission_id": str(sub.id),
+                "status": "queued",
+                "enqueue": False,
+                "message": "BOM generation is already queued."
+            }
+            
+        if sub.status != SubmissionStatus.COMPLETE.value:
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "submission_not_ready",
+                    "current_status": sub.status
+                }
+            )
 
         spec = await self._slot_doc(sub.spec_document_id)
         if spec is None or spec.validation_status != ValidationStatus.ACCEPTED.value:

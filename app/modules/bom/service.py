@@ -1,8 +1,6 @@
 # service.py
 """
-================================================================================
-modules/bom/service.py — Stage-2/3 BOM generation + approval engine (BomService)
-================================================================================
+modules/bom/service.py â€” Stage-2/3 BOM generation + approval engine (BomService)
 
 The business brain of Stage 2. Consumes a submission's spec + order sheets and
 produces the DRAFT `bom` + `bom_item` tree, then governs the editable contract,
@@ -10,7 +8,7 @@ the cutting-manager confirmation gate, and the Stage-3 approval/export gates.
 
 THREE CHANGES IN THIS REVISION (the #3/#4/#5 + god-split work)
   #3/#4  TYPED, NO SHIM. extraction.extract_spec/extract_order now return
-         ExtractedSpec / ExtractedOrder. This service consumes them directly —
+         ExtractedSpec / ExtractedOrder. This service consumes them directly â€”
          the old intermediate-dict round-trip (Pydantic -> dict -> Pydantic) is
          gone. Native-term -> pom_code resolution and attribute flattening
          (formerly extraction._legacy_attributes) live HERE now, where the DB is.
@@ -24,16 +22,15 @@ THREE CHANGES IN THIS REVISION (the #3/#4/#5 + god-split work)
             >>> get_consumption_template, get_bom_by_submission) must NOT commit.
             >>> Reads never should; if any do, the single-commit guarantee breaks.
             >>> The write helpers (repo.save/add/add_*) are intentionally NOT used
-            >>> in the generate path anymore — session add/flush is used instead.
+            >>> in the generate path anymore â€” session add/flush is used instead.
   god-split  generate_bom is now an orchestrator over private steps:
          _extract_spec, _resolve_and_persist_poms, _spec_attributes,
          _resolve_pattern, _build_items. Same class, same session, same
-         transaction — deliberately NOT separate service classes (that would
+         transaction â€” deliberately NOT separate service classes (that would
          fragment the unit-of-work above).
 
 The other gates (confirm_cutting, approve_bom, reject/reopen/export, edit) keep
-their existing commit boundaries — out of scope for the generate unit-of-work.
-================================================================================
+their existing commit boundaries â€” out of scope for the generate unit-of-work.
 """
 from __future__ import annotations
 
@@ -54,10 +51,12 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
-from app.modules.bom import checks as checks_mod
+from app.modules.bom import checks as checks_mod, pattern
 from app.modules.bom import costing
+from app.modules.bom import dcm
 from app.modules.bom.dcm import (
     CONFIDENCE,
+    dxf_yields,
     estimate_area_dcm,
     style_signature,
 )
@@ -84,9 +83,10 @@ from app.modules.bom.models import (
 
 from app.modules.bom.repository import BomRepository
 from app.core.storage import get_storage
+from app.modules.bom.pattern import learn_yield
 
-# Which categories get DCM-resolved (leather AREA materials, in dm²). Threads /
-# accessories / manufacturing / packaging / FOB carry given qty + price, no DCM (§2).
+# Which categories get DCM-resolved (leather AREA materials, in dmÂ²). Threads /
+# accessories / manufacturing / packaging / FOB carry given qty + price, no DCM (Â§2).
 MATERIAL_DCM_CATEGORIES = {
     BomItemCategory.MAIN_MATERIAL.value,
     BomItemCategory.SUB_MATERIAL.value,
@@ -97,7 +97,7 @@ MATERIAL_DCM_CATEGORIES = {
 logger = logging.getLogger(__name__)
 
 
-# ── native-term → pom_code resolution (the DB pom_dictionary is the truth) ──────
+#  native-term â†’ pom_code resolution (the DB pom_dictionary is the truth)
 _WS_RE = re.compile(r"\s+")
 
 
@@ -116,7 +116,7 @@ def _term_language(term: str) -> str | None:
 
 
 class PomDict:
-    """Session-free native-term → pom_code map built from `pom_dictionary` rows.
+    """Session-free native-term â†’ pom_code map built from `pom_dictionary` rows.
     Tries the term's detected language first, then any language."""
 
     def __init__(self, rows: list[tuple[str, str, str]]):
@@ -134,7 +134,7 @@ class PomDict:
         return self._by_term.get(key)
 
 
-# ── content sniff so extract_* routes correctly even with a missing extension ──
+# content sniff so extract_* routes correctly even with a missing extension â”€â”€
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _PDF_MIME = "application/pdf"
 
@@ -144,7 +144,7 @@ def _sniff_mime(data: bytes | None) -> str | None:
         return None
     if data[:4] == b"%PDF":
         return _PDF_MIME
-    if data[:2] == b"PK":          # zip container → xlsx/xlsm
+    if data[:2] == b"PK":          # zip container â†’ xlsx/xlsm
         return _XLSX_MIME
     return None
 
@@ -188,7 +188,7 @@ def load_cost_catalog(path: str | None = None) -> dict:
 @dataclass
 class LineSeed:
     """One BOM line BEFORE DCM resolution + costing. Material lines have their
-    qty_per_garment RESOLVED by the §2 policy; others keep the given value."""
+    qty_per_garment RESOLVED by the Â§2 policy; others keep the given value."""
     category: str
     name: str
     material_color: str | None = None
@@ -197,7 +197,7 @@ class LineSeed:
     qty_per_garment: Decimal | float | None = None
     annotation: str | None = None
     source_ref: str | None = None
-    supplied_by: str | None = None                    # client/buyer → unit_price 0
+    supplied_by: str | None = None                    # client/buyer â†’ unit_price 0
 
 
 @dataclass
@@ -258,9 +258,7 @@ class BomService:
             "idempotent_replay": True,
         }
 
-    # ══════════════════════════════════════════════════════════════════════
-    # Stage-2 BOM build — the bom-owned half of the Stage-1 → Stage-2 trigger.
-    # ══════════════════════════════════════════════════════════════════════
+    
     async def generate_for_order(
         self, user, *, spec_bytes: bytes, filename: str,
         spec_type: str | None, client_match_code: str | None,
@@ -271,10 +269,9 @@ class BomService:
     ) -> dict:
         """Build a DRAFT BOM from the accepted ORDER + SPEC sheets ALONE. Parses the
         order sheet, creates the SpecSheet the engine extracts into, and runs
-        generate_bom anchored on the submission — all in ONE transaction (committed
-        once inside generate_bom). The Client→Order→Style→SKU tree is created later,
+        generate_bom anchored on the submission â€” all in ONE transaction (committed
+        once inside generate_bom). The Clientâ†’Orderâ†’Styleâ†’SKU tree is created later,
         at MD approval (materialize_breakdown)."""
-        # ── idempotency guard (§13) ──────────────────────────────────────────
         # A double-fire of the trigger (retry, double-click, at-least-once delivery,
         # Celery re-queue) must NOT mint a second BOM + spec_sheet + duplicate staging
         # rows + duplicate audit. If a BOM already exists for this submission, return it.
@@ -282,7 +279,7 @@ class BomService:
             existing = await self.repo.get_bom_by_submission(submission_id)
             if existing is not None:
                 logger.info("generate_for_order: BOM already exists for submission=%s "
-                            "→ returning existing bom=%s (idempotent replay)",
+                            "â†’ returning existing bom=%s (idempotent replay)",
                             submission_id, existing.id)
                 return self._replay_response(existing)
 
@@ -295,9 +292,10 @@ class BomService:
                 order_mime or _sniff_mime(order_bytes),
                 order_match_code or client_match_code,
             )
+            
         logger.debug("generate_for_order parsed order: %s", order)
 
-        # Stage the order-extraction row (flush-only — committed once in generate_bom).
+        # Stage the order-extraction row (flush-only â€” committed once in generate_bom).
         # We hold the ORM object and stamp its promotion inside generate_bom rather than
         # tucking an id into the payload (the typed model can't carry transient fields).
         order_extraction_row: OrderExtraction | None = None
@@ -356,7 +354,7 @@ class BomService:
         oi["style_name"] = identity.name
         oi["customer_ref"] = identity.customer_ref
         oi["internal_ref"] = identity.internal_ref
-        # materialize_breakdown reads oi["unit_price"] — alias the typed field so it
+        # materialize_breakdown reads oi["unit_price"] â€” alias the typed field so it
         # survives the dict round-trip (it's `price_per_garment` on the model).
         oi["unit_price"] = order.price_per_garment if order is not None else None
         return oi
@@ -364,7 +362,7 @@ class BomService:
     @staticmethod
     def _build_line_seeds(spec_attributes: dict | None,
                           garment_code: str | None) -> list[LineSeed]:
-        """Seed builder (§5b): material/accessory lines from the spec's flattened
+        """Seed builder (Â§5b): material/accessory lines from the spec's flattened
         attributes + the configured cost lines from cost_catalog.yaml. Unit prices on
         material lines are left blank for the cutting manager to fill."""
         attrs = spec_attributes or {}
@@ -374,10 +372,10 @@ class BomService:
         if leather:
             seeds.append(LineSeed(
                 category=BomItemCategory.MAIN_MATERIAL.value, name=str(leather),
-                material_color=attrs.get("primary_color"), uom="dm²",
+                material_color=attrs.get("primary_color"), uom="dmÂ²",
                 source_ref="spec.attributes.leather_quality"))
 
-        # Secondary leathers/fabrics (e.g. a contrast panel '別布') → own DCM line.
+        # Secondary leathers/fabrics (e.g. a contrast panel 'åˆ¥å¸ƒ') â†’ own DCM line.
         for sub in attrs.get("sub_materials") or []:
             if not isinstance(sub, dict):
                 continue
@@ -386,13 +384,13 @@ class BomService:
                 continue
             seeds.append(LineSeed(
                 category=BomItemCategory.SUB_MATERIAL.value, name=str(name),
-                uom="dm²", annotation=sub.get("name"),
+                uom="dmÂ²", annotation=sub.get("name"),
                 source_ref="spec.attributes.sub_materials"))
 
         lining = attrs.get("lining")
         if lining and "unlined" not in str(lining).lower():
             seeds.append(LineSeed(
-                category=BomItemCategory.LINING.value, name=str(lining), uom="dm²",
+                category=BomItemCategory.LINING.value, name=str(lining), uom="dmÂ²",
                 source_ref="spec.attributes.lining"))
 
         # Interlining (fusible/non-fusible) when the spec names one. DCM-resolved.
@@ -402,14 +400,14 @@ class BomService:
             if il_name:
                 seeds.append(LineSeed(
                     category=BomItemCategory.INTERLINING.value, name=str(il_name),
-                    uom="dm²", annotation=interlining.get("placement"),
+                    uom="dmÂ²", annotation=interlining.get("placement"),
                     source_ref="spec.attributes.interlining"))
 
         for acc in attrs.get("accessories") or []:
             if not isinstance(acc, dict):
                 continue
             name = acc.get("spec") or acc.get("type") or "accessory"
-            # qty per garment from the spec (two rear zippers → 2); default 1 only when
+            # qty per garment from the spec (two rear zippers â†’ 2); default 1 only when
             # the document/extractor gave no usable count.
             try:
                 qty = int(acc.get("qty_per_garment") or acc.get("qty") or 1)
@@ -423,7 +421,9 @@ class BomService:
                 supplied_by=acc.get("supplied_by"),
                 source_ref="spec.attributes.accessories"))
 
-        catalog = load_cost_catalog()
+        from app.modules.bom import config_store
+        catalog = config_store.get_cost_catalog()
+        
         cost_lines = catalog.get((garment_code or "").upper()) or catalog.get("_default") or []
         for ln in cost_lines:
             category, name = ln.get("category"), ln.get("name")
@@ -436,11 +436,7 @@ class BomService:
                 qty_per_garment=ln.get("qty_per_garment", 1)))
         return seeds
 
-    # ══════════════════════════════════════════════════════════════════════
-    # Generation (§1, §2, §5, §6) — orchestrator over the private steps below.
-    # ONE TRANSACTION: stage with self.db.add/flush, commit exactly once at the end.
-    # ══════════════════════════════════════════════════════════════════════
-    
+   
     async def generate_bom(
         self, user, *, spec_sheet, spec_bytes: bytes, filename: str,
         identity: StyleIdentity, client_match_code: str | None,
@@ -454,7 +450,6 @@ class BomService:
                     identity.client_order_id, identity.style_id, spec_sheet.spec_type,
                     client_match_code, len(line_seeds) if line_seeds is not None else "auto")
 
-        # ── 1. extract (typed) ───────────────────────────────────────────────
         spec = await self._extract_spec(spec_bytes, filename)
         logger.debug("generate_bom extracted spec: %s", spec)
 
@@ -465,15 +460,15 @@ class BomService:
         ext_warnings = list(spec.warnings)
         manual_entry_required = "manual_entry_required" in ext_warnings
 
-        # ── 2. resolve native terms → pom_code, persist (replace-on-key) ──────
+        # 2. resolve native terms → pom_code, persist (replace-on-key)
         resolved_poms, unresolved, pom_rows = await self._resolve_and_persist_poms(spec, spec_sheet)
 
-        # ── 3. flatten + merge extracted attributes into the spec sheet ───────
+        # 3. flatten + merge extracted attributes into the spec sheet
         attributes = self._spec_attributes(spec)
         if attributes:
             spec_sheet.attributes = {**(spec_sheet.attributes or {}), **attributes}
 
-        # ── 3b. seed BOM lines AFTER extraction (the ordering fix) ────────────
+        # 3b. seed BOM lines AFTER extraction (the ordering fix) 
         if line_seeds is None:
             line_seeds = self._build_line_seeds(
                 spec_sheet.attributes, garment_code=spec.garment_type_guess)
@@ -481,11 +476,10 @@ class BomService:
         gt = await self.repo.get_garment_type(spec.garment_type_guess)
         gt_id = gt.id if gt else None
 
-        # ── 4. pattern reference (resolve to template memory if possible) ─────
+        # 4. pattern reference (resolve to template memory if possible) 
         pattern_template_id, pr_block = await self._resolve_pattern(
             spec, identity, spec_sheet, gt_id)
 
-        # ── 5. resolution context ─────────────────────────────────────────────
         sig = style_signature(customer_ref=identity.customer_ref,
                               internal_ref=identity.internal_ref, name=identity.name)
         sizes = list(spec.sizes)
@@ -493,7 +487,6 @@ class BomService:
             or (sizes[0] if sizes else None) 
         poms_for_size = self._poms_by_size(resolved_poms)
 
-        # ── 6. build bom + items with DCM resolution + costing ────────────────
         bom = Bom(
             submission_id=submission_id, client_id=identity.client_id,
             client_order_id=identity.client_order_id, style_id=identity.style_id,
@@ -502,6 +495,11 @@ class BomService:
             garment_type_id=gt_id, dcm_base_size=base_size,
             order_identity=self._order_identity_snapshot(identity, order),
         )
+        
+        pattern = await self.repo.get_current_pattern(sig, client_id=identity.client_id)
+        dxf_yields = dcm.effective_dxf_yields(
+            dcm.dxf_yields(), await self.repo.yields_by_species()) if pattern else {}
+        
         items = await self._build_items(
             line_seeds, identity=identity, sig=sig, gt=gt, gt_id=gt_id,
             base_size=base_size, poms_for_size=poms_for_size,
@@ -514,7 +512,6 @@ class BomService:
         # stays loaded in-memory, so we can build the view below pre-commit).
         await self.db.flush()
 
-        # ── 7. cross-checks (§8) ──────────────────────────────────────────────
         ctx = {
             "attributes": spec_sheet.attributes or {},
             "poms": resolved_poms, "sizes": sizes,
@@ -540,7 +537,7 @@ class BomService:
                 "details": order_warnings,
             }] + flags
 
-        # ── 8. promotion stamps + audit (all in-memory; committed once below) ─
+        # 8. promotion stamps + audit (all in-memory; committed once below) 
         now = datetime.now(timezone.utc)
         spec_extraction_row.promoted_to_spec_sheet_id = spec_sheet.id
         spec_extraction_row.promoted_at = now
@@ -557,7 +554,6 @@ class BomService:
             after=self._bom_snapshot(bom), at=now,
         ))
 
-        # ── THE single commit for the whole generate unit-of-work ─────────────
         await self.repo.commit()
 
         logger.info("generate_bom done: bom=%s items=%d fob=%s flags=%d unresolved=%d manual=%s",
@@ -581,7 +577,6 @@ class BomService:
             },
         }
 
-    # ── generation steps (private; share self.db + the single transaction) ────
     async def _extract_spec(self, spec_bytes: bytes, filename: str) -> ExtractedSpec:
         """Step 1: run the (blocking) LLM extraction off the event loop. Returns the
         typed contract directly — never raises (failures carry manual_entry_required)."""
@@ -589,7 +584,7 @@ class BomService:
             extract_spec, spec_bytes, filename, _sniff_mime(spec_bytes))
 
     async def _resolve_and_persist_poms(self, spec: ExtractedSpec, spec_sheet):
-        """Step 2: native term → pom_code via the DB dictionary, then stage the
+        """Step 2: native term â†’ pom_code via the DB dictionary, then stage the
         pom_measurement rows (replace-on-key). Returns (resolved_poms, unresolved,
         pom_rows). Inlines the replace so it participates in the single transaction
         instead of depending on a repo method's commit boundary."""
@@ -614,7 +609,7 @@ class BomService:
             for size, value in p["by_size"].items():
                 key = (str(size), p["pom_code"])
                 if key in seen:           # guard the (spec_sheet_id, size, pom_code) unique constraint
-                    logger.warning("duplicate (size=%s pom=%s) — keeping first", size, p["pom_code"])
+                    logger.warning("duplicate (size=%s pom=%s) â€” keeping first", size, p["pom_code"])
                     continue
                 seen.add(key)
                 conf = p.get("confidence")
@@ -630,7 +625,7 @@ class BomService:
                     or ExtractionSource.MANUAL.value,
                     confidence=Decimal(str(conf)) if conf is not None else Decimal("0.00"),
                 ))
-
+ 
         # replace-on-key, inline (single transaction): drop any existing rows for this
         # spec sheet, then stage the new ones. With the idempotency guard upstream the
         # spec sheet is always fresh, so the delete is a harmless no-op here.
@@ -640,7 +635,7 @@ class BomService:
     @staticmethod
     def _spec_attributes(spec: ExtractedSpec) -> dict:
         """Step 3 helper: flatten the typed spec into the unstructured attributes dict
-        the line-seed builder + checks read (formerly extraction._legacy_attributes —
+        the line-seed builder + checks read (formerly extraction._legacy_attributes â€”
         moved here, where the resolution lives)."""
         attrs: dict = dict(spec.materials or {})
 
@@ -677,8 +672,8 @@ class BomService:
     async def _resolve_pattern(self, spec: ExtractedSpec, identity: StyleIdentity,
                                spec_sheet, gt_id):
         """Step 4: stage a PatternReference for a "follow pattern X" spec and try to
-        resolve it to a confirmed consumption template (§2 Source 1b). Returns
-        (pattern_template_id, pr_block). Staged with self.db.add — committed once."""
+        resolve it to a confirmed consumption template (Â§2 Source 1b). Returns
+        (pattern_template_id, pr_block). Staged with self.db.add â€” committed once."""
         if spec.pattern_reference is None:
             return None, None
         pr = spec.pattern_reference
@@ -704,10 +699,9 @@ class BomService:
                     or ref.resolved_style_id is not None}
         return pattern_template_id, pr_block
 
-    async def _build_items(self, line_seeds: list[LineSeed], *, identity: StyleIdentity,
-                           sig, gt, gt_id, base_size, poms_for_size,
-                           pattern_template_id) -> list[BomItem]:
-        """Step 6: turn seeds into BomItems, DCM-resolving leather AREA lines (§2) and
+    async def _build_items(self, line_seeds, *, identity, sig, gt, gt_id, base_size,
+                           poms_for_size, pattern_template_id, pattern=None, dxf_yields=None):
+        """Step 6: turn seeds into BomItems, DCM-resolving leather AREA lines (Â§2) and
         carrying given qty/price on the rest."""
         items: list[BomItem] = []
         for seed in line_seeds: 
@@ -716,51 +710,70 @@ class BomService:
             dcm_source = None
             dcm_conf = None
             if seed.category in MATERIAL_DCM_CATEGORIES:
-                dcm, src = await self._resolve_dcm(
+                dcm_val, src = await self._resolve_dcm(
                     client_id=identity.client_id, style_signature=sig, garment_type_id=gt_id,
                     garment_type_row=gt, material_category=seed.category, size=base_size,
                     poms_for_size=poms_for_size, pattern_template_id=pattern_template_id,
-                )
-                qpg = dcm
-                if src is not None:
+                    pattern=pattern, line_species=dcm.species_of(seed.name),
+                    dxf_yields=dxf_yields)
+                if dcm_val is not None:
+                    qpg = dcm_val                              # F1: dcm_val, NOT the `dcm` module
                     dcm_source = src.value
                     dcm_conf = CONFIDENCE[src]
+                else:
+                    # #3: no DCM source resolved (first order: no DXF/template/similar, and
+                    # the POM heuristic had nothing to work with). Emit a PROVISIONAL leather
+                    # line — qty 0, confidence 0, flagged — never a silent 1-sf line, never a
+                    # block. Binding DCM arrives via the cutting-manager confirm or DXF regen.
+                    qpg = Decimal("0")
+                    dcm_source = DcmSource.PROVISIONAL.value
+                    dcm_conf = Decimal("0")
             else:
                 qpg = Decimal(str(seed.qty_per_garment)) if seed.qty_per_garment is not None \
                     else Decimal("1")
+                    
             items.append(BomItem(
                 category=seed.category, name=seed.name, material_color=seed.material_color,
                 qty_per_garment=qpg, uom=seed.uom, unit_price=price,
                 annotation=seed.annotation, source_ref=seed.source_ref,
                 dcm_source=dcm_source, dcm_confidence=dcm_conf,
             ))
+            
         return items
 
-    # ── the ordered DCM fallback (§2 Sources 1→3; Source 4 is the edit/confirm) ─
+    # the ordered DCM fallback (Â§2 Sources 1â†’3; Source 4 is the edit/confirm) â”€
     async def _resolve_dcm(self, *, client_id, style_signature, garment_type_id,
                            garment_type_row, material_category, size, poms_for_size,
-                           pattern_template_id):
+                           pattern_template_id, pattern=None, line_species="_default",
+                           dxf_yields=None):
         size_key = size if size is not None else ""
-        # Source 1 — the DCM memory (exact, confirmed)
+        # Source 1 â€” the DCM memory (exact, confirmed)
         tmpl = await self.repo.find_consumption_template(
             client_id=client_id, style_signature=style_signature,
             garment_type_id=garment_type_id, material_category=material_category, size=size_key,
         )
         if tmpl:
             return Decimal(str(tmpl.dcm_value)), DcmSource.TEMPLATE
-        # Source 1b — via a resolved pattern reference's template
+        # Source 1b â€” via a resolved pattern reference's template
         if pattern_template_id is not None:
             tmpl = await self.repo.get_consumption_template(pattern_template_id)
             if tmpl and tmpl.material_category == material_category:
                 return Decimal(str(tmpl.dcm_value)), DcmSource.TEMPLATE
-        # Source 2 — similar style (rule-based nearest neighbour)
+        # Source 1c â€” DXF net pattern area Ã— per-species yield (measured geometry).
+        if pattern is not None and material_category in MATERIAL_DCM_CATEGORIES:
+            from app.modules.bom.pattern import dcm_for_category
+            dxf_dcm = dcm_for_category(pattern, category=material_category, size=size,
+                                       species=line_species, yields=dxf_yields or {})
+            if dxf_dcm is not None:
+                return Decimal(str(dxf_dcm)), DcmSource.DXF
+        # Source 2 â€” similar style (rule-based nearest neighbour)
         sim = await self.repo.find_similar_template(
             client_id=client_id, garment_type_id=garment_type_id,
             material_category=material_category, size=size_key, exclude_signature=style_signature,
         )
         if sim:
             return Decimal(str(sim.dcm_value)), DcmSource.SIMILAR_STYLE
-        # Source 3 — AI heuristic from POM area (last resort, FLAGGED)
+        # Source 3 â€” AI heuristic from POM area (last resort, FLAGGED)
         est = estimate_area_dcm(
             getattr(garment_type_row, "area_formula", None) if garment_type_row else None,
             getattr(garment_type_row, "default_wastage_pct", None) if garment_type_row else None,
@@ -768,7 +781,6 @@ class BomService:
         )
         if est is not None and est > 0:
             return est, DcmSource.AI_ESTIMATE
-        # nothing resolved → manual confirmation required (no silent value)
         return None, None
 
     @staticmethod
@@ -778,10 +790,24 @@ class BomService:
             for size, val in (p.get("by_size") or {}).items():
                 out.setdefault(size, {})[p["pom_code"]] = val
         return out
+    
+    async def ingest_pattern_dxf(self, user, *, data: bytes, style_signature=None, client_id=None):
+        """Parse + persist a pattern DXF in ONE transaction. The repository owns the
+        parse/attribute/supersede/write (persist_dxf); this method just stores the bytes
+        and commits. Idempotent on (style_signature, sha256)."""
+        import hashlib
+        from starlette.concurrency import run_in_threadpool
+        sha = hashlib.sha256(data).hexdigest()
+        # store the raw bytes first so the pattern can be re-derived; pass the KEY to the repo
+        key = f"patterns/{(style_signature or 'unknown').upper()}/{sha}.dxf"
+        await run_in_threadpool(get_storage().put, key, data)
+        row, unknown = await self.repo.persist_dxf(
+            data, style_signature=style_signature, client_id=client_id, storage_key=key)
+        await self.repo.commit()
+        return {"pattern_id": str(row.id), "style_signature": row.style_signature,
+                "n_pieces": row.n_pieces, "unknown_fabrics": unknown, "warnings": row.warnings}
 
-    # ══════════════════════════════════════════════════════════════════════
-    # Editable contract — bulk PATCH + optimistic revision locking (§7)
-    # ══════════════════════════════════════════════════════════════════════
+    
     _EDIT_FIELDS = {"dcm", "qty_per_garment", "unit_price"}
     _EDITABLE_STATES = {BomStatus.DRAFT.value, BomStatus.READY_FOR_REVIEW.value}
 
@@ -850,9 +876,7 @@ class BomService:
         return {"revision": bom.revision, "recomputed": self._bom_view(bom),
                 "reconfirm_required": reconfirm_required}
 
-    # ══════════════════════════════════════════════════════════════════════
-    # Cutting-manager confirmation gate (§10) + Stage-3 approval gate (§9/§10)
-    # ══════════════════════════════════════════════════════════════════════
+
     async def confirm_cutting(self, user, bom_id: uuid.UUID,
                               identity: StyleIdentity | None = None) -> dict:
         bom = await self._load_bom(bom_id)
@@ -873,6 +897,7 @@ class BomService:
         if identity is not None:
             sig = style_signature(customer_ref=identity.customer_ref,
                                   internal_ref=identity.internal_ref, name=identity.name)
+            pattern = await self.repo.get_current_pattern(sig, client_id=identity.client_id)
             base_size = bom.dcm_base_size
             gt_id = bom.garment_type_id
             for item in bom.items:
@@ -885,6 +910,14 @@ class BomService:
                         confirmed_at=now, source_bom_id=bom.id,
                     )
                     backfilled += 1
+                    if pattern is not None and item.category in (
+                            BomItemCategory.MAIN_MATERIAL.value, BomItemCategory.SUB_MATERIAL.value):
+                        obs = learn_yield(pattern, category=item.category, size=bom.dcm_base_size,
+                                        species=dcm.species_of(item.name),
+                                        confirmed_dcm_sf=item.qty_per_garment)
+                        if obs:
+                            await self.repo.add_yield_observation(
+                                obs, source_bom_id=bom.id, confirmed_by=getattr(user,"id",None), confirmed_at=now)
         await self._audit(user, "BOM_SUBMIT_FOR_REVIEW", bom.id,
                           after={"status": bom.status,
                                  "cutting_confirmed_at": now.isoformat(),
@@ -942,7 +975,7 @@ class BomService:
                 "inventory_check_id": inventory_check_id}
 
     async def _materialize_breakdown(self, user, bom: Bom) -> None:
-        """Create the Client→Order→Style→SKU tree from the BOM's parsed order snapshot
+        """Create the Clientâ†’Orderâ†’Styleâ†’SKU tree from the BOM's parsed order snapshot
         and back-link it. Idempotent: a BOM that already has a style is left alone."""
         if bom.style_id is not None:
             return
@@ -954,7 +987,7 @@ class BomService:
         source_document_id = bom.source_document_id
         if client_id is None:
             logger.warning("breakdown skipped: bom=%s has no client_id (order sheet did not "
-                           "resolve a client) — order/style not created", bom_id)
+                           "resolve a client) â€” order/style not created", bom_id)
             return
         from app.modules.clients.service import ClientService
 
@@ -981,7 +1014,7 @@ class BomService:
                 await ProcurementService(self.db).link_submission_to_order(
                     submission_id, order_id)
             except Exception:
-                logger.exception("failed to link submission %s → order %s",
+                logger.exception("failed to link submission %s â†’ order %s",
                                  submission_id, order_id)
         await self._audit(user, "BOM_BREAKDOWN", bom_id,
                           after={"client_order_id": str(order_id), "style_id": str(style_id)})
@@ -1095,9 +1128,7 @@ class BomService:
     async def get_bom(self, bom_id: uuid.UUID) -> dict:
         return self._bom_view(await self._load_bom(bom_id))
 
-    # ══════════════════════════════════════════════════════════════════════
-    # Helpers
-    # ══════════════════════════════════════════════════════════════════════
+    
     async def _load_bom(self, bom_id: uuid.UUID) -> Bom:
         bom = await self.repo.get_bom(bom_id)
         if bom is None:
@@ -1242,3 +1273,60 @@ class BomService:
             at=datetime.now(timezone.utc),
         ))
         await self.repo.commit()
+        
+        
+    async def set_dxf_yield(self, species: str, factor, note: str | None = None) -> dict:
+        from app.modules.bom import config_store
+        await self.repo.upsert_dxf_yield(species=species, factor=factor, note=note)
+        snap = config_store._current()
+        snap.dxf_yields = {**snap.dxf_yields, species: float(factor)}
+        config_store.set_snapshot(snap)
+        return {"species": species, "factor": float(factor)}
+
+    async def upsert_fabric_role(self, data: dict) -> dict:
+        from app.modules.bom import config_store
+        from app.modules.bom.config_store import _FabricRoleView
+        await self.repo.upsert_fabric_role(**data)
+        snap = config_store._current()
+        snap.fabric_lexicon = {**snap.fabric_lexicon,
+            data["label"]: _FabricRoleView(data["role"], data["category"], bool(data["is_leather"]))}
+        config_store.set_snapshot(snap)
+        return data
+    
+    async def set_cost_catalog(self, garment_code: str, lines: list[dict]) -> dict:
+            from app.modules.bom import config_store
+            code = garment_code.upper()
+            await self.repo.replace_cost_catalog(code, lines)
+            rows = [(code, l["category"], l["name"], l.get("uom"),
+                    l.get("unit_price"), l.get("qty_per_garment", 1), i)
+                    for i, l in enumerate(lines)]
+            grouped = config_store._group_cost_lines(rows)
+            snap = config_store._current()
+            snap.cost_catalog = {**snap.cost_catalog, **grouped}
+            config_store.set_snapshot(snap)
+            return {"garment_code": code, "lines": len(lines)}
+        
+    async def set_client_checks(self, client_code: str, rules: list[dict]) -> dict:
+            from app.modules.bom import config_store
+            await self.repo.replace_client_checks(client_code, rules)
+            rows = [(client_code, r["id"], r["kind"], r.get("severity", "warn"), r.get("field"),
+                    (r["range"][0] if r.get("range") else None),
+                    (r["range"][1] if r.get("range") else None), r.get("params"), i)
+                    for i, r in enumerate(rules)]
+            new_entry = config_store._reconstruct_checks(rows)
+            snap = config_store._current()
+            snap.bom_checks = [e for e in snap.bom_checks if e["client_code"] != client_code] + new_entry
+            config_store.set_snapshot(snap)
+            return {"client_code": client_code, "rules": len(rules)}
+        
+    async def add_pom_mapping(self, data: dict) -> dict:
+            language = data.get("language") or _term_language(data["source_term"])
+            gt_id = None
+            if data.get("garment_type_code"):
+                gt = await self.repo.get_garment_type(data["garment_type_code"])
+                gt_id = gt.id if gt else None
+            await self.repo.upsert_pom_mapping(
+                language=language, source_term=data["source_term"],
+                pom_code=data["pom_code"], garment_type_id=gt_id, weight=data.get("weight", 1))
+            return {"source_term": data["source_term"], "pom_code": data["pom_code"],
+                    "language": language, "garment_type_id": str(gt_id) if gt_id else None}

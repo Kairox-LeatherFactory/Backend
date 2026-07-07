@@ -1,0 +1,524 @@
+{
+  "contract_number": "49/26",
+  "contract_date": "2026-04-01",
+  "seller": {
+    "name": "PAKKAR TANVEER EXPORTS",
+    "address": "No.1 Hyder Garden, 2nd Street Extn., Jamaliya Nagar, Perambur, Chennai 600012, India"
+  },
+  "buyer": {
+    "client_id": "ORFATTI-001",
+    "client_name": "CONFEZIONI ORFATTI SRL",
+    "address": "Via E. e P. Salani 24, 50050 Limite S/Arno FI, Italy"
+  },
+  "agent": {
+    "name": "MEA SRL",
+    "address": "Via Capoquadri 8, 50053 Empoli (FI), Italy",
+    "email": "mea.srl@tin.it"
+  },
+  "delivery_date": "2026-05-15",
+  "delivery_terms": "EX CHENNAI",
+  "currency": "EUR",
+  "total_order_quantity": 168,
+  "size_range": "DONNA 38-56 (XS–XXXL)",
+  "style_id": "SP74007",
+  "internal_style_ref": "SP74007 – NAPLINE / NAPPLAN (spec file sheet header shows SP64803 – treat as same garment; confirm with client)",
+  "spec_file_style_ref_note": "Technical sheets (all 4 tabs) carry style ref SP64803 in the header block, but the MEAS CHART tab row R4 correctly shows SP74007. Order sheet lists as SP74007. Treat SP64803 as internal spec cross-ref and SP74007 as the live order style ID.",
+  "collection": "MONTEREGGI",
+  "season": "SS2027",
+  "garment_type": "Jacket",
+  "garment_subtype": "Napalan Jacket with Zip Front, Back Yoke, Monogram Embroidery Patch, Button Cuffs, Anti-Dust Treatment",
+  "gender": "Women (Donna)",
+  "size_range_ordered": "42 (S)",
+  "order_quantity": 19,
+  "colour": "Dusty Blue",
+  "colour_code": "Dusty Blue – follow order swatch (order sheet lists as 'Dust')",
+  "unit_price_eur": "TBC",
+  "leather": {
+    "type": "Napline – Goat Nappalan",
+    "finish": "Nappalan – smooth grain-side with anti-dust treatment on inside",
+    "animal": "Goat",
+    "thickness_mm": "TBC – Nappalan grade; 'thick and very soft hand-feel' per spec",
+    "selection_grade": "Standard Nappalan with very soft handfeel",
+    "quality_notes": "Anti-dust treatment on inside (underside) of leather throughout whole garment including collar, facing, pocket sac and curl hanger. Quality confirmed on SMS.",
+    "colour_direction": "Dusty Blue – confirmed; SMS repetitions should be Dusty Blue",
+    "grain_restriction": "Net-cut workmanship as on original sample; consistent panel direction",
+    "anti_dust_treatment": true,
+    "napalan_treatment": true,
+    "usage_positions": "Whole outside garment, top and under collar, stand collar outside & inside, one layer pocket sac, pocket facing and curl hanger",
+    "DCM_norm": 375,
+    "costing_DCM_lay_avg": 360,
+    "unit_price_inr_per_dcm": 11,
+    "total_leather_cost_inr": 4125,
+    "calibration": {
+      "extra_leather_dcm": 15,
+      "calibration_percent": 4.17,
+      "allocated_dcm": 375,
+      "expected_consumption_dcm": 360,
+      "purpose": "Grace allowance for leather defects, matching, cutting losses and production variation."
+    }
+  },
+  "pattern": {
+    "base_pattern_ref": "Original sample held by client; spec ref SP64803; paper pattern per Mrs. Laura / client",
+    "pattern_type": "Fitted jacket with zip front, cuffed sleeve with button, back yoke, net-cut workmanship zones",
+    "paper_pattern_source": "Client-supplied (follow original sample for fitting and measures)",
+    "size_base": "42 (labelled S – fitting confirmed as size S on SMS)",
+    "grading_increment_cm": 2,
+    "grading_method": "Proportional Italian system",
+    "size_run": [
+      "XS/40",
+      "S/42",
+      "M/44",
+      "L/46",
+      "XL/48",
+      "XXL/50",
+      "XXXL/52"
+    ],
+    "net_cut_workmanship": "Net-cut workmanship as on original sample throughout"
+  },
+  "measurements_cm": {
+    "size_reference": "S/42 (proto TG S/42)",
+    "size_run": [
+      "XS/40",
+      "S/42",
+      "M/44",
+      "L/46",
+      "XL/48",
+      "XXL/50",
+      "XXXL/52"
+    ],
+    "back_length_A": {
+      "XS_40": 63.0,
+      "S_42": 64.0,
+      "M_44": 65.0,
+      "L_46": 66.0,
+      "XL_48": 67.0,
+      "XXL_50": 68.0,
+      "XXXL_52": 69.0,
+      "proto_S": 64.0
+    },
+    "front_length_B_diff_from_back": {
+      "XS_40": -1.2,
+      "S_42": 0,
+      "M_44": 1.2,
+      "L_46": 2.4,
+      "XL_48": 3.6,
+      "XXL_50": 4.8,
+      "XXXL_52": 6.0,
+      "note": "Front length taken from shoulder; values shown as differential from back length"
+    },
+    "sleeve_length_incl_cuff_D": {
+      "XS_40": 49.8,
+      "S_42": 50.5,
+      "M_44": 51.2,
+      "L_46": 51.9,
+      "XL_48": 52.6,
+      "XXL_50": 53.3,
+      "XXXL_52": 54.0,
+      "proto_S": 51.0
+    },
+    "half_bottom_sleeve_circunf_E": {
+      "XS_40": 10.45,
+      "S_42": 10.7,
+      "M_44": 10.95,
+      "L_46": 11.2,
+      "XL_48": 11.45,
+      "XXL_50": 11.7,
+      "XXXL_52": 11.95,
+      "proto_S": 10.5
+    },
+    "cuff_length_opened_flat_E1_diff": {
+      "XS_40": -0.7,
+      "S_42": 0,
+      "M_44": 0.7,
+      "L_46": 1.4,
+      "XL_48": 2.1,
+      "XXL_50": 2.8,
+      "XXXL_52": 3.5
+    },
+    "cuff_width_E2": {
+      "all_sizes": 5.0,
+      "proto_S": 5.0
+    },
+    "elbow_position_from_shoulder_F": {
+      "XS_40": 21.0,
+      "S_42": 21.5,
+      "M_44": 22.0,
+      "L_46": 22.5,
+      "XL_48": 23.0,
+      "XXL_50": 23.5,
+      "XXXL_52": 24.0
+    },
+    "half_elbow_circunf_F1": {
+      "XS_40": 16.8,
+      "S_42": 17.3,
+      "M_44": 17.8,
+      "L_46": 18.3,
+      "XL_48": 18.8,
+      "XXL_50": 19.3,
+      "XXXL_52": 19.8,
+      "proto_S": 18.0,
+      "sms_note": "TO BE CORRECTED – not respecting measure scheme on SMS"
+    },
+    "half_muscle_circunf_F2": {
+      "XS_40": 19.0,
+      "S_42": 19.6,
+      "M_44": 20.2,
+      "L_46": 20.8,
+      "XL_48": 21.4,
+      "XXL_50": 22.0,
+      "XXXL_52": 22.6,
+      "proto_S": 20.5,
+      "sms_note": "TO BE CORRECTED – not respecting measure scheme on SMS"
+    },
+    "half_chest_circunf_G": {
+      "XS_40": 56.0,
+      "S_42": 58.0,
+      "M_44": 60.0,
+      "L_46": 62.0,
+      "XL_48": 64.0,
+      "XXL_50": 66.0,
+      "XXXL_52": 68.0,
+      "proto_S": 58.5,
+      "note": "Taken with back yoke fold closed"
+    },
+    "waist_height_at_CB_H": {
+      "XS_40": 34.7,
+      "S_42": 35.5,
+      "M_44": 36.3,
+      "L_46": 37.1,
+      "XL_48": 37.9,
+      "XXL_50": 38.7,
+      "XXXL_52": 39.5
+    },
+    "half_waist_circunf_H1": {
+      "XS_40": 55.0,
+      "S_42": 57.0,
+      "M_44": 59.0,
+      "L_46": 61.0,
+      "XL_48": 63.0,
+      "XXL_50": 65.0,
+      "XXXL_52": 67.0
+    },
+    "half_bottom_hem_circunf_L": {
+      "XS_40": 60.0,
+      "S_42": 62.0,
+      "M_44": 64.0,
+      "L_46": 66.0,
+      "XL_48": 68.0,
+      "XXL_50": 70.0,
+      "XXXL_52": 72.0,
+      "proto_S": 61.5
+    },
+    "collar_height_back_M": {
+      "all_sizes": 5.0,
+      "proto_S": 5.1
+    },
+    "shoulder_to_shoulder_N": {
+      "XS_40": 58.3,
+      "S_42": 59.3,
+      "M_44": 60.3,
+      "L_46": 61.3,
+      "XL_48": 62.3,
+      "XXL_50": 63.3,
+      "XXXL_52": 64.3,
+      "proto_S": 60.5
+    },
+    "back_width_at_15cm_N1": {
+      "XS_40": 53.1,
+      "S_42": 54.3,
+      "M_44": 55.5,
+      "L_46": 56.7,
+      "XL_48": 57.9,
+      "XXL_50": 59.1,
+      "XXXL_52": 60.3,
+      "proto_S": 55.0
+    },
+    "breast_width_at_13cm_N2": {
+      "XS_40": 54.6,
+      "S_42": 55.8,
+      "M_44": 57.0,
+      "L_46": 58.2,
+      "XL_48": 59.4,
+      "XXL_50": 60.6,
+      "XXXL_52": 61.8
+    },
+    "pocket_position_from_hsp_P_diff": {
+      "XS_40": -0.8,
+      "S_42": 0,
+      "M_44": 0.8,
+      "L_46": 1.6,
+      "XL_48": 2.4,
+      "XXL_50": 3.2,
+      "XXXL_52": 4.0
+    },
+    "pocket_length_P2": {
+      "M_44": 0.0,
+      "L_46": 1.0,
+      "XL_48": 1.0,
+      "XXL_50": 1.0,
+      "XXXL_52": 1.0
+    },
+    "flap_width_P4_diff": {
+      "XS_40": -0.3,
+      "S_42": 0,
+      "M_44": 0.3,
+      "L_46": 0.6,
+      "XL_48": 0.9,
+      "XXL_50": 1.2,
+      "XXXL_52": 1.5
+    },
+    "breast_pocket_position_Q_diff": {
+      "XS_40": -0.5,
+      "S_42": 0,
+      "M_44": 0.5,
+      "L_46": 1.0,
+      "XL_48": 1.5,
+      "XXL_50": 2.0,
+      "XXXL_52": 2.5
+    },
+    "belt_length_T_diff": {
+      "XS_40": -4.0,
+      "S_42": 0,
+      "M_44": 4.0,
+      "L_46": 8.0,
+      "XL_48": 12.0,
+      "XXL_50": 16.0,
+      "XXXL_52": 20.0
+    },
+    "front_neckhole_depth_V1_diff": {
+      "XS_40": -0.2,
+      "S_42": 0,
+      "M_44": 0.2,
+      "L_46": 0.4,
+      "XL_48": 0.6,
+      "XXL_50": 0.8,
+      "XXXL_52": 1.0
+    },
+    "round_sleeve_vertical_depth_diff": {
+      "XS_40": -0.4,
+      "S_42": 0,
+      "M_44": 0.4,
+      "L_46": 0.8,
+      "XL_48": 1.2,
+      "XXL_50": 1.6,
+      "XXXL_52": 2.0
+    }
+  },
+  "construction": {
+    "lining": {
+      "body": "No body lining – anti-dust treatment on inside leather throughout",
+      "sleeves": "No sleeve lining stated – anti-dust treatment on inside leather",
+      "pocket_sac": "One layer polyester lining – Matching (same quality and softness as on SMS)",
+      "pocket_sac_type": "POLYESTER LINING same quality and softness as on sms – ONE LAYER POCKET SAC",
+      "adhesive": "Good quality adhesive – used same as on SMS",
+      "lining_colour": "Matching Dusty Blue"
+    },
+    "collar": {
+      "type": "Stand collar",
+      "construction": "Outside and inside – full Nappalan; top and under collar, stand collar outside & inside; clean-cut net-cut workmanship",
+      "collar_height_back_cm": 5.0
+    },
+    "front_closure": "ZIP – type not specified in spec (zip details section was empty in technical sheet); confirm zip type/size with client",
+    "zip_note": "Zip section (item 1) and Puller section (item 2) were left blank in the technical sheets – no zip or puller specification captured. Confirm: type (metal/nylon), size (T5/T8), colour (matching/nickel), open-end or close-end, single or double slider.",
+    "button_details": {
+      "main_button": "4 Holes Button Size 24 – Matching Dusty Blue (NOT the large size used on proto – corrected on SMS)",
+      "qty": "7+1 spare",
+      "position": "Front side + Cuff",
+      "under_button": "4 Holes Under Button Size 18 – Matching (corrected on SMS – NOT transparent)",
+      "under_qty": "7+1 spare",
+      "sms_correction_note": "Proto buttons were too big (size was too large); corrected to Size 24 for SMS. Counter/under buttons changed to matching colour, not transparent."
+    },
+    "cuff": {
+      "present": true,
+      "buttons_on_cuff": "Yes – button(s) on cuff, included in qty 7+1 spare",
+      "cuff_width_cm": 5.0
+    },
+    "front_facing": "Nappalan leather – full front facing",
+    "pocket_construction": {
+      "type": "Inseam / welt (exact construction to follow original sample)",
+      "pocket_sac": "One layer Nappalan leather net-cut pocket sac – same as garment material; Pocket facing also in Nappalan",
+      "breast_pocket": "TBC – breast pocket P/Q measurements graded in measurement chart; confirm if present on this style",
+      "cargo_pockets": false
+    },
+    "back_yoke": {
+      "present": true,
+      "note": "Back yoke confirmed from chest measurement note ('taken with back yoke fold closed'); details (lining, width) to follow original sample SP64803"
+    },
+    "embroidered_patch": {
+      "present": true,
+      "position": "Back centre under collar line (outside)",
+      "material": "Nappalan leather patch – net cut workmanship, full thread embroidery matching Dusty Blue",
+      "embroidery": "Full thread embroidery matching colour – was missing/underdeveloped on proto; client requires photo before production confirmation",
+      "fixing": "Net cut; sewn on back side with stitching at 2mm",
+      "size": "Approx 4×4cm (follow accessories details sheet – same as SP74006/SP74008)"
+    },
+    "main_label_position": "Inside left front side on pocket sac – directly on leather (NOT on lining patch); per SMS correction",
+    "curl_hanger": "Nappalan leather curl hanger",
+    "seam_allowance_general_cm": 1.0,
+    "net_cut_workmanship": "Net-cut workmanship throughout – as on original sample SP64803",
+    "panel_curvature": "Moderate – fitted jacket silhouette, shaped front facing, collar curves",
+    "panel_pieces_estimated": 14,
+    "workmanship_notes": [
+      "Follow the original sample for the fitting and measures (PPS COMMENTS 02/02/2026)",
+      "Make net-cut workmanship as on the original sample",
+      "Quality of leather confirmed; SMS repetitions should be Dusty Blue",
+      "Fitting confirmed as size S; correct 1/2 elbow (F1) and 1/2 muscle (F2) – these were not respecting the measurement scheme on SMS",
+      "Develop back-side patch with full thread embroidery matching colour – was forgotten on proto; send 1 photo for confirmation before production",
+      "Patch must be net cut and sewn on back side with stitching at 2mm",
+      "Counter/under buttons must be MATCHING (not transparent) – corrected on SMS",
+      "Buttons must be Size 24 – proto buttons were too big; confirmed correction for SMS",
+      "Main label must be sewn inside on pocket sac – check position on garment (per SMS correction)",
+      "Anti-dust treatment on inside leather throughout",
+      "ZIP details not captured in technical sheet – confirm zip type, size, finish with client before production"
+    ]
+  },
+  "accessories": [
+    {
+      "item": "ZIP (type/size TBC)",
+      "colour": "TBC – confirm with client",
+      "qty_per_garment": "TBC",
+      "position": "Centre front",
+      "note": "Zip specification was blank in technical sheets – must be confirmed"
+    },
+    {
+      "item": "ZIP PULLER (type TBC)",
+      "colour": "TBC – confirm with client",
+      "qty_per_garment": "TBC",
+      "position": "Centre front zip",
+      "note": "Puller specification was blank in technical sheets – must be confirmed"
+    },
+    {
+      "item": "4 Holes Button Size 24",
+      "colour": "Matching Dusty Blue",
+      "qty_per_garment": "7+1 spare",
+      "position": "Front side + Cuff"
+    },
+    {
+      "item": "4 Holes Under Button Size 18",
+      "colour": "Matching Dusty Blue",
+      "qty_per_garment": "7+1 spare",
+      "position": "Front side + Cuff (inside)"
+    },
+    {
+      "item": "Nappalan Leather Patch with Monogram Full Thread Embroidery",
+      "colour": "Matching Dusty Blue",
+      "qty_per_garment": 1,
+      "position": "Back centre under collar line (outside)"
+    },
+    {
+      "item": "Polybag for Spare Accessories",
+      "colour": "Clear",
+      "qty_per_garment": 1,
+      "position": "Applied on size label – left flank",
+      "note": "Small polybag with centred machine hole"
+    },
+    {
+      "item": "Transparent Plastic Pin",
+      "colour": "Transparent",
+      "qty_per_garment": 1,
+      "position": "Applied on size label – left flank"
+    },
+    {
+      "item": "Leather Curl Hanger",
+      "colour": "Matching",
+      "qty_per_garment": 1,
+      "position": "Back neck"
+    }
+  ],
+  "labels": [
+    {
+      "type": "Main Label",
+      "brand": "MONTEREGGI",
+      "qty": 1,
+      "position": "Inside left front side on pocket sac – directly on leather",
+      "construction": "Woven quality, black ground, white writing"
+    },
+    {
+      "type": "Size Label",
+      "qty": 1,
+      "position": "Left flank at 10cm from round sleeves"
+    },
+    {
+      "type": "Composition Label",
+      "qty": 1,
+      "position": "Inside left flank, under size label"
+    },
+    {
+      "type": "Care Label + Prodotto Importato",
+      "qty": 1,
+      "position": "Inside left flank, under size label"
+    }
+  ],
+  "threads": [
+    {
+      "type": "Thread Size 30",
+      "colour": "Matching Dusty Blue",
+      "use": "All outside stitching"
+    }
+  ],
+  "costing": {
+    "currency": "INR / EUR",
+    "leather_inr_no_gst": 4125,
+    "leather_inr_with_gst": 4331.25,
+    "lining_viscose_pocket_inr": 27.5,
+    "lining_viscose_pocket_inr_with_gst": 30.8,
+    "thread_tkt30_inr": 6100,
+    "thread_tkt60_inr": 25700,
+    "thread_tkt50_inr": 8100,
+    "fusing_inr": 9,
+    "adhesive_solutions_inr": 14.25,
+    "pakka_tape_inr": 30,
+    "button_size24_inr": 45,
+    "under_button_size18_inr": 7.5,
+    "embroidery_patch_inr": 30,
+    "polybag_inr": 2,
+    "plastic_pin_inr": 1,
+    "main_label_embroidery_inr": 30,
+    "care_label_inr": 3.5,
+    "size_label_inr": 3.5,
+    "hang_tag_inr": 5,
+    "poly_bag_packaging_inr": 12,
+    "box_inner_ply_inr": 23,
+    "carton_box_inr": 11.76,
+    "making_cost_inr": 1000,
+    "freight_inr": 450,
+    "commission_pct": 6,
+    "exchange_rate_eur_inr": 85,
+    "fob_price_eur_approx": "TBC",
+    "note": "BOM for SP74007 not in BOM workbook; costing derived from SP74006 (Goat Nappalan jacket, same collection/season) as closest reference. Button qty adjusted to 7+1 (vs 2+1 in SP74006). Zip cost not included – confirm with supplier. Thread costs shown as full box rates from BOM; apportion per garment."
+  },
+  "yardage_estimation": {
+    "leather_DCM": 375,
+    "lay_avg_DCM": 360,
+    "lining_polyester_pocket_MTR": "TBC – one layer pocket sac only",
+    "fusing_MTS": 0.5,
+    "solutions_litre": 0.15,
+    "pakka_tape_MTS": 3.75
+  },
+  "proxy_area_sqft": {
+    "estimated": 40.4,
+    "note": "Derived from 375 DCM / 9.29 (same DCM norm as SP74006)"
+  },
+  "complexity_assessment": {
+    "overall_complexity": "High",
+    "rationale": "Nappalan with anti-dust treatment; zip front (type unconfirmed); 7-button cuff system; net-cut workmanship throughout; back yoke construction; full-thread embroidery patch (missing on proto – development outstanding); button size corrected on SMS; multiple SMS corrections still open; fitting corrections required for elbow and muscle measurements.",
+    "complexity_score": 8,
+    "complexity_max": 10
+  },
+  "open_issues": [
+    "ZIP: type, size, colour, end-type and slider count not captured in technical sheets — CONFIRM WITH CLIENT before production",
+    "PULLER: not specified — confirm with client",
+    "BREAST POCKET: measurement rows Q1–Q5 are graded in the chart but presence of breast pocket on finished garment not explicitly confirmed — verify",
+    "ELBOW (F1) and MUSCLE (F2) measurements were not respecting scheme on SMS — must be corrected for bulk",
+    "EMBROIDERY PATCH: not developed on proto — send photo for client approval before SMS",
+    "BOM not available in BOM workbook for SP74007 — costing based on SP74006 reference",
+    "Spec file style header shows SP64803, but measure chart and order sheet show SP74007 — confirm correct style ID with client"
+  ],
+  "proto_sample_status": "SMS reviewed (PPS comments 02/02/2026); corrections required: button size (use 24 not large), elbow/muscle measurements, embroidery patch development, main label position",
+  "label_brand": "MONTEREGGI",
+  "source_files": [
+    "SP74007_NAPLINE.xls",
+    "Orfatti_Contr49-26_BOM.xlsx (SP74006 sheet used as costing reference – no SP74007 sheet present)",
+    "49-26-01-04-2026.pdf"
+  ]
+}

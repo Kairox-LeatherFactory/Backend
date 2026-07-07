@@ -22,6 +22,35 @@ TABLE GUIDE (each class is one table; see the per-class docstring for column det
   PomMeasurement            one standardized POM per spec sheet per size.
   StyleConsumptionTemplate  the DCM memory — cross-order-stable key; back-filled by the cutting gate.
   PatternReference          "follow pattern X in size Y" → resolved base style / DCM template.
+  
+  
+Two new staging tables that capture the RAW extraction output before promotion
+into the operational tables (spec_sheet / pom_measurement / bom). Same column
+conventions as the rest of the module — UUIDMixin + TimestampMixin, GUID PKs,
+JSON_VARIANT for free-shape payloads, VARCHAR for enum values.
+Paste this block AFTER the PatternReference class. No other changes to the file.
+The matching Alembic migration is in the next file.
+  
+  THREE NEW TABLES, all bom-owned (LAYERING: bom never writes another module's tables):
+
+  PatternExtraction   one parsed DXF per (style, file). Header + the derived area /
+                      fabric matrices + the resolved fabric->role map, stored as JSON
+                      (same JSON_VARIANT posture as SpecSheet.attributes). This is what
+                      the DCM resolver reads — it does NOT re-parse the DXF at generate
+                      time. Keyed cross-order-stable on style_signature (like the DCM
+                      memory) so any order of the style finds its pattern.
+  PatternPiece        one row per cut piece (75 for this file = 15 pieces x 5 sizes).
+                      Full fidelity for audit / re-derivation; cascade-deleted with the
+                      parent. The resolver doesn't need these — the matrices on the
+                      parent are the hot path — but "store the data, persistently" means
+                      the raw pattern is kept, not just the rollup.
+  DxfYieldObservation the learning loop. Each CONFIRMED order writes one row per leather
+                      material: net_qty_sf (from the pattern) + confirmed_dcm_sf (cutting
+                      manager) -> implied_yield. The resolver averages these per species
+                      to derive the per-factory DXF yield empirically, instead of trusting
+                      the seeds.yaml bootstrap forever.
+
+UNITS: square feet (sf) everywhere, consistent with the rest of the DCM subsystem.
 ================================================================================
 """
 import uuid
@@ -37,6 +66,8 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    Boolean,
+    Float,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -261,21 +292,6 @@ class PatternReference(Base, UUIDMixin, TimestampMixin):
     )
     notes: Mapped[str | None] = mapped_column(Text)
     
-"""
-================================================================================
-APPEND TO: app/modules/bom/models.py
-================================================================================
-Two new staging tables that capture the RAW extraction output before promotion
-into the operational tables (spec_sheet / pom_measurement / bom). Same column
-conventions as the rest of the module — UUIDMixin + TimestampMixin, GUID PKs,
-JSON_VARIANT for free-shape payloads, VARCHAR for enum values.
-
-Paste this block AFTER the PatternReference class. No other changes to the file.
-
-The matching Alembic migration is in the next file.
-================================================================================
-"""
-
 # (imports at the top of the file already cover everything we need:
 #  UUIDMixin, TimestampMixin, GUID, JSON_VARIANT, Numeric, String, Integer,
 #  DateTime, ForeignKey, Mapped, mapped_column)
@@ -365,3 +381,135 @@ class OrderExtraction(Base, UUIDMixin, TimestampMixin):
         GUID(), ForeignKey("bom.id"), nullable=True, index=True,
     )
     promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    
+    
+class PatternExtraction(Base, UUIDMixin, TimestampMixin):
+    """A parsed pattern DXF for a style. The cut-area data the DCM resolver consumes.
+
+    Keyed on the SAME cross-order-stable style_signature the DCM memory uses (NOT
+    style_id, which is order-scoped), so the pattern outlives any single order and is
+    found by every future order of the same physical style. `sha256` makes a re-upload
+    of the identical file idempotent; a genuinely new export supersedes via is_current.
+    """
+    __tablename__ = "pattern_extraction"
+    __table_args__ = (
+        UniqueConstraint("style_signature", "sha256", name="uq_pattern_extraction_file"),
+    )
+    # Nullable client_id mirrors Bom/SpecSheet — a pattern can land before the client is
+    # resolved (client comes off the order sheet at approval).
+    client_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("client.id"), nullable=True, index=True
+    )
+    style_signature: Mapped[str] = mapped_column(String(120), index=True)
+    garment_type_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("garment_type.id"), nullable=True
+    )
+    source_document_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("document.id"), nullable=True
+    )
+    # parser provenance / detected facts
+    source_system: Mapped[str | None] = mapped_column(String(20))     # creacompo|lectra|gerber|unknown
+    parser_version: Mapped[str | None] = mapped_column(String(40))
+    unit: Mapped[str | None] = mapped_column(String(4))               # mm|cm|in|m (detected)
+    master_size: Mapped[str | None] = mapped_column(String(10))
+    n_pieces: Mapped[int | None] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    storage_key: Mapped[str | None] = mapped_column(String(300))      # where the raw .dxf lives
+    is_current: Mapped[bool] = mapped_column(default=True, index=True)
+    # derived data the resolver reads (sf). Stored, not recomputed.
+    area_matrix: Mapped[dict | None] = mapped_column(JSON_VARIANT)     # {size:{n_pieces,net_sf,net_qty_sf}}
+    fabric_matrix: Mapped[dict | None] = mapped_column(JSON_VARIANT)   # {size:{fabric: net_qty_sf}}
+    fabric_roles: Mapped[dict | None] = mapped_column(JSON_VARIANT)    # {fabric:{role,category,is_leather}}
+    warnings: Mapped[list | None] = mapped_column(JSON_VARIANT)        # parser warnings + unknown fabrics
+
+    pieces: Mapped[list["PatternPiece"]] = relationship(
+        back_populates="pattern", cascade="all, delete-orphan"
+    )
+
+
+class PatternPiece(Base, UUIDMixin, TimestampMixin):
+    """One cut piece instance from the DXF (full fidelity for audit / re-derivation)."""
+    __tablename__ = "pattern_piece"
+    pattern_extraction_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("pattern_extraction.id"), index=True
+    )
+    block: Mapped[str | None] = mapped_column(String(120))
+    name: Mapped[str | None] = mapped_column(String(200))     # cp932-recovered PIECE name
+    fabric: Mapped[str | None] = mapped_column(String(120))   # raw FABRIC label
+    size: Mapped[str | None] = mapped_column(String(10))
+    qty: Mapped[int] = mapped_column(Integer, default=1)
+    net_area_sf: Mapped[Decimal | None] = mapped_column(Numeric(10, 3))
+    longest_cm: Mapped[Decimal | None] = mapped_column(Numeric(8, 1))
+    pattern: Mapped["PatternExtraction"] = relationship(back_populates="pieces")
+
+
+class DxfYieldObservation(Base, UUIDMixin, TimestampMixin):
+    """A confirmed (net pattern area -> real DCM) pair: the per-factory cutting/hide-waste
+    yield, MEASURED. Written by the cutting gate for each confirmed leather line; the
+    resolver averages by species to learn the DXF yield empirically (replacing the
+    seeds.yaml bootstrap as data accrues)."""
+    __tablename__ = "dxf_yield_observation"
+    style_signature: Mapped[str] = mapped_column(String(120), index=True)
+    species: Mapped[str] = mapped_column(String(20), index=True)   # sheep|goat|_default
+    size: Mapped[str | None] = mapped_column(String(10))
+    net_qty_sf: Mapped[Decimal] = mapped_column(Numeric(10, 3))
+    confirmed_dcm_sf: Mapped[Decimal] = mapped_column(Numeric(12, 3))
+    implied_yield: Mapped[Decimal] = mapped_column(Numeric(6, 3))
+    source_bom_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("bom.id"), nullable=True
+    )
+    confirmed_by: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("app_user.id"), nullable=True
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DxfYield(Base, UUIDMixin, TimestampMixin):
+    """Per-species cutting-yield multiplier (net pattern sf → leather DCM).
+    Overrides the built-in default; `_default` is a valid species key."""
+    __tablename__ = "dxf_yield"
+    species: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    factor: Mapped[Decimal] = mapped_column(Numeric(6, 3))
+    note: Mapped[str | None] = mapped_column(Text)
+
+
+class FabricRoleRow(Base, UUIDMixin, TimestampMixin):
+    """CAD fabric label → BOM role/category/leather-flag. Language-agnostic:
+    a Japanese, Italian, or English label is just a row."""
+    __tablename__ = "fabric_role"
+    label: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    role: Mapped[str] = mapped_column(String(30))
+    category: Mapped[str] = mapped_column(String(30))
+    is_leather: Mapped[bool] = mapped_column(Boolean, default=False)
+    
+class CostCatalogLine(Base, UUIDMixin, TimestampMixin):
+    """A default non-material BOM cost line (§5b). Keyed by garment_type.code (UPPER)
+    or the literal '_default'. Seeded from cost_catalog.yaml; editable at runtime."""
+    __tablename__ = "cost_catalog_line"
+    __table_args__ = (
+        UniqueConstraint("garment_code", "category", "name", name="uq_cost_line"),
+    )
+    garment_code: Mapped[str] = mapped_column(String(40), index=True)
+    category: Mapped[str] = mapped_column(String(20))
+    name: Mapped[str] = mapped_column(String(120))
+    uom: Mapped[str | None] = mapped_column(String(20))
+    unit_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    qty_per_garment: Mapped[Decimal | None] = mapped_column(Numeric(12, 3), default=1)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    
+class ClientCheckRule(Base, UUIDMixin, TimestampMixin):
+    """One per-client BOM cross-check (§8). `kind` dispatches a generic engine
+    primitive; the rest is that rule's config. Replaces the last hardcoded clients."""
+    __tablename__ = "client_check_rule"
+    __table_args__ = (
+        UniqueConstraint("client_code", "rule_id", name="uq_check_rule"),
+    )
+    client_code: Mapped[str] = mapped_column(String(60), index=True)
+    rule_id: Mapped[str] = mapped_column(String(60))
+    kind: Mapped[str] = mapped_column(String(40))
+    severity: Mapped[str] = mapped_column(String(10), default="warn")
+    field: Mapped[str | None] = mapped_column(String(60))
+    range_lo: Mapped[float | None] = mapped_column(Float)
+    range_hi: Mapped[float | None] = mapped_column(Float)
+    params: Mapped[dict | None] = mapped_column(JSON_VARIANT)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
