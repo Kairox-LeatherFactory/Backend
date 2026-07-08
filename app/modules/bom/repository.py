@@ -415,97 +415,97 @@ class BomRepository:
         await self.db.flush()
         return row, unknown
     
-async def upsert_dxf_yield(self, *, species, factor, note=None):
-    from app.modules.bom.models import DxfYield
-    row = await self.db.scalar(select(DxfYield).where(DxfYield.species == species))
-    if row:
-        row.factor, row.note = factor, note
-    else:
-        row = DxfYield(species=species, factor=factor, note=note)
-        self.db.add(row)
-    await self.db.commit()
-    return row
-
-async def upsert_fabric_role(self, *, label, role, category, is_leather=False):
-    from app.modules.bom.models import FabricRoleRow
-    row = await self.db.scalar(select(FabricRoleRow).where(FabricRoleRow.label == label))
-    if row:
-        row.role, row.category, row.is_leather = role, category, is_leather
-    else:
-        row = FabricRoleRow(label=label, role=role, category=category, is_leather=is_leather)
-        self.db.add(row)
-    await self.db.commit()
-    return row
-
-async def replace_cost_catalog(self, garment_code: str, lines: list[dict]):
-        from app.modules.bom.models import CostCatalogLine
-        from sqlalchemy import delete
-        await self.db.execute(delete(CostCatalogLine).where(
-            CostCatalogLine.garment_code == garment_code))
-        for i, ln in enumerate(lines):
-            self.db.add(CostCatalogLine(garment_code=garment_code, sort_order=i, **ln))
+    async def upsert_dxf_yield(self, *, species, factor, note=None):
+        from app.modules.bom.models import DxfYield
+        row = await self.db.scalar(select(DxfYield).where(DxfYield.species == species))
+        if row:
+            row.factor, row.note = factor, note
+        else:
+            row = DxfYield(species=species, factor=factor, note=note)
+            self.db.add(row)
         await self.db.commit()
-        
-async def replace_client_checks(self, client_code: str, rules: list[dict]):
-        from app.modules.bom.models import ClientCheckRule
-        from sqlalchemy import delete
-        await self.db.execute(delete(ClientCheckRule).where(
-            ClientCheckRule.client_code == client_code))
-        for i, r in enumerate(rules):
-            rng = r.get("range") or [None, None]
-            self.db.add(ClientCheckRule(
-                client_code=client_code, rule_id=r["id"], kind=r["kind"],
-                severity=r.get("severity", "warn"), field=r.get("field"),
-                range_lo=rng[0], range_hi=rng[1], params=r.get("params"), sort_order=i))
-        await self.db.commit()
-        
-async def upsert_pom_mapping(self, *, language, source_term, pom_code,
-                                 garment_type_id=None, weight=1):
-    from app.modules.bom.models import PomDictionary
-    row = await self.db.scalar(select(PomDictionary).where(
-        PomDictionary.language == language,
-        PomDictionary.source_term == source_term,
-        PomDictionary.garment_type_id == garment_type_id))
-    if row:
-        row.pom_code, row.weight = pom_code, weight
-    else:
-        row = PomDictionary(language=language, source_term=source_term,
-                            pom_code=pom_code, garment_type_id=garment_type_id, weight=weight)
-        self.db.add(row)
-    await self.db.commit()
-    return row
+        return row
 
-async def list_pom_mappings(self):
-    from app.modules.bom.models import PomDictionary
-    return list(await self.db.scalars(
-        select(PomDictionary).order_by(PomDictionary.source_term)))
-    
-async def get_order_styles(self, submission_id) -> list["OrderStyle"]:
+    async def upsert_fabric_role(self, *, label, role, category, is_leather=False):
+        from app.modules.bom.models import FabricRoleRow
+        row = await self.db.scalar(select(FabricRoleRow).where(FabricRoleRow.label == label))
+        if row:
+            row.role, row.category, row.is_leather = role, category, is_leather
+        else:
+            row = FabricRoleRow(label=label, role=role, category=category, is_leather=is_leather)
+            self.db.add(row)
+        await self.db.commit()
+        return row
+
+    async def replace_cost_catalog(self, garment_code: str, lines: list[dict]):
+            from app.modules.bom.models import CostCatalogLine
+            from sqlalchemy import delete
+            await self.db.execute(delete(CostCatalogLine).where(
+                CostCatalogLine.garment_code == garment_code))
+            for i, ln in enumerate(lines):
+                self.db.add(CostCatalogLine(garment_code=garment_code, sort_order=i, **ln))
+            await self.db.commit()
+            
+    async def replace_client_checks(self, client_code: str, rules: list[dict]):
+            from app.modules.bom.models import ClientCheckRule
+            from sqlalchemy import delete
+            await self.db.execute(delete(ClientCheckRule).where(
+                ClientCheckRule.client_code == client_code))
+            for i, r in enumerate(rules):
+                rng = r.get("range") or [None, None]
+                self.db.add(ClientCheckRule(
+                    client_code=client_code, rule_id=r["id"], kind=r["kind"],
+                    severity=r.get("severity", "warn"), field=r.get("field"),
+                    range_lo=rng[0], range_hi=rng[1], params=r.get("params"), sort_order=i))
+            await self.db.commit()
+            
+    async def upsert_pom_mapping(self, *, language, source_term, pom_code,
+                                    garment_type_id=None, weight=1):
+        from app.modules.bom.models import PomDictionary
+        row = await self.db.scalar(select(PomDictionary).where(
+            PomDictionary.language == language,
+            PomDictionary.source_term == source_term,
+            PomDictionary.garment_type_id == garment_type_id))
+        if row:
+            row.pom_code, row.weight = pom_code, weight
+        else:
+            row = PomDictionary(language=language, source_term=source_term,
+                                pom_code=pom_code, garment_type_id=garment_type_id, weight=weight)
+            self.db.add(row)
+        await self.db.commit()
+        return row
+
+    async def list_pom_mappings(self):
+        from app.modules.bom.models import PomDictionary
+        return list(await self.db.scalars(
+            select(PomDictionary).order_by(PomDictionary.source_term)))
+        
+    async def get_order_styles(self, submission_id) -> list["OrderStyle"]:
+            from sqlalchemy import select
+            from sqlalchemy.orm import selectinload
+            from app.modules.bom.models import OrderStyle
+            res = await self.db.execute(
+                select(OrderStyle)
+                .where(OrderStyle.submission_id == submission_id)
+                .options(selectinload(OrderStyle.colors))
+                .order_by(OrderStyle.style_name))
+            return list(res.scalars().all())
+
+    async def get_order_style(self, order_style_id) -> "OrderStyle | None":
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
         from app.modules.bom.models import OrderStyle
         res = await self.db.execute(
             select(OrderStyle)
-            .where(OrderStyle.submission_id == submission_id)
-            .options(selectinload(OrderStyle.colors))
-            .order_by(OrderStyle.style_name))
+            .where(OrderStyle.id == order_style_id)
+            .options(selectinload(OrderStyle.colors)))
+        return res.scalar_one_or_none()
+
+    async def patterns_for_client(self, client_id) -> list["PatternReference"]:
+        from sqlalchemy import select
+        from app.modules.bom.models import PatternReference
+        stmt = select(PatternReference)
+        if client_id is not None:
+            stmt = stmt.where(PatternReference.client_id == client_id)
+        res = await self.db.execute(stmt.order_by(PatternReference.created_at.desc()))
         return list(res.scalars().all())
-
-async def get_order_style(self, order_style_id) -> "OrderStyle | None":
-    from sqlalchemy import select
-    from sqlalchemy.orm import selectinload
-    from app.modules.bom.models import OrderStyle
-    res = await self.db.execute(
-        select(OrderStyle)
-        .where(OrderStyle.id == order_style_id)
-        .options(selectinload(OrderStyle.colors)))
-    return res.scalar_one_or_none()
-
-async def patterns_for_client(self, client_id) -> list["PatternReference"]:
-    from sqlalchemy import select
-    from app.modules.bom.models import PatternReference
-    stmt = select(PatternReference)
-    if client_id is not None:
-        stmt = stmt.where(PatternReference.client_id == client_id)
-    res = await self.db.execute(stmt.order_by(PatternReference.created_at.desc()))
-    return list(res.scalars().all())

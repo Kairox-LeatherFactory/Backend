@@ -103,12 +103,6 @@ def estimate_area_dcm(area_formula: dict | None, wastage_pct, poms_for_size: dic
     dcm = area_cm2 / 100.0 * (1.0 + wastage)
     return Decimal(str(round(dcm, 3)))
 
-# DXF-path yields (per species). Distinct from any proxy calibration: this multiplies the
-# TRUE net pattern area. Bootstrap from order 1579 (sheep 34.5/13.77=2.51, goat 2.6/1.22=2.13);
-# the learning loop replaces these with measured means. Sits in cost_catalog.yaml under a
-# `dxf_yield_factor:` key, or falls back to these defaults.
-_DEFAULT_DXF_YIELDS = {"sheep": 2.50, "goat": 2.10, "calf": 2.30, "lamb": 2.50, "_default": 2.30}
-
 def dxf_yields() -> dict:
     from app.modules.bom import config_store
     return config_store.get_dxf_yields()   # or move it to config
@@ -123,10 +117,3 @@ def species_of(name: str) -> str:
 def fabric_lexicon() -> dict:
     from app.modules.bom import config_store
     return config_store.get_fabric_lexicon()
-
-def effective_dxf_yields(seed: dict, observations_by_species: dict) -> dict:
-    out = dict(seed or {})
-    for sp, ys in (observations_by_species or {}).items():
-        vals = [float(y) for y in ys if y]
-        if vals: out[sp] = round(sum(vals)/len(vals), 3)
-    return out
