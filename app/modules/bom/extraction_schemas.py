@@ -314,10 +314,18 @@ class ExtractedSpec(BaseModel):
 # ── order-sheet result (mirrors order_extraction) ────────────────────────────
 class OrderLine(BaseModel):
     model_config = ConfigDict(extra="ignore")
-
+    
+    model: str | None = None            # NEW: style/Modello this line belongs to
     color: str | None = None
     article: str | None = None
     sizes: dict[str, int] = Field(default_factory=dict)
+    printed_total: int | None = None    # NEW: the row's printed TOTALE CAPI —
+                                        # cross-check only; qty is ALWAYS recomputed
+    
+    @field_validator("model", "color", "article", mode="before")
+    @classmethod
+    def _coerce_str(cls, v: Any) -> str | None:
+        return _to_str_or_none(v)
 
     @field_validator("color", "article", mode="before")
     @classmethod
@@ -440,3 +448,37 @@ def is_empty_spec(spec: ExtractedSpec) -> bool:
 def is_empty_order(order: ExtractedOrder) -> bool:
     """An order is 'empty' when no per-size quantities survived derivation."""
     return order.order_qty <= 0 and not order.lines
+
+
+class StyleColorBreakdown(BaseModel):
+    """One leather color within a style: aggregated across ALL order blocks."""
+    color_key: str                       # normalised code ('06', '651', '724')
+    color_label: str                     # richest label seen ('06 DARK BROWN')
+    per_size_qty: dict[str, int]
+    qty: int
+    warnings: list[str] = Field(default_factory=list)   # e.g. printed-total mismatch
+
+
+class StyleBreakdown(BaseModel):
+    """One style within the order document — the unit a BOM is minted for."""
+    style_key: str                       # normalised ('SHINOBI KNIT DETACH')
+    material: str | None = None          # from the Materiale column
+    qty: int
+    per_size_qty: dict[str, int]
+    colors: list[StyleColorBreakdown]
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ExtractedOrderDoc(BaseModel):
+    """A parsed order DOCUMENT: header + one StyleBreakdown per distinct style.
+    Totals are recomputed from size cells; printed totals are checks only."""
+    model_config = ConfigDict(extra="ignore")
+    order_number: str | None = None
+    client_name: str | None = None
+    season: str | None = None
+    currency: str | None = None
+    delivery_date: str | None = None
+    payment_term: str | None = None
+    styles: list[StyleBreakdown] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    extracted_by: str = "manual"

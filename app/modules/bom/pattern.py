@@ -12,10 +12,14 @@ Pure functions; they read a PatternData (or any object exposing .fabric_roles /
 .fabric_matrix / .master_size — the persisted PatternExtraction row is compatible).
 """
 from __future__ import annotations
+from decimal import Decimal
 
 # role (from the lexicon) -> the BomItemCategory-style key the resolver resolves on
 _ROLE_TO_CATEGORY = {"main": "main_material", "sub_material": "sub_material",
                      "lining": "lining", "interlining": "interlining"}
+
+SF_TO_DM2 = Decimal("9.290304")
+
 
 
 def role_to_category(role: str) -> str:
@@ -51,14 +55,19 @@ def _net_qty_for_category(pattern, category: str, size) -> tuple[str | None, flo
     return None, 0.0                                      # labelled but unmapped → refuse
 
 
-def dcm_for_category(pattern, *, category: str, size, species: str, yields: dict):
-    """Source-1c DCM for one leather material line: net_qty_sf(category, size) ×
-    yield(species). Returns float or None (None -> resolver falls through to predictor)."""
-    key, net = _net_qty_for_category(pattern, category, size)
-    if key is None or net <= 0:
+
+def dcm_for_category(pattern, *, category, size, species="_default", yields=None):
+    """DXF-driven DCM in dm² (CANONICAL): net cut area (sf, from geometry)
+    × per-species yield (dimensionless) × SF_TO_DM2. Returns Decimal dm² or
+    None when the pattern can't attribute this category (no leather fabrics
+    mapped and multiple labelled fabrics — see _net_qty_for_category)."""
+    key, net_sf = _net_qty_for_category(pattern, category, size)
+    if key is None or not net_sf:
         return None
-    yld = yields.get(species) or yields.get("_default") or 1.0
-    return round(net * float(yld), 1)
+    y = (yields or {}).get(species) or (yields or {}).get("_default")
+    if not y:
+        return None
+    return (Decimal(str(net_sf)) * Decimal(str(y)) * SF_TO_DM2).quantize(Decimal("0.01"))
 
 
 def graded_dxf(pattern, *, category: str, sizes, species: str, yields: dict) -> dict:
@@ -74,20 +83,19 @@ def graded_dxf(pattern, *, category: str, sizes, species: str, yields: dict) -> 
     return out
 
 
-def learn_yield(pattern, *, category: str, size, species: str, confirmed_dcm_sf) -> dict | None:
-    """Confirmed DCM ÷ pattern net area -> implied per-species yield. The calibration hook
-    the confirm gate calls per confirmed leather line. Returns the observation fields, or
-    None when this category has no leather geometry. ~1.5–3.0 is the sane band for hide."""
-    key, net = _net_qty_for_category(pattern, category, size)
-    if key is None or net <= 0:
+def learn_yield(pattern, *, category, size, species, confirmed_dcm_sf):
+    """Yield observation from a cutting-manager confirm. DESPITE the legacy
+    parameter name, the value arriving from the BOM is dm² (the item's
+    qty_per_garment) — convert to sf so the yield is dimensionless against the
+    sf net area:  yield = gross_sf / net_sf  ==  gross_dm² / net_dm².
+    Returns the observation dict or None when the pattern has no net area."""
+    key, net_sf = _net_qty_for_category(pattern, category, size)
+    if key is None or not net_sf:
         return None
-    c = float(confirmed_dcm_sf)
-    if c <= 0:
-        return None
-    style = getattr(pattern, "style", None) or getattr(pattern, "style_signature", None)
-    return {"style": style, "species": species, "size": key,
-            "net_qty_sf": round(net, 2), "confirmed_dcm_sf": round(c, 2),
-            "implied_yield": round(c / net, 3)}
+    gross_sf = Decimal(str(confirmed_dcm_sf)) / SF_TO_DM2
+    implied = (gross_sf / Decimal(str(net_sf))).quantize(Decimal("0.0001"))
+    return {"species": species, "category": category, "size": key,
+            "net_sf": float(net_sf), "implied_yield": float(implied)}
 
 
 def effective_dxf_yields(seed_yields: dict,

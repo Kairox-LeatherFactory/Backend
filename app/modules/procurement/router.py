@@ -176,41 +176,6 @@ async def submission_status(
     return await ProcurementService(db).get_submission_status(submission_id)
 
 
-@router.post("/submissions/{submission_id}/generate-bom", status_code=202)
-async def generate_bom(
-    submission_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(_DMMD),
-):
-    """Stage-1 → Stage-2 trigger. Validates synchronously, then enqueues the heavy
-    extraction+build as a Celery task. Returns 202 + job_id; the result arrives over
-    Realtime on submission:{id}. DM/MD only."""
-    claim = await ProcurementService(db).claim_submission_for_bom(user, submission_id)
-
-    # Already built (replay) — return it synchronously, nothing to enqueue.
-    if not claim.get("enqueue"):
-        return {"status": claim["status"], "replayed": True, "bom": claim.get("bom")}
-
-    from app.modules.bom.tasks import generate_bom_for_submission
-    async_result = generate_bom_for_submission.delay(
-        user_id=str(user.id),
-        submission_id=claim["submission_id"],
-        client_id=claim["client_id"],
-        spec_storage_key=claim["spec_key"],
-        spec_filename=claim["spec_filename"],
-        spec_type=claim["spec_type"],
-        client_match_code=claim["client_match_code"],
-        order_storage_key=claim["order_key"],
-        order_filename=claim["order_filename"],
-        order_mime=claim["order_mime"],
-        order_match_code=claim["order_match_code"],
-        source_document_id=claim["source_document_id"],
-    )
-    return {"status": "queued", "job_id": async_result.id,
-            "submission_id": claim["submission_id"]}
-
-
-
 @router.get("/submissions/{submission_id}/documents/{document_id}")
 async def document_report(
     submission_id: uuid.UUID,
@@ -219,34 +184,3 @@ async def document_report(
     user: User = Depends(_DMMD),
 ):
     return await ProcurementService(db).get_document_report(submission_id, document_id)
- 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

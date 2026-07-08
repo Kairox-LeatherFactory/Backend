@@ -45,7 +45,6 @@ from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 
 import yaml
-
 from fastapi import HTTPException
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,7 +55,6 @@ from app.modules.bom import costing
 from app.modules.bom import dcm
 from app.modules.bom.dcm import (
     CONFIDENCE,
-    dxf_yields,
     estimate_area_dcm,
     style_signature,
 )
@@ -67,7 +65,7 @@ from app.modules.bom.enums import (
     DcmSource,
     ExtractionSource,
 )
-from app.modules.bom.extraction import extract_order, extract_spec
+from app.modules.bom.extraction import extract_order_doc, extract_spec , extract_order
 from app.modules.bom.extraction_schemas import ExtractedOrder, ExtractedSpec
 from app.modules.bom.export import render_bom_pdf
 from app.core.models import AuditLog, Document
@@ -79,6 +77,8 @@ from app.modules.bom.models import (
     PomMeasurement,
     SpecExtraction,
     SpecSheet,
+    OrderStyle,
+    OrderStyleColor,
 )
 
 from app.modules.bom.repository import BomRepository
@@ -220,6 +220,11 @@ class BomService:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.repo = BomRepository(db)
+        
+    @property
+    def procurement(self):
+        from app.modules.procurement.service import ProcurementService
+        return ProcurementService(self.db)
 
     async def get_bom_dto(self, bom_id):
         """A session-free BOM snapshot for cross-module consumers (inventory check,
@@ -257,72 +262,6 @@ class BomService:
             "extraction": {"idempotent_replay": True},
             "idempotent_replay": True,
         }
-
-    
-    async def generate_for_order(
-        self, user, *, spec_bytes: bytes, filename: str,
-        spec_type: str | None, client_match_code: str | None,
-        client_id: uuid.UUID | None, submission_id: uuid.UUID | None = None,
-        order_bytes: bytes | None = None, order_filename: str | None = None,
-        order_mime: str | None = None, order_match_code: str | None = None,
-        source_document_id: uuid.UUID | None = None,
-    ) -> dict:
-        """Build a DRAFT BOM from the accepted ORDER + SPEC sheets ALONE. Parses the
-        order sheet, creates the SpecSheet the engine extracts into, and runs
-        generate_bom anchored on the submission â€” all in ONE transaction (committed
-        once inside generate_bom). The Clientâ†’Orderâ†’Styleâ†’SKU tree is created later,
-        at MD approval (materialize_breakdown)."""
-        # A double-fire of the trigger (retry, double-click, at-least-once delivery,
-        # Celery re-queue) must NOT mint a second BOM + spec_sheet + duplicate staging
-        # rows + duplicate audit. If a BOM already exists for this submission, return it.
-        if submission_id is not None:
-            existing = await self.repo.get_bom_by_submission(submission_id)
-            if existing is not None:
-                logger.info("generate_for_order: BOM already exists for submission=%s "
-                            "â†’ returning existing bom=%s (idempotent replay)",
-                            submission_id, existing.id)
-                return self._replay_response(existing)
-
-        # Parse the order sheet off the event loop (openpyxl/pypdf are blocking).
-        # Best-effort: anything unparsed is a warning in order.warnings, never a reject.
-        order: ExtractedOrder | None = None
-        if order_bytes:
-            order = await run_in_threadpool(
-                extract_order, order_bytes, order_filename or "order",
-                order_mime or _sniff_mime(order_bytes),
-                order_match_code or client_match_code,
-            )
-            
-        logger.debug("generate_for_order parsed order: %s", order)
-
-        # Stage the order-extraction row (flush-only â€” committed once in generate_bom).
-        # We hold the ORM object and stamp its promotion inside generate_bom rather than
-        # tucking an id into the payload (the typed model can't carry transient fields).
-        order_extraction_row: OrderExtraction | None = None
-        if order is not None:
-            order_extraction_row = self._build_order_extraction_row(
-                order, source_document_id=source_document_id)
-            self.db.add(order_extraction_row)
-
-        identity = self._identity_from_order(order, client_id)
-
-        spec_sheet = SpecSheet(
-            client_id=client_id, style_id=None,
-            source_document_id=source_document_id,
-            spec_type=spec_type or "unknown", attributes={},
-        )
-        self.db.add(spec_sheet)
-        # Flush to populate spec_sheet.id (used as a FK for pom_measurement /
-        # pattern_reference and in the replace-on-key delete). No commit yet.
-        await self.db.flush()
-
-        return await self.generate_bom(
-            user, spec_sheet=spec_sheet, spec_bytes=spec_bytes,
-            filename=filename or "spec", identity=identity,
-            client_match_code=client_match_code, line_seeds=None,
-            submission_id=submission_id, order=order,
-            order_extraction_row=order_extraction_row,
-        )
 
     @staticmethod
     def _identity_from_order(order: ExtractedOrder | None,
@@ -435,6 +374,224 @@ class BomService:
                 unit_price=ln.get("unit_price"),
                 qty_per_garment=ln.get("qty_per_garment", 1)))
         return seeds
+    
+    async def _load_document_bytes(self, document_id) -> tuple[bytes, str] | None:
+        """(bytes, filename) for a stored Document, or None when the row or its
+        bytes are missing. Storage IO off the event loop."""
+        doc = await self.repo.get_document(document_id)
+        if doc is None or not doc.storage_url:
+            return None
+        data = await run_in_threadpool(get_storage().get, doc.storage_url)
+        return (data, doc.filename or "document") if data else None
+
+    @staticmethod
+    def _style_response(row: OrderStyle) -> dict:
+        """One OrderStyle as the API/UI dict — the single serializer both the
+        breakdown list and the attachments-confirm response use."""
+        return {
+            "id": str(row.id),
+            "style_signature": row.style_signature,
+            "style_name": row.style_name,
+            "material": row.material,
+            "qty": row.qty,
+            "per_size_qty": row.per_size_qty or {},
+            "warnings": row.warnings or [],
+            "spec_document_id": str(row.spec_document_id) if row.spec_document_id else None,
+            "spec_match_status": row.spec_match_status,
+            "pattern_reference_id": (str(row.pattern_reference_id)
+                                     if row.pattern_reference_id else None),
+            "dxf_match_status": row.dxf_match_status,
+            "bom_id": str(row.bom_id) if row.bom_id else None,
+            "colors": [{
+                "color_key": c.color_key,
+                "color_label": c.color_label,
+                "qty": c.qty,
+                "per_size_qty": c.per_size_qty or {},
+                "warnings": c.warnings or [],
+            } for c in (row.colors or [])],
+        }
+
+    def _breakdown_response(self, rows: list[OrderStyle],
+                            warnings: list[str] | None = None) -> dict:
+        return {
+            "status": "ready",
+            "style_count": len(rows),
+            "styles": [self._style_response(r) for r in rows],
+            "warnings": list(warnings or []),
+        }
+
+    @staticmethod
+    def _identity_from_breakdown(row: OrderStyle) -> StyleIdentity:
+        """StyleIdentity from a persisted OrderStyle — the per-style analogue of
+        _identity_from_order. client_order_id/style_id stay None until
+        materialise at approval, exactly like the order-parsed path."""
+        return StyleIdentity(
+            client_id=row.client_id,
+            client_order_id=None, style_id=None,
+            customer_ref=None, internal_ref=None,
+            name=row.style_name,
+            order_qty=int(row.qty or 0),
+            per_size_qty=dict(row.per_size_qty or {}),
+            order_number=None,                    # order header lives on the doc, not the style
+        )
+    
+    # ── Fan-out v2: breakdown ──────────────────────────────────────────────
+    async def build_order_breakdown(self, submission_id, *, order_bytes: bytes,
+                                    order_filename: str, order_mime: str | None,
+                                    client_id) -> dict:
+        """Extract the order document, persist one OrderStyle per style with its
+        OrderStyleColor children, pre-fill spec/DXF SUGGESTIONS, commit once.
+        Idempotent: an existing breakdown for the submission is returned as-is."""
+        existing = await self.repo.get_order_styles(submission_id)
+        if existing:
+            return self._breakdown_response(existing, warnings=["replayed"])
+
+        doc = await run_in_threadpool(extract_order_doc, order_bytes,
+                                      order_filename, order_mime)
+        candidates_spec = await self.procurement.spec_documents_for_client(client_id)
+        candidates_dxf = await self.repo.patterns_for_client(client_id)
+
+        rows: list[OrderStyle] = []
+        for sb in doc.styles:
+            sig = style_signature(customer_ref=None, internal_ref=None,
+                                  name=sb.style_key) or f"UNNAMED-{len(rows)}"
+            row = OrderStyle(
+                submission_id=submission_id, style_signature=sig,
+                style_name=sb.style_key, material=sb.material, qty=sb.qty,
+                per_size_qty=sb.per_size_qty, warnings=sb.warnings,
+                colors=[OrderStyleColor(color_key=c.color_key,
+                                        color_label=c.color_label, qty=c.qty,
+                                        per_size_qty=c.per_size_qty,
+                                        warnings=c.warnings) for c in sb.colors])
+            # SUGGEST, never silently bind: status stays 'suggested' until a human
+            # confirms. No match -> 'none'; the UI shows it needs an upload.
+            spec_doc = self._suggest_by_name(sb.style_key, candidates_spec,
+                                        key=lambda d: d.filename)
+            if spec_doc is not None:
+                row.spec_document_id, row.spec_match_status = spec_doc.id, "suggested"
+            pat = self._suggest_by_name(sb.style_key, candidates_dxf,
+                                   key=lambda p: p.style_signature or p.source_name)
+            if pat is not None:
+                row.pattern_reference_id, row.dxf_match_status = pat.id, "suggested"
+            rows.append(row)
+            self.db.add(row)
+
+        await self.db.commit()
+        return self._breakdown_response(rows, warnings=doc.warnings)
+
+    async def confirm_style_attachments(self, order_style_id, *,
+                                        spec_document_id=None,
+                                        pattern_reference_id=None,
+                                        clear_spec=False, clear_dxf=False) -> dict:
+        """The operator's confirm/override. Explicit ids override suggestions;
+        confirming with no ids accepts the current suggestions. clear_* detaches."""
+        row = await self.repo.get_order_style(order_style_id)
+        if row is None:
+            raise HTTPException(404, detail={"error": "order_style_not_found",
+                                             "order_style_id": str(order_style_id)})
+        if clear_spec:
+            row.spec_document_id, row.spec_match_status = None, "none"
+        elif spec_document_id is not None:
+            row.spec_document_id, row.spec_match_status = spec_document_id, "confirmed"
+        elif row.spec_document_id is not None:
+            row.spec_match_status = "confirmed"
+        if clear_dxf:
+            row.pattern_reference_id, row.dxf_match_status = None, "none"
+        elif pattern_reference_id is not None:
+            row.pattern_reference_id, row.dxf_match_status = pattern_reference_id, "confirmed"
+        elif row.pattern_reference_id is not None:
+            row.dxf_match_status = "confirmed"
+        await self.db.commit()
+        return self._style_response(row)
+
+    async def generate_bom_for_style(self, user, order_style_id) -> dict:
+        """Generate ONE BOM for ONE confirmed style. Colors ride inside as the
+        qty/price dimension (order_identity snapshot). Spec 'suggested' but not
+        confirmed -> refuse: a plausible-but-wrong spec produces a
+        plausible-but-wrong BOM, which is worse than waiting for a click."""
+        row = await self.repo.get_order_style(order_style_id)
+        if row is None:
+            raise HTTPException(404, detail={"error": "order_style_not_found",
+                                             "order_style_id": str(order_style_id)})
+        if row.bom_id is not None:
+            return self._replay_response(await self.repo.get_bom(row.bom_id))
+        if row.spec_match_status == "suggested":
+            raise HTTPException(409, detail={
+                "error": "spec_suggestion_unconfirmed",
+                "message": "Please confirm the suggested specification before "
+                           "generating the BOM."})
+
+        spec_bytes, spec_name = b"", "no-spec"
+        if row.spec_match_status == "confirmed" and row.spec_document_id:
+            loaded = await self._load_document_bytes(row.spec_document_id)
+            if loaded is None:
+                raise HTTPException(409, detail={
+                    "error": "spec_bytes_missing",
+                    "message": "The confirmed spec document has no stored bytes; "
+                               "re-upload it and confirm again."})
+            spec_bytes, spec_name = loaded
+
+        # The staging SpecSheet row generate_bom requires (mirrors what the old
+        # generate_for_order built): one per generation attempt, promoted at commit.
+        spec_sheet = SpecSheet(
+            client_id=row.client_id, style_id=None,
+            source_document_id=row.spec_document_id,
+            spec_type="unknown", attributes={},
+        )
+        self.db.add(spec_sheet)
+        await self.db.flush()                      # populate spec_sheet.id, no commit
+
+        identity = self._identity_from_breakdown(row)
+        result = await self.generate_bom(
+            user,
+            spec_sheet=spec_sheet,
+            spec_bytes=spec_bytes,
+            filename=spec_name,
+            identity=identity,
+            client_match_code=None,                # per-style path has no template code
+            submission_id=row.submission_id,
+            style_signature_str=row.style_signature,
+            order_identity_extra={"colors": [
+                {"color_key": c.color_key, "color_label": c.color_label,
+                 "qty": c.qty, "per_size_qty": c.per_size_qty}
+                for c in row.colors]},
+            extra_warnings=(["spec_pending"] if not spec_bytes else [])
+                           + list(row.warnings or []),
+            commit=False,                          # single commit below, with the link
+        )
+        row.bom_id = uuid.UUID(result["bom"]["id"])   # return shape is {"bom": {"id": ...}}
+        await self.repo.commit()
+        return result
+
+
+    def _suggest_by_name(self, style_key: str, candidates, *, key):
+        """Filename/signature token match: candidate whose name contains the style's
+        FIRST word ('SHINOBI KNIT DETACH' -> 'SHINOBI'). Ambiguous (2+ hits) -> None,
+        because a wrong suggestion pre-selected in the UI gets rubber-stamped."""
+        from app.modules.bom.extraction import normalize_style
+        token = normalize_style(style_key).split(" ")[0]
+        if not token:
+            return None
+        hits = [c for c in candidates if token in normalize_style(key(c) or "")]
+        return hits[0] if len(hits) == 1 else None
+    
+    async def breakdown_state(self, submission_id) -> str:
+        """not_started | processing | ready. READ-ONLY — never claims.
+        'processing' = the claim is held (CONSUMED) but no OrderStyle rows are
+        committed yet (worker in flight)."""
+        if await self.repo.get_order_styles(submission_id):
+            return "ready"
+        if await self.procurement.is_breakdown_claimed(submission_id):
+            return "processing"
+        return "not_started"
+
+    async def claim_submission_for_breakdown(self, submission_id) -> bool:
+        """Delegates to procurement (submission is procurement-owned). Atomic
+        CAS COMPLETE->CONSUMED; True exactly once."""
+        return await self.procurement.claim_submission_for_breakdown(submission_id)
+
+    async def release_breakdown_claim(self, submission_id) -> None:
+        await self.procurement.release_breakdown_claim(submission_id)
 
    
     async def generate_bom(
@@ -445,6 +602,11 @@ class BomService:
         submission_id: uuid.UUID | None = None,
         order: ExtractedOrder | None = None,
         order_extraction_row: OrderExtraction | None = None,
+        style_signature_str: str | None = None,
+        order_identity_extra: dict | None = None,
+        extra_warnings: list[str] | None = None,
+        commit: bool = True
+        
     ) -> dict:
         logger.info("generate_bom start: order=%s style=%s spec_type=%s client_match=%s seeds=%s",
                     identity.client_order_id, identity.style_id, spec_sheet.spec_type,
@@ -457,7 +619,7 @@ class BomService:
             spec, source_document_id=spec_sheet.source_document_id)
         self.db.add(spec_extraction_row)
 
-        ext_warnings = list(spec.warnings)
+        ext_warnings = list(spec.warnings) + list(extra_warnings or [])
         manual_entry_required = "manual_entry_required" in ext_warnings
 
         # 2. resolve native terms → pom_code, persist (replace-on-key)
@@ -491,10 +653,13 @@ class BomService:
             submission_id=submission_id, client_id=identity.client_id,
             client_order_id=identity.client_order_id, style_id=identity.style_id,
             status=BomStatus.DRAFT.value, currency=currency,
+            style_signature=style_signature_str or sig,
             order_qty=identity.order_qty, revision=1,
             garment_type_id=gt_id, dcm_base_size=base_size,
             order_identity=self._order_identity_snapshot(identity, order),
         )
+        if order_identity_extra:                                  # ← ADD (colors etc.)
+            bom.order_identity = {**(bom.order_identity or {}), **order_identity_extra}
         
         pattern = await self.repo.get_current_pattern(sig, client_id=identity.client_id)
         dxf_yields = dcm.effective_dxf_yields(
@@ -503,7 +668,7 @@ class BomService:
         items = await self._build_items(
             line_seeds, identity=identity, sig=sig, gt=gt, gt_id=gt_id,
             base_size=base_size, poms_for_size=poms_for_size,
-            pattern_template_id=pattern_template_id)
+            pattern_template_id=pattern_template_id,pattern=pattern, dxf_yields=dxf_yields)
         self._recompute(bom, items, base_size)
         bom.items = items
         bom.source_document_id = spec_sheet.source_document_id
@@ -554,7 +719,10 @@ class BomService:
             after=self._bom_snapshot(bom), at=now,
         ))
 
-        await self.repo.commit()
+        if commit:
+            await self.repo.commit()
+        else:
+            await self.db.flush()      # ids valid; caller owns the single commit
 
         logger.info("generate_bom done: bom=%s items=%d fob=%s flags=%d unresolved=%d manual=%s",
                     bom_view["id"], len(bom_view["items"]), bom_view["garment_fob_price"],

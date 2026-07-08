@@ -58,6 +58,8 @@ from celery.schedules import crontab
 from app.core.celery import celery_app
 
 from app.core.config import settings
+from app.core.database import AsyncSessionLocal
+from app.modules.bom.service import BomService
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +76,6 @@ def _run_async(coro):
 async def _with_session(fn):
     """Open a fresh AsyncSession (worker process ≠ API process), run fn(db), and
     ensure it's closed. Commit/rollback are owned by the service inside fn."""
-    from app.core.database import AsyncSessionLocal  # exported by your db module
 
     async with AsyncSessionLocal() as db:
         return await fn(db)
@@ -106,85 +107,59 @@ async def _push_realtime(channel: str, event: str, payload: dict[str, Any]) -> N
 # ══════════════════════════════════════════════════════════════════════════════
 # HEAVY TASK — extraction + BOM generation off the request path.
 # ══════════════════════════════════════════════════════════════════════════════
-@celery_app.task(
-    bind=True,
-    name="app.modules.bom.tasks.generate_bom_for_submission",
-    max_retries=2,
-    default_retry_delay=10,
-)
-def generate_bom_for_submission(
-    self,
-    *,
-    user_id: str | None,
-    submission_id: str,
-    client_id: str | None,
-    spec_storage_key: str | None = None,
-    spec_b64: str | None = None,
-    spec_filename: str = "spec",
-    spec_type: str | None = None,
-    client_match_code: str | None = None,
-    order_storage_key: str | None = None,
-    order_b64: str | None = None,
-    order_filename: str | None = None,
-    order_mime: str | None = None,
-    order_match_code: str | None = None,
-    source_document_id: str | None = None,
-) -> dict[str, Any]:
-    """Run the Stage-2 generate pipeline as a background job. The router enqueues
-    this with storage keys (not raw bytes) and returns a job id; the result is
-    pushed over Realtime on the submission channel. Safe to autoretry — the
-    service's idempotency guard returns the existing BOM on redelivery."""
-    spec_bytes = _fetch_bytes(storage_key=spec_storage_key, b64=spec_b64)
-    order_bytes = _fetch_bytes(storage_key=order_storage_key, b64=order_b64)
-    if not spec_bytes:
-        # Nothing to extract — don't retry a structurally-impossible job.
-        result = {"error": "spec_bytes_missing", "submission_id": submission_id}
-        _run_async(_push_realtime(f"submission:{submission_id}", "bom_failed", result))
-        return result
+@celery_app.task(name="bom.build_order_breakdown_for_submission",
+                 bind=True, max_retries=0)
+def build_order_breakdown_for_submission(self, submission_id: str) -> dict:
+    """Worker side of POST /order-breakdown. Loads the submission's accepted
+    ORDER document bytes, runs extract_order_doc (Gemini, 30–200s), persists
+    OrderStyle/OrderStyleColor rows, pushes the Realtime event. The router
+    already claimed the submission, so this never double-runs."""
+    async def _run() -> dict:
+        async with AsyncSessionLocal() as db:
+            svc = BomService(db)
+            try:
+                order_doc = await svc.repo.get_accepted_order_document(submission_id)
+                if order_doc is None:
+                    await svc.release_breakdown_claim(submission_id)
+                    return {"status": "failed", "reason": "no_accepted_order_document"}
+                data, filename, mime = await svc.repo.load_document_bytes_meta(order_doc.id)
+                result = await svc.build_order_breakdown(
+                    submission_id,
+                    order_bytes=data, order_filename=filename, order_mime=mime,
+                    client_id=order_doc.client_id,
+                )
+                return {"status": "ready", **result}
+            except Exception:
+                # Release the claim so the operator can re-trigger after a fix;
+                # rows are only committed at the end, so a failure leaves nothing.
+                await svc.release_breakdown_claim(submission_id)
+                raise
 
-    async def _job(db):
-        from app.modules.procurement.service import ProcurementService
-        from app.core.storage import get_storage
+    result = _run_async(_run())
+    _run_async(_push_realtime(
+        f"submission:{submission_id}", "order_breakdown_ready",
+        {"submission_id": submission_id, "status": result.get("status"),
+         "style_count": len(result.get("styles", []))}))
+    return result
 
-        user = SimpleNamespace(id=uuid.UUID(user_id)) if user_id else None
-        spec_bytes = get_storage().get(spec_storage_key)
-        order_bytes = get_storage().get(order_storage_key) if order_storage_key else None
-        return await ProcurementService(db).build_bom_for_submission(
-            user, uuid.UUID(submission_id),
-            spec_bytes=spec_bytes, order_bytes=order_bytes,
-            filename=spec_filename, spec_type=spec_type,
-            client_match_code=client_match_code,
-            client_id=uuid.UUID(client_id) if client_id else None,
-            order_filename=order_filename, order_mime=order_mime,
-            order_match_code=order_match_code,
-            source_document_id=uuid.UUID(source_document_id) if source_document_id else None,
-        )
 
-    try:
-        result = _run_async(_with_session(_job))
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("generate_bom_for_submission failed: submission=%s", submission_id)
-        # Retry transient failures; after max_retries Celery re-raises and the
-        # job lands in the dead state — surfaced to the UI below on the final attempt.
-        try:
-            raise self.retry(exc=exc)
-        except self.MaxRetriesExceededError:
-            payload = {"error": "generation_failed", "submission_id": submission_id,
-                       "detail": str(exc)}
-            _run_async(_push_realtime(f"submission:{submission_id}", "bom_failed", payload))
-            return payload
+@celery_app.task(name="bom.generate_bom_for_style", bind=True, max_retries=0)
+def generate_bom_for_style_task(self, order_style_id: str, user_id: str) -> dict:
+    """Worker side of POST /order-styles/{id}/generate-bom. All business guards
+    live in BomService.generate_bom_for_style (idempotent replay, unconfirmed-
+    suggestion refusal) — the router pre-checks them only for fast 4xxs."""
+    async def _run() -> dict:
+        async with AsyncSessionLocal() as db:
+            svc = BomService(db)
+            user = await svc.repo.get_user(user_id) if user_id else None
+            return await svc.generate_bom_for_style(user, order_style_id)
 
-    payload = {
-        "submission_id": submission_id,
-        "bom_id": result["bom"]["id"],
-        "status": result["bom"]["status"],
-        "flags": result["flags"],
-        
-        "manual_entry_required": result["extraction"].get("manual_entry_required", False),
-        "idempotent_replay": result.get("idempotent_replay", False),
-    }
-    _run_async(_push_realtime(f"submission:{submission_id}", "bom_ready", payload))
-    return payload
+    result = _run_async(_run())
+    _run_async(_push_realtime(
+        f"order_style:{order_style_id}", "bom_generated",
+        {"order_style_id": order_style_id, "bom_id": result.get("bom_id"),
+         "warnings": result.get("warnings", [])}))
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════

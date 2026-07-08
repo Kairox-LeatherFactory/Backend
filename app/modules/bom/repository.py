@@ -62,8 +62,10 @@ from app.modules.bom.models import (
     Bom,
     DxfYieldObservation,
     GarmentType,
+    OrderStyle,
     PatternExtraction,
     PatternPiece,
+    PatternReference,
     PomDictionary,
     PomMeasurement,
     SpecSheet,
@@ -477,3 +479,33 @@ async def list_pom_mappings(self):
     from app.modules.bom.models import PomDictionary
     return list(await self.db.scalars(
         select(PomDictionary).order_by(PomDictionary.source_term)))
+    
+async def get_order_styles(self, submission_id) -> list["OrderStyle"]:
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+        from app.modules.bom.models import OrderStyle
+        res = await self.db.execute(
+            select(OrderStyle)
+            .where(OrderStyle.submission_id == submission_id)
+            .options(selectinload(OrderStyle.colors))
+            .order_by(OrderStyle.style_name))
+        return list(res.scalars().all())
+
+async def get_order_style(self, order_style_id) -> "OrderStyle | None":
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+    from app.modules.bom.models import OrderStyle
+    res = await self.db.execute(
+        select(OrderStyle)
+        .where(OrderStyle.id == order_style_id)
+        .options(selectinload(OrderStyle.colors)))
+    return res.scalar_one_or_none()
+
+async def patterns_for_client(self, client_id) -> list["PatternReference"]:
+    from sqlalchemy import select
+    from app.modules.bom.models import PatternReference
+    stmt = select(PatternReference)
+    if client_id is not None:
+        stmt = stmt.where(PatternReference.client_id == client_id)
+    res = await self.db.execute(stmt.order_by(PatternReference.created_at.desc()))
+    return list(res.scalars().all())

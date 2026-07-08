@@ -14,56 +14,83 @@ failure mode, which is worse than no data.
 Instead: the LLM is the SOLE extractor, with each rung RETRIED (exponential
 backoff) before falling through:
 
-    Gemini (primary, retried)  ->  Groq (text fallback, retried)  ->  manual_entry_required
+  TEXT payloads (xlsx/xls/csv markdown, digital-PDF text layer):
+    Gemini text (retried) -> Groq text (retried) -> [PDF only: native-PDF rung]
+    -> manual_entry_required
 
-If both LLMs are unavailable, or both exhaust their retries, the public
-functions return an empty result with `extracted_by="manual"` and the warning
+  SCANNED PDFs (no usable text layer):
+    NATIVE PDF -> Gemini (retried) -> manual_entry_required
+
+NATIVE-PDF TRANSPORT (the F8 fix — 2026-07)
+    The old scanned-PDF path rasterised every page to PNG and inlined them all
+    as base64 image blocks in ONE langchain message. Base64 inflates bytes
+    ~33%, 200-DPI PNGs are large, and multi-page orders compounded it — the
+    request routinely blew Gemini's server-side deadline (504 DeadlineExceeded)
+    and there was no further rung, so dense scanned orders silently fell to
+    manual. The proven fix (validated by the standalone extract_document.py):
+    send the RAW PDF BYTES as a single native document part and let Gemini read
+    text, tables, and scanned pages itself — no rasterisation, no inline
+    images, tiny request. `pdf_render_pages` is no longer used by extraction
+    (it remains in procurement/sniffing for document CLASSIFICATION only).
+
+If every rung is unavailable or exhausted, the public functions return an
+empty result with `extracted_by="manual"` and the warning
 `manual_entry_required`. The caller (service layer) sees this and either
 prompts the cutting manager to enter data manually, or holds the BOM in a
 "pending extraction" state for retry.
 
 TYPED CONTRACT (the #3/#4 change)
-    The public entry points now return the Pydantic models DIRECTLY
-    (ExtractedSpec / ExtractedOrder) — the legacy intermediate-dict shim is gone
-    (_spec_to_intermediate / _legacy_attributes / _order_to_intermediate /
-    validate_intermediate all removed). The service layer consumes the typed
-    objects, does its own native-term -> pom_code resolution and attribute
-    flattening, and writes the staging rows from `model.model_dump(mode="json")`.
-    Range/coherence warnings live in the contract (ExtractedSpec validators).
+    The public entry points return the Pydantic models DIRECTLY
+    (ExtractedSpec / ExtractedOrder) — the legacy intermediate-dict shim is gone.
+    The service layer consumes the typed objects, does its own native-term ->
+    pom_code resolution and attribute flattening, and writes the staging rows
+    from `model.model_dump(mode="json")`. Range/coherence warnings live in the
+    contract (ExtractedSpec validators).
 
 ARCHITECTURE (CLAUDE.md — unchanged posture)
-  * PURE + SYNC. model.invoke() is blocking; the async service threadpools the
-    whole call. No DB session in this module. (The retry time.sleep() blocks the
-    threadpool worker, not the event loop — fine at our concurrency.)
+  * PURE + SYNC. model.invoke() / generate_content() are blocking; the async
+    service threadpools the whole call. No DB session in this module. (The
+    retry time.sleep() blocks the threadpool worker, not the event loop —
+    fine at our concurrency.)
   * No path EVER raises. Failures -> a valid ExtractedSpec/ExtractedOrder with
     `warnings=["...reason...", "manual_entry_required"]`.
   * POM-dictionary term resolution + garment_type mapping happen in the SERVICE
     (DB-touching), NOT here. Extraction emits NATIVE terms (no pom_code).
   * Reuses classifier._init_model / classifier._coerce and the existing settings.
 
+DEPENDENCIES (requirements.txt)
+    google-genai>=1.0        # NEW — native-PDF transport (separate package from
+                             # langchain-google-genai; both coexist fine)
+
 FUNCTION GUIDE
   extract_spec(data, filename, mime) -> ExtractedSpec     PUBLIC entry. Never raises.
   extract_order(data, filename, mime, client_match_code=None) -> ExtractedOrder PUBLIC.
-  llm_extract_spec(kind, payload) -> ExtractedSpec | None  Gemini->Groq, never raises.
-  llm_extract_order(kind, payload) -> ExtractedOrder | None Gemini->Groq, never raises.
+  llm_extract_spec(kind, payload) -> ExtractedSpec | None  kind: "text"|"pdf". Never raises.
+  llm_extract_order(kind, payload) -> ExtractedOrder | None Same contract.
+  _gemini_native_pdf(data, prompt) -> str | None           The F8 transport, retried.
 ================================================================================
 """
 from __future__ import annotations
 
-import base64
 import logging
 import time
 from typing import Any
 
 from app.core.config import settings
-from app.modules.bom.excel_content import xlsx_to_markdown,xls_to_markdown
+from app.modules.bom.excel_content import xlsx_to_markdown, xls_to_markdown
 from app.modules.bom.extraction_schemas import (
     ExtractedOrder,
+    ExtractedOrderDoc,
     ExtractedSpec,
+    StyleBreakdown,
+    StyleColorBreakdown,
     is_empty_order,
     is_empty_spec,
 )
-from app.modules.bom.pdf_content import pdf_extract_text, pdf_to_llm_input
+from app.modules.bom.pdf_content import pdf_extract_text
+import re as _re
+import unicodedata as _ud
+from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +104,140 @@ PDF_MIME = "application/pdf"
 _LLM_RETRY_ATTEMPTS = 3
 _LLM_RETRY_BASE_DELAY = 0.5  # seconds; exponential: 0.5, 1.0, 2.0
 
+# Native-PDF transport: inline the PDF bytes as a document part up to this size;
+# above it, use the Files API (upload once, reference by uri) — same behaviour
+# as the proven standalone extract_document.py. Gemini's inline-part ceiling is
+# 20 MB; we stop a little short of it.
+_INLINE_PDF_MAX_BYTES = 19 * 1024 * 1024
+
+
+_SIZE_RE = _re.compile(r"^(\d{1,3}|XXS|XS|S|M|L|XL|XXL|XXXL|[2-6]XL)$")
+_DITTO = {'"', "''", "〃", "same", "SAME"}
+
+
+def is_size_token(h: str) -> bool:
+    """True iff a header is a real size label — never 'PREZZO', 'TOTALE CAPI',
+    'COLORE'. Server-side belt-and-braces on whatever the LLM returns; without
+    it, price/total columns inflate quantities (proven failure on real data)."""
+    return bool(_SIZE_RE.match((h or "").strip().upper()))
+
+
+def normalize_style(s: str | None) -> str:
+    """Grouping key for a style: NFKC, trim, collapse whitespace, uppercase.
+    Deterministic; never merges near-duplicates (those are flagged instead)."""
+    if not s:
+        return ""
+    s = _ud.normalize("NFKC", str(s)).strip()
+    return _re.sub(r"\s+", " ", s).upper()
+
+
+def normalize_color(c: str | None) -> str:
+    """Color key = the leading CODE token when present ('06 DARK BROWN' -> '06'),
+    else the whole normalised label. John Peter names a color fully once and
+    reuses the bare code in later blocks — keying on the code merges them."""
+    if not c:
+        return ""
+    c = normalize_style(c)
+    first = c.split(" ")[0]
+    return first if _re.match(r"^\d+[A-Z]?$", first) else c
+
+
+def _dup_key(s: str) -> str:
+    """Aggressive key used ONLY to FLAG suspected duplicate styles, never to
+    merge them: folds DET/DETACH/DETACHABLE/FOR DET, strips non-alnum."""
+    s = normalize_style(s)
+    s = _re.sub(r"\b(DETACHABLE|DETACH|FOR DET|DET)\b", "DET", s)
+    return _re.sub(r"[^A-Z0-9]", "", s)
+
+
+def split_styles_colors(raw_lines: list[dict], header: dict | None = None,
+                        engine: str = "gemini") -> ExtractedOrderDoc:
+    """Deterministic grouping of the LLM's per-line output into
+    style -> color -> per-size quantities. The LLM parses the grid (it
+    generalises across client templates); this function only groups — but it
+    inherits dittos DEFENSIVELY in case any leak past the prompt, filters size
+    tokens, aggregates the same style/color across order blocks, keeps the
+    richest color label, recomputes every total, cross-checks each row against
+    its printed_total, and flags (never merges) near-duplicate style names."""
+    header = header or {}
+    styles: "OrderedDict[str, dict]" = OrderedDict()
+    doc_warnings: list[str] = []
+    prev_model: str | None = None
+    prev_material: str | None = None
+
+    for ln in raw_lines or []:
+        m = (ln.get("model") or "").strip()
+        model = prev_model if (m in _DITTO or not m) else normalize_style(m)
+        if not model:
+            continue
+        prev_model = model
+        mat = (ln.get("material") or ln.get("article") or "").strip()
+        material = prev_material if (mat in _DITTO or not mat) else mat
+        prev_material = material
+
+        sizes = {k.strip().upper(): int(v)
+                 for k, v in (ln.get("sizes") or {}).items()
+                 if is_size_token(k) and isinstance(v, (int, float)) and v > 0}
+        if not sizes:
+            continue
+        row_qty = sum(sizes.values())
+
+        st = styles.setdefault(model, {
+            "material": material, "qty": 0,
+            "per_size": {}, "colors": OrderedDict(), "warnings": []})
+        if not st["material"] and material:
+            st["material"] = material
+
+        ckey = normalize_color(ln.get("color"))
+        raw_label = (ln.get("color") or "").strip()
+        col = st["colors"].setdefault(ckey, {
+            "label": raw_label, "per_size": {}, "qty": 0, "warnings": []})
+        if len(raw_label) > len(col["label"]):
+            col["label"] = raw_label                       # '06' -> '06 DARK BROWN'
+
+        for sz, q in sizes.items():
+            col["per_size"][sz] = col["per_size"].get(sz, 0) + q
+            st["per_size"][sz] = st["per_size"].get(sz, 0) + q
+        col["qty"] += row_qty
+        st["qty"] += row_qty
+
+        # Printed-total cross-check: dense grids can drop a size cell during
+        # extraction; the printed row total catches it. WARN, never overwrite.
+        pt = ln.get("printed_total")
+        if isinstance(pt, (int, float)) and int(pt) != row_qty:
+            col["warnings"].append(
+                f"row_total_mismatch: sizes_sum={row_qty} printed={int(pt)}")
+
+    # Near-duplicate style names: flag for the operator, never auto-merge —
+    # a wrong merge corrupts quantities invisibly; a wrong split is visible.
+    dup: dict[str, list[str]] = {}
+    for k in styles:
+        dup.setdefault(_dup_key(k), []).append(k)
+    for group in dup.values():
+        if len(group) > 1:
+            doc_warnings.append("possible_duplicate_style:" + "|".join(group))
+            for k in group:
+                styles[k]["warnings"].append(
+                    "possible_duplicate_of:" + "|".join(x for x in group if x != k))
+
+    return ExtractedOrderDoc(
+        order_number=header.get("order_number"),
+        client_name=header.get("client_name"),
+        season=header.get("season"),
+        currency=header.get("currency"),
+        delivery_date=header.get("delivery_date"),
+        payment_term=header.get("payment_term"),
+        extracted_by=engine,
+        warnings=doc_warnings,
+        styles=[StyleBreakdown(
+            style_key=k, material=s["material"], qty=s["qty"],
+            per_size_qty=s["per_size"], warnings=s["warnings"],
+            colors=[StyleColorBreakdown(
+                color_key=ck, color_label=c["label"], per_size_qty=c["per_size"],
+                qty=c["qty"], warnings=c["warnings"])
+                for ck, c in s["colors"].items()],
+        ) for k, s in styles.items()],
+    )
 
 # ════════════════════════════════════════════════════════════════════════════
 # LLM PROMPTS
@@ -135,11 +296,17 @@ Extract these fields:
 - delivery_date (ISO yyyy-mm-dd format if you can parse it)
 - payment_term
 - lines: list of {color, article, sizes {size: qty}}
-  - One line per (style, color) combination
-  - The same color under a different style is a SEPARATE line
-  - sizes may use alpha codes (S, M, L, XL, XXL) or numeric (38, 40, 42, 44)
-  - Continuation rows (blank style with data filled below) inherit from the
-    previous style
+  - lines: list of {model, color, article, sizes {size: qty}, printed_total}
+  - `model` is the style name from the Modello/Model/Style column — REQUIRED on
+    EVERY line. Ditto marks (", '', 〃) or a blank cell mean "same as the line
+    above": RESOLVE them and write the actual style name, never the ditto mark.
+  - Same rule for the material column: resolve dittos to the actual material.
+  - One line per (style, color) ROW as printed. The same style repeated in a
+    later order block on a later page is STILL that style — keep its name exact.
+  - `printed_total` is the row's printed total-pieces number (TOTALE CAPI or
+    similar) if the row has one; omit it otherwise. Do NOT use it to fill sizes.
+  - sizes may use alpha codes (S, M, L, XL, XXL) or numeric (38, 40, 42...).
+    ONLY size columns go in sizes — never price, total, or note columns.
 
 Do NOT trust any printed GRAND TOTAL. It is recomputed downstream from your
 line data; just give the lines accurately.
@@ -152,29 +319,22 @@ Output ONLY valid JSON. No prose, no markdown fences.
 # LLM PLUMBING
 # ════════════════════════════════════════════════════════════════════════════
 
-def _build_content(kind: str, payload: Any, prompt: str) -> list[dict]:
-    """Assemble the LLM message: prompt + payload (text or list of image bytes).
-    Images are embedded as data: URLs (base64); text payloads as a plain text
-    block. Vision-capable models can accept the image_url blocks alongside text."""
-    blocks: list[dict] = [{"type": "text", "text": prompt}]
-    if kind == "images":
-        for img_bytes in payload or []:
-            b64 = base64.b64encode(img_bytes).decode("ascii")
-            blocks.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{b64}"},
-            })
-    else:
-        blocks.append({"type": "text", "text": str(payload)})
-    return blocks
+def _build_text_content(payload: Any, prompt: str) -> list[dict]:
+    """Assemble the langchain message for a TEXT payload: prompt + text block.
+    (The old image_url/base64 branch is gone — scanned PDFs now go through the
+    native-PDF transport, never through inline page images.)"""
+    return [
+        {"type": "text", "text": prompt},
+        {"type": "text", "text": str(payload)},
+    ]
 
 
 def _invoke_with_retry(model, message, label: str, *,
                        attempts: int = _LLM_RETRY_ATTEMPTS,
                        base_delay: float = _LLM_RETRY_BASE_DELAY):
-    """Invoke a single model with bounded exponential-backoff retry. Returns the
-    raw response on success or None when every attempt failed. Never raises — a
-    failure here just means the caller falls to the next rung."""
+    """Invoke a single langchain model with bounded exponential-backoff retry.
+    Returns the raw response on success or None when every attempt failed.
+    Never raises — a failure here just means the caller falls to the next rung."""
     for attempt in range(1, attempts + 1):
         try:
             return model.invoke([message])
@@ -190,13 +350,96 @@ def _invoke_with_retry(model, message, label: str, *,
     return None
 
 
-def _llm_invoke(kind: str, content: list[dict]) -> tuple[str, str] | None:
-    """Invoke the configured LLM. Primary (Gemini) with retry, then the text-only
-    fallback (Groq) with retry for text payloads — vision payloads have no text
-    fallback because Groq doesn't currently support image input.
+def _gemini_native_pdf(data: bytes, prompt: str, *,
+                       attempts: int = _LLM_RETRY_ATTEMPTS,
+                       base_delay: float = _LLM_RETRY_BASE_DELAY) -> str | None:
+    """THE F8 TRANSPORT. Send the raw PDF to Gemini as a single native document
+    part — no rasterisation, no inline base64 page images. Gemini reads text,
+    tables, and scanned/image pages itself in one pass, so multi-page scanned
+    orders no longer build the oversized payload that caused 504s.
+
+    Proven by the standalone extract_document.py against real client PDFs; this
+    keeps its exact generation config (temperature=0, top_p=0.1) and adds
+    response_mime_type="application/json" because the pipeline parses typed
+    JSON, not markdown.
+
+    <= ~19 MB inlines via Part.from_bytes; larger PDFs upload once via the
+    Files API and are referenced by uri. Returns the raw response text, or
+    None when the SDK is missing / no key / all attempts failed. Never raises."""
+    try:
+        from google import genai
+        from google.genai import types as gtypes
+    except ImportError:
+        logger.warning("google-genai not importable — native-PDF rung unavailable "
+                       "(pip install google-genai)")
+        return None
+
+    api_key = settings.gemini_api_key
+    if not api_key:
+        logger.warning("GEMINI_API_KEY not configured — native-PDF rung unavailable")
+        return None
+
+    # vision_model spec is "gemini:<model>"; the native SDK wants the bare model id.
+    spec = settings.vision_model or settings.extraction_model
+    model_id = spec.partition(":")[2] or spec
+
+    try:
+        client = genai.Client(api_key=api_key)
+    except Exception as exc:                                    # noqa: BLE001
+        logger.warning("google-genai client init failed: %s", exc)
+        return None
+
+    uploaded = None
+    for attempt in range(1, attempts + 1):
+        try:
+            if len(data) <= _INLINE_PDF_MAX_BYTES:
+                doc_part = gtypes.Part.from_bytes(data=data, mime_type=PDF_MIME)
+            else:
+                if uploaded is None:                            # upload once, reuse on retry
+                    import io
+                    uploaded = client.files.upload(
+                        file=io.BytesIO(data),
+                        config={"mime_type": PDF_MIME},
+                    )
+                doc_part = uploaded
+
+            resp = client.models.generate_content(
+                model=model_id,
+                contents=[doc_part, prompt],
+                config=gtypes.GenerateContentConfig(
+                    temperature=0,
+                    top_p=0.1,
+                    response_mime_type="application/json",
+                ),
+            )
+            text = getattr(resp, "text", None)
+            if text:
+                return text
+            logger.warning("native-PDF (%s) attempt %d/%d returned empty text",
+                           model_id, attempt, attempts)
+        except Exception as exc:                                # noqa: BLE001
+            logger.warning("native-PDF (%s) attempt %d/%d failed: %s",
+                           model_id, attempt, attempts, exc)
+        if attempt < attempts:
+            time.sleep(base_delay * (2 ** (attempt - 1)))
+
+    logger.warning("native-PDF (%s) failed after %d attempts", model_id, attempts)
+    return None
+
+
+def _llm_invoke(kind: str, payload: Any, prompt: str) -> tuple[str, str] | None:
+    """Invoke the configured LLM for the given payload kind.
+
+      kind == "text": langchain ladder — Gemini text (retried) -> Groq (retried).
+      kind == "pdf":  native-PDF transport — raw PDF bytes to Gemini (retried).
+                      No Groq rung (Groq has no document/vision input).
 
     Returns (engine_name, raw_response) on success, None when no model is
-    available or both rungs exhausted their retries. Never raises."""
+    available or every rung exhausted its retries. Never raises."""
+    if kind == "pdf":
+        raw = _gemini_native_pdf(payload, prompt)
+        return ("gemini", raw) if raw is not None else None
+
     try:
         from langchain_core.messages import HumanMessage
     except ImportError:
@@ -205,21 +448,15 @@ def _llm_invoke(kind: str, content: list[dict]) -> tuple[str, str] | None:
 
     from app.modules.procurement.classifier import _init_model
 
-    message = HumanMessage(content=content)
+    message = HumanMessage(content=_build_text_content(payload, prompt))
 
-    # Vision payloads use the vision-capable model; text uses extraction_model.
-    primary_spec = (settings.vision_model if kind == "images"
-                    else settings.extraction_model)
+    primary_spec = settings.extraction_model
     primary = _init_model(primary_spec)
     if primary is not None:
         resp = _invoke_with_retry(primary, message, primary_spec)
         if resp is not None:
             engine = "gemini" if "gemini" in primary_spec.lower() else "groq"
             return engine, str(getattr(resp, "content", resp))
-
-    # Groq fallback only meaningful for text payloads
-    if kind == "images":
-        return None
 
     fb_spec = settings.extraction_fallback_model
     fallback = _init_model(fb_spec)
@@ -233,11 +470,12 @@ def _llm_invoke(kind: str, content: list[dict]) -> tuple[str, str] | None:
 
 
 def llm_extract_spec(kind: str, payload: Any) -> ExtractedSpec | None:
-    """LLM spec extraction. Returns None when no LLM is available, the response
-    is unparseable, schema validation fails, or the result is empty (no usable
-    fields). The caller treats None as "fall through to manual." Never raises."""
+    """LLM spec extraction. kind: "text" (markdown/csv/text-layer) or "pdf"
+    (raw PDF bytes -> native transport). Returns None when no LLM is available,
+    the response is unparseable, schema validation fails, or the result is empty
+    (no usable fields). The caller treats None as "fall through". Never raises."""
     from app.modules.procurement.classifier import _coerce
-    result = _llm_invoke(kind, _build_content(kind, payload, _SPEC_PROMPT))
+    result = _llm_invoke(kind, payload, _SPEC_PROMPT)
     if result is None:
         return None
     engine, raw = result
@@ -261,12 +499,12 @@ def llm_extract_order(kind: str, payload: Any) -> ExtractedOrder | None:
     """LLM order extraction. Same contract as llm_extract_spec — returns None
     when nothing usable is produced. Never raises."""
     from app.modules.procurement.classifier import _coerce
-    result = _llm_invoke(kind, _build_content(kind, payload, _ORDER_PROMPT))
+    result = _llm_invoke(kind, payload, _ORDER_PROMPT)
     if result is None:
         return None
     engine, raw = result
     parsed = _coerce(raw)
-    if not isinstance(parsed, dict): 
+    if not isinstance(parsed, dict):
         logger.info("LLM (%s) returned non-dict for order: %r", engine, type(parsed))
         return None
     parsed["extracted_by"] = engine
@@ -338,6 +576,38 @@ def _resolve_kind(data: bytes, filename: str, mime: str | None) -> str:
     return "unknown"
 
 
+def _extract_pdf(data: bytes, llm_fn, empty_fn):
+    """Shared PDF ladder for spec + order:
+
+        digital text layer -> text rung (Gemini text -> Groq)   [cheap, has fallback]
+                           -> native-PDF rescue on failure
+        scanned (no layer) -> native-PDF rung directly
+
+    llm_fn(kind, payload) -> typed model | None; empty_fn(reason) -> empty typed
+    result. Never raises."""
+    text = pdf_extract_text(data)
+    if text:
+        result = llm_fn("text", text)
+        if result is not None:
+            return result
+        # Digital PDF but the text rung produced nothing usable (layout lost in
+        # the text layer, or both text models down) — the native transport sees
+        # the real page layout, so rescue through it before giving up.
+        native = llm_fn("pdf", data)
+        if native is not None:
+            native.warnings = list(native.warnings) + ["text_rung_failed_native_pdf_used"]
+            return native
+        return empty_fn("llm_extraction_failed")
+
+    # Scanned / image-only PDF: native transport is the primary (and only) rung.
+    if not getattr(settings, "vision_classifier_enabled", True):
+        return empty_fn("vision_disabled_for_scanned_pdf")
+    native = llm_fn("pdf", data)
+    if native is not None:
+        return native
+    return empty_fn("native_pdf_extraction_failed")
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # PUBLIC ENTRY POINTS — return the typed contract directly.
 # ════════════════════════════════════════════════════════════════════════════
@@ -347,9 +617,9 @@ def extract_spec(data: bytes, filename: str, mime: str | None = None) -> Extract
     surface as `manual_entry_required` in `warnings`.
 
     Routing:
-      PDF (digital text)    -> text LLM
-      PDF (scanned/image)   -> vision LLM (Gemini), no Groq fallback
-      XLSX / XLSM           -> markdown -> text LLM
+      PDF (digital text)    -> text LLM (Gemini -> Groq), native-PDF rescue
+      PDF (scanned/image)   -> NATIVE PDF -> Gemini (no rasterised images)
+      XLSX / XLSM / XLS     -> markdown -> text LLM
       CSV / TSV             -> text -> text LLM
       everything else       -> manual_entry_required"""
     logger.info("calling extract_spec with filename=%r mime=%r data_length=%d",
@@ -358,13 +628,7 @@ def extract_spec(data: bytes, filename: str, mime: str | None = None) -> Extract
         kind = _resolve_kind(data, filename, mime)
 
         if kind == "pdf":
-            payload_kind, payload = pdf_to_llm_input(data)
-            if not payload:
-                return _empty_spec("pdf_unreadable")
-            if (payload_kind == "images"
-                    and not getattr(settings, "vision_classifier_enabled", True)):
-                return _empty_spec("vision_disabled_for_scanned_pdf")
-            return llm_extract_spec(payload_kind, payload) or _empty_spec("llm_extraction_failed")
+            return _extract_pdf(data, llm_extract_spec, _empty_spec)
 
         if kind in ("xlsx", "xls"):
             markdown = (xlsx_to_markdown if kind == "xlsx" else xls_to_markdown)(data)
@@ -398,20 +662,14 @@ def extract_order(data: bytes, filename: str, mime: str | None = None,
         kind = _resolve_kind(data, filename, mime)
 
         if kind == "pdf":
-            payload_kind, payload = pdf_to_llm_input(data)
-            if not payload:
-                return _empty_order("pdf_unreadable")
-            if (payload_kind == "images"
-                    and not getattr(settings, "vision_classifier_enabled", True)):
-                return _empty_order("vision_disabled_for_scanned_pdf")
-            return llm_extract_order(payload_kind, payload) or _empty_order("llm_extraction_failed")
+            return _extract_pdf(data, llm_extract_order, _empty_order)
 
         if kind in ("xlsx", "xls"):
             markdown = (xlsx_to_markdown if kind == "xlsx" else xls_to_markdown)(data)
             if not markdown.strip():
                 return _empty_order("xls_unreadable" if kind == "xls" else "xlsx_unreadable")
             return llm_extract_order("text", markdown) or _empty_order("llm_extraction_failed")
-        
+
         if kind == "csv":
             try:
                 text = data.decode("utf-8", errors="replace")
@@ -424,3 +682,25 @@ def extract_order(data: bytes, filename: str, mime: str | None = None,
     except Exception as exc:                                    # noqa: BLE001
         logger.exception("extract_order degraded for %s (%s): %s", filename, mime, exc)
         return _empty_order(f"extract_order_exception: {type(exc).__name__}")
+    
+def extract_order_doc(data: bytes, filename: str,
+                      mime: str | None = None) -> ExtractedOrderDoc:
+    """Multi-style order extraction: same routing/transport ladder as
+    extract_order (xlsx/xls -> markdown -> text rung; PDF -> text rung or
+    native-PDF rung), then deterministic style/color grouping. Never raises."""
+    order = extract_order(data, filename, mime)            # existing ladder, reused
+    if is_empty_order(order):
+        return ExtractedOrderDoc(extracted_by="manual", warnings=list(order.warnings))
+    header = {"order_number": order.order_number, "client_name": order.client_name,
+              "season": order.season, "currency": order.currency,
+              "delivery_date": order.delivery_date, "payment_term": order.payment_term}
+    doc = split_styles_colors([l.model_dump() for l in order.lines],
+                              header=header, engine=order.extracted_by)
+    if not doc.styles:                                     # lines had no model column
+        doc.warnings.append("no_styles_parsed_single_style_assumed")
+        doc.styles = [StyleBreakdown(
+            style_key=normalize_style(order.style_no) or "UNKNOWN",
+            material=order.article, qty=order.order_qty or 0,
+            per_size_qty=order.per_size_qty or {},
+            colors=[], warnings=["style_from_header_not_lines"])]
+    return doc

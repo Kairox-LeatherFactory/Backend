@@ -68,6 +68,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Boolean,
     Float,
+    JSON,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -110,6 +111,8 @@ class Bom(Base, UUIDMixin, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("client_order_id", "style_id", name="uq_bom_order_style"),
         UniqueConstraint("submission_id", name="uq_bom_submission"),
+         UniqueConstraint("submission_id", "style_signature",
+                         name="uq_bom_submission_style"),   # replaces uq_bom_submission
     )
     # A Stage-2 BOM is now born from the order + spec sheets ALONE, anchored on the
     # submission. The Client→Order→Style→SKU breakdown is created (and back-linked into
@@ -121,6 +124,7 @@ class Bom(Base, UUIDMixin, TimestampMixin):
     submission_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("submission.id"), nullable=True, index=True
     )
+    style_signature: Mapped[str | None] = mapped_column(String(120), index=True)
     client_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("client.id"), nullable=True, index=True
     )
@@ -513,3 +517,55 @@ class ClientCheckRule(Base, UUIDMixin, TimestampMixin):
     range_hi: Mapped[float | None] = mapped_column(Float)
     params: Mapped[dict | None] = mapped_column(JSON_VARIANT)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    
+class OrderStyle(Base, UUIDMixin, TimestampMixin):
+    """One style inside a submitted order document — the unit the operator sees,
+    confirms attachments for, and generates a BOM from. bom module owns this."""
+    __tablename__ = "order_style"
+    __table_args__ = (
+        UniqueConstraint("submission_id", "style_signature",
+                         name="uq_order_style_submission_style"),
+    )
+    client_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("client.id"), nullable=True, index=True)
+    submission_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("submission.id"), nullable=False, index=True)
+    style_signature: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    style_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    material: Mapped[str | None] = mapped_column(String(200))
+    qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    per_size_qty: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    warnings: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+
+    # Guided matching state — suggestions are pre-filled, confirmation is human.
+    spec_document_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("document.id"))
+    spec_match_status: Mapped[str] = mapped_column(       # suggested|confirmed|none
+        String(20), nullable=False, default="none")
+    pattern_reference_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("pattern_reference.id"))
+    dxf_match_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="none")
+    bom_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("bom.id"))
+
+    colors: Mapped[list["OrderStyleColor"]] = relationship(
+        back_populates="style", cascade="all, delete-orphan",
+        order_by="OrderStyleColor.color_key")
+
+
+class OrderStyleColor(Base, UUIDMixin, TimestampMixin):
+    """One leather color within a style, aggregated across all order blocks."""
+    __tablename__ = "order_style_color"
+    __table_args__ = (
+        UniqueConstraint("order_style_id", "color_key",
+                         name="uq_order_style_color"),
+    )
+    order_style_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("order_style.id"), nullable=False, index=True)
+    color_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    color_label: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    per_size_qty: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    warnings: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+
+    style: Mapped[OrderStyle] = relationship(back_populates="colors")
