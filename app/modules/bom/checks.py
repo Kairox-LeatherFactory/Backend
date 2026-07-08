@@ -105,12 +105,31 @@ def _check_pitch_monotonic(rule: dict, ctx: dict) -> dict:
 def _check_qty_sum(rule: dict, ctx: dict) -> dict:
     per_size = ctx.get("per_size_qty") or {}
     total = ctx.get("order_qty")
-    if total is None:
-        return _flag(rule, True, "order_qty unknown (skipped)")
+
+    if total is None or not per_size:
+        warn_rule = dict(rule)
+        warn_rule["severity"] = "warn"
+
+        return _flag(
+            warn_rule,
+            True,
+            "size quantity check skipped: missing order_qty or per_size_qty",
+        )
+
     s = sum(per_size.values())
+
     if int(s) != int(total):
-        return _flag(rule, False, f"Σ per-size qty ({s}) != order total ({total})")
-    return _flag(rule, True, f"Σ per-size qty == order total ({total})")
+        return _flag(
+            rule,
+            False,
+            f"Σ per-size qty ({s}) != order total ({total})",
+        )
+
+    return _flag(
+        rule,
+        True,
+        f"Σ per-size qty == order total ({total})",
+    )
 
 
 def _check_pattern_ref(rule: dict, ctx: dict) -> dict:
