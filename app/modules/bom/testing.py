@@ -35,16 +35,19 @@
 # # pprint(result)
 
 
-# from app.modules.bom.extraction import extract_order, extract_spec
+from app.modules.bom.extraction import extract_order, extract_spec
 
-# # Read the file as bytes
-# with open("D:\\hamthan-d\\Kaizen AMD\\client\\2-factor\\leather_factory_backend_with_attendance\\backend\\data\\spec_sheet_1.xlsx", "rb") as f:
-#     data = f.read()
+# Read the file as bytes
+with open("C:\\Users\\head user\\Desktop\\Hamthan\\Clinets\\2-Factor\\Backend\\data\\Jackie-cleint-spec-sheet.xlsx", "rb") as f:
+    data = f.read()
 
-# result = extract_spec(
-#     data=data,
-#     filename="spec_sheet_1.xlsx",
-#     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-# )
+result = extract_spec(
+    data=data,
+    filename="Jackie-cleint-spec-sheet.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
 
-# print(result)
+print(result)
+
+import app.core.config
+print(app.core.config.settings.virus_scan_enabled)

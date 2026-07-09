@@ -148,7 +148,7 @@ def _init_model(spec: str):
             from langchain_google_genai import ChatGoogleGenerativeAI
 
             return ChatGoogleGenerativeAI(model=model, google_api_key=settings.gemini_api_key,
-                                          temperature=0, timeout=100, max_retries=retries)
+                                          temperature=0,max_retries=retries)
         if provider == "groq":
             if not settings.groq_api_key:
                 return None

@@ -1,0 +1,1174 @@
+{
+  "style_id": "CR1-02F5-PL02",
+  "brand": "CRIMIE",
+  "buyer_company": "Beau Geste Co., Ltd. (株式会社ボージェスト)",
+  "manufacturer": "PAKKAR (Pakkar Tanveer Exports)",
+  "document_purpose": "Master consolidated record combining the order sheet, BOM/yardage-price quotation, sewing spec sheet (raw extraction), and the previously generated structured style JSON for CR1-02F5-PL02.",
+  "raw_source_documents": {
+    "order_sheet": {
+      "document_title": "発注書 / Order Sheet",
+      "order_no": "1579",
+      "order_date": "2026-06-01",
+      "manufacturer_field_label": "発注先 Manufacturer",
+      "manufacturer": "PAKKAR",
+      "buyer_company": "Beau Geste (株式会社ボージェスト)",
+      "color_columns": [
+        "Black"
+      ],
+      "shipping_limit_field": "出荷期限 / Shipping Limit",
+      "shipping_limit_value": null,
+      "quantity_by_color": {
+        "Black": 60
+      },
+      "total_amount_pcs": 60,
+      "unit_price": "$104",
+      "total_unit_price_field": "合計単価 Total Price",
+      "approval_sample_field": "Approval Sample (合計数量欄に記載)",
+      "size_breakdown": {
+        "S": 4,
+        "M": 17,
+        "L": 23,
+        "XL": 10,
+        "XXL": 6
+      },
+      "article_name_field": "品名 Article Name",
+      "article_name": "Leather Pants",
+      "material_field": "素材 Material",
+      "material": "Sheep skin",
+      "our_ref_no_field": "当社管理番号 Our Ref-No",
+      "our_ref_no": "A32073-44",
+      "customer_no_field": "製品番号 Customer No",
+      "customer_no": "CR1-02F5-PL02",
+      "skin_order_sheet_no_field": "Skin Order Sheet No.",
+      "skin_order_sheet_no": null,
+      "specification_section_header": "仕様 / Specification",
+      "production_type": "Bulk Production",
+      "article_spec": "Sheep Glass",
+      "thickness_spec": "0.6～0.7 m/m",
+      "handwritten_note": "Pls take care of where it is used goat suede.",
+      "handwritten_yardage_note": [
+        "24.5sf (Sheep Glass)",
+        "2.6sf (Goat Suede)"
+      ],
+      "note_field": "備考 / Note",
+      "customer_brand_note": "CRIMIE",
+      "design_section": "Design (sketch of track pants with side panel, drawstring waist, back pocket, zip details)",
+      "approval_signoff": {
+        "起票_drafted_by": "S.Aiya",
+        "担当_in_charge": "S.Aiya",
+        "承認_approved_by": "(signature, illegible)"
+      },
+      "bottom_section_tabs": [
+        "ネーム",
+        "下げ札",
+        "附属",
+        "パターン"
+      ],
+      "source_file": "1782727995300_Order-sheet-1.pdf"
+    },
+    "bom_yardage_price_quotation": {
+      "document_title": "Yardage and Price Quotation",
+      "brand": "CRIMIE",
+      "style_no": "CRI 02F5 PL02",
+      "domestic_price": null,
+      "garment_price_quotation_fob": "US$107.25",
+      "factory": "PAKKAR TANVEER EXPORTS",
+      "line_items": [
+        {
+          "category": "Main Material",
+          "no_or_name": "SHEEP GLASS COL BLACK",
+          "yardage": 34.5,
+          "unit": 1.8,
+          "sample": 62.1,
+          "mass": null
+        },
+        {
+          "category": "Main Material",
+          "no_or_name": "GOAT SUEDE",
+          "yardage": 2.6,
+          "unit": 1.75,
+          "sample": 4.55,
+          "mass": null
+        },
+        {
+          "category": "Sub-Material / LINING",
+          "no_or_name": "POLYSTER LINING - POCKETS",
+          "yardage": 0.4,
+          "unit": 1.5,
+          "sample": 0.6,
+          "mass": null
+        },
+        {
+          "category": "INTERLINING",
+          "no_or_name": "FUSING INTER LINING",
+          "yardage": 1,
+          "unit": 1.0,
+          "sample": 1.0,
+          "mass": null
+        },
+        {
+          "category": "THREADS",
+          "no_or_name": "THREAD",
+          "yardage": 1,
+          "unit": 1.0,
+          "sample": 1.0,
+          "mass": null
+        },
+        {
+          "category": "ACCESSORIES",
+          "no_or_name": "BUTTONS - SGT-10 20MM",
+          "yardage": 4,
+          "unit": 0,
+          "sample": 0.0,
+          "mass": null
+        },
+        {
+          "category": "ACCESSORIES",
+          "no_or_name": "BUTTONS - SGT-10 15MM",
+          "yardage": 2,
+          "unit": 0,
+          "sample": 0.0,
+          "mass": null
+        },
+        {
+          "category": "ACCESSORIES",
+          "no_or_name": "SUPPORT BUTTONS 10MM",
+          "yardage": 6,
+          "unit": 0,
+          "sample": 0.0,
+          "mass": null
+        },
+        {
+          "category": "Manufacturing cost",
+          "no_or_name": "CUTTING AND STICHING",
+          "yardage": 1,
+          "unit": 1,
+          "sample": 30.0,
+          "mass": null
+        },
+        {
+          "category": "Packaging cost",
+          "no_or_name": "BOX, POLY COVER, TISSUE PAPER",
+          "yardage": 1,
+          "unit": 1,
+          "sample": 3.0,
+          "mass": null
+        },
+        {
+          "category": "FOB CHARGE",
+          "no_or_name": "BUYER MATERIAL DUTY + CLEARING CHARGES",
+          "yardage": 1,
+          "unit": 1,
+          "sample": 5.0,
+          "mass": null
+        }
+      ],
+      "total_usd": 107.25,
+      "source_file": "1782727995298_BMO-1.pdf"
+    },
+    "spec_sheet": {
+      "document_title": "縫製仕様書 (Sewing Specification Sheet)",
+      "sheet_name": "CRPL-004",
+      "header_block": {
+        "brand": "CRIMIE",
+        "factory_name_label": "工場名",
+        "factory_code": "CZ",
+        "style_no_label": "品番",
+        "style_no": "CR1-02F5-PL02",
+        "season_label": "シーズン",
+        "season": "2026AW",
+        "pattern_no_label": "パターンNo.",
+        "pattern_no": "CR1-02F5-PL02",
+        "article_name_label": "品名",
+        "article_name_jp": "脇スエードレザートラックパンツ",
+        "article_name_en": "Side-Suede-Panel Leather Track Pants",
+        "patternmaker_label": "パタンナー名",
+        "patternmaker": "WITZ",
+        "sample_delivery_label": "サンプル納期",
+        "sample_delivery": null,
+        "bulk_delivery_label": "量産納期",
+        "bulk_delivery": null
+      },
+      "measurement_chart_jp_labels": {
+        "section_title": "規格寸法(cm) ※( )内は型紙寸法",
+        "note": "Values in parentheses are paper-pattern dimensions",
+        "columns": [
+          "No.",
+          "部位 (measurement point)",
+          "1st.",
+          "本生産 (bulk) S",
+          "M",
+          "L",
+          "XL",
+          "XXL",
+          "ピッチ (grading pitch)"
+        ],
+        "rows": [
+          {
+            "no": 1,
+            "jp_label": "ウェスト上り",
+            "en_label": "Waist top edge",
+            "S": 72,
+            "M": 77,
+            "L": 82,
+            "XL": 87,
+            "XXL": 92,
+            "pitch": 5
+          },
+          {
+            "no": 2,
+            "jp_label": "ウェスト実寸",
+            "en_label": "Waist actual measurement",
+            "S": 88,
+            "M": 93,
+            "L": 98,
+            "XL": 103,
+            "XXL": 108,
+            "pitch": 5
+          },
+          {
+            "no": 3,
+            "jp_label": "ヒップ位置",
+            "en_label": "Hip position",
+            "S": 18,
+            "M": 19,
+            "L": 20,
+            "XL": 21,
+            "XXL": 22,
+            "pitch": 1
+          },
+          {
+            "no": 4,
+            "jp_label": "ヒップ",
+            "en_label": "Hip circumference",
+            "S": 101.4,
+            "M": 105.6,
+            "L": 109.8,
+            "XL": 114,
+            "XXL": 118.2,
+            "pitch": 4.2
+          },
+          {
+            "no": 5,
+            "jp_label": "渡り幅",
+            "en_label": "Thigh width (crotch width)",
+            "S": 33,
+            "M": 34,
+            "L": 35,
+            "XL": 36,
+            "XXL": 37,
+            "pitch": 1
+          },
+          {
+            "no": 6,
+            "jp_label": "膝丈",
+            "en_label": "Knee length (position)",
+            "S": 30,
+            "M": 30.5,
+            "L": 31,
+            "XL": 31.5,
+            "XXL": 31.5,
+            "pitch": 0.5
+          },
+          {
+            "no": 7,
+            "jp_label": "膝幅",
+            "en_label": "Knee width",
+            "S": 23.5,
+            "M": 24.5,
+            "L": 25.5,
+            "XL": 26.5,
+            "XXL": 27.5,
+            "pitch": 1
+          },
+          {
+            "no": 8,
+            "jp_label": "裾幅",
+            "en_label": "Hem width",
+            "S": 22,
+            "M": 22.5,
+            "L": 23,
+            "XL": 23.5,
+            "XXL": 24,
+            "pitch": 0.5
+          },
+          {
+            "no": 9,
+            "jp_label": "前股上",
+            "en_label": "Front rise",
+            "S": 27.5,
+            "M": 28.5,
+            "L": 29.5,
+            "XL": 30.5,
+            "XXL": 31.5,
+            "pitch": 1
+          },
+          {
+            "no": 10,
+            "jp_label": "前股ぐり",
+            "en_label": "Front crotch curve",
+            "S": 29.2,
+            "M": 30.3,
+            "L": 31.4,
+            "XL": 32.5,
+            "XXL": 33.6,
+            "pitch": 1
+          },
+          {
+            "no": 11,
+            "jp_label": "後股ぐり",
+            "en_label": "Back crotch curve",
+            "S": 41.7,
+            "M": 42.8,
+            "L": 43.9,
+            "XL": 45,
+            "XXL": 46.1,
+            "pitch": 1.1
+          },
+          {
+            "no": 12,
+            "jp_label": "内股下",
+            "en_label": "Inseam",
+            "S": 76,
+            "M": 77,
+            "L": 79,
+            "XL": 79,
+            "XXL": 79,
+            "pitch": "1/2/0〜 (irregular)"
+          },
+          {
+            "no": 13,
+            "jp_label": "ベルト幅",
+            "en_label": "Belt width",
+            "S": 4,
+            "M": 4,
+            "L": 4,
+            "XL": 4,
+            "XXL": 4,
+            "pitch": 0
+          },
+          {
+            "no": 14,
+            "jp_label": "脇総丈",
+            "en_label": "Side total length",
+            "S": 105,
+            "M": 107,
+            "L": 110,
+            "XL": 111,
+            "XXL": 112,
+            "pitch": "irregular"
+          }
+        ]
+      },
+      "accessory_measurement_chart": {
+        "section_title": "附属寸法 (Accessory Dimensions) — サンプル・本生産 (Sample/Bulk Production)",
+        "rows": [
+          {
+            "no": 1,
+            "jp_label": "ヒモ丈",
+            "en_label": "Cord/strap length",
+            "S": 140,
+            "M": 140,
+            "L": 140
+          },
+          {
+            "no": 2,
+            "jp_label": "平ゴム丈",
+            "en_label": "Flat elastic length",
+            "S": 74,
+            "M": 79,
+            "L": 84
+          },
+          {
+            "no": 3,
+            "jp_label": "前Pファスナー",
+            "en_label": "Front pocket zipper",
+            "S": 16,
+            "M": 16,
+            "L": 16
+          },
+          {
+            "no": 4,
+            "jp_label": "後Pファスナー",
+            "en_label": "Back pocket zipper",
+            "S": 15,
+            "M": 15,
+            "L": 15
+          }
+        ],
+        "note": "Sheet only lists S/M/L columns for accessory dims; XL/XXL values for cord (150,150) and elastic (89,94) appear in adjacent secondary table"
+      },
+      "special_notes_jp": {
+        "特記事項_label": "特記事項 (Special Notes)",
+        "特記事項_text": "※CR1-O2B5-PL02をベースに作成(サイズはCRPL-011) ※縮率は工場仕上げ",
+        "特記事項_translation": "Created based on CR1-O2B5-PL02 (sizing follows CRPL-011); shrinkage rate is per factory finishing",
+        "修正変更等_label": "修正変更等 (Revisions/Changes)",
+        "修正変更等_text": "26.03.16/サイズ修正＆全サイズグレーディング",
+        "修正変更等_translation": "2026-03-16: Size correction & full-size grading"
+      },
+      "materials_table_realizeworks": {
+        "section_title": "REALIZEWORKS.INC 資材表 (Materials/Trim Table)",
+        "columns": [
+          "区分 (category)",
+          "品番 (item no.)",
+          "資材名 (material name)",
+          "規格 (spec)",
+          "混率 (composition)",
+          "手配先 (sourced from)",
+          "使用箇所 (usage location)",
+          "用尺・個数 (yardage/qty)",
+          "色展開 (colour)"
+        ],
+        "rows": [
+          {
+            "no": 1,
+            "category_jp": "表地",
+            "category_en": "Outer fabric/main material",
+            "item_no": null,
+            "material_name": "シープグラス",
+            "material_name_en": "Sheep Glass",
+            "spec": "0.6-0.7",
+            "composition": "SHEEP LEATHER",
+            "sourced_from": "BG",
+            "usage_location": null,
+            "colour": "BLACK"
+          },
+          {
+            "no": 2,
+            "category_jp": "別布",
+            "category_en": "Contrast fabric",
+            "item_no": null,
+            "material_name": "ゴートスエード",
+            "material_name_en": "Goat Suede",
+            "spec": null,
+            "composition": "GOAT",
+            "sourced_from": "BG",
+            "usage_location": "脇切替え (Side panel insert)",
+            "colour": "BLACK"
+          },
+          {
+            "no": 3,
+            "category_jp": "袋地",
+            "category_en": "Bag/pocket lining",
+            "item_no": null,
+            "material_name": "ポリエステルタフタ",
+            "material_name_en": "Polyester Taffeta",
+            "spec": null,
+            "composition": "P100%",
+            "sourced_from": "BG",
+            "usage_location": "ポケット袋布 (Pocket bag fabric)",
+            "colour": "BLACK"
+          },
+          {
+            "no": 1,
+            "category_jp": "ファスナー",
+            "category_en": "Zipper",
+            "item_no": "YKK 5MA ZA C5",
+            "material_name": "No.5M/止め CR引手SILVER",
+            "material_name_en": "No.5M closed-end, CR pull tab Silver",
+            "spec": "16cm",
+            "composition": null,
+            "sourced_from": "BG",
+            "usage_location": "前ポケット (Front pocket)",
+            "qty": "2pcs.",
+            "colour": "580 / BLACK"
+          },
+          {
+            "no": 2,
+            "category_jp": "ファスナー",
+            "category_en": "Zipper",
+            "item_no": "YKK 5MA DABL C5",
+            "material_name": "No.5M/止め",
+            "material_name_en": "No.5M closed-end",
+            "spec": "15cm",
+            "composition": null,
+            "sourced_from": "BG",
+            "usage_location": "右後ポケット (Right back pocket)",
+            "qty": "1pc.",
+            "colour": "580 / BLACK",
+            "note_jp": "左後ポケットのファスナースライダーはDABLです。ご注意ください。",
+            "note_en": "CAUTION: the left back pocket zipper slider is DABL type."
+          },
+          {
+            "no": 3,
+            "category_jp": "D釻",
+            "category_en": "D-ring",
+            "item_no": null,
+            "material_name": "CRオリジナル",
+            "material_name_en": "CR Original",
+            "spec": "内径10mm (inner dia. 10mm)",
+            "composition": null,
+            "sourced_from": "RW",
+            "usage_location": "タブ (Tab)",
+            "qty": "1pc.",
+            "colour": "SILVER"
+          },
+          {
+            "no": 4,
+            "category_jp": "平ヒモ",
+            "category_en": "Flat cord",
+            "item_no": null,
+            "material_name": "チップ加工SILVER",
+            "material_name_en": "Tip-finished, Silver",
+            "spec": null,
+            "composition": null,
+            "sourced_from": "BG",
+            "usage_location": "ベルト (Belt)",
+            "qty": "1pc.",
+            "colour": "BLACK"
+          },
+          {
+            "no": 5,
+            "category_jp": "平ゴム",
+            "category_en": "Flat elastic",
+            "item_no": null,
+            "material_name": null,
+            "material_name_en": null,
+            "spec": "35mm幅 (35mm width)",
+            "composition": null,
+            "sourced_from": "BG",
+            "usage_location": "ベルト (Belt)",
+            "qty": "1pc.",
+            "colour": "BLACK"
+          },
+          {
+            "no": 6,
+            "category_jp": "芯",
+            "category_en": "Interlining/core",
+            "item_no": null,
+            "material_name": null,
+            "material_name_en": null,
+            "spec": null,
+            "composition": null,
+            "sourced_from": "BG",
+            "usage_location": "型紙に指示あり (As instructed on pattern)",
+            "colour": "BLACK"
+          },
+          {
+            "no": 7,
+            "category_jp": "レザーワッペン",
+            "category_en": "Leather patch/badge",
+            "item_no": "CRオリジナル",
+            "material_name": "レザーワッペンA 厚手",
+            "material_name_en": "Leather Patch A, thick stock",
+            "spec": "新カシメ 上4mm 下5mm (New rivet, top 4mm bottom 5mm)",
+            "composition": null,
+            "sourced_from": "CZ",
+            "usage_location": "右後ろポケット上 (Above right back pocket)",
+            "qty": "1set",
+            "colour": "BLACK"
+          },
+          {
+            "no": 8,
+            "category_jp": "パッキン",
+            "category_en": "Washer/packing",
+            "item_no": "C4182S",
+            "material_name": "MORITOパッキン 9x2",
+            "material_name_en": "MORITO Packing 9x2",
+            "spec": "9mm",
+            "composition": null,
+            "sourced_from": "RW",
+            "usage_location": "レザーワッペン裏側 (Behind leather patch)",
+            "qty": "2pcs.",
+            "colour": "BLACK"
+          }
+        ]
+      },
+      "labels_table": {
+        "section_title": "ネーム類明細 (Label/Trim Details)",
+        "columns": [
+          "品名 (item name)",
+          "品番 (item no.)",
+          "数量 (qty)",
+          "付け位置 (attach position)"
+        ],
+        "rows": [
+          {
+            "item_jp": "ネーム",
+            "item_en": "Main Label",
+            "item_no": "CR22D",
+            "qty": 1,
+            "position_jp": "後ベルト中心裏にはさみこみ",
+            "position_en": "Inserted into reverse of back belt centre"
+          },
+          {
+            "item_jp": "ピスネーム",
+            "item_en": "Pis Label (small woven brand tab)",
+            "item_no": null,
+            "qty": null,
+            "position_jp": null,
+            "position_en": null
+          },
+          {
+            "item_jp": "サイズネーム",
+            "item_en": "Size Label",
+            "item_no": null,
+            "qty": null,
+            "position_jp": "左脇裏側はさみこみ",
+            "position_en": "Inserted into reverse of left side seam"
+          },
+          {
+            "item_jp": "品質表示",
+            "item_en": "Composition/Care Label",
+            "item_no": null,
+            "qty": 1,
+            "position_jp": "左脇裏側はさみこみ",
+            "position_en": "Inserted into reverse of left side seam"
+          },
+          {
+            "item_jp": "下げ札",
+            "item_en": "Hang Tag",
+            "item_no": null,
+            "qty": 1,
+            "position_jp": "右前ベルトループに一重通し",
+            "position_en": "Single loop-through on right front belt loop"
+          }
+        ]
+      },
+      "secondary_processing_table": {
+        "section_title": "二次加工 (Secondary Processing) / 裁断・縫製仕様 (Cutting & Sewing Specification)",
+        "washing_jp": "洗い",
+        "washing_value": "なし (None)",
+        "printing_jp": "プリント",
+        "printing_value": "なし (None)",
+        "embroidery_jp": "刺繍",
+        "embroidery_value": "なし (None)",
+        "opp_bag_jp": "OPP袋",
+        "opp_bag_value": "なし (None)",
+        "weave_knit_jp": "織り/編み",
+        "weave_knit_value": null,
+        "pattern_layout_jp": "型入れ",
+        "pattern_layout_value": "一方方向・差込 (One-direction, insert/nested cutting)",
+        "pattern_matching_jp": "柄合わせ",
+        "pattern_matching_value": "有・無 (Yes/No — not finalized)",
+        "thread_count_jp": "糸番手",
+        "thread_count_value": "60番手 (60s thread count)",
+        "stitches_per_inch_jp": "運針数",
+        "stitches_per_inch_value": null,
+        "hs_code_jp": "HSコード",
+        "hs_code_value": null,
+        "colour_total_jp": "カラー計",
+        "colour_total_value": 0,
+        "grand_total_jp": "合計",
+        "grand_total_value": 0
+      },
+      "secondary_processing_instruction_sheet": {
+        "sheet_name": "二次加工指示 (Secondary Processing Instruction)",
+        "no_field": "NO.",
+        "delivery_sample_field": "納期 サンプル",
+        "delivery_bulk_field": "量産",
+        "color_section": {
+          "body_jp": "BODY",
+          "print_embroidery_jp": "プリント・刺繍"
+        },
+        "print_embroidery_method_jp": "プリント・刺繍方法",
+        "secondary_process_jp": "二次加工",
+        "memo_jp": "メモ",
+        "note": "This sheet's fields were left blank in the source file — no print/embroidery/secondary processing instructions recorded for this style"
+      },
+      "other_sheets_in_workbook": {
+        "仕様詳細": "Sewing specification detail sheet — header only ('縫製仕様書'), no populated data rows found for this style",
+        "デザイン管理表": "Design management table — not populated with extractable text data (likely contains embedded images/sketches only)"
+      },
+      "source_file": "1782727995300_spec_sheet_1.xlsx"
+    }
+  },
+  "structured_style_spec": {
+    "order_sheet_no": "1579",
+    "order_date": "2026-06-01",
+    "manufacturer": {
+      "name": "PAKKAR (Pakkar Tanveer Exports)",
+      "factory_code": "CZ"
+    },
+    "buyer": {
+      "name": "Beau Geste Co., Ltd. (株式会社ボージェスト)",
+      "our_ref_no": "A32073-44"
+    },
+    "customer_brand": "CRIMIE",
+    "customer_no": "CR1-02F5-PL02",
+    "style_id": "CR1-02F5-PL02",
+    "internal_style_ref": "Pattern No. CR1-02F5-PL02 (also referenced as CRI 02F5 PL02 / CRI-02F5-PL02 in price quotation)",
+    "season": "2026 AW",
+    "patternmaker": "WITZ",
+    "garment_type": "Trousers / Pants",
+    "garment_subtype": "Side-Panel Suede Leather Track Pants (脇スエードレザートラックパンツ) – Sheep Glass Leather Body with Goat Suede Side Inserts, Elastic/Cord Belt, Zip Pockets",
+    "article_name": "Leather Pants",
+    "gender": "Unisex/Men (no explicit gender stated)",
+    "colour": "Black",
+    "colour_code": "Black (BLACK) – all components",
+    "shipping_limit": "TBC – not specified on order sheet",
+    "order_quantity_total": 60,
+    "size_breakdown": {
+      "S": 4,
+      "M": 17,
+      "L": 23,
+      "XL": 10,
+      "XXL": 6
+    },
+    "unit_price_usd": 104,
+    "total_price_usd": 6240,
+    "garment_price_quotation_fob_usd": 107.25,
+    "leather": {
+      "main_material": {
+        "type": "Sheep Glass (Sheep Leather)",
+        "colour": "Black",
+        "thickness_mm": "0.6–0.7",
+        "supplier": "SHEEP LEATHER",
+        "usage_position": "Main body (BG = main fabric)",
+        "yardage_sqft": 34.5,
+        "unit_price_usd": 1.8,
+        "sample_mass_usd": 62.1,
+        "note": "Note on order sheet specifies 34.5sf (Sheep Glass)"
+      },
+      "sub_material": {
+        "type": "Goat Suede",
+        "colour": "Black",
+        "supplier": "GOAT",
+        "usage_position": "Side panel insert (脇切替え / side seam panel)",
+        "yardage_sqft": 2.6,
+        "unit_price_usd": 1.75,
+        "sample_mass_usd": 4.55,
+        "note": "Note on order sheet specifies 2.6sf (Goat Suede); client instructs to take care where goat suede is used"
+      },
+      "selection_grade": "Approval sample required before bulk production",
+      "anti_dust_treatment": false,
+      "napalan_treatment": false
+    },
+    "pattern": {
+      "base_pattern_ref": "Created based on CR1-O2B5-PL02 (sizing per CRPL-011)",
+      "pattern_type": "Track-pant style trousers with side seam leather/suede paneling, elastic + cord belt waistband",
+      "size_base": "S–XXL (5 sizes, full grading)",
+      "grading_method": "Factory grading per measurement chart (full size run graded)",
+      "shrinkage_note": "Shrinkage rate is per factory finishing",
+      "revision_history": [
+        "2026-03-16: Size correction and full-size re-grading"
+      ]
+    },
+    "measurements_cm": {
+      "size_run": [
+        "S",
+        "M",
+        "L",
+        "XL",
+        "XXL"
+      ],
+      "waist_top_edge_no1": {
+        "S": 72,
+        "M": 77,
+        "L": 82,
+        "XL": 87,
+        "XXL": 92,
+        "grading_pitch": 5
+      },
+      "waist_actual_no2": {
+        "S": 88,
+        "M": 93,
+        "L": 98,
+        "XL": 103,
+        "XXL": 108,
+        "grading_pitch": 5
+      },
+      "hip_position_no3": {
+        "S": 18,
+        "M": 19,
+        "L": 20,
+        "XL": 21,
+        "XXL": 22,
+        "grading_pitch": 1
+      },
+      "hip_circumference_no4": {
+        "S": 101.4,
+        "M": 105.6,
+        "L": 109.8,
+        "XL": 114,
+        "XXL": 118.2,
+        "grading_pitch": 4.2
+      },
+      "thigh_width_no5": {
+        "S": 33,
+        "M": 34,
+        "L": 35,
+        "XL": 36,
+        "XXL": 37,
+        "grading_pitch": 1
+      },
+      "knee_length_no6": {
+        "S": 30,
+        "M": 30.5,
+        "L": 31,
+        "XL": 31.5,
+        "XXL": 31.5,
+        "grading_pitch": 0.5
+      },
+      "knee_width_no7": {
+        "S": 23.5,
+        "M": 24.5,
+        "L": 25.5,
+        "XL": 26.5,
+        "XXL": 27.5,
+        "grading_pitch": 1
+      },
+      "hem_width_no8": {
+        "S": 22,
+        "M": 22.5,
+        "L": 23,
+        "XL": 23.5,
+        "XXL": 24,
+        "grading_pitch": 0.5
+      },
+      "front_rise_no9": {
+        "S": 27.5,
+        "M": 28.5,
+        "L": 29.5,
+        "XL": 30.5,
+        "XXL": 31.5,
+        "grading_pitch": 1
+      },
+      "front_crotch_curve_no10": {
+        "S": 29.2,
+        "M": 30.3,
+        "L": 31.4,
+        "XL": 32.5,
+        "XXL": 33.6,
+        "grading_pitch": 1
+      },
+      "back_crotch_curve_no11": {
+        "S": 41.7,
+        "M": 42.8,
+        "L": 43.9,
+        "XL": 45,
+        "XXL": 46.1,
+        "grading_pitch": 1.1
+      },
+      "inseam_no12": {
+        "S": 76,
+        "M": 77,
+        "L": 79,
+        "XL": 79,
+        "XXL": 79,
+        "grading_pitch": "1/2/0~ (irregular)"
+      },
+      "belt_width_no13": {
+        "S": 4,
+        "M": 4,
+        "L": 4,
+        "XL": 4,
+        "XXL": 4,
+        "grading_pitch": 0
+      },
+      "side_total_length_no14": {
+        "S": 105,
+        "M": 107,
+        "L": 110,
+        "XL": 111,
+        "XXL": 112,
+        "grading_pitch": "irregular"
+      },
+      "accessory_measurements": {
+        "cord_length_strap_no1": {
+          "S": 140,
+          "M": 140,
+          "L": 140,
+          "XL": 150,
+          "XXL": 150,
+          "grading_pitch": "0/5"
+        },
+        "flat_elastic_length_no2": {
+          "S": 74,
+          "M": 79,
+          "L": 84,
+          "XL": 89,
+          "XXL": 94,
+          "grading_pitch": 5
+        },
+        "front_pocket_zip_no3": {
+          "S": 16,
+          "M": 16,
+          "L": 16,
+          "XL": 16,
+          "XXL": 16,
+          "grading_pitch": 0
+        },
+        "back_pocket_zip_no4": {
+          "S": 15,
+          "M": 15,
+          "L": 15,
+          "XL": 15,
+          "XXL": 15,
+          "grading_pitch": 0
+        }
+      }
+    },
+    "construction": {
+      "lining": {
+        "pocket_bag": "Polyester taffeta (ポリエステルタフタ), 100% polyester, Black",
+        "pocket_bag_yardage_mtr": 0.4,
+        "pocket_bag_unit_price_usd": 1.5,
+        "pocket_bag_sample_mass_usd": 0.6,
+        "body": "Unlined (no body lining specified)"
+      },
+      "interlining": {
+        "type": "Fusing interlining",
+        "yardage_mtr": 1.0,
+        "unit_price_usd": 1.0,
+        "position": "Per pattern instruction (型紙に指示あり)",
+        "colour": "Black"
+      },
+      "side_panel": {
+        "type": "Goat suede insert at side seam (脇切替え)",
+        "colour": "Black"
+      },
+      "waistband_belt": {
+        "construction": "Belt with flat cord (D-ring tab) + flat elastic, no traditional buckle",
+        "flat_cord": {
+          "finish": "Tipped/chip-processed ends (チップ加工)",
+          "colour": "Silver tip, Black cord",
+          "position": "Belt",
+          "qty_per_garment": 1
+        },
+        "flat_elastic": {
+          "width_mm": 35,
+          "colour": "Black",
+          "position": "Belt",
+          "qty_per_garment": 1
+        },
+        "d_ring": {
+          "type": "CR Original D-ring",
+          "inner_diameter_mm": 10,
+          "finish": "Silver",
+          "position": "Tab",
+          "qty_per_garment": 1
+        },
+        "belt_width_cm": 4
+      },
+      "front_closure": "No fly button stated; closure via belt + elastic system",
+      "pocket_construction": {
+        "front_pockets": {
+          "type": "Zip pocket",
+          "zip": "YKK 5MA ZA C5, No.5M, closed end, CR pull tab in Silver",
+          "zip_length_cm": 16,
+          "qty_per_garment": 2,
+          "colour_code": "580 / Black"
+        },
+        "back_pockets": {
+          "type": "Zip pocket",
+          "right_back_pocket_zip": "YKK 5MA DABL C5, No.5M, 15cm, 1pc",
+          "right_back_pocket_zip_colour_code": "580 / Black",
+          "critical_note": "Left back pocket zipper slider is DABL (reverse/left-opening type) — factory must take care to use correct slider orientation",
+          "leather_patch_position": "Right back pocket top"
+        },
+        "cargo_pockets": false,
+        "breast_pocket": false
+      },
+      "leather_patch": {
+        "present": true,
+        "type": "CR Original Leather Patch A, thick stock",
+        "rivets": "New rivets – top 4mm, bottom 5mm",
+        "position": "Right back pocket, top",
+        "qty_per_garment": "1 set",
+        "colour": "Black",
+        "backing_washer": {
+          "type": "MORITO packing C4182S, 9x2",
+          "size_mm": 9,
+          "position": "Behind leather patch (reverse side)",
+          "qty_per_garment": 2,
+          "colour": "Black"
+        }
+      },
+      "pattern_layout": "One-direction layout, insert/nested cutting (一方方向・差込)",
+      "pattern_matching": "Yes/No specified per panel – TBC, confirm with factory",
+      "seam_allowance_general_cm": "TBC – not specified",
+      "panel_curvature": "Moderate – fitted trouser through hip/thigh, straight knee-to-hem, side seam panel insert",
+      "panel_pieces_estimated": 10,
+      "secondary_processing": {
+        "washing": "None",
+        "printing": "None",
+        "embroidery": "None",
+        "opp_bag": "None"
+      },
+      "workmanship_notes": [
+        "Based on CR1-O2B5-PL02 pattern base; sizing follows CRPL-011",
+        "Shrinkage rate applied is per factory finishing standard",
+        "2026-03-16 revision: size correction and full-size grading applied to all sizes",
+        "Take care in handling/positioning where goat suede side panel is used (per buyer's handwritten note on order sheet)",
+        "Left back pocket zipper slider is DABL type — do not confuse with right back pocket zipper",
+        "Pattern layout: one-direction, insert/nested cutting",
+        "Approval sample required before bulk production"
+      ]
+    },
+    "accessories": [
+      {
+        "item": "YKK Zip 5MA ZA C5, No.5M, CR Pull Tab",
+        "colour": "Silver tab / Black tape (code 580)",
+        "length_cm": 16,
+        "qty_per_garment": 2,
+        "position": "Front pockets"
+      },
+      {
+        "item": "YKK Zip 5MA DABL C5, No.5M",
+        "colour": "Black tape (code 580)",
+        "length_cm": 15,
+        "qty_per_garment": 1,
+        "position": "Right back pocket",
+        "note": "Left back pocket uses DABL-slider equivalent — verify orientation"
+      },
+      {
+        "item": "D-Ring (CR Original)",
+        "colour": "Silver",
+        "inner_diameter_mm": 10,
+        "qty_per_garment": 1,
+        "position": "Belt tab"
+      },
+      {
+        "item": "Flat Cord (chip-tipped)",
+        "colour": "Silver tip / Black cord",
+        "qty_per_garment": 1,
+        "position": "Belt"
+      },
+      {
+        "item": "Flat Elastic 35mm",
+        "colour": "Black",
+        "qty_per_garment": 1,
+        "position": "Belt"
+      },
+      {
+        "item": "Leather Patch A (thick, CR Original)",
+        "colour": "Black",
+        "qty_per_garment": "1 set",
+        "position": "Right back pocket top"
+      },
+      {
+        "item": "Backing Washer (MORITO C4182S, 9x2)",
+        "colour": "Black",
+        "qty_per_garment": 2,
+        "position": "Behind leather patch"
+      },
+      {
+        "item": "Button SGT-10 20MM",
+        "colour": "TBC",
+        "qty_per_garment": 4,
+        "position": "TBC (per yardage/price sheet)"
+      },
+      {
+        "item": "Button SGT-10 15MM",
+        "colour": "TBC",
+        "qty_per_garment": 2,
+        "position": "TBC (per yardage/price sheet)"
+      },
+      {
+        "item": "Support Button 10MM",
+        "colour": "TBC",
+        "qty_per_garment": 6,
+        "position": "TBC (per yardage/price sheet)"
+      }
+    ],
+    "labels": [
+      {
+        "type": "Main Label (ネーム)",
+        "brand": "CR22D",
+        "qty": 1,
+        "position": "Back belt centre, sewn into inside fold"
+      },
+      {
+        "type": "Size Label",
+        "qty": 1,
+        "position": "Left side, inside fold"
+      },
+      {
+        "type": "Composition Label (品質表示)",
+        "qty": 1,
+        "position": "Left side, inside fold"
+      },
+      {
+        "type": "Hang Tag (下げ札)",
+        "qty": 1,
+        "position": "Right front belt loop, single loop-through"
+      }
+    ],
+    "threads": [
+      {
+        "type": "Thread",
+        "ticket_number": "60s (60番手)",
+        "use": "General construction stitching",
+        "yardage_mtr": 1.0,
+        "unit_price_usd": 1.0
+      }
+    ],
+    "costing": {
+      "currency": "USD",
+      "main_material_sheep_glass": {
+        "yardage_sqft": 34.5,
+        "unit_price": 1.8,
+        "sample_mass_cost": 62.1
+      },
+      "sub_material_goat_suede": {
+        "yardage_sqft": 2.6,
+        "unit_price": 1.75,
+        "sample_mass_cost": 4.55
+      },
+      "lining_pocket_poly": {
+        "yardage_mtr": 0.4,
+        "unit_price": 1.5,
+        "sample_mass_cost": 0.6
+      },
+      "interlining_fusing": {
+        "yardage_mtr": 1,
+        "unit_price": "TBC",
+        "sample_mass_cost": 1.0
+      },
+      "thread": {
+        "yardage_mtr": 1,
+        "unit_price": "TBC",
+        "sample_mass_cost": 1.0
+      },
+      "accessories_buttons": {
+        "qty_20mm": 4,
+        "qty_15mm": 2,
+        "qty_support_10mm": 6,
+        "sample_mass_cost": 0.0
+      },
+      "manufacturing_cost_cutting_stitching": 30.0,
+      "packaging_cost_box_poly_tissue": 3.0,
+      "fob_charge_duty_clearing": 5.0,
+      "total_garment_price_fob_usd": 107.25,
+      "order_unit_price_usd": 104,
+      "order_total_price_usd": 6240,
+      "note": "Order-sheet unit price ($104) differs slightly from yardage/price quotation FOB total ($107.25); confirm final contracted price with buyer"
+    },
+    "yardage_estimation": {
+      "main_leather_sheep_glass_sqft": 34.5,
+      "sub_leather_goat_suede_sqft": 2.6,
+      "pocket_lining_polyester_mtr": 0.4,
+      "fusing_interlining_mtr": 1.0,
+      "thread_mtr": 1.0
+    },
+    "complexity_assessment": {
+      "overall_complexity": "Medium",
+      "rationale": "Dual leather types (sheep glass body + goat suede side insert) requiring panel-matching care; two zip pocket types with a critical left/right slider orientation distinction; leather patch with rivet and backing washer detail; belt system combining D-ring, flat cord, and flat elastic rather than a standard buckle/button waistband; full 5-size grading already finalized.",
+      "complexity_score": 6,
+      "complexity_max": 10
+    },
+    "proto_sample_status": "Approval sample required before bulk production (60 pcs); pattern revised and re-graded 2026-03-16",
+    "label_brand": "CRIMIE",
+    "source_files": [
+      "1782727995298_BMO-1.pdf",
+      "1782727995300_Order-sheet-1.pdf",
+      "1782727995300_spec_sheet_1.xlsx"
+    ]
+  },
+  "cross_document_reconciliation_notes": [
+    "Style/pattern number is consistent across all 3 documents as 'CR1-02F5-PL02', though the BOM document renders it as 'CRI 02F5 PL02' (spacing/casing variant only).",
+    "Order sheet handwritten note lists yardage as 24.5sf (Sheep Glass) and 2.6sf (Goat Suede); BOM line items list 34.5 (Sheep Glass) and 2.6 (Goat Suede) — the Sheep Glass yardage differs (24.5 vs 34.5). Likely a handwriting/transcription discrepancy; BOM figure (34.5) was used as authoritative in the structured spec since it is typed, but this should be confirmed with the factory.",
+    "Order sheet unit price is $104/pc; BOM total FOB garment price is $107.25 — a $3.25 per-unit discrepancy. Not reconciled; flagged in structured_style_spec.costing.note.",
+    "Order sheet material field says 'Sheep skin' (general); spec sheet and BOM both specify 'Sheep Glass' (a specific sheep leather finish) plus Goat Suede as a secondary material for the side panel — spec sheet is the most detailed and authoritative source for material specifics.",
+    "Accessory measurement chart (spec sheet) only explicitly lists S/M/L columns inline; XL/XXL values for cord length (150) and flat elastic length (89, 94) were recovered from the adjacent measurement table area and merged into structured_style_spec.measurements_cm.accessory_measurements.",
+    "Buttons (SGT-10 20mm/15mm, support buttons 10mm) appear only in the BOM accessories line items with $0 unit cost and no stated usage position in the spec sheet's materials table — these may be a holdover from a related style or a yet-unconfirmed trim; flagged as TBC in structured_style_spec.",
+    "No sample or bulk delivery dates were filled in on either the order sheet or the spec sheet header — both left blank in source documents.",
+    "Secondary processing instruction sheet (二次加工指示) in the spec workbook was entirely blank for this style, confirming the spec sheet's own secondary_processing_table values of 'none' for washing/printing/embroidery/OPP bag."
+  ],
+  "source_files": [
+    "1782727995298_BMO-1.pdf",
+    "1782727995300_Order-sheet-1.pdf",
+    "1782727995300_spec_sheet_1.xlsx"
+  ]
+}

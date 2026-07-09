@@ -1,0 +1,307 @@
+{
+  "contract_number": "49/26",
+  "contract_date": "2026-04-01",
+  "seller": {
+    "name": "PAKKAR TANVEER EXPORTS",
+    "address": "No.1 Hyder Garden, 2nd Street Extn., Jamaliya Nagar, Perambur, Chennai 600012, India"
+  },
+  "buyer": {
+    "client_id": "ORFATTI-001",
+    "client_name": "CONFEZIONI ORFATTI SRL",
+    "address": "Via E. e P. Salani 24, 50050 Limite S/Arno FI, Italy"
+  },
+  "agent": {
+    "name": "MEA SRL",
+    "address": "Via Capoquadri 8, 50053 Empoli (FI), Italy",
+    "email": "mea.srl@tin.it"
+  },
+  "delivery_date": "2026-05-15",
+  "delivery_terms": "EX CHENNAI",
+  "currency": "EUR",
+  "total_order_quantity": 168,
+  "size_range": "DONNA 38-56 (XS–XXXL)",
+  "style_id": "SP72706",
+  "internal_style_ref": "SP72706 (FOIL DOLLY)",
+  "collection": "VLAB",
+  "season": "SS2027",
+  "garment_type": "Jacket",
+  "garment_subtype": "Short Boxy Jacket – Patch Pockets, Leather-Covered Snaps, Partial Lining",
+  "gender": "Women (Donna)",
+  "size_range_ordered": "42 (S)",
+  "order_quantity": 11,
+  "colour": "ICE",
+  "colour_code": "ICE – follow leather swatch",
+  "unit_price_eur": "TBC",
+  "leather": {
+    "type": "202 DOLLY",
+    "finish": "Foil / Metallic Finish",
+    "animal": "Not specified – specialist foil-coated leather",
+    "thickness_mm": "TBC – standard garment leather ~0.6–0.8mm",
+    "selection_grade": "Same as original sample",
+    "colour_direction": "ICE – per swatch",
+    "grain_restriction": "Net-cut where indicated; raw edges on collar neck, round sleeves, body flanks, sleeve cuts",
+    "anti_dust_treatment": false,
+    "napalan_treatment": false,
+    "special_finish": "Foil surface – careful handling required",
+    "DCM_norm": 327,
+    "costing_DCM_lay_avg": 307,
+    "unit_price_inr_per_dcm": 14,
+    "total_leather_cost_inr": 4578,
+    "foil_charges_sqft": 26,
+    "calibration": {
+      "extra_leather_dcm": 20,
+      "calibration_percent": 6.51,
+      "allocated_dcm": 327,
+      "expected_consumption_dcm": 307,
+      "purpose": "Grace allowance for leather defects, matching, cutting losses and production variation."
+    }
+  },
+  "pattern": {
+    "base_pattern_ref": "Original brown garment (customer-held); same fitting as SP72705 but different details",
+    "pattern_type": "Fitted short jacket, round sleeve, patch pockets",
+    "paper_pattern_source": "From original sample – client to supply",
+    "size_base": "42 (labelled as S)",
+    "grading_increment_cm": 2,
+    "grading_method": "Proportional Italian system"
+  },
+  "measurements_cm": {
+    "size_reference": "S/42",
+    "back_length_A": {
+      "target": 52.0,
+      "proto": 51.2
+    },
+    "sleeve_length_incl_cuff_D": {
+      "target": 60.0,
+      "proto": 61.0,
+      "comment": "Sleeve length 60cm for size S per proto comment"
+    },
+    "half_bottom_sleeve_circunf_E": {
+      "target": 14.0,
+      "note": "Reduce sleeve largeness: half bottom sleeve 14cm for S; half elbow at 34cm from shoulder must be 17.2cm"
+    },
+    "elbow_position_from_shoulder_F": {
+      "target": 34.0,
+      "proto": 17.4
+    },
+    "half_elbow_at_34cm_F1": 17.2,
+    "half_muscle_circunf_F2": {
+      "target": 18.0,
+      "proto": 18.5
+    },
+    "half_chest_circunf_G": "TBC (cancelled on meas chart per proto – follow proto sample)",
+    "half_bottom_hem_L": {
+      "target": 54.0,
+      "proto": 54.0
+    },
+    "collar_height_back_M": {
+      "target": 8.7,
+      "proto": 8.7
+    },
+    "stand_collar_width_M2": {
+      "target": 3.5,
+      "proto": 3.7
+    },
+    "shoulder_to_shoulder_N": {
+      "target": 40.3,
+      "proto": 40.3
+    },
+    "back_width_at_15cm_N1": {
+      "target": 40.0,
+      "proto": 40.0
+    },
+    "back_yoke_lining_length_cm": 16.0,
+    "back_neckhole_breadth_V": "per grade",
+    "front_neckhole_depth_V1": "per grade"
+  },
+  "construction": {
+    "lining": {
+      "body": "Unlined (lower back and front side body unlined)",
+      "back_yoke": "Polyester lining on sleeve + back yoke only (to clean back leather folds)",
+      "sleeves": "Polyester lining – ICE colour (matching)",
+      "pocket_sac": "One visible layer leather; inside/facing in leather (raw cut); underside viscose matching",
+      "adhesive_locations": [
+        "Front edge",
+        "Front facing",
+        "Collar",
+        "Stand collar",
+        "Body hem",
+        "Sleeve hem",
+        "Patch pocket top side"
+      ],
+      "lining_colour": "ICE – must completely match leather colour (critical per workmanship note 8)"
+    },
+    "collar": {
+      "type": "Top collar + under collar + stand collar",
+      "construction": "Outside and inside; stand collar outside and inside; clean-cut",
+      "collar_height_back_cm": 8.7,
+      "stand_collar_width_cm": 3.5
+    },
+    "front_closure": "Snap – covered with leather (head size same as original); inside metal part nickel",
+    "snap_details": {
+      "qty": "4+1 spare",
+      "position": "Front side",
+      "head_covering": "Leather-covered – same shape, workmanship, size as original brown garment",
+      "under_side": "Flat plate nickel finishing",
+      "plastic_reinforcement": 4
+    },
+    "front_facing": "Leather, clean-cut",
+    "pocket_construction": {
+      "type": "Patch pockets",
+      "shape": "Same shape as brown original garment",
+      "edge": "Raw cut all around",
+      "facing_inside": "Leather inside, raw cut (same as yellow original garment in 202 DOLLY)",
+      "quantity": 2,
+      "breast_pocket": false,
+      "cargo_pockets": false
+    },
+    "yoke": {
+      "present": true,
+      "type": "Back yoke",
+      "lining": "Polyester – lengthen 3cm; back centre finished length 16cm",
+      "lining_colour": "ICE matching"
+    },
+    "back_neck_patch": {
+      "present": false,
+      "note": "CANCELLED per proto comment #5 – do not apply back neck patch on SP72706"
+    },
+    "decorative_panels": {
+      "curl_hanger": "Leather curl hanger"
+    },
+    "seam_allowance_general_cm": 1.0,
+    "open_seam_locations": [
+      "Collar + stand collar neck sewing",
+      "Back and front round sleeve",
+      "Body flanks",
+      "Under vertical sleeve cut",
+      "Bottom horizontal sleeve cut"
+    ],
+    "panel_curvature": "Moderate – fitted silhouette, curved patch pocket edges",
+    "panel_pieces_estimated": 14,
+    "workmanship_notes": [
+      "Paper pattern from original brown garment – fitting/length correct",
+      "Sleeve: half bottom 14cm for S; reduce sleeve largeness as pinned on proto right sleeve",
+      "Sleeve length 60cm for size S",
+      "Back yoke lining lengthen 3cm, back centre finished length = 16cm",
+      "Main label on back centre DIRECTLY ON LINING without leather patch (comment #6)",
+      "Back neck patch CANCELLED (comment #5)",
+      "Patch pocket raw cut all around; inside facing leather raw cut",
+      "LAB IT ON print on back neck – same as yellow original but with no patch (direct on lining for SP72706? – confirm with client)",
+      "Snap under side must be flat plate nickel – NOT the hollow type (see photo reference)",
+      "Lining must completely match ICE colour of leather",
+      "Return original sample with repetitions"
+    ]
+  },
+  "accessories": [
+    {
+      "item": "Snap – Head covered with leather",
+      "colour": "ICE (matching)",
+      "qty_per_garment": "4+1 spare",
+      "position": "Front side"
+    },
+    {
+      "item": "Snap – Under side flat plate",
+      "colour": "Nickel",
+      "qty_per_garment": "4+1 spare",
+      "position": "Front side (under)"
+    },
+    {
+      "item": "Plastic Reinforcement",
+      "colour": "NA",
+      "qty_per_garment": 4,
+      "position": "Behind snap attachment"
+    },
+    {
+      "item": "LAB IT ON Print on Leather Patch",
+      "colour": "Silver + Red",
+      "qty_per_garment": 1,
+      "position": "Inside back neck line"
+    },
+    {
+      "item": "Leather Curl Hanger",
+      "colour": "Matching",
+      "qty_per_garment": 1,
+      "position": "Back neck"
+    },
+    {
+      "item": "Polybag for Spare Buttons",
+      "colour": "Clear",
+      "qty_per_garment": 1,
+      "position": "On left flank applied to size label"
+    },
+    {
+      "item": "Transparent Plastic Pin",
+      "colour": "Transparent",
+      "qty_per_garment": 1,
+      "position": "On size label"
+    }
+  ],
+  "labels": [
+    {
+      "type": "Main Label",
+      "brand": "VLAB",
+      "qty": 1,
+      "position": "Inside back centre on lining directly (no leather patch)",
+      "construction": "Woven, black ground, white writing"
+    },
+    {
+      "type": "Size Label",
+      "qty": 1,
+      "position": "Left flank at 10cm from round sleeves"
+    },
+    {
+      "type": "Composition Label",
+      "qty": 1,
+      "position": "Inside left flank, under size label"
+    },
+    {
+      "type": "Care Label + Prodotto Importato",
+      "qty": 1,
+      "position": "Inside left flank, under size label"
+    }
+  ],
+  "threads": [
+    {
+      "type": "Thread Size 30",
+      "colour": "ICE (matching)",
+      "use": "All outside stitching"
+    },
+    {
+      "type": "Thread (SMS size)",
+      "colour": "ICE (matching)",
+      "use": "All inside stitching"
+    }
+  ],
+  "costing": {
+    "leather_inr_no_gst": 4578,
+    "leather_inr_with_gst": 4806.9,
+    "materials_inr_no_gst": 2903.25,
+    "materials_inr_with_gst": 2940.63,
+    "total_cost_inr_no_gst": 7481.25,
+    "making_cost_inr": 1000,
+    "freight_inr": 450,
+    "commission_pct": 6,
+    "exchange_rate_eur_inr": 85,
+    "fob_price_eur_approx": 88
+  },
+  "yardage_estimation": {
+    "leather_DCM": 327,
+    "lay_avg_DCM": 307,
+    "lining_MTR": 1.0,
+    "fusing_MTS": 0.5,
+    "solutions_litre": 0.15,
+    "pakka_tape_MTS": 3.75
+  },
+  "complexity_assessment": {
+    "overall_complexity": "High",
+    "rationale": "Foil leather; leather-covered snaps require precision; patch pockets with raw edges; partial lining; back yoke lining; colour-match requirement is critical; open-seam construction in multiple locations.",
+    "complexity_score": 8,
+    "complexity_max": 10
+  },
+  "proto_sample_status": "Proto sample to be made; return with original sample",
+  "label_brand": "VLAB",
+  "source_files": [
+    "SP72706_202_DOLLY.xls",
+    "SAMPLE_COSTING_SHEET_FOR_SIR.xlsx",
+    "49-26-01-04-2026.pdf"
+  ]
+}

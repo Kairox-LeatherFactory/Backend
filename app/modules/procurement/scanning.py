@@ -105,10 +105,22 @@ def scan_bytes(data: bytes, *, scanner: Scanner | None = None) -> tuple[ScanStat
     socket call. When enabled → uses `scanner` (default: real clamd), failing
     CLOSED with ScannerUnavailable if the scanner cannot be reached.
     """
+    print("=" * 50)
+    print("ENTERED scan_bytes")
+    print("virus_scan_enabled =", settings.virus_scan_enabled)
+    print("type =", type(settings.virus_scan_enabled))
+    print("=" * 50)
+
     if not settings.virus_scan_enabled:
+        print("SKIPPING VIRUS SCAN")
         return ScanStatus.SKIPPED, None
+
+    print("RUNNING VIRUS SCAN")
+
     scan = scanner or _default_scanner()
-    infected, sig = scan(data)          # ScannerUnavailable propagates (→ 503)
+    infected, sig = scan(data)
+
     if infected:
         return ScanStatus.INFECTED, sig
+
     return ScanStatus.CLEAN, None

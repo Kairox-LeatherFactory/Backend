@@ -123,3 +123,17 @@ langchain-google-genai==3.0.1    # Gemini — PRIMARY for BOM extraction (multim
 # langchain-ollama>=0.2          # local/free
 # langchain-anthropic            # hosted
 # langchain-openai               # hosted
+
+# ── Background jobs (Celery + Beat) ─────────────────────────────────────────
+# WHY: heavy + scheduled work moved off the request path —
+#   1. extraction/BOM generation (Gemini-vision is 5–30s + retries; blocking an
+#      HTTP worker that long is wrong) → enqueued as a task, result pushed via
+#      Realtime. The router validates synchronously, the worker builds.
+#   2. SCHEDULED jobs (Beat): freight-risk deadline scan, 2-hour notification
+#      escalation — periodic work that has no request to hang on.
+# Run THREE processes: uvicorn (API), `celery ... worker`, `celery ... beat`.
+celery==5.6.2
+redis==7.3.0             # broker + result backend client (Upstash works: rediss://)
+
+ezdxf>=1.4,<2.0
+shapely>=2.0,<3.0

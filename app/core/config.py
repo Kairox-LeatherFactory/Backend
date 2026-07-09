@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     # Examples: "ollama:qwen2.5:3b-instruct", "anthropic:claude-3-5-haiku", "openai:gpt-4o-mini"
     chat_model: str = ""
     
+    celery_broker_url: str = "redis://localhost:6379/0"
+    celery_result_backend: str = "redis://localhost:6379/1"
+    
     # PDF "is this scanned?" threshold. A page with fewer than this many extracted
     # text characters routes to the vision LLM instead of the text LLM. 40 chars per
     # page reliably distinguishes a real text-layer PDF from one with noise leak.
@@ -79,7 +82,7 @@ class Settings(BaseSettings):
     # / handwritten PDFs, narrative spec sheets, ambiguous classification). The
     # service runs a provider chain Gemini -> Groq -> "needs manual entry"; it never
     # silently guesses. Embeddings remain local HF (intelligence/models_catalog.py).
-    extraction_model: str = "gemini:gemini-2.0-flash"          # primary (multimodal/long-context)
+    extraction_model: str = "gemini:gemini-2.5-flash"          # primary (multimodal/long-context)
     extraction_fallback_model: str = "groq:llama-3.3-70b-versatile"  # fallback (text/structured)
     gemini_api_key: str = ""        # langchain-google-genai
     groq_api_key: str = ""          # langchain-groq (also read from env by ChatGroq)
@@ -106,7 +109,7 @@ class Settings(BaseSettings):
     ocr_max_pages: int = 5                           # cap pages OCR'd (cost/latency bound)
     ocr_dpi: int = 200                               # rasterisation DPI for OCR + vision
     vision_classifier_enabled: bool = True
-    vision_model: str = "gemini:gemini-2.0-flash"    # multimodal model for the vision rung
+    vision_model: str = "gemini:gemini-2.5-flash"    # multimodal model for the vision rung
     vision_conf_threshold: float = 0.5               # below this from the text path → escalate
     vision_max_pages: int = 4                        # cap page-images sent to the vision model
 
@@ -136,7 +139,7 @@ class Settings(BaseSettings):
     max_upload_mb: int = 25
     # Virus scan (real ClamAV) gated by a flag: ON in staging/prod (reject on hit,
     # fail closed if clamd is unreachable); OFF in dev records scan_status=skipped.
-    virus_scan_enabled: bool = True
+    virus_scan_enabled: bool = False
     clamd_host: str = "127.0.0.1"
     clamd_port: int = 3310
 

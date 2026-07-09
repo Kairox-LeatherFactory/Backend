@@ -1,0 +1,255 @@
+{
+  "contract_number": "49/26",
+  "contract_date": "2026-04-01",
+  "seller": {
+    "name": "PAKKAR TANVEER EXPORTS",
+    "address": "No.1 Hyder Garden, 2nd Street Extn., Jamaliya Nagar, Perambur, Chennai 600012, India"
+  },
+  "buyer": {
+    "client_id": "ORFATTI-001",
+    "client_name": "CONFEZIONI ORFATTI SRL",
+    "address": "Via E. e P. Salani 24, 50050 Limite S/Arno FI, Italy"
+  },
+  "agent": {
+    "name": "MEA SRL",
+    "address": "Via Capoquadri 8, 50053 Empoli (FI), Italy",
+    "email": "mea.srl@tin.it"
+  },
+  "delivery_date": "2026-05-15",
+  "delivery_terms": "EX CHENNAI",
+  "currency": "EUR",
+  "total_order_quantity": 168,
+  "size_range": "DONNA 38-56 (XS–XXXL)",
+  "style_id": "SP74003",
+  "internal_style_ref": "SP74003 (G.SUEDE)",
+  "collection": "MONTEREGGI",
+  "season": "SS2027",
+  "garment_type": "Jacket",
+  "garment_subtype": "Fully-Lined Jacket with Embroidered Back Patch and Fake Horn Buttons",
+  "gender": "Women (Donna)",
+  "size_range_ordered": "42 (S)",
+  "order_quantity": 19,
+  "colour": "Military Green",
+  "colour_code": "Military Green – follow order swatch",
+  "unit_price_eur": "TBC",
+  "leather": {
+    "type": "Goat Suede",
+    "finish": "Natural suede, soft and substantial hand-feel",
+    "animal": "Goat",
+    "thickness_mm": "0.4–0.5mm",
+    "selection_grade": "ABC Selection",
+    "quality_notes": "Soft with substantial hand-feel; ABC selection means only clean, uniform panels",
+    "colour_direction": "Military Green – follow order",
+    "grain_restriction": "No directional grain restriction stated; standard suede nap direction must be consistent across panels",
+    "anti_dust_treatment": false,
+    "napalan_treatment": false,
+    "DCM_norm": 480,
+    "costing_DCM_lay_avg": 460,
+    "unit_price_inr_per_dcm": 12,
+    "total_leather_cost_inr": 5760,
+    "calibration": {
+      "extra_leather_dcm": 20,
+      "calibration_percent": 4.35,
+      "allocated_dcm": 480,
+      "expected_consumption_dcm": 460,
+      "purpose": "Grace allowance for leather defects, matching, cutting losses and production variation."
+    }
+  },
+  "pattern": {
+    "base_pattern_ref": "Original sample held by ORFATTI / TANVEER",
+    "pattern_type": "Fitted jacket, round sleeve, fully lined",
+    "paper_pattern_source": "From original sample",
+    "size_base": "42 (labelled as S, confirmed by client)",
+    "grading_increment_cm": 2,
+    "grading_method": "Proportional Italian system"
+  },
+  "measurements_cm": {
+    "size_reference": "S/42 SMS",
+    "back_length_A": 68.5,
+    "sleeve_length_incl_cuff_D": 63.0,
+    "half_bottom_sleeve_circunf_E": 14.2,
+    "elbow_position_from_shoulder_F": 33.0,
+    "half_elbow_circunf_F1": 15.3,
+    "half_muscle_circunf_F2": 17.2,
+    "half_chest_circunf_G": 50.0,
+    "waist_height_from_CB_H": 38.0,
+    "half_waist_circunf_H1": 46.5,
+    "half_bottom_hem_L": 54.8,
+    "collar_height_back_M": 5.4,
+    "front_collar_width_M1": 3.2,
+    "stand_collar_width_M2": 2.8,
+    "shoulder_to_shoulder_N": 40.0,
+    "back_width_at_15cm_N1": 36.0,
+    "breast_width_at_13cm_N2_size_S": 37.5,
+    "pocket_position_from_hsp_P_size_S": 47.0,
+    "pocket_length_P2": 16.0,
+    "pocket_width_P3": 5.0,
+    "weight_approx_g": {
+      "proto": 153,
+      "sms_requested": 155
+    }
+  },
+  "construction": {
+    "lining": {
+      "body": "Viscose lining – Black (same quality and softness as original sample)",
+      "sleeves": "Polyester lining – Black",
+      "pocket_sac": "Polyester lining – Black",
+      "adhesive_locations": [
+        "Front facing",
+        "Collar",
+        "Stand collar",
+        "Hems"
+      ],
+      "lining_colour": "Black"
+    },
+    "collar": {
+      "type": "Stand collar with collar",
+      "construction": "Round collar joint; leather curl hanger at back",
+      "collar_height_back_cm": 5.4,
+      "front_collar_width_cm": 3.2,
+      "stand_collar_width_cm": 2.8,
+      "easy_living_tape": false,
+      "curl_hanger": "Leather curl hanger only (Easy Living tape cancelled)"
+    },
+    "front_closure": "Fake Horn Button 4-holes Size 36",
+    "front_facing": "Leather, attached to body",
+    "pocket_construction": {
+      "type": "Welt / inseam",
+      "position_from_hsp_cm": 47.0,
+      "length_cm": 16.0,
+      "width_cm": 5.0,
+      "breast_pocket": true,
+      "breast_pocket_notes": "Breast pocket with flap – see P1–P5 and Q1–Q5 measurements",
+      "cargo_pockets": false,
+      "pocket_braid": false
+    },
+    "yoke": false,
+    "back_slit": false,
+    "embroidered_patch": {
+      "present": true,
+      "position": "Centre back outside, close to round collar joint stitching",
+      "material": "Leather patch – net cut, fixed with 2mm stitching all around, backed with adhesive",
+      "size": "TBC – approx 4×4cm",
+      "embroidery": "Thread matching leather colour; must be improved per client comments",
+      "label_type": "Montereggi embroidered patch"
+    },
+    "main_label_position": "Back centre, directly on lining (no leather patch under it – per proto comment #2)",
+    "seam_allowance_general_cm": 1.0,
+    "panel_curvature": "Moderate – standard fitted jacket curves",
+    "panel_pieces_estimated": 16,
+    "decorative_panels": {
+      "back_embroidery_patch": "Yes – net cut leather, 2mm stitching, adhesive backed",
+      "breast_pocket_flap": "Yes"
+    },
+    "workmanship_notes": [
+      "Cancel Easy Living tape on centre back round collar joint – keep leather curl hanger only",
+      "Apply main label directly on lining at back centre (not on leather patch)",
+      "Lining: body in viscose Black; sleeves + pocket sac in polyester Black",
+      "Apply embroidered patch on back side outside close to round collar joint stitching",
+      "Patch net cut; fixed with stitching at 2mm all around; backed with adhesive",
+      "Improve embroidery thread colour – must match leather perfectly",
+      "Label garment size S (confirmed by client SMS)",
+      "Fake horn buttons: shape and colour to follow swatch sent by client"
+    ]
+  },
+  "accessories": [
+    {
+      "item": "Fake Horn Button 4-Holes Size 36",
+      "colour": "Matching – per swatch",
+      "qty_per_garment": "1+1 spare",
+      "position": "Centre front"
+    },
+    {
+      "item": "Under Button 4-Holes Size 18",
+      "colour": "Matching",
+      "qty_per_garment": "1+1 spare",
+      "position": "Centre front (inside)"
+    },
+    {
+      "item": "Embroidered Leather Patch",
+      "colour": "Matching",
+      "qty_per_garment": 1,
+      "position": "Centre back outside"
+    },
+    {
+      "item": "Polybag for Spare Accessories",
+      "colour": "Clear",
+      "qty_per_garment": 1,
+      "position": "Size label left flank"
+    },
+    {
+      "item": "Transparent Plastic Pin",
+      "colour": "Transparent",
+      "qty_per_garment": 1,
+      "position": "Size label left flank"
+    }
+  ],
+  "labels": [
+    {
+      "type": "Main Label",
+      "brand": "ORFATTI",
+      "qty": 1,
+      "position": "Back centre directly on lining",
+      "construction": "Woven, black ground, white writing"
+    },
+    {
+      "type": "Size Label",
+      "qty": 1,
+      "position": "Left flank at 10cm from round sleeves"
+    },
+    {
+      "type": "Composition Label",
+      "qty": 1,
+      "position": "Inside left flank, under size label"
+    },
+    {
+      "type": "Care Label + Prodotto Importato",
+      "qty": 1,
+      "position": "Inside left flank, under size label"
+    }
+  ],
+  "threads": [
+    {
+      "type": "Thread Size 30",
+      "colour": "Matching Military Green",
+      "use": "All outside stitching"
+    }
+  ],
+  "costing": {
+    "leather_inr_no_gst": 5760,
+    "leather_inr_with_gst": 6048,
+    "materials_inr_no_gst": 341.95,
+    "making_cost_inr": 1200,
+    "freight_inr": 450,
+    "commission_pct": 6,
+    "exchange_rate_eur_inr": 85,
+    "fob_price_eur_approx": 108,
+    "note": "Costing sheet (SP74003) shows bulk run of 100pcs – per-unit figures used here"
+  },
+  "yardage_estimation": {
+    "leather_DCM": 480,
+    "lay_avg_DCM": 460,
+    "lining_body_MTR": 2.0,
+    "lining_polyester_MTR": 0.5,
+    "fusing_MTS": 0.5,
+    "solutions_litre": 0.15,
+    "pakka_tape_MTS": 3.75
+  },
+  "proxy_area_sqft": {
+    "estimated": 51.7,
+    "note": "Derived from 480 DCM / 9.29 (DCM to sqft conversion)"
+  },
+  "complexity_assessment": {
+    "overall_complexity": "Medium-High",
+    "rationale": "Fully lined jacket with dual lining types; embroidered back patch with net-cut leather; breast pocket with flap; fake horn buttons; round collar + stand collar construction.",
+    "complexity_score": 7,
+    "complexity_max": 10
+  },
+  "proto_sample_status": "SMS sample confirmed; label size S",
+  "label_brand": "MONTEREGGI",
+  "source_files": [
+    "SP74003_GOAT_SUEDE.xls",
+    "SAMPLE_COSTING_SHEET_FOR_SIR.xlsx",
+    "49-26-01-04-2026.pdf"
+  ]
+}
