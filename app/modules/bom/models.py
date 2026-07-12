@@ -192,6 +192,10 @@ class BomItem(Base, UUIDMixin, TimestampMixin):
     source_ref: Mapped[str | None] = mapped_column(String(120))
     dcm_source: Mapped[str | None] = mapped_column(String(20))   # DcmSource value
     dcm_confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    # ── attribution axis (label→material mapping) — SEPARATE from dcm_* (yield) ──
+    attribution_source: Mapped[str | None] = mapped_column(String(20))          # AttributionSource
+    attribution_confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    attribution_status: Mapped[str] = mapped_column(String(20), default="confirmed")  # AttributionStatus
     bom: Mapped["Bom"] = relationship(back_populates="items")
 
 
@@ -485,6 +489,11 @@ class FabricRoleRow(Base, UUIDMixin, TimestampMixin):
     role: Mapped[str] = mapped_column(String(30))
     category: Mapped[str] = mapped_column(String(30))
     is_leather: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(20), default="confirmed", index=True)  # FabricRoleStatus
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    source: Mapped[str | None] = mapped_column(String(20), default="seed")
+    suggested_by: Mapped[uuid.UUID | None] = mapped_column(GUID())
+    confirmed_by: Mapped[uuid.UUID | None] = mapped_column(GUID())
     
 class CostCatalogLine(Base, UUIDMixin, TimestampMixin):
     """A default non-material BOM cost line (§5b). Keyed by garment_type.code (UPPER)
@@ -569,3 +578,18 @@ class OrderStyleColor(Base, UUIDMixin, TimestampMixin):
     warnings: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
 
     style: Mapped[OrderStyle] = relationship(back_populates="colors")
+    
+class MaterialRate(Base, UUIDMixin, TimestampMixin):
+    """Per-material (optionally per-supplier) unit price so BOM lines roll up a real
+    FOB instead of 0. Keyed by a normalized material key + uom; newest is_current wins.
+    Runtime-editable, same posture as dxf_yield / cost_catalog."""
+    __tablename__ = "material_rate"
+    __table_args__ = (UniqueConstraint("material_key", "uom", "supplier",
+                                       name="uq_material_rate"),)
+    material_key: Mapped[str] = mapped_column(String(160), index=True)   # normalized line name
+    display_name: Mapped[str | None] = mapped_column(String(200))
+    uom: Mapped[str | None] = mapped_column(String(20))
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(12, 4))
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    supplier: Mapped[str | None] = mapped_column(String(160))
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, index=True)

@@ -92,6 +92,13 @@ class Settings(BaseSettings):
     # whole budget on internal backoff before we move to the next rung.
     llm_request_timeout: float = 20.0
     llm_max_retries: int = 0
+    # Cap the model's OUTPUT so a large consolidated order (many styles) can't blow
+    # the response budget. gemini-2.5-flash is a THINKING model: with no explicit
+    # ceiling and thinking left on, a big JSON answer either truncates (-> unparseable
+    # JSON) or the thinking tokens starve the visible output (-> empty). We set a
+    # generous ceiling AND disable thinking on the extraction calls (thinking_budget=0)
+    # so the whole budget goes to the answer we actually parse.
+    llm_max_output_tokens: int = 8192
 
     # ── Scanned-document OCR + Gemini vision fallback (§3a identity validation) ─
     # The escalation ladder for an upload the cheap heuristic can't settle:

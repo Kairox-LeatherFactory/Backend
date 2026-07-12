@@ -3,8 +3,9 @@
 modules/production/repository.py — Async data access for production
 ================================================================================
 production_event is the finest grain: one manager records that one employee did
-N pieces of one operation on one SKU on one day. Aggregations here power the
-live "Carnaby card" (stage totals) and the piece-rate wage inputs.
+ONE PIECE of one operation on one day (qty always 1). Aggregations here power the
+live "Carnaby card" (stage totals) and the piece-rate wage inputs. New piece
+primitives mint pieces at cutting and stage them (one event) at later steps.
 ================================================================================
 """
 import uuid
@@ -17,6 +18,7 @@ from app.modules.clients.models import SKU
 from app.modules.production.models import (
     Operation,
     OperationAccess,
+    Piece,
     ProductionEvent,
 )
 
@@ -35,11 +37,81 @@ class ProductionRepository:
     async def get_operation(self, op_id: uuid.UUID) -> Operation | None:
         return await self.db.get(Operation, op_id)
 
+    async def get_operation_by_code(self, code: str) -> Operation | None:
+        res = await self.db.execute(select(Operation).where(Operation.code == code))
+        return res.scalar_one_or_none()
+
     async def operations_for_role(self, role: str) -> set[uuid.UUID]:
         res = await self.db.execute(
             select(OperationAccess.operation_id).where(OperationAccess.role == role)
         )
         return set(res.scalars())
+
+    # --- pieces ---
+    async def piece_count_for_sku(self, sku_id: uuid.UUID) -> int:
+        return int(await self.db.scalar(
+            select(func.count(Piece.id)).where(Piece.sku_id == sku_id)
+        ) or 0)
+
+    async def get_piece_by_code(self, code: str) -> Piece | None:
+        res = await self.db.execute(select(Piece).where(Piece.code == code))
+        return res.scalar_one_or_none()
+
+    async def has_event_at_op(self, piece_id: uuid.UUID, operation_id: uuid.UUID) -> bool:
+        found = await self.db.scalar(
+            select(ProductionEvent.id).where(
+                ProductionEvent.piece_id == piece_id,
+                ProductionEvent.operation_id == operation_id,
+            ).limit(1)
+        )
+        return found is not None
+
+    async def mint_pieces(
+        self, *, sku_id: uuid.UUID, operation: Operation, employee_id: uuid.UUID,
+        work_date: date, count: int, entered_by: str | None, prefix: str,
+    ) -> list[Piece]:
+        """Create `count` pieces for a SKU AND their CUTTING events, one commit.
+
+        Codes are contiguous `{prefix}-{seq:04d}` where seq continues from the
+        pieces already minted for this SKU. `code` carries a unique constraint, so
+        a concurrent mint of the same SKU FAILS LOUDLY (Postgres) rather than
+        silently colliding — retry the request if that ever fires.
+        """
+        base = await self.piece_count_for_sku(sku_id)
+        pieces: list[Piece] = []
+        for i in range(1, count + 1):
+            p = Piece(
+                code=f"{prefix}-{base + i:04d}",
+                sku_id=sku_id,
+                current_operation_id=operation.id,
+            )
+            self.db.add(p)
+            pieces.append(p)
+        await self.db.flush()  # assign piece ids
+        for p in pieces:
+            self.db.add(ProductionEvent(
+                sku_id=sku_id, operation_id=operation.id, employee_id=employee_id,
+                work_date=work_date, qty=1, entered_by=entered_by, piece_id=p.id,
+            ))
+        await self.db.commit()
+        for p in pieces:
+            await self.db.refresh(p)
+        return pieces
+
+    def stage_piece_nocommit(
+        self, *, piece: Piece, operation_id: uuid.UUID, employee_id: uuid.UUID,
+        work_date: date, entered_by: str | None,
+    ) -> None:
+        """Add one scan event for an existing piece and advance its current stage.
+        Caller commits once for the whole batch."""
+        self.db.add(ProductionEvent(
+            sku_id=piece.sku_id, operation_id=operation_id, employee_id=employee_id,
+            work_date=work_date, qty=1, entered_by=entered_by, piece_id=piece.id,
+        ))
+        piece.current_operation_id = operation_id
+
+    async def commit(self) -> None:
+        await self.db.commit()
 
     # --- events ---
     async def add_event(self, **kw) -> ProductionEvent:

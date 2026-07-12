@@ -31,11 +31,14 @@
 
 
 from __future__ import annotations
+import logging
 
 from dataclasses import dataclass, field
 
 import ezdxf
 from shapely.geometry import Polygon
+
+logger = logging.getLogger(__name__)
 
 SF_PER_CM2 = 1.0 / 929.0304
 PARSER_VERSION = "dxf_pattern/1.0"
@@ -132,12 +135,13 @@ def _block_texts(block) -> list:
 
 
 def _cut_area_units2(block) -> tuple[float, float]:
-    """Largest closed-POLYLINE area in this block (the cut contour), plus its
-    longest bounding-box dimension. Both in raw drawing units (units²/units)."""
+    """Largest closed contour area in this block (the cut contour), plus its
+    longest bounding-box dimension. Both in raw drawing units (units²/units).
+    Reads POLYLINE and LWPOLYLINE; HATCH is deliberately ignored (fill, not cut line)."""
     best_area = 0.0
     best_longest = 0.0
-    for e in block.query("POLYLINE"):
-        pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
+    for e in block.query("POLYLINE LWPOLYLINE"):
+        pts = _poly_points(e)
         if len(pts) < 3:
             continue
         poly = Polygon(pts)
@@ -160,6 +164,13 @@ def _detect_source(header_texts: list) -> str:
     if "gerber" in blob or "accumark" in blob:
         return "gerber"
     return "unknown"
+
+def _poly_points(e) -> list[tuple[float, float]]:
+    """Vertices as (x, y), for either old-style POLYLINE (vertex sub-entities)
+    or LWPOLYLINE (packed point array)."""
+    if e.dxftype() == "LWPOLYLINE":
+        return [(x, y) for x, y, *_ in e.get_points("xy")]
+    return [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
 
 
 def _detect_unit(insunits, longest_dims_units: list, expected_longest_cm: float | None) -> tuple[str, list]:
@@ -197,9 +208,11 @@ def parse_pattern(path: str, *, expected_outseam_cm: float | None = None) -> Par
     """Read a block-nested pattern DXF into a ParsedPattern. Never raises."""
     try:
         doc = ezdxf.readfile(path)
-    except Exception as exc:  # unreadable / corrupt / not a DXF
-        return ParsedPattern("unknown", None, None, "mm", [], {}, {},
-                             warnings=[f"dxf_read_failed:{type(exc).__name__}", "manual_entry_required"])
+    except ezdxf.DXFStructureError:
+        from ezdxf import recover
+        doc, auditor = recover.readfile(path)          # tolerant read of malformed exports
+        if auditor.has_errors:
+            logger.warning("dxf recovered with %d errors: %s", len(auditor.errors), path)
 
     msp = doc.modelspace()
     header_texts = [t.dxf.text for t in msp.query("TEXT")]

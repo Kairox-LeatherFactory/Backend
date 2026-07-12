@@ -161,7 +161,12 @@ def _load_workbook(data: bytes):
             return None
 
 
-def _markdown_from_wb(wb) -> str:
+def _markdown_from_wb(wb, *, tagged: bool = True) -> str:
+    # tagged=True prefixes each cell with its A1 coordinate AND repeats it in an HTML
+    # comment (`A5 <!-- A5 --> val`) — useful context for a spec's measurement grid.
+    # tagged=False emits just `A5 val`, ~halving tokens; a CONSOLIDATED order sheet
+    # (many styles) would otherwise blow the model's output budget / timeout on the
+    # doubled coordinate noise. Callers that route orders pass tagged=False.
     out: list[str] = []
     try:
         for sheet_name in wb.sheetnames:
@@ -182,7 +187,8 @@ def _markdown_from_wb(wb) -> str:
                         continue
                     text = text.replace("\r", " ").replace("\n", " / ")
                     coord = f"{_col_letter(c_idx)}{r}"
-                    cells.append(f"{coord} <!-- {coord} --> {text}")
+                    cells.append(f"{coord} <!-- {coord} --> {text}" if tagged
+                                 else f"{coord} {text}")
                 if cells:
                     out.append(" | ".join(cells))
             # Note in-text when a sheet carries pictures, so the (text) model
@@ -222,14 +228,16 @@ def _images_from_wb(wb) -> list[bytes]:
     return images
 
 
-def xlsx_to_markdown(data: bytes) -> str:
-    """Flatten ALL sheets to a coordinate-tagged markdown blob. Returns "" on total
-    failure. (Backwards-compatible entry point — unchanged contract.)"""
+def xlsx_to_markdown(data: bytes, *, tagged: bool = True) -> str:
+    """Flatten ALL sheets to a markdown blob. `tagged=True` (default, unchanged
+    contract) double-marks each cell with its coordinate; `tagged=False` emits the
+    leaner `A5 val` form for token-heavy consolidated ORDER sheets. Returns "" on
+    total failure."""
     wb = _load_workbook(data)
     if wb is None:
         return ""
     try:
-        return _markdown_from_wb(wb)
+        return _markdown_from_wb(wb, tagged=tagged)
     finally:
         try:
             wb.close()

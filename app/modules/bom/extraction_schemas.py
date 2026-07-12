@@ -284,6 +284,10 @@ class ExtractedSpec(BaseModel):
     def _clamp(cls, v: Any) -> float:
         f = _to_float(v)
         return min(1.0, max(0.0, f)) if f is not None else 0.5
+    
+    @field_validator("materials","interlining","lining","brand_label","color_details", mode="before")
+    @classmethod
+    def _none_to_dict(cls, v): return v or {}
 
     @model_validator(mode="after")
     def _dedupe_sort_sizes(self) -> "ExtractedSpec":

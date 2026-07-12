@@ -33,7 +33,9 @@ The other gates (confirm_cutting, approve_bom, reject/reopen/export, edit) keep
 their existing commit boundaries â€” out of scope for the generate unit-of-work.
 """
 from __future__ import annotations
-
+import difflib
+import functools
+import re
 import hashlib
 import logging
 import os
@@ -43,6 +45,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
+import json
 
 import yaml
 from fastapi import HTTPException
@@ -53,6 +56,7 @@ from starlette.concurrency import run_in_threadpool
 from app.modules.bom import checks as checks_mod, pattern
 from app.modules.bom import costing
 from app.modules.bom import dcm
+from app.modules.bom.attribution import SpecMaterial
 from app.modules.bom.dcm import (
     CONFIDENCE,
     estimate_area_dcm,
@@ -84,6 +88,7 @@ from app.modules.bom.models import (
 from app.modules.bom.repository import BomRepository
 from app.core.storage import get_storage
 from app.modules.bom.pattern import learn_yield
+from app.modules.bom.units import normalize_price
 
 # Which categories get DCM-resolved (leather AREA materials, in dmÂ²). Threads /
 # accessories / manufacturing / packaging / FOB carry given qty + price, no DCM (Â§2).
@@ -133,6 +138,67 @@ class PomDict:
             return self._by_lang_term[(language, key)]
         return self._by_term.get(key)
 
+# -------------------------------------------------------------
+# 1. Lookups & Normalization Constants (Top of file / Module level)
+# -------------------------------------------------------------
+_LOOSE_RE = re.compile(r"[\s_\-/().]+")
+
+def _norm_loose(t: str) -> str:
+    return _LOOSE_RE.sub("", str(t)).strip().lower()
+
+_POM_ALIASES = {
+    "CHEST": ["chest", "bust", "torace", "petto", "胸", "胸囲"],
+    "SHOULDER": ["shoulder", "spalle", "肩幅", "袖ぐり"], # Added your example here!
+    # ... other aliases
+}
+_ALIAS_INDEX = [(code, _norm_loose(a)) for code, al in _POM_ALIASES.items() for a in al if _norm_loose(a)]
+
+_POM_CLASSIFY_PROMPT = (
+    'Map a garment MEASUREMENT label to ONE standard measurement code. '
+    'Return ONLY JSON {{"pom_code":"<CODE or empty>"}}. Allowed codes: {codes}. '
+    'label: {label}. If none clearly fits, return an empty pom_code.'
+)
+
+# -------------------------------------------------------------
+# 2. Add the Suggestion Function Here
+# -------------------------------------------------------------
+def suggest_pom_code(term: str, *, llm_json_call=None, fuzzy_at: float = 0.86):
+    """Exact-seed miss -> alias-keyword -> fuzzy -> LLM (constrained) -> None.
+    Returns (pom_code, confidence)."""
+    key = _norm_loose(term)
+    if not key:
+        return None, 0.0
+
+    # Step 1: Alias-keyword substring match
+    hits = [(code, a) for code, a in _ALIAS_INDEX if a and a in key]
+    if hits:
+        return max(hits, key=lambda h: len(h[1]))[0], 0.85
+
+    # Step 2: Fuzzy match
+    best_code, best = None, 0.0
+    for code, a in _ALIAS_INDEX:
+        r = difflib.SequenceMatcher(None, key, a).ratio()
+        if r > best:
+            best_code, best = code, r
+    
+    if best >= fuzzy_at:
+        return best_code, round(best * 0.75, 2)
+
+    # Step 3: LLM Backup Rung (Fallback for native tokens like 袖ぐり)
+    if llm_json_call:
+        allowed = sorted({code for code, _ in _ALIAS_INDEX})
+        prompt = _POM_CLASSIFY_PROMPT.format(codes=", ".join(allowed), label=term)
+        try:
+            obj = llm_json_call(prompt) or {}
+            pom_code = obj.get("pom_code")
+            if isinstance(pom_code, str):
+                pom_code = pom_code.strip().upper()
+                if pom_code in allowed:
+                    return pom_code, 0.6
+        except Exception:
+            pass
+
+    return None, 0.0
 
 # content sniff so extract_* routes correctly even with a missing extension â”€â”€
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -277,6 +343,51 @@ class BomService:
             per_size_qty=dict(order.per_size_qty or {}),
             order_number=order.order_number,
         )
+        
+    @staticmethod
+    def _spec_materials_for(spec_attributes: dict | None) -> list["SpecMaterial"]:
+        """Bounded candidate set for DXF-label → material matching. Mirrors
+        _build_line_seeds' reading of the flattened spec attributes EXACTLY, so a
+        matched label points at the same (category, name) a BOM line carries.
+        `aliases` = the native CAD term (sub.name, e.g. VELLUTO/別布) the DXF label
+        is actually written in; the BOM line name stays sub.material (e.g. Goat).
+        is_leather: main by definition; sub only when its material names a hide
+        species; lining/interlining never."""
+        from app.modules.bom.attribution import SpecMaterial
+        from app.modules.bom import dcm
+        attrs = spec_attributes or {}
+        mats: list[SpecMaterial] = []
+
+        leather = attrs.get("leather_quality")
+        if leather:
+            mats.append(SpecMaterial(name=str(leather), category="main_material",
+                                     is_leather=True, role="main"))
+
+        for sub in attrs.get("sub_materials") or []:
+            if not isinstance(sub, dict):
+                continue
+            name = sub.get("material") or sub.get("name")
+            if not name:
+                continue
+            native = sub.get("name")
+            aliases = (str(native),) if native and str(native) != str(name) else ()
+            mats.append(SpecMaterial(
+                name=str(name), category="sub_material",
+                is_leather=(dcm.species_of(str(name)) != "_default"),
+                role="sub_material", aliases=aliases))
+
+        lining = attrs.get("lining")
+        if lining and "unlined" not in str(lining).lower():
+            mats.append(SpecMaterial(name=str(lining), category="lining",
+                                     is_leather=False, role="lining"))
+
+        interlining = attrs.get("interlining")
+        if isinstance(interlining, dict) and interlining.get("present") is not False:
+            il = interlining.get("material")
+            if il:
+                mats.append(SpecMaterial(name=str(il), category="interlining",
+                                         is_leather=False, role="interlining"))
+        return mats
 
     @staticmethod
     def _order_identity_snapshot(identity: StyleIdentity,
@@ -297,6 +408,13 @@ class BomService:
         # survives the dict round-trip (it's `price_per_garment` on the model).
         oi["unit_price"] = order.price_per_garment if order is not None else None
         return oi
+    
+    @staticmethod
+    def _scalar(v):  
+        if v is None:
+            return None 
+        else:
+            return v if isinstance(v,str) else json.dumps(v)
 
     @staticmethod
     def _build_line_seeds(spec_attributes: dict | None,
@@ -311,7 +429,7 @@ class BomService:
         if leather:
             seeds.append(LineSeed(
                 category=BomItemCategory.MAIN_MATERIAL.value, name=str(leather),
-                material_color=attrs.get("primary_color"), uom="dmÂ²",
+                material_color=BomService._scalar(attrs.get("primary_color")), uom="dmÂ²",
                 source_ref="spec.attributes.leather_quality"))
 
         # Secondary leathers/fabrics (e.g. a contrast panel 'åˆ¥å¸ƒ') â†’ own DCM line.
@@ -374,6 +492,40 @@ class BomService:
                 unit_price=ln.get("unit_price"),
                 qty_per_garment=ln.get("qty_per_garment", 1)))
         return seeds
+    
+    @staticmethod
+    def _groq_json(prompt: str) -> dict:
+        """One JSON object from the extraction text ladder (Gemini text -> Groq).
+        Blocking (langchain .invoke), so call it from a threadpool in async code.
+        Returns {} on any failure so callers degrade instead of raising."""
+        from app.modules.bom.extraction import _llm_invoke
+        from app.modules.procurement.classifier import _coerce
+        try:
+            result = _llm_invoke("text", "", prompt)      # kind='text' => Gemini text -> Groq
+            if not result:
+                return {}
+            _engine, raw = result
+            obj = _coerce(raw)
+            return obj if isinstance(obj, dict) else {}
+        except Exception:
+            return {}
+        
+    @staticmethod
+    def _weighted_dxf_dcm(pattern, *, category, species, yields, per_size_qty):
+        """Order-weighted DCM: grade the DXF per size, weight by the order's per-size
+        quantities. Total leather = Σ per-size consumption, so a single base size
+        mis-states it by up to the S↔XL spread (~14% on PL02)."""
+        from app.modules.bom.pattern import graded_dxf
+        sizes = [s for s, q in (per_size_qty or {}).items() if q]
+        if not sizes:
+            return None
+        graded = graded_dxf(pattern, category=category, sizes=sizes,
+                            species=species, yields=yields)
+        num = sum(Decimal(str(q)) * graded[s] for s, q in per_size_qty.items()
+                  if q and graded.get(s) is not None)
+        den = sum(Decimal(str(q)) for s, q in per_size_qty.items()
+                  if q and graded.get(s) is not None)
+        return (num / den).quantize(Decimal("0.01")) if den else None
     
     async def _load_document_bytes(self, document_id) -> tuple[bytes, str] | None:
         """(bytes, filename) for a stored Document, or None when the row or its
@@ -456,6 +608,7 @@ class BomService:
             sig = style_signature(customer_ref=None, internal_ref=None,
                                   name=sb.style_key) or f"UNNAMED-{len(rows)}"
             row = OrderStyle(
+                client_id=client_id,
                 submission_id=submission_id, style_signature=sig,
                 style_name=sb.style_key, material=sb.material, qty=sb.qty,
                 per_size_qty=sb.per_size_qty, warnings=sb.warnings,
@@ -563,16 +716,38 @@ class BomService:
         await self.repo.commit()
         return result
 
+    _CODE_RE = re.compile(r"[A-Z]{1,4}[- ]?\d{3,6}(?:[- ]?[A-Z0-9]{1,4})?")
+
+    def _style_codes(self,text: str) -> set[str]:
+        """Alphanumeric style codes embedded in a name/filename, normalized
+        (strip separators): 'CLEREMONT_15-06-26-P53' -> {'P53'}, 'SP-64806 (SP74006)'
+        -> {'SP64806','SP74006'}."""
+        if not text:
+            return set()
+        return {re.sub(r"[-_ ]", "", m.group()).upper()
+                for m in self._CODE_RE.finditer(text.upper())}
 
     def _suggest_by_name(self, style_key: str, candidates, *, key):
-        """Filename/signature token match: candidate whose name contains the style's
-        FIRST word ('SHINOBI KNIT DETACH' -> 'SHINOBI'). Ambiguous (2+ hits) -> None,
-        because a wrong suggestion pre-selected in the UI gets rubber-stamped."""
+        """Match on style code first (survives real CAD filenames), then fall back to
+        full-token overlap. Ambiguous (2+ distinct hits) -> None: a wrong pre-selection
+        in the UI gets rubber-stamped, so we'd rather force a manual click."""
         from app.modules.bom.extraction import normalize_style
-        token = normalize_style(style_key).split(" ")[0]
-        if not token:
+
+        style_codes = self._style_codes(style_key)
+        if style_codes:
+            hits = [c for c in candidates
+                    if style_codes & self._style_codes(key(c) or "")]
+            if len(hits) == 1:
+                return hits[0]
+            if len(hits) > 1:
+                return None  # ambiguous code match -> manual
+
+        # Fallback: any shared normalized word (not just the first)
+        words = {w for w in normalize_style(style_key).split(" ") if len(w) > 2}
+        if not words:
             return None
-        hits = [c for c in candidates if token in normalize_style(key(c) or "")]
+        hits = [c for c in candidates
+                if words & {w for w in normalize_style(key(c) or "").split(" ") if len(w) > 2}]
         return hits[0] if len(hits) == 1 else None
     
     async def breakdown_state(self, submission_id) -> str:
@@ -608,6 +783,7 @@ class BomService:
         commit: bool = True
         
     ) -> dict:
+        from app.modules.bom.pattern import effective_dxf_yields
         logger.info("generate_bom start: order=%s style=%s spec_type=%s client_match=%s seeds=%s",
                     identity.client_order_id, identity.style_id, spec_sheet.spec_type,
                     client_match_code, len(line_seeds) if line_seeds is not None else "auto")
@@ -662,13 +838,15 @@ class BomService:
             bom.order_identity = {**(bom.order_identity or {}), **order_identity_extra}
         
         pattern = await self.repo.get_current_pattern(sig, client_id=identity.client_id)
-        dxf_yields = dcm.effective_dxf_yields(
+        attr_by_label = await self._enrich_attribution(
+            pattern, spec_sheet.attributes, identity, user) if pattern else {}
+        dxf_yields = effective_dxf_yields(
             dcm.dxf_yields(), await self.repo.yields_by_species()) if pattern else {}
         
         items = await self._build_items(
             line_seeds, identity=identity, sig=sig, gt=gt, gt_id=gt_id,
             base_size=base_size, poms_for_size=poms_for_size,
-            pattern_template_id=pattern_template_id,pattern=pattern, dxf_yields=dxf_yields)
+            pattern_template_id=pattern_template_id,pattern=pattern, attr_by_label=attr_by_label, dxf_yields=dxf_yields)
         self._recompute(bom, items, base_size)
         bom.items = items
         bom.source_document_id = spec_sheet.source_document_id
@@ -744,6 +922,32 @@ class BomService:
                 "manual_entry_required": manual_entry_required,
             },
         }
+        
+    async def _enrich_attribution(self, pattern, spec_attributes, identity, user):
+        import functools
+        from starlette.concurrency import run_in_threadpool
+        from app.modules.bom import config_store
+        from app.modules.bom.fabric_roles import resolve_fabric_role
+        from app.modules.bom.attribution import resolve_attribution, AttributionStatus
+
+        lex = config_store.get_fabric_lexicon()
+        spec_mats = self._spec_materials_for(spec_attributes)
+        labels = list((pattern.fabric_roles or {}).keys()) or list(
+            {f for m in (pattern.fabric_matrix or {}).values() for f in m if f})
+        out = {}
+        for label in labels:
+            a = await run_in_threadpool(functools.partial(
+                resolve_attribution, label,
+                lexicon_hit=resolve_fabric_role(label, lex), spec_materials=spec_mats,
+                garment=getattr(identity, "garment_type", ""), other_labels=labels,
+                embed=None, llm_json=self._groq_json))
+            out[label] = a
+            if a.status != AttributionStatus.CONFIRMED.value and a.confidence > 0:
+                await self.repo.upsert_fabric_role(
+                    label=label, role=a.role, category=a.category, is_leather=a.is_leather,
+                    status="suggested", confidence=a.confidence, source=a.source.value,
+                    suggested_by=getattr(user, "id", None))
+        return out
 
     async def _extract_spec(self, spec_bytes: bytes, filename: str) -> ExtractedSpec:
         """Step 1: run the (blocking) LLM extraction off the event loop. Returns the
@@ -763,8 +967,17 @@ class BomService:
             term = p.source_term or ""
             code = pom_dict.resolve(term, _term_language(term))
             if not code:
-                unresolved.append({"source_term": term, "by_size": p.by_size})
-                continue
+                sug, conf = await run_in_threadpool(functools.partial(
+                    suggest_pom_code, term, llm_json=self._groq_json))
+                if sug:
+                    await self.repo.upsert_pom_mapping(
+                        language=_term_language(term) or "en", source_term=term,
+                        pom_code=sug, status="suggested", confidence=conf, garment_type_id=None)
+                    code = sug
+                else:
+                    unresolved.append({"source_term": term, "by_size": p.by_size})
+                    logger.info("pom_unresolved style=%s term=%r", spec.style_no, term)
+                    continue
             resolved_poms.append({
                 "source_term": p.source_term, "by_size": p.by_size, "pitch": p.pitch,
                 "extracted_by": p.extracted_by, "confidence": p.confidence,
@@ -868,15 +1081,29 @@ class BomService:
         return pattern_template_id, pr_block
 
     async def _build_items(self, line_seeds, *, identity, sig, gt, gt_id, base_size,
-                           poms_for_size, pattern_template_id, pattern=None, dxf_yields=None):
+                           poms_for_size, pattern_template_id, pattern=None, attr_by_label=None, dxf_yields=None):
         """Step 6: turn seeds into BomItems, DCM-resolving leather AREA lines (Â§2) and
         carrying given qty/price on the rest."""
         items: list[BomItem] = []
-        for seed in line_seeds: 
-            price = Decimal("0") if (seed.supplied_by or "").lower() in ("client", "buyer") \
-                else (Decimal(str(seed.unit_price)) if seed.unit_price is not None else Decimal("0"))
+        for seed in line_seeds:
+            # Buyer/client supplied materials are never costed.
+            price = Decimal("0")
+
+            if (seed.supplied_by or "").lower() not in ("client", "buyer"):
+                if seed.unit_price is not None:
+                    # Explicit price from extraction/config wins.
+                    price = Decimal(str(seed.unit_price))
+                else:
+                    # Otherwise fall back to the material rate table
+                    # (matched by material name + UOM).
+                    rate = await self.repo.get_material_rate(seed.name)     # by name; uom drives conversion
+                    if rate is not None:
+                        price = normalize_price(rate.unit_price, rate.uom, seed.uom)
             dcm_source = None
             dcm_conf = None
+            attribution_source = None
+            attribution_confidence = None
+            attribution_status = None
             if seed.category in MATERIAL_DCM_CATEGORIES:
                 dcm_val, src = await self._resolve_dcm(
                     client_id=identity.client_id, style_signature=sig, garment_type_id=gt_id,
@@ -896,6 +1123,26 @@ class BomService:
                     qpg = Decimal("0")
                     dcm_source = DcmSource.PROVISIONAL.value
                     dcm_conf = Decimal("0")
+                    
+                if (
+                    dcm_source == DcmSource.DXF.value
+                    and pattern is not None
+                    and attr_by_label
+                ):
+                    contrib = [
+                        attr_by_label[label]
+                        for label, meta in (pattern.fabric_roles or {}).items()
+                        if attr_by_label.get(label)
+                        and meta.get("is_leather")
+                        and meta.get("category") == seed.category
+                    ]
+
+                    worst = min(contrib, key=lambda a: a.confidence, default=None)
+
+                    if worst is not None:
+                        attribution_source = worst.source.value
+                        attribution_confidence = worst.confidence
+                        attribution_status = worst.status.value
             else:
                 qpg = Decimal(str(seed.qty_per_garment)) if seed.qty_per_garment is not None \
                     else Decimal("1")
@@ -905,6 +1152,9 @@ class BomService:
                 qty_per_garment=qpg, uom=seed.uom, unit_price=price,
                 annotation=seed.annotation, source_ref=seed.source_ref,
                 dcm_source=dcm_source, dcm_confidence=dcm_conf,
+                attribution_source=attribution_source, 
+                attribution_confidence=attribution_confidence, 
+                attribution_status=attribution_status
             ))
             
         return items
@@ -927,8 +1177,25 @@ class BomService:
             tmpl = await self.repo.get_consumption_template(pattern_template_id)
             if tmpl and tmpl.material_category == material_category:
                 return Decimal(str(tmpl.dcm_value)), DcmSource.TEMPLATE
-        # Source 1c â€” DXF net pattern area Ã— per-species yield (measured geometry).
+        # =====================================================================
+        # ADDED HERE: Source 1c — Order-Weighted DXF Yield (Order Quantities Profile)
+        # =====================================================================
         if pattern is not None and material_category in MATERIAL_DCM_CATEGORIES:
+            # Look up or extract the order running details context passed through identity
+            # (or use the order_identity dictionary context if available)
+            per_size_qty = poms_for_size.get("__order_run_quantities__") or {} 
+            
+            weighted_dcm = self._weighted_dxf_dcm(
+                pattern,
+                category=material_category,
+                species=line_species,
+                yields=dxf_yields or {},
+                per_size_qty=per_size_qty
+            )
+            if weighted_dcm is not None:
+                return weighted_dcm, DcmSource.DXF
+
+            # Fallback to single base size graded yield if order profile is missing
             from app.modules.bom.pattern import dcm_for_category
             dxf_dcm = dcm_for_category(pattern, category=material_category, size=size,
                                        species=line_species, yields=dxf_yields or {})
@@ -1450,6 +1717,13 @@ class BomService:
         snap.dxf_yields = {**snap.dxf_yields, species: float(factor)}
         config_store.set_snapshot(snap)
         return {"species": species, "factor": float(factor)}
+    
+    async def set_material_rate(self, *, name, unit_price, uom=None,
+                                currency="USD", supplier=None):
+        await self.repo.upsert_material_rate(name=name, unit_price=unit_price,
+                                             uom=uom, currency=currency, supplier=supplier)
+        return {"material": name, "unit_price": float(unit_price), "uom": uom,
+                "currency": currency, "supplier": supplier}
 
     async def upsert_fabric_role(self, data: dict) -> dict:
         from app.modules.bom import config_store
@@ -1498,3 +1772,80 @@ class BomService:
                 pom_code=data["pom_code"], garment_type_id=gt_id, weight=data.get("weight", 1))
             return {"source_term": data["source_term"], "pom_code": data["pom_code"],
                     "language": language, "garment_type_id": str(gt_id) if gt_id else None}
+            
+    async def confirm_attribution(self, user, bom_id, item_id, *, label,
+                                  role, category, is_leather):
+        """A cutting/direct manager confirms a DXF-label → material attribution.
+        (1) persists the mapping to the DB lexicon as CONFIRMED, (2) rewrites the
+        stored pattern's fabric_roles for this label, (3) re-resolves DCM for THIS
+        line only, (4) flips the line's attribution axis to confirmed. Does NOT
+        advance bom.status."""
+        from app.modules.bom import config_store, dcm
+        from app.modules.bom.config_store import _FabricRoleView
+        from app.modules.bom.pattern import effective_dxf_yields
+        from app.modules.bom.attribution import (
+            AttributionSource, AttributionStatus, ATTR_CONFIRMED)
+        from app.core.enums import UserRole 
+
+        rv = getattr(user, "role", None)
+        rv = rv.value if hasattr(rv, "value") else rv
+        allowed = {UserRole.CUTTING_MANAGER.value, UserRole.DIRECT_MANAGER.value,
+                   UserRole.MANAGING_DIRECTOR.value}
+        if rv not in allowed:
+            raise HTTPException(403, detail={"error": "not_authorized",
+                "message": "Only a cutting manager, direct manager, or MD may confirm an attribution."})
+
+        bom = await self._load_bom(bom_id)
+        item = next((i for i in bom.items if i.id == item_id), None)
+        if item is None:
+            raise HTTPException(404, "BOM line not found.")
+
+        # 1) persist to the deterministic lexicon (confirmed) + refresh process cache
+        await self.repo.upsert_fabric_role(
+            label=label, role=role, category=category, is_leather=bool(is_leather),
+            status="confirmed", source="confirmed", confirmed_by=getattr(user, "id", None))
+        snap = config_store._current()
+        snap.fabric_lexicon = {**snap.fabric_lexicon,
+            label: _FabricRoleView(role, category, bool(is_leather))}
+        config_store.set_snapshot(snap)
+
+        # 2) rewrite the stored pattern's fabric_roles so DXF DCM now counts this label
+        identity = await self._resolve_identity(bom)
+        regenerated = False
+        if identity is not None:
+            sig = style_signature(customer_ref=identity.customer_ref,
+                                  internal_ref=identity.internal_ref, name=identity.name)
+            pattern = await self.repo.get_current_pattern(sig, client_id=identity.client_id)
+            if pattern is not None:
+                pattern.fabric_roles = {**(pattern.fabric_roles or {}),
+                    label: {"role": role, "category": category, "is_leather": bool(is_leather)}}
+                await self.repo.save(pattern)
+
+                # 3) re-resolve DCM for THIS line's category only (same call generate uses)
+                if item.category in MATERIAL_DCM_CATEGORIES:
+                    dxf_yields = effective_dxf_yields(dcm.dxf_yields(),
+                                                      await self.repo.yields_by_species())
+                    dcm_val, src = await self._resolve_dcm(
+                        client_id=identity.client_id, style_signature=sig,
+                        garment_type_id=bom.garment_type_id, garment_type_row=None,
+                        material_category=item.category, size=bom.dcm_base_size,
+                        poms_for_size={}, pattern_template_id=None, pattern=pattern,
+                        line_species=dcm.species_of(item.name), dxf_yields=dxf_yields)
+                    if dcm_val is not None:
+                        item.qty_per_garment = dcm_val
+                        item.dcm_source = src.value
+                        item.dcm_confidence = CONFIDENCE[src]
+                        regenerated = True
+
+        # 4) flip the attribution axis on the line -> confirmed, recompute totals
+        item.attribution_source = AttributionSource.CONFIRMED.value
+        item.attribution_confidence = ATTR_CONFIRMED
+        item.attribution_status = AttributionStatus.CONFIRMED.value
+        self._recompute(bom, [item], bom.dcm_base_size)
+        await self.repo.save(bom)
+        await self._audit(user, "BOM_ATTRIBUTION_CONFIRM", bom.id,
+                          after={"item_id": str(item_id), "label": label,
+                                 "is_leather": bool(is_leather), "regenerated": regenerated})
+        return {"bom_id": str(bom.id), "item_id": str(item_id),
+                "attribution_status": item.attribution_status, "dcm_source": item.dcm_source,
+                "qty_per_garment": float(item.qty_per_garment or 0), "regenerated": regenerated}

@@ -73,6 +73,7 @@ from app.modules.bom.models import (
     SpecExtraction,
     OrderExtraction
 )
+from app.modules.bom import dcm as C
 
 
 class BomRepository:
@@ -386,7 +387,8 @@ class BomRepository:
                 os.remove(tmp)
 
         parsed = await run_in_threadpool(_parse)
-        sig = (style_signature or parsed.style or "").strip().upper()
+        from app.modules.bom.dcm import slugify, style_signature as _sig
+        sig = style_signature or _sig(customer_ref=None, internal_ref=None, name=parsed.style) or ""
         if not sig:
             raise ValueError("DXF carries no DESIGN/style tag; pass style_signature.")
 
@@ -426,13 +428,20 @@ class BomRepository:
         await self.db.commit()
         return row
 
-    async def upsert_fabric_role(self, *, label, role, category, is_leather=False):
+    async def upsert_fabric_role(self, *, label, role, category, is_leather=False,
+                                 status="confirmed", confidence=None, source=None,
+                                 suggested_by=None, confirmed_by=None):
         from app.modules.bom.models import FabricRoleRow
         row = await self.db.scalar(select(FabricRoleRow).where(FabricRoleRow.label == label))
         if row:
             row.role, row.category, row.is_leather = role, category, is_leather
+            row.status, row.confidence, row.source = status, confidence, source
+            if suggested_by is not None: row.suggested_by = suggested_by
+            if confirmed_by is not None: row.confirmed_by = confirmed_by
         else:
-            row = FabricRoleRow(label=label, role=role, category=category, is_leather=is_leather)
+            row = FabricRoleRow(label=label, role=role, category=category,
+                                is_leather=is_leather, status=status, confidence=confidence,
+                                source=source, suggested_by=suggested_by, confirmed_by=confirmed_by)
             self.db.add(row)
         await self.db.commit()
         return row
@@ -509,3 +518,34 @@ class BomRepository:
             stmt = stmt.where(PatternReference.client_id == client_id)
         res = await self.db.execute(stmt.order_by(PatternReference.created_at.desc()))
         return list(res.scalars().all())
+    
+    @staticmethod
+    def _rate_key(name: str) -> str:
+        return " ".join((name or "").strip().casefold().split())
+
+    async def get_material_rate(self, name, uom=None):
+        from app.modules.bom.models import MaterialRate
+        key = self._rate_key(name)
+        if not key:
+            return None
+        q = select(MaterialRate).where(MaterialRate.material_key == key,
+                                       MaterialRate.is_current.is_(True))
+        if uom:                                    # prefer exact uom, tolerate uom-agnostic rows
+            q = q.where((MaterialRate.uom == uom) | (MaterialRate.uom.is_(None)))
+        return await self.db.scalar(q.order_by(MaterialRate.created_at.desc()).limit(1))
+
+    async def upsert_material_rate(self, *, name, unit_price, uom=None,
+                                   currency="USD", supplier=None):
+        from app.modules.bom.models import MaterialRate
+        key = self._rate_key(name)
+        row = await self.db.scalar(select(MaterialRate).where(
+            MaterialRate.material_key == key, MaterialRate.uom == uom,
+            MaterialRate.supplier == supplier))
+        if row:
+            row.unit_price, row.currency, row.display_name = unit_price, currency, name
+        else:
+            row = MaterialRate(material_key=key, display_name=name, uom=uom,
+                               unit_price=unit_price, currency=currency, supplier=supplier)
+            self.db.add(row)
+        await self.db.commit()
+        return row

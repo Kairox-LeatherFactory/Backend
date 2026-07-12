@@ -143,11 +143,12 @@ def normalize_color(c: str | None) -> str:
 
 
 def _dup_key(s: str) -> str:
-    """Aggressive key used ONLY to FLAG suspected duplicate styles, never to
-    merge them: folds DET/DETACH/DETACHABLE/FOR DET, strips non-alnum."""
+    """Order-independent key to FLAG suspected duplicate styles (never merge).
+    Folds DET/DETACH/DETACHABLE and compares the SORTED token set, so
+    'CLERMONT VEST' collides with 'VEST CLERMONT'."""
     s = normalize_style(s)
     s = _re.sub(r"\b(DETACHABLE|DETACH|FOR DET|DET)\b", "DET", s)
-    return _re.sub(r"[^A-Z0-9]", "", s)
+    return " ".join(sorted(set(_re.findall(r"[A-Z0-9]+", s))))    # ← sorted token set
 
 
 def split_styles_colors(raw_lines: list[dict], header: dict | None = None,
@@ -207,6 +208,8 @@ def split_styles_colors(raw_lines: list[dict], header: dict | None = None,
         if isinstance(pt, (int, float)) and int(pt) != row_qty:
             col["warnings"].append(
                 f"row_total_mismatch: sizes_sum={row_qty} printed={int(pt)}")
+        elif pt is None:
+            col["warnings"].append(f"row_total_unverified: sizes_sum={row_qty}")
 
     # Near-duplicate style names: flag for the operator, never auto-merge —
     # a wrong merge corrupts quantities invisibly; a wrong split is visible.
@@ -282,42 +285,80 @@ do NOT invent values):
 Output ONLY valid JSON matching this structure. No prose, no markdown fences.
 """
 
-_ORDER_PROMPT = """Extract structured data from a leather garment ORDER SHEET.
+_ORDER_PROMPT = """Extract structured data from a garment ORDER SHEET.
 
-The document may be in any language and any layout. Order sheets may contain
-multiple orders (one per visual block) and may have production-tracking rows
-mixed in (Cutting started, Week Period, Overall Total) — IGNORE the
-production rows.
+The sheet may be in ANY language and ANY layout — a single table, several stacked
+order blocks, or a scan. Headers may be missing, merged, abbreviated, or in a
+language you must interpret. Decide each column's ROLE from its VALUES, not its header.
 
-Extract these fields:
+Return ONE top-level JSON OBJECT with exactly this shape — NEVER a bare array,
+NEVER markdown fences, NEVER prose:
 
-- order_number, style_no, article, client_name, season, currency
-- price_per_garment (numeric)
-- delivery_date (ISO yyyy-mm-dd format if you can parse it)
-- payment_term
-- lines: list of {color, article, sizes {size: qty}}
-  - lines: list of {model, color, article, sizes {size: qty}, printed_total}
-  - `model` is the style name from the Modello/Model/Style column — REQUIRED on
-    EVERY line. Ditto marks (", '', 〃) or a blank cell mean "same as the line
-    above": RESOLVE them and write the actual style name, never the ditto mark.
-  - Same rule for the material column: resolve dittos to the actual material.
-  - One line per (style, color) ROW as printed. The same style repeated in a
-    later order block on a later page is STILL that style — keep its name exact.
-  - `printed_total` is the row's printed total-pieces number (TOTALE CAPI or
-    similar) if the row has one; omit it otherwise. Do NOT use it to fill sizes.
-  - sizes may use alpha codes (S, M, L, XL, XXL) or numeric (38, 40, 42...).
-    ONLY size columns go in sizes — never price, total, or note columns.
+{
+  "order_number": "...",
+  "client_name": "...",
+  "season": "...",
+  "currency": "...",
+  "price_per_garment": 0.0,
+  "delivery_date": "yyyy-mm-dd",
+  "payment_term": "...",
+  "lines": [
+    {"model": "...", "color": "...", "article": "...",
+     "sizes": {"S": 0, "M": 0}, "printed_total": 0}
+  ]
+}
 
-Do NOT trust any printed GRAND TOTAL. It is recomputed downstream from your
-line data; just give the lines accurately.
+Emit ONE entry in "lines" per printed (style, colour) row, with:
+- model: the style IDENTITY. Prefer the stable alphanumeric CODE that uniquely tags
+  the garment design on a row (e.g. SP74003, CR1-02F5, 74-018, ROCHE) — copy it
+  EXACTLY (case + punctuation). If there is only a human style NAME and no code,
+  use the name. If both a code and a name exist, use the code.
+- article: the fabric / leather / quality descriptor (a leather type, mill code,
+  finish). Describes WHAT it is made of, NEVER its identity. Different styles often
+  SHARE one article value, and an article may look name-like — it is still the
+  material, not the identity.
+- color: the colourway text.
+- sizes: {size: qty}. Size columns hold size labels (alpha S..XXL or numeric 34..58)
+  with per-size quantities. Include ONLY true size columns — never price, total,
+  note, or date columns.
+- printed_total: the row's own printed total if present; else omit.
 
-Output ONLY valid JSON. No prose, no markdown fences.
+Disambiguating identity (model) vs material (article) when BOTH look name-like: the
+identity value is unique per design and often coded; the material value REPEATS a
+small set of fabric words across many rows. Unique codes -> model; repeated fabric
+words -> article.
+
+Rules:
+- Resolve ditto marks (", '', 〃, ー, blank) to the value from the row above.
+- IGNORE production/tracking rows and SUBTOTAL / TOTAL / grand-total rows
+  (e.g. "TOTAL SP74003", "TOTALE", "Overall Total").
+- The same style in a later block/page is STILL that style — keep its identity exact.
+- Do NOT trust any printed grand total; lines are recomputed downstream.
+- The header fields (order_number, client_name, season, currency, price_per_garment,
+  delivery_date, payment_term) go at the TOP LEVEL, not inside a line.
+
+Output ONLY the JSON object described above. No prose, no markdown fences.
 """
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # LLM PLUMBING
 # ════════════════════════════════════════════════════════════════════════════
+
+
+def build_order_prompt(client_hint: str | None = None) -> str:
+    """The order prompt, optionally specialised with a per-client layout hint.
+    `client_hint` is free text you store/learn per client, e.g.
+      'style codes match SP\\d+; columns: GARMENTS STYLE | TYPE OF LEATHER | COLOUR |
+       sizes 38-56; material vocab: DOLLY, G.SUEDE, G.NAPPALAN'.
+    Injected as authoritative; the general rules stay as the fallback so an unseen
+    client still parses."""
+    if not client_hint:
+        return _ORDER_PROMPT
+    return (_ORDER_PROMPT
+            + "\n\nKNOWN LAYOUT FOR THIS CLIENT (authoritative where it applies):\n"
+            + client_hint.strip()
+            + "\nIf a row doesn't match this known layout, fall back to the general rules above.")
 
 def _build_text_content(payload: Any, prompt: str) -> list[dict]:
     """Assemble the langchain message for a TEXT payload: prompt + text block.
@@ -403,14 +444,26 @@ def _gemini_native_pdf(data: bytes, prompt: str, *,
                     )
                 doc_part = uploaded
 
+            # Cap output + turn thinking OFF for gemini-2.5-flash. Without these a
+            # dense scanned/consolidated order either truncates its JSON (unparseable)
+            # or spends the budget on thinking and returns empty text — both surfaced
+            # as "200 but 0 lines". A dynamic-key `sizes` map cannot be expressed as a
+            # response_schema (controlled generation needs fixed properties), so shape
+            # is pinned by the prompt + the array-tolerant _coerce, not a schema.
+            cfg_kwargs = dict(
+                temperature=0,
+                top_p=0.1,
+                response_mime_type="application/json",
+                max_output_tokens=settings.llm_max_output_tokens,
+            )
+            try:
+                cfg_kwargs["thinking_config"] = gtypes.ThinkingConfig(thinking_budget=0)
+            except Exception:                                   # noqa: BLE001
+                pass                                            # older SDK w/o ThinkingConfig
             resp = client.models.generate_content(
                 model=model_id,
                 contents=[doc_part, prompt],
-                config=gtypes.GenerateContentConfig(
-                    temperature=0,
-                    top_p=0.1,
-                    response_mime_type="application/json",
-                ),
+                config=gtypes.GenerateContentConfig(**cfg_kwargs),
             )
             text = getattr(resp, "text", None)
             if text:
@@ -490,16 +543,19 @@ def llm_extract_spec(kind: str, payload: Any) -> ExtractedSpec | None:
         logger.warning("spec schema validation failed for %s: %s", engine, exc)
         return None
     if is_empty_spec(spec):
-        logger.info("LLM (%s) returned empty spec — trying next rung", engine)
+        # Log the raw head so an empty result is diagnosable as envelope-mismatch
+        # (wrong top-level shape, silently dropped) vs a genuinely blank document.
+        logger.info("LLM (%s) returned empty spec — trying next rung; raw_head=%r",
+                    engine, str(raw)[:300])
         return None
     return spec
 
 
-def llm_extract_order(kind: str, payload: Any) -> ExtractedOrder | None:
+def llm_extract_order(kind: str, payload: Any, *, client_hint=None) -> ExtractedOrder | None:
     """LLM order extraction. Same contract as llm_extract_spec — returns None
     when nothing usable is produced. Never raises."""
     from app.modules.procurement.classifier import _coerce
-    result = _llm_invoke(kind, payload, _ORDER_PROMPT)
+    result = _llm_invoke(kind, payload, build_order_prompt(client_hint))
     if result is None:
         return None
     engine, raw = result
@@ -514,7 +570,10 @@ def llm_extract_order(kind: str, payload: Any) -> ExtractedOrder | None:
         logger.warning("order schema validation failed for %s: %s", engine, exc)
         return None
     if is_empty_order(order):
-        logger.info("LLM (%s) returned empty order — trying next rung", engine)
+        # Log the raw head so an empty result is diagnosable as envelope-mismatch
+        # (wrong top-level shape, silently dropped) vs a genuinely blank document.
+        logger.info("LLM (%s) returned empty order — trying next rung; raw_head=%r",
+                    engine, str(raw)[:300])
         return None
     return order
 
@@ -665,7 +724,10 @@ def extract_order(data: bytes, filename: str, mime: str | None = None,
             return _extract_pdf(data, llm_extract_order, _empty_order)
 
         if kind in ("xlsx", "xls"):
-            markdown = (xlsx_to_markdown if kind == "xlsx" else xls_to_markdown)(data)
+            # Orders use the LEANER flatten (tagged=False) — a consolidated multi-style
+            # sheet otherwise doubles its token count on coordinate noise and truncates.
+            markdown = (xlsx_to_markdown(data, tagged=False) if kind == "xlsx"
+                        else xls_to_markdown(data))
             if not markdown.strip():
                 return _empty_order("xls_unreadable" if kind == "xls" else "xlsx_unreadable")
             return llm_extract_order("text", markdown) or _empty_order("llm_extraction_failed")

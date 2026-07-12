@@ -219,7 +219,8 @@ def refresh_from_session(db) -> Snapshot:
     yield_rows = [(r.species, float(r.factor))
                   for r in db.scalars(select(DxfYield))]
     lex_rows = [(r.label, r.role, r.category, bool(r.is_leather))
-                for r in db.scalars(select(FabricRoleRow))]
+                for r in db.scalars(
+                    select(FabricRoleRow).where(FabricRoleRow.status == "confirmed"))]
     cost_rows = [(r.garment_code, r.category, r.name, r.uom, r.unit_price,
                   r.qty_per_garment, r.sort_order)
                  for r in db.scalars(select(CostCatalogLine))]

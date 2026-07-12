@@ -13,6 +13,7 @@ Pure functions; they read a PatternData (or any object exposing .fabric_roles /
 """
 from __future__ import annotations
 from decimal import Decimal
+import re
 
 # role (from the lexicon) -> the BomItemCategory-style key the resolver resolves on
 _ROLE_TO_CATEGORY = {"main": "main_material", "sub_material": "sub_material",
@@ -21,6 +22,38 @@ _ROLE_TO_CATEGORY = {"main": "main_material", "sub_material": "sub_material",
 SF_TO_DM2 = Decimal("9.290304")
 
 
+_ALPHA_SIZES = {s: i for i, s in enumerate(
+    ["XXS","XS","S","M","L","XL","XXL","XXXL","3XL","4XL","5XL","6XL"])}
+
+def _size_rank(s):
+    """Comparable magnitude for a size label: its numeric value if it has digits,
+    else an S/M/L/XL ordinal, else None."""
+    m = re.search(r"-?\d+(?:\.\d+)?", str(s))
+    if m:
+        return float(m.group())
+    return _ALPHA_SIZES.get(str(s).strip().upper())
+
+def _resolve_size_key(fm: dict, size, master_size) -> str | None:
+    """Pick the DXF size bucket for the spec base size. Ladder:
+    exact -> master_size -> single-size export -> nearest graded size by rank
+    (tie-break LARGER, conservative for leather) -> largest -> deterministic.
+    Returns None only when the matrix is empty."""
+    if not fm:
+        return None
+    key = str(size)
+    if key in fm:
+        return key
+    if master_size and master_size in fm:
+        return master_size
+    if len(fm) == 1:                                  # single-size export (CLERMONT '50')
+        return next(iter(fm))
+    ranked = [(k, _size_rank(k)) for k in fm if _size_rank(k) is not None]
+    target = _size_rank(size)
+    if target is not None and ranked:
+        return min(ranked, key=lambda kv: (abs(kv[1] - target), -kv[1]))[0]
+    if ranked:
+        return max(ranked, key=lambda kv: kv[1])[0]
+    return sorted(fm.keys())[-1]
 
 def role_to_category(role: str) -> str:
     return _ROLE_TO_CATEGORY.get(role, role)
@@ -36,17 +69,14 @@ def _net_qty_for_category(pattern, category: str, size) -> tuple[str | None, flo
     refuse (return None) so the operator maps them (override b) rather than mis-attributing
     lining/textile area to leather."""
     fabric_roles = pattern.fabric_roles or {}
-    leather = {f for f, m in fabric_roles.items()
-               if m.get("is_leather") and m.get("category") == category}
+    mapped = {f for f, m in fabric_roles.items() if m.get("category") == category}  # ← was is_leather AND category
     fm = pattern.fabric_matrix or {}
-    key = str(size)
-    if key not in fm:
-        key = pattern.master_size if pattern.master_size in fm else None
+    key = _resolve_size_key(fm, size, pattern.master_size)
     if key is None:
         return None, 0.0
     at = fm.get(key, {})
-    if leather:
-        net = sum(float(v) for f, v in at.items() if f in leather)
+    if mapped:
+        net = sum(float(v) for f, v in at.items() if f in mapped)
         return key, round(net, 2)
     distinct = {f for f in at if f}                       # blank/"" counts as "unlabelled"
     if len(distinct) <= 1:                                # single-fabric / unlabelled export
@@ -56,18 +86,21 @@ def _net_qty_for_category(pattern, category: str, size) -> tuple[str | None, flo
 
 
 
-def dcm_for_category(pattern, *, category, size, species="_default", yields=None):
-    """DXF-driven DCM in dm² (CANONICAL): net cut area (sf, from geometry)
-    × per-species yield (dimensionless) × SF_TO_DM2. Returns Decimal dm² or
-    None when the pattern can't attribute this category (no leather fabrics
-    mapped and multiple labelled fabrics — see _net_qty_for_category)."""
+LEATHER_DCM_CATEGORIES = {"main_material", "sub_material"}
+FABRIC_WASTAGE_DEFAULT = Decimal("1.15")   # TODO: move to config_store, like dxf_yield
+
+def dcm_for_category(pattern, *, category, size, species="_default", yields=None,
+                     fabric_wastage=None):
     key, net_sf = _net_qty_for_category(pattern, category, size)
     if key is None or not net_sf:
         return None
-    y = (yields or {}).get(species) or (yields or {}).get("_default")
-    if not y:
+    if category in LEATHER_DCM_CATEGORIES:
+        mult = (yields or {}).get(species) or (yields or {}).get("_default")
+    else:                                   # lining/interlining/pocketing → fabric wastage
+        mult = fabric_wastage or FABRIC_WASTAGE_DEFAULT
+    if not mult:
         return None
-    return (Decimal(str(net_sf)) * Decimal(str(y)) * SF_TO_DM2).quantize(Decimal("0.01"))
+    return (Decimal(str(net_sf)) * Decimal(str(mult)) * SF_TO_DM2).quantize(Decimal("0.01"))
 
 
 def graded_dxf(pattern, *, category: str, sizes, species: str, yields: dict) -> dict:

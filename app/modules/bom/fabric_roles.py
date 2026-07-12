@@ -34,6 +34,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import unicodedata
+
+def _norm_fabric_match(s: str) -> str:
+    return unicodedata.normalize("NFKC", s or "").replace("ー", "").replace("ｰ", "").casefold()
+
 
 @dataclass(frozen=True)
 class FabricRole:
@@ -75,24 +80,34 @@ DEFAULT_FABRIC_LEXICON: dict[str, FabricRole] = {
     "平ゴム": FabricRole("elastic", _ACCESSORY, False),    # flat elastic
     "ゴム":   FabricRole("elastic", _ACCESSORY, False),
     "elastic": FabricRole("elastic", _ACCESSORY, False),
+    # ── English / Italian CAD vocab (Lectra, Orfatti, CLERMONT — non-JP exports) ──
+    # NOTE: these are MATERIAL words, not JP role words (表生地/別布), so main-vs-sub
+    # is a best-default; a client with two leather labels disambiguates via a DB row.
+    "leather": FabricRole("main", _MAIN, True),
+    "pelle":   FabricRole("main", _MAIN, True),            # IT: leather
+    "nappa":   FabricRole("main", _MAIN, True),
+    "velluto": FabricRole("sub_material", _SUB, True),     # IT: suede/velour leather panel
+    "scamosciato": FabricRole("sub_material", _SUB, True), # IT: suede
+    "nylon":   FabricRole("lining", _LINING, False),       # substring covers "DETACHABLE NYLON"
+    "textile": FabricRole("lining", _LINING, False),
+    "tessuto": FabricRole("lining", _LINING, False),       # IT: fabric
+    "fodera":  FabricRole("lining", _LINING, False),       # IT: lining
+    "cotone":  FabricRole("lining", _LINING, False),       # IT: cotton
+    "cotton":  FabricRole("lining", _LINING, False),
 }
 
 
-def resolve_fabric_role(fabric: str, lexicon: dict[str, FabricRole] | None = None) -> FabricRole | None:
-    """Map a raw DXF FABRIC string to a FabricRole. Returns None when unknown (the
-    caller surfaces it for a human to add a lexicon row). Match is case-folded
-    substring so labels with suffixes/parentheses still resolve."""
+def resolve_fabric_role(fabric, lexicon=None):
     lex = lexicon or DEFAULT_FABRIC_LEXICON
     f = (fabric or "").strip()
     if not f:
         return None
-    # exact first (cheap + unambiguous), then substring containment
     if f in lex:
         return lex[f]
-    fold = f.casefold()
+    fold = _norm_fabric_match(f)                       # ← chōon-insensitive
     for key, role in lex.items():
-        k = key.casefold()
-        if k in fold or fold in k:
+        k = _norm_fabric_match(key)
+        if k and (k in fold or fold in k):
             return role
     return None
 

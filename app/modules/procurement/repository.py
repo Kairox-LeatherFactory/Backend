@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.models import Document
 from app.modules.procurement.models import ClientTemplate, Submission
+from app.modules.procurement.enums import ValidationStatus
 
 
 class ProcurementRepository:

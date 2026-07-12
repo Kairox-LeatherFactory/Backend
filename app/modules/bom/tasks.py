@@ -60,6 +60,7 @@ from app.core.celery import celery_app
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.modules.bom.service import BomService
+from app.modules.users.service import UserService
 
 logger = logging.getLogger(__name__)
 
@@ -118,15 +119,19 @@ def build_order_breakdown_for_submission(self, submission_id: str) -> dict:
         async with AsyncSessionLocal() as db:
             svc = BomService(db)
             try:
-                order_doc = await svc.repo.get_accepted_order_document(submission_id)
-                if order_doc is None:
+                accepted = await svc.procurement.get_accepted_order_bytes(submission_id)
+                if accepted is None:
                     await svc.release_breakdown_claim(submission_id)
                     return {"status": "failed", "reason": "no_accepted_order_document"}
-                data, filename, mime = await svc.repo.load_document_bytes_meta(order_doc.id)
+                data, filename, mime = accepted
+                client_id = await svc.procurement.get_submission_client_id(submission_id)
+                if client_id is None:
+                    await svc.release_breakdown_claim(submission_id)
+                    return {"status": "failed", "reason": "submission_not_found"}
                 result = await svc.build_order_breakdown(
                     submission_id,
                     order_bytes=data, order_filename=filename, order_mime=mime,
-                    client_id=order_doc.client_id,
+                    client_id=client_id,
                 )
                 return {"status": "ready", **result}
             except Exception:
@@ -151,7 +156,7 @@ def generate_bom_for_style_task(self, order_style_id: str, user_id: str) -> dict
     async def _run() -> dict:
         async with AsyncSessionLocal() as db:
             svc = BomService(db)
-            user = await svc.repo.get_user(user_id) if user_id else None
+            user = await UserService(db).get(user_id) if user_id else None
             return await svc.generate_bom_for_style(user, order_style_id)
 
     result = _run_async(_run())

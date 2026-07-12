@@ -91,6 +91,20 @@ class StorageBackend(ABC):
         override with a real signed URL."""
         return self.url_for(key)
 
+    def _strip_uri(self, value: str) -> str:
+        """Accept EITHER a bare object key OR a storage_url produced by url_for()
+        (as persisted in Document.storage_url). Keys never contain '://', so a
+        value carrying a scheme is treated as a stored URL and reduced to its key."""
+        s = str(value)
+        if "://" not in s:
+            return s.lstrip("/")
+        prefix = self.url_for("")            # this backend's own "<scheme>://<authority>/"
+        if s.startswith(prefix):
+            return s[len(prefix):].lstrip("/")
+        # URI written by a different root/bucket: keep the object-path portion.
+        after = s.split("://", 1)[1]
+        return (after.split("/", 1)[1] if "/" in after else "").lstrip("/")
+
 
 # ── local filesystem (default; dev + tests) ─────────────────────────────────
 class LocalStorageBackend(StorageBackend):
@@ -103,6 +117,7 @@ class LocalStorageBackend(StorageBackend):
         self.root = os.path.abspath(root or settings.local_storage_dir)
 
     def _path(self, key: str) -> str:
+        key = self._strip_uri(key)          # accept a stored storage_url, not just a bare key
         # key is a forward-slash relative path; never allow escaping the root.
         safe = os.path.normpath(key).replace("\\", "/").lstrip("/")
         full = os.path.normpath(os.path.join(self.root, safe))
@@ -167,12 +182,15 @@ class S3StorageBackend(StorageBackend):
         return self.url_for(key)
 
     def get(self, key: str) -> bytes:
+        key = self._strip_uri(key)
         return self._s3.get_object(Bucket=self.bucket, Key=key)["Body"].read()
 
     def delete(self, key: str) -> None:
+        key = self._strip_uri(key)
         self._s3.delete_object(Bucket=self.bucket, Key=key)
 
     def exists(self, key: str) -> bool:
+        key = self._strip_uri(key)
         from botocore.exceptions import ClientError
 
         try:
@@ -182,6 +200,7 @@ class S3StorageBackend(StorageBackend):
             return False
 
     def presign(self, key: str, expires_seconds: int = 3600) -> str:
+        key = self._strip_uri(key)
         return self._s3.generate_presigned_url(
             "get_object",
             Params={"Bucket": self.bucket, "Key": key},
@@ -215,12 +234,15 @@ class SupabaseStorageBackend(StorageBackend):
         return self.url_for(key)
 
     def get(self, key: str) -> bytes:
+        key = self._strip_uri(key)
         return self._b().download(key)
 
     def delete(self, key: str) -> None:
+        key = self._strip_uri(key)
         self._b().remove([key])
 
     def exists(self, key: str) -> bool:
+        key = self._strip_uri(key)
         try:
             self._b().download(key)
             return True
@@ -228,6 +250,7 @@ class SupabaseStorageBackend(StorageBackend):
             return False
 
     def presign(self, key: str, expires_seconds: int = 3600) -> str:
+        key = self._strip_uri(key)
         res = self._b().create_signed_url(key, expires_seconds)
         return res.get("signedURL") or res.get("signed_url") or self.url_for(key)
 

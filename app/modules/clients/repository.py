@@ -99,3 +99,46 @@ class ClientRepository:
                             color_name=color_name, size=size, qty_ordered=int(qty)))
         await self.db.commit()
         return co.id, st.id
+    
+    async def sku_label_context(self, sku_id) -> dict | None:
+        row = (await self.db.execute(
+            select(
+                SKU.id, ClientOrder.order_number, Style.name,
+                SKU.color_code, SKU.color_name, SKU.size, SKU.qty_ordered,
+            )
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .where(SKU.id == sku_id)
+        )).first()
+        if not row:
+            return None
+        sku_id_, order_number, style_name, color_code, color_name, size, qty = row
+        return {
+            "sku_id": sku_id_, "order_number": order_number, "style_name": style_name,
+            "color_code": color_code, "color_name": color_name, "size": size,
+            "qty_ordered": int(qty or 0),
+        }
+ 
+    async def list_sku_options(self, *, order_id=None, style_id=None) -> list[dict]:
+        stmt = (
+            select(
+                SKU.id, ClientOrder.order_number, Style.name,
+                SKU.color_code, SKU.color_name, SKU.size, SKU.qty_ordered,
+            )
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+        )
+        if order_id:
+            stmt = stmt.where(Style.client_order_id == order_id)
+        if style_id:
+            stmt = stmt.where(SKU.style_id == style_id)
+        stmt = stmt.order_by(ClientOrder.order_number, Style.name, SKU.color_code, SKU.size)
+        rows = (await self.db.execute(stmt)).all()
+        return [
+            {
+                "sku_id": r[0], "order_number": r[1], "style_name": r[2],
+                "color_code": r[3], "color_name": r[4], "size": r[5],
+                "qty_ordered": int(r[6] or 0),
+            }
+            for r in rows
+        ]

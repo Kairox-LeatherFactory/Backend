@@ -400,6 +400,11 @@ class ProcurementService:
         data = await run_in_threadpool(get_storage().get, doc.storage_url)
         return (data, doc.filename, doc.mime) if data else None
 
+    async def get_submission_client_id(self, submission_id: uuid.UUID) -> uuid.UUID | None:
+        """Return the submission's client_id, or None if the submission is missing."""
+        sub = await self.repo.get_submission(submission_id)
+        return sub.client_id if sub is not None else None
+
     async def spec_documents_for_client(self, client_id) -> list[Document]:
         """Accepted spec-sheet documents for this client — the suggestion pool
         the breakdown's name-matcher runs over."""
