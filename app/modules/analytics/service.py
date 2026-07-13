@@ -2,17 +2,23 @@
 ================================================================================
 modules/analytics/service.py — Read-only cross-module analytics (async)
 ================================================================================
-Powers the live dashboard, the sea-freight risk predictor, stage-spread
-bottleneck detection, and the per-piece production feed / traveler view.
+Grouped drill-down for the floor UI:
+    order_tree(order_id)        order -> styles (each with piece count + current-
+                                stage distribution). The landing view.
+    style_detail(style_id)      one style -> its pieces, each with its full stage
+                                history (employee + date/time per stage, rework
+                                flagged). Shown when the user picks a style.
+    piece_detail(...)           one piece by piece_code OR sku_code+seq -> order/
+                                style/sku header + ordered stage history.
 
-This module is allowed to read across modules' tables (read-only) for aggregate
-reporting. It never writes. All display rows are built with explicit joins — no
-lazy relationship access under async.
+Plus the dashboard/alert helpers. Reads across modules for reporting; never
+writes. All rows are built with explicit joins — no lazy access under async.
 ================================================================================
 """
 import uuid
 from datetime import date
 
+from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +28,10 @@ from app.modules.clients.models import SKU, Client, ClientOrder, Style
 from app.modules.clients.service import sku_label
 from app.modules.employees.models import Employee
 from app.modules.production.models import Operation, Piece, ProductionEvent
+
+
+def _norm(code: str | None) -> str:
+    return (code or "").strip().upper()
 
 
 class AnalyticsService:
@@ -44,90 +54,201 @@ class AnalyticsService:
             "total_operations_logged": int(total_produced),
         }
 
-    # ------------------------------------------------------- per-piece feed
-    async def production_feed(
-        self, *, piece_code: str | None = None, employee_id: uuid.UUID | None = None,
-        operation_id: uuid.UUID | None = None, style_id: uuid.UUID | None = None,
-        order_id: uuid.UUID | None = None, start: date | None = None,
-        end: date | None = None, limit: int = 500,
-    ) -> list[dict]:
-        """One row per piece-scan: who did what stage to which piece, when.
+    # ================================================================ LEVEL 1
+    async def order_tree(self, order_id: uuid.UUID) -> dict:
+        """Order landing view: the order + its styles, each summarised by piece
+        count and how those pieces are distributed across current stages."""
+        head = (await self.db.execute(
+            select(ClientOrder.order_number, Client.name, Client.id, ClientOrder.id)
+            .join(Client, Client.id == ClientOrder.client_id)
+            .where(ClientOrder.id == order_id)
+        )).first()
+        if not head:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+        order_number, client_name, _cid, _oid = head
 
-        This is the 'track each piece through every stage' view. Filter by
-        piece_code to get a single piece's full history (see piece_history)."""
-        stmt = (
-            select(
-                ProductionEvent.work_date,
-                Employee.name,
-                Style.name,
-                SKU.color_code,
-                SKU.color_name,
-                SKU.size,
-                Piece.code,
-                Operation.code,
-                Operation.label,
-                Operation.sequence,
-                ProductionEvent.entered_by,
-                ClientOrder.order_number,
-            )
+        styles = (await self.db.execute(
+            select(Style.id, Style.name, Style.article)
+            .where(Style.client_order_id == order_id)
+            .order_by(Style.name)
+        )).all()
+
+        # Current-stage distribution per style, one grouped query.
+        dist = (await self.db.execute(
+            select(Style.id, Operation.code, func.count(Piece.id))
+            .select_from(Piece)
+            .join(SKU, SKU.id == Piece.sku_id)
+            .join(Style, Style.id == SKU.style_id)
+            .outerjoin(Operation, Operation.id == Piece.current_operation_id)
+            .where(Style.client_order_id == order_id)
+            .group_by(Style.id, Operation.code)
+        )).all()
+        by_style: dict[uuid.UUID, dict] = {}
+        for style_id, op_code, cnt in dist:
+            d = by_style.setdefault(style_id, {"count": 0, "stages": {}})
+            d["count"] += int(cnt)
+            d["stages"][op_code or "UNSTARTED"] = int(cnt)
+
+        return {
+            "order_id": str(order_id),
+            "order_number": order_number,
+            "client": client_name,
+            "styles": [
+                {
+                    "style_id": str(sid),
+                    "style_name": name,
+                    "article": article,
+                    "piece_count": by_style.get(sid, {}).get("count", 0),
+                    "stage_counts": by_style.get(sid, {}).get("stages", {}),
+                }
+                for sid, name, article in styles
+            ],
+        }
+
+    # ================================================================ LEVEL 2
+    async def style_detail(self, style_id: uuid.UUID) -> dict:
+        """One style with all its pieces, each carrying its full stage history."""
+        head = (await self.db.execute(
+            select(Style.name, Style.article, ClientOrder.order_number, Client.name)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .join(Client, Client.id == ClientOrder.client_id)
+            .where(Style.id == style_id)
+        )).first()
+        if not head:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Style not found")
+        style_name, article, order_number, client_name = head
+
+        pieces = (await self.db.execute(
+            select(Piece.id, Piece.code, Piece.seq, SKU.code,
+                   SKU.color_name, SKU.color_code, SKU.size)
+            .join(SKU, SKU.id == Piece.sku_id)
+            .where(SKU.style_id == style_id)
+            .order_by(SKU.code, Piece.seq)
+        )).all()
+
+        # All events for this style's pieces in one query; group in Python.
+        events = (await self.db.execute(
+            select(ProductionEvent.piece_id, Operation.code, Operation.label,
+                   Operation.sequence, Employee.name, ProductionEvent.work_date,
+                   ProductionEvent.entered_by, ProductionEvent.created_at)
             .select_from(ProductionEvent)
             .join(Piece, Piece.id == ProductionEvent.piece_id)
-            .join(SKU, SKU.id == ProductionEvent.sku_id)
-            .join(Style, Style.id == SKU.style_id)
-            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .join(SKU, SKU.id == Piece.sku_id)
             .join(Operation, Operation.id == ProductionEvent.operation_id)
             .join(Employee, Employee.id == ProductionEvent.employee_id)
-        )
-        if piece_code:
-            stmt = stmt.where(Piece.code == piece_code.strip().upper())
-        if employee_id:
-            stmt = stmt.where(ProductionEvent.employee_id == employee_id)
-        if operation_id:
-            stmt = stmt.where(ProductionEvent.operation_id == operation_id)
-        if style_id:
-            stmt = stmt.where(SKU.style_id == style_id)
-        if order_id:
-            stmt = stmt.where(Style.client_order_id == order_id)
-        if start:
-            stmt = stmt.where(ProductionEvent.work_date >= start)
-        if end:
-            stmt = stmt.where(ProductionEvent.work_date <= end)
-        stmt = stmt.order_by(
-            ProductionEvent.work_date.desc(), Operation.sequence
-        ).limit(limit)
+            .where(SKU.style_id == style_id)
+            .order_by(ProductionEvent.piece_id, ProductionEvent.work_date,
+                      ProductionEvent.created_at)
+        )).all()
 
-        rows = (await self.db.execute(stmt)).all()
-        out: list[dict] = []
-        for (work_date, emp_name, style_name, color_code, color_name, size,
-             code, op_code, op_label, _seq, entered_by, order_number) in rows:
-            out.append({
-                "work_date": work_date.isoformat(),
-                "employee_name": emp_name,
-                "sku_label": sku_label(style_name, color_name, color_code, size),
-                "bundle_id": code,            # the piece code (your "bundle id")
+        stages_by_piece: dict[uuid.UUID, list[dict]] = {}
+        seen_ops: dict[uuid.UUID, set] = {}
+        for (pid, op_code, op_label, _seq, emp, wdate, entered_by, created) in events:
+            seen = seen_ops.setdefault(pid, set())
+            stages_by_piece.setdefault(pid, []).append({
                 "stage_code": op_code,
                 "stage_label": op_label,
-                "order_number": order_number,
+                "employee_name": emp,
+                "work_date": wdate.isoformat() if wdate else None,
+                "logged_at": created.isoformat() if created else None,
                 "entered_by": entered_by,
+                "is_rework": op_code in seen,
             })
-        return out
+            seen.add(op_code)
 
-    async def piece_history(self, code: str) -> dict:
-        """One piece's ordered stage traveler — every stage it has passed."""
-        stages = await self.production_feed(piece_code=code, limit=200)
-        # feed is date-desc; present the traveler forward by stage sequence.
-        stages = sorted(stages, key=lambda r: (r["work_date"], r["stage_code"]))
         return {
-            "bundle_id": code.strip().upper(),
-            "sku_label": stages[0]["sku_label"] if stages else None,
+            "style_id": str(style_id),
+            "style_name": style_name,
+            "article": article,
+            "order_number": order_number,
+            "client": client_name,
+            "pieces": [
+                {
+                    "piece_id": str(pid),
+                    "bundle_id": code,
+                    "seq": seq,
+                    "sku_code": sku_code,
+                    "colour": color_name or color_code,
+                    "size": size,
+                    "current_stage": (stages_by_piece.get(pid) or [{}])[-1].get("stage_code"),
+                    "stages": stages_by_piece.get(pid, []),
+                }
+                for (pid, code, seq, sku_code, color_name, color_code, size) in pieces
+            ],
+        }
+
+    # ================================================================ LEVEL 3
+    async def piece_detail(self, *, piece_code: str | None = None,
+                           sku_code: str | None = None,
+                           seq: int | None = None) -> dict:
+        """One piece by piece_code OR (sku_code + seq): header + stage history."""
+        q = (
+            select(Piece.id, Piece.code, Piece.seq,
+                   SKU.code, SKU.color_name, SKU.color_code, SKU.size,
+                   Style.name, Style.article,
+                   ClientOrder.order_number, Client.name)
+            .select_from(Piece)
+            .join(SKU, SKU.id == Piece.sku_id)
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .join(Client, Client.id == ClientOrder.client_id)
+        )
+        if piece_code:
+            q = q.where(Piece.code == _norm(piece_code))
+        elif sku_code and seq is not None:
+            q = q.where(SKU.code == _norm(sku_code), Piece.seq == seq)
+        else:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "Provide piece_code or (sku_code + seq).")
+        row = (await self.db.execute(q)).first()
+        if not row:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Piece not found")
+        (pid, code, pseq, skucode, color_name, color_code, size,
+         style_name, article, order_number, client_name) = row
+
+        ev = (await self.db.execute(
+            select(Operation.code, Operation.label, Operation.sequence,
+                   Employee.name, ProductionEvent.work_date,
+                   ProductionEvent.entered_by, ProductionEvent.created_at)
+            .select_from(ProductionEvent)
+            .join(Operation, Operation.id == ProductionEvent.operation_id)
+            .join(Employee, Employee.id == ProductionEvent.employee_id)
+            .where(ProductionEvent.piece_id == pid)
+            .order_by(ProductionEvent.work_date, ProductionEvent.created_at)
+        )).all()
+        stages: list[dict] = []
+        seen: set = set()
+        for (op_code, op_label, _s, emp, wdate, entered_by, created) in ev:
+            stages.append({
+                "stage_code": op_code,
+                "stage_label": op_label,
+                "employee_name": emp,
+                "work_date": wdate.isoformat() if wdate else None,
+                "logged_at": created.isoformat() if created else None,
+                "entered_by": entered_by,
+                "is_rework": op_code in seen,
+            })
+            seen.add(op_code)
+
+        return {
+            "bundle_id": code,
+            "seq": pseq,
+            "sku_code": skucode,
+            "sku_label": sku_label(style_name, color_name, color_code, size),
+            "colour": color_name or color_code,
+            "size": size,
+            "style_name": style_name,
+            "article": article,
+            "order_number": order_number,
+            "client": client_name,
+            "current_stage": stages[-1]["stage_code"] if stages else None,
             "stages": stages,
         }
 
-    # --------------------------------------------------- existing analytics
+    # =============================================================== dashboards
     async def stage_spread_alerts(self) -> list[dict]:
-        """Detect bottlenecks: where a downstream stage lags CUTTING badly.
-        Under per-piece the gap is true WIP-in-flight (pieces cut but not yet
-        reached stage X), not miscount noise."""
+        """Bottlenecks: where a downstream stage lags CUTTING. Under per-piece the
+        gap is true WIP-in-flight (cut but not yet reached stage X)."""
         alerts: list[dict] = []
         styles = (await self.db.execute(select(Style))).scalars().all()
         for style in styles:
@@ -156,8 +277,6 @@ class AnalyticsService:
         return alerts
 
     async def freight_risk(self, today: date | None = None) -> list[dict]:
-        """Flag POs approaching their sea-freight cutoff while still in production.
-        Missing the sea window forces air freight, which can erase the margin."""
         today = today or date.today()
         warn_from = settings.sea_cutoff_warning_days
         risks: list[dict] = []

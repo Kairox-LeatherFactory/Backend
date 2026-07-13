@@ -15,9 +15,10 @@ from datetime import date
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.modules.clients.models import Client, ClientOrder, Style, SKU
+from app.modules.clients.models import Client, ClientOrder, Style, SKU,SkuOrderLine
 from app.modules.production.models import Operation, ProductionEvent
 from app.modules.wages.models import Rate
+from app.modules.clients.service import make_sku_code
 
 
 def _get_or_create_client(db: Session, name: str, country: str | None) -> Client:
@@ -47,22 +48,27 @@ def _get_or_create_style(db: Session, order: ClientOrder, name: str,
     return st
 
 
-def _upsert_sku(db: Session, style: Style, color: str | None,
-                size: str, qty: int) -> str:
+def _upsert_sku(db, order, style, color, size, qty):
+    """Returns (SKU, status). Sums qty into the one-per-triple SKU and sets its
+    deterministic code on first creation."""
+    from sqlalchemy import select
+    from app.modules.clients.models import SKU
+    from app.modules.clients.service import make_sku_code
+ 
     color_code = (color or "—")
     existing = db.scalar(select(SKU).where(
         SKU.style_id == style.id, SKU.color_code == color_code, SKU.size == size))
     if existing:
-        # Same SKU seen again. Real data sometimes splits one colourway+size across
-        # multiple order rows (e.g. across two order sheets), so we ADD the new
-        # quantity rather than collide or overwrite. A true re-import of the SAME
-        # file is handled at a higher level by clearing prior rows first.
         existing.qty_ordered = (existing.qty_ordered or 0) + qty
-        return "updated"
-    db.add(SKU(style_id=style.id, color_code=color_code, color_name=color,
-               size=size, qty_ordered=qty))
-    db.flush()        # make visible so the next lookup for the same SKU finds it
-    return "created"
+        return existing, "updated"
+    sku = SKU(
+        style_id=style.id, color_code=color_code, color_name=color,
+        size=size, qty_ordered=qty,
+        code=make_sku_code(order.order_number, style.name, color or color_code, size),
+    )
+    db.add(sku)
+    db.flush()          # visible to the next lookup, and gives sku.id for lines
+    return sku, "created"
 
 
 def _get_or_create_operation(db: Session, code: str, seq: int) -> Operation:
@@ -105,6 +111,9 @@ def load_preview(db: Session, preview, country_map: dict | None = None,
                 Style.client_order_id == order.id)).all()
             for st in old_styles:
                 for sk in db.scalars(select(SKU).where(SKU.style_id == st.id)).all():
+                    for ol in db.scalars(                                                # <-- ADD
+                    select(SkuOrderLine).where(SkuOrderLine.sku_id == sk.id)).all():
+                        db.delete(ol)
                     db.delete(sk)
                 for rt in db.scalars(select(Rate).where(Rate.style_id == st.id)).all():
                     db.delete(rt)
@@ -118,9 +127,12 @@ def load_preview(db: Session, preview, country_map: dict | None = None,
             if style.id not in styles_seen:
                 styles_seen.add(style.id); stats["styles"] += 1
             for size, qty in line.sizes.items():
-                res = _upsert_sku(db, style, line.color, size, qty)
+                sku, res = _upsert_sku(db, order, style, line.color, size, qty)
                 if res == "created": stats["skus_created"] += 1
                 elif res == "updated": stats["skus_updated"] += 1
+                db.add(SkuOrderLine(                                             
+                   sku_id=sku.id, order_date=line.order_date,
+                   qty=qty, source_row=line.source_row))
 
         # operations + rates from production cards
         for card in cp.production_cards:

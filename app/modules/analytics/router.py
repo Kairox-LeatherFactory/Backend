@@ -1,6 +1,8 @@
 """
 ================================================================================
-modules/analytics/router.py — Read-only dashboard + alerts HTTP API (async)
+modules/analytics/router.py — Read-only dashboard + drill-down HTTP API (async)
+================================================================================
+Drill-down: /orders/{id}/tree  ->  /styles/{id}/detail  ->  /pieces/detail
 ================================================================================
 """
 import uuid
@@ -22,34 +24,38 @@ async def overview(db: AsyncSession = Depends(get_db), _: User = Depends(get_cur
     return await AnalyticsService(db).factory_overview()
 
 
-@router.get("/production-feed")
-async def production_feed(
+@router.get("/orders/{order_id}/tree")
+async def order_tree(
+    order_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Order landing view: styles with piece count + current-stage distribution."""
+    return await AnalyticsService(db).order_tree(order_id)
+
+
+@router.get("/styles/{style_id}/detail")
+async def style_detail(
+    style_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """One style: every piece with its full stage history (employee + date/time)."""
+    return await AnalyticsService(db).style_detail(style_id)
+
+
+@router.get("/pieces/detail")
+async def piece_detail(
     piece_code: str | None = Query(None),
-    employee_id: uuid.UUID | None = Query(None),
-    operation_id: uuid.UUID | None = Query(None),
-    style_id: uuid.UUID | None = Query(None),
-    order_id: uuid.UUID | None = Query(None),
-    start: date | None = Query(None),
-    end: date | None = Query(None),
-    limit: int = Query(500, le=2000),
+    sku_code: str | None = Query(None),
+    seq: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    """Employee · SKU name · bundle id · stage feed, filterable every which way."""
-    return await AnalyticsService(db).production_feed(
-        piece_code=piece_code, employee_id=employee_id, operation_id=operation_id,
-        style_id=style_id, order_id=order_id, start=start, end=end, limit=limit,
+    """One piece by piece_code OR (sku_code + seq): header + grouped stages."""
+    return await AnalyticsService(db).piece_detail(
+        piece_code=piece_code, sku_code=sku_code, seq=seq
     )
-
-
-@router.get("/pieces/{code}/history")
-async def piece_history(
-    code: str,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
-    """One piece's full stage-by-stage traveler."""
-    return await AnalyticsService(db).piece_history(code)
 
 
 @router.get("/alerts/stage-spread")

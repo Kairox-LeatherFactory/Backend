@@ -1,21 +1,20 @@
 """Production: operations, pieces, the event log, and the manager->operation map.
 
-KEY DESIGN POINTS (updated for PER-PIECE tracking):
-1. A Piece is a single physical garment, minted at CUTTING, carrying a unique,
-   human-typeable `code` — the "bundle id" printed on its traveler card. A
-   manager types this code at each subsequent stage.
-2. production_event is still the finest grain, but qty is now always 1 and each
-   tracked event references the Piece it acted on. Because sum(qty) == piece
-   count, EVERY existing aggregate (wages, style progress, freight risk) keeps
-   working with no SQL change.
-3. Per-piece REPLACES the old "pieces don't conserve" tolerance. A scan must
-   reference a piece that already exists, so a downstream stage can never exceed
-   the count minted at cutting; the stage-spread is now true WIP-in-flight, not
-   miscount noise. REWORK IS PERMISSIVE: a piece may be scanned at the same
-   operation more than once (fails QC, goes back a stage). We surface repeats as
-   a metric, we do NOT reject them — hence NO unique(piece_id, operation_id).
-4. operation_access maps which manager ROLE may enter which operation — config,
-   not hardcoded, so you re-assign without a code change.
+PER-PIECE MODEL
+1. A Piece is one physical garment. Its identity is (sku_id, seq): piece `seq`
+   of that SKU — e.g. size-M piece 5 of 21. seq runs 1..N within the SKU, so
+   `UniqueConstraint(sku_id, seq)` is the authoritative integrity rule.
+2. `code` is the fully-qualified, globally-unique string printed on the traveler
+   card: {ORDER}-{STYLE}-{sku.code}-{seq}  e.g. KJ2451-CLERMONT-57-M-005.
+   It carries the SKU identity AND the piece number through every stage.
+3. Pieces are minted at CUTTING (N Piece rows + N CUTTING events, qty=1). Every
+   later stage logs a qty=1 event against an EXISTING piece, so a downstream
+   stage can never exceed the count cut. sum(qty) == piece count, so wages /
+   progress / freight-risk are unchanged.
+4. REWORK is permissive: a piece may be logged at the same operation more than
+   once (fails QC, goes back, returns). It keeps its seq and code; repeats are
+   surfaced as a metric, never rejected. Hence NO unique(piece_id, operation_id).
+5. There is NO bundle_ref. The piece IS the tracked unit.
 """
 import uuid
 from datetime import date
@@ -30,9 +29,9 @@ from app.core.models import GUID, TimestampMixin, UUIDMixin
 class Operation(Base, UUIDMixin, TimestampMixin):
     """An ordered, named production step. CUTTING, FUSING, ... configurable."""
     __tablename__ = "operation"
-    code: Mapped[str] = mapped_column(String(30), unique=True)   # CUTTING, FUSING, SHELL, LA, LS, FF
+    code: Mapped[str] = mapped_column(String(30), unique=True)
     label: Mapped[str] = mapped_column(String(60))
-    sequence: Mapped[int] = mapped_column(Integer)              # ordering in the chain
+    sequence: Mapped[int] = mapped_column(Integer)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
@@ -42,7 +41,7 @@ class OperationAccess(Base, UUIDMixin):
     __table_args__ = (
         UniqueConstraint("role", "operation_id", name="uq_role_operation"),
     )
-    role: Mapped[str] = mapped_column(String(40), index=True)   # matches Role enum value
+    role: Mapped[str] = mapped_column(String(40), index=True)
     operation_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("operation.id"))
 
 
@@ -57,16 +56,15 @@ class StyleOperation(Base, UUIDMixin):
 
 
 class Piece(Base, UUIDMixin, TimestampMixin):
-    """A single physical garment tracked through every stage.
-
-    Minted at CUTTING (each cut piece = one row + one CUTTING event). `code` is
-    the unique, human-typeable id on the traveler card — what your spec calls the
-    "bundle id". `current_operation_id` is a denormalised convenience for the live
-    'where is this piece' / feed views; the event log remains the source of truth.
-    """
+    """One physical garment. Identity = (sku_id, seq); code is the printed id."""
     __tablename__ = "piece"
-    # Stored normalised (upper/trimmed) so a manually typed lookup always matches.
-    code: Mapped[str] = mapped_column(String(60), unique=True, index=True)
+    __table_args__ = (
+        UniqueConstraint("sku_id", "seq", name="uq_piece_sku_seq"),
+    )
+    # Globally-unique printed/scannable string, stored normalised (upper/trimmed).
+    code: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    # 1..N within the SKU — the "5th piece of size M". Typed at scan time.
+    seq: Mapped[int] = mapped_column(Integer)
     sku_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("sku.id"), index=True)
     current_operation_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("operation.id")
@@ -81,15 +79,11 @@ class ProductionEvent(Base, UUIDMixin, TimestampMixin):
     operation_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("operation.id"), index=True)
     employee_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("employee.id"), index=True)
     work_date: Mapped[date] = mapped_column(Date, index=True)
-    qty: Mapped[int] = mapped_column(Integer, default=1)   # always 1 for a piece event
-    # Who keyed it in (the manager). Audit trail.
-    entered_by: Mapped[str | None] = mapped_column(String(120))
-    # Per-piece linkage. Nullable so legacy / aggregate events still validate.
+    qty: Mapped[int] = mapped_column(Integer, default=1)     # always 1 for a piece event
+    entered_by: Mapped[str | None] = mapped_column(String(120))  # the manager who keyed it
     piece_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("piece.id"), index=True
     )
-    # DEPRECATED free-text bundle string. Kept only to backfill piece_id, then drop.
-    bundle_ref: Mapped[str | None] = mapped_column(String(60), index=True)
 
     operation: Mapped["Operation"] = relationship()
     piece: Mapped["Piece | None"] = relationship()

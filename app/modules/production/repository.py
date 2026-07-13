@@ -3,9 +3,9 @@
 modules/production/repository.py — Async data access for production
 ================================================================================
 production_event is the finest grain: one manager records that one employee did
-ONE PIECE of one operation on one day (qty always 1). Aggregations here power the
-live "Carnaby card" (stage totals) and the piece-rate wage inputs. New piece
-primitives mint pieces at cutting and stage them (one event) at later steps.
+ONE PIECE of one operation on one day (qty=1). Piece primitives mint pieces at
+cutting (seq per SKU) and stage them at later steps. All aggregates below are
+unchanged by per-piece because qty is always 1 (sum(qty) == piece count).
 ================================================================================
 """
 import uuid
@@ -48,13 +48,19 @@ class ProductionRepository:
         return set(res.scalars())
 
     # --- pieces ---
-    async def piece_count_for_sku(self, sku_id: uuid.UUID) -> int:
+    async def max_seq_for_sku(self, sku_id: uuid.UUID) -> int:
         return int(await self.db.scalar(
-            select(func.count(Piece.id)).where(Piece.sku_id == sku_id)
+            select(func.coalesce(func.max(Piece.seq), 0)).where(Piece.sku_id == sku_id)
         ) or 0)
 
     async def get_piece_by_code(self, code: str) -> Piece | None:
         res = await self.db.execute(select(Piece).where(Piece.code == code))
+        return res.scalar_one_or_none()
+
+    async def get_piece_by_sku_seq(self, sku_id: uuid.UUID, seq: int) -> Piece | None:
+        res = await self.db.execute(
+            select(Piece).where(Piece.sku_id == sku_id, Piece.seq == seq)
+        )
         return res.scalar_one_or_none()
 
     async def has_event_at_op(self, piece_id: uuid.UUID, operation_id: uuid.UUID) -> bool:
@@ -70,23 +76,22 @@ class ProductionRepository:
         self, *, sku_id: uuid.UUID, operation: Operation, employee_id: uuid.UUID,
         work_date: date, count: int, entered_by: str | None, prefix: str,
     ) -> list[Piece]:
-        """Create `count` pieces for a SKU AND their CUTTING events, one commit.
+        """Create `count` pieces (seq continuing from the SKU's current max) AND
+        their CUTTING events, in ONE transaction.
 
-        Codes are contiguous `{prefix}-{seq:04d}` where seq continues from the
-        pieces already minted for this SKU. `code` carries a unique constraint, so
-        a concurrent mint of the same SKU FAILS LOUDLY (Postgres) rather than
+        Integrity is UniqueConstraint(sku_id, seq): a concurrent mint of the same
+        SKU that computes an overlapping seq FAILS LOUDLY on Postgres rather than
         silently colliding — retry the request if that ever fires.
         """
-        base = await self.piece_count_for_sku(sku_id)
+        base = await self.max_seq_for_sku(sku_id)
         pieces: list[Piece] = []
         for i in range(1, count + 1):
-            p = Piece(
-                code=f"{prefix}-{base + i:04d}",
-                sku_id=sku_id,
+            seq = base + i
+            pieces.append(Piece(
+                code=f"{prefix}-{seq:03d}", seq=seq, sku_id=sku_id,
                 current_operation_id=operation.id,
-            )
-            self.db.add(p)
-            pieces.append(p)
+            ))
+        self.db.add_all(pieces)
         await self.db.flush()  # assign piece ids
         for p in pieces:
             self.db.add(ProductionEvent(
@@ -152,12 +157,9 @@ class ProductionRepository:
 
     async def piece_counts_by_employee_style_op(self, start: date, end: date):
         """Rows of (employee_id, style_id, operation_id, work_date, total_qty) for a
-        window — the raw material for piece-rate wage calculation.
-
-        work_date is kept in the grouping ON PURPOSE: a rate can change mid-period,
-        so each day's pieces must be priced at the rate effective on THAT day. If we
-        collapsed all dates into one total we'd be forced to apply a single rate and
-        mis-price work done before/after a rate change."""
+        window — the raw material for piece-rate wage calculation. work_date is kept
+        in the grouping ON PURPOSE so a mid-period rate change prices each day's work
+        at the rate effective that day."""
         stmt = (
             select(
                 ProductionEvent.employee_id,
