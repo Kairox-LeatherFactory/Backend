@@ -143,5 +143,5 @@ ezdxf>=1.4,<2.0
 shapely>=2.0,<3.0
 xlrd>=2.0.1
 
-pip install torch torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/cpu
+# pip install torch torchvision torchaudio \
+#     --index-url https://download.pytorch.org/whl/cpu
