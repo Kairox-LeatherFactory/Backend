@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
-from app.modules.clients.service import make_sku_code
+from app.modules.clients.utlis import make_sku_code
 
 
 class ClientRepository:
