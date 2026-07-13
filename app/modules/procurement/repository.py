@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.models import Document
 from app.modules.procurement.models import ClientTemplate, Submission
+from app.modules.procurement.enums import ValidationStatus
 
 
 class ProcurementRepository:
@@ -83,3 +84,25 @@ class ProcurementRepository:
             stmt = stmt.where(ClientTemplate.doc_kind == doc_kind)
         res = await self.db.execute(stmt)
         return list(res.scalars())
+    
+    async def cas_submission_status(self, submission_id, *, expect: str, to: str) -> bool:
+        """Atomic compare-and-set on submission.status. rowcount==1 iff this call
+        won the transition — the concurrency guard for the breakdown claim."""
+        from sqlalchemy import update
+        res = await self.db.execute(
+            update(Submission)
+            .where(Submission.id == submission_id, Submission.status == expect)
+            .values(status=to)
+        )
+        await self.db.commit()
+        return res.rowcount == 1
+
+    async def accepted_documents(self, *, kind: str, client_id) -> list[Document]:
+        from sqlalchemy import select
+        stmt = (select(Document)
+                .where(Document.kind == kind,
+                       Document.validation_status == ValidationStatus.ACCEPTED.value))
+        if client_id is not None:
+            stmt = stmt.where(Document.client_id == client_id)
+        res = await self.db.execute(stmt.order_by(Document.created_at.desc()))
+        return list(res.scalars().all())

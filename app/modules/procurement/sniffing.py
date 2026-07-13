@@ -50,13 +50,15 @@ from app.core.config import settings
 
 PDF_MIME = "application/pdf"
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+XLS_MIME = "application/vnd.ms-excel"          # legacy BIFF .xls (OLE2 compound file)
 CSV_MIME = "text/csv"
 
-ALLOWED_MIMES = {PDF_MIME, XLSX_MIME, CSV_MIME}
-_EXT_FOR_MIME = {PDF_MIME: ".pdf", XLSX_MIME: ".xlsx", CSV_MIME: ".csv"}
+ALLOWED_MIMES = {PDF_MIME, XLSX_MIME, XLS_MIME, CSV_MIME}
+_EXT_FOR_MIME = {PDF_MIME: ".pdf", XLSX_MIME: ".xlsx", XLS_MIME: ".xls", CSV_MIME: ".csv"}
 # Which sniffed MIME each filename extension is allowed to map to.
 _MIME_FOR_EXT = {
-    ".pdf": PDF_MIME, ".xlsx": XLSX_MIME, ".xlsm": XLSX_MIME, ".csv": CSV_MIME,
+    ".pdf": PDF_MIME, ".xlsx": XLSX_MIME, ".xlsm": XLSX_MIME,
+    ".xls": XLS_MIME, ".csv": CSV_MIME,
 }
 
 
@@ -111,6 +113,13 @@ def _sniff_mime(data: bytes) -> str:
 
     if data[:5] == b"%PDF-" or data[:4] == b"%PDF":
         return PDF_MIME
+    if data[:8] == b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1":
+        # OLE2 compound file — shared by .xls/.doc/.ppt. Confirm a Workbook stream
+        # (directory entry names are UTF-16LE) so only spreadsheets are accepted.
+        if (b"W\x00o\x00r\x00k\x00b\x00o\x00o\x00k\x00" in data
+                or b"B\x00o\x00o\x00k\x00" in data):
+            return XLS_MIME
+        return ""
     if data[:4] == b"PK\x03\x04":
         # A ZIP — is it an OOXML spreadsheet?
         try:
@@ -157,6 +166,8 @@ def sniff_and_extract(data: bytes, filename: str) -> DocFeatures:
         _extract_pdf(data, feats)
     elif mime == XLSX_MIME:
         _extract_xlsx(data, feats)
+    elif mime == XLS_MIME:
+        _extract_xls(data, feats)
     else:
         _extract_csv(data, feats)
     return feats
@@ -305,6 +316,42 @@ def _extract_xlsx(data: bytes, feats: DocFeatures) -> None:
     feats.numeric_ratio = (numeric / total) if total else 0.0
     feats.text_blob = "\n".join(cells)
     wb.close()
+
+
+def _extract_xls(data: bytes, feats: DocFeatures) -> None:
+    """Legacy BIFF .xls feature extraction. openpyxl cannot read OLE2, so mirror
+    _extract_xlsx via pandas+xlrd — the SAME engine bom.excel_content.xls_to_markdown
+    uses, so intake and downstream extraction agree on what 'readable' means."""
+    try:
+        import pandas as pd
+
+        sheets = pd.read_excel(io.BytesIO(data), sheet_name=None,
+                               engine="xlrd", header=None)
+    except Exception as exc:
+        raise EmptyOrCorrupt(f"unreadable legacy .xls: {exc}") from exc
+    if not sheets:
+        raise EmptyOrCorrupt(".xls has no readable sheets")
+
+    feats.sheet_names = list(sheets.keys())
+    first = sheets[feats.sheet_names[0]]
+    feats.n_rows = int(first.shape[0])
+    feats.n_cols = int(first.shape[1])
+
+    cells: list[str] = list(feats.sheet_names)
+    numeric = total = 0
+    for r, row in enumerate(first.itertuples(index=False, name=None)):
+        if r >= 60:
+            break
+        for c in row[:40]:
+            if c is None or c == "" or (isinstance(c, float) and pd.isna(c)):
+                continue
+            total += 1
+            if isinstance(c, (int, float)):
+                numeric += 1
+            else:
+                cells.append(str(c))
+    feats.numeric_ratio = (numeric / total) if total else 0.0
+    feats.text_blob = "\n".join(cells)
 
 
 # ── CSV ─────────────────────────────────────────────────────────────────────

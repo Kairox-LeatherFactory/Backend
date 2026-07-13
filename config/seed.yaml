@@ -1,0 +1,95 @@
+# ==============================================================================
+# seeds.yaml  —  the ONE file you edit.
+#
+# Two things live here:
+#   (A) CALIBRATION SEEDS  — the cold-start factors. Dev/expert owned. Rarely change.
+#   (B) TRAINING_HISTORY   — confirmed (style -> real DCM) rows. YOU APPEND THESE.
+#                            Once a (garment_type, tier) bucket has >= model.min_confirms_per_bucket
+#                            rows, the predictor takes over from the seed for that bucket.
+#
+# UNIT IS SQUARE FEET (sf) EVERYWHERE. Leather is bought/cut in sf. Do not mix dm².
+# ==============================================================================
+
+units: sf
+
+# ---- (A) CALIBRATION, DECOMPOSED -------------------------------------------------
+# DCM = proxy_area_sf * panel_factor * complexity_mult * tier_panel_adj * yield_factor
+calibration:
+  # panel_factor: bounding-box(outseam x hip) -> real panel area. PER GARMENT TYPE.
+  panel_factor:   {pants: 2.00, jacket: 2.30, vest: 1.70, skirt: 1.80, _default: 2.00}
+  # complexity_mult: simple/medium/complex paneling within a type.
+  complexity_mult: {simple: 0.85, medium: 1.00, complex: 1.20}
+  # yield_factor: 1 / cutting-efficiency. THE PER-FACTORY CONSTANT. Measure it (README §4).
+  #   sheep 1.40 was validated against the Beau Geste pants ground truth (34.5 sf).
+  yield_factor:   {sheep: 1.40, goat: 1.45, _default: 1.45}
+  # tier_panel_adj: knit/fabric panels replace leather -> less leather consumed.
+  tier_panel_adj: {full_leather: 1.00, leather_hybrid: 0.55, textile: 0.10}
+  # contrast sub-material (e.g. side panel) carried as a fraction of the MAIN leather.
+  sub_material_ratio: 0.08
+
+# which POMs proxy length x girth, per garment type
+proxy_def:
+  pants:  {length: outseam,      girth: hip}
+  jacket: {length: body_length,  girth: chest}
+  skirt:  {length: skirt_length, girth: hip}
+
+# flat cold-start DCM (sf) for NO-POM clients (Jackiee), keyed "type|tier". Expert-set.
+# NOTE: the price-reconciliation gate will FLAG these if they exceed what the selling
+# price can contain — that is the signal to tune them down (see Jackiee in the report).
+seed_dcm:
+  "jacket|full_leather":   50.0
+  "jacket|leather_hybrid": 30.0
+  "jacket|textile":         6.0
+  "vest|full_leather":     22.0
+  "vest|leather_hybrid":   14.0
+  "vest|textile":           4.0
+
+# leather price per sf, for the reconciliation cross-check
+leather_psf: {sheep: 2.10, goat: 2.60, _default: 2.30}
+
+# EU numeric size ~= chest_cm / 2; alpha sizes mapped to representative EU for grading
+alpha_to_eu: {S: 46, M: 48, L: 50, XL: 52}
+
+# confidence stamp per DCM source (the confidence ladder)
+confidence: {template: 0.95, dxf: 0.88, model: 0.75, similar: 0.70, seed: 0.45, manual: 1.00}
+
+model:
+  # below this many confirms in a (garment_type, tier) bucket -> use seed.
+  # at/above -> use the trained predictor for that bucket.
+  min_confirms_per_bucket: 6
+  features: [proxy_sf, garment_type, tier, complexity, n_poms, lined, n_sub, n_acc]
+
+# ---- (B) TRAINING HISTORY  — APPEND CONFIRMED ROWS HERE --------------------------
+# Each row = one finalized garment whose REAL DCM the cutting manager confirmed.
+# Required: garment_type, material, tier, complexity, proxy_sf, dcm. Optional counts.
+# proxy_sf = outseam_cm * hip_cm / 929.03 at the base size (or your computed proxy).
+#
+# Format example (copy, fill, uncomment):
+#   - {style: "STYLE-CODE", garment_type: jacket, material: sheep, tier: full_leather,
+#      complexity: medium, proxy_sf: 16.0, n_poms: 18, lined: 1, n_sub: 0, n_acc: 2, dcm: 52.0}
+#
+training_history:
+  # The ONLY real ground-truth row so far (Beau Geste pants, order 1579, 34.5 sf).
+  - {style: "CR1-02F5-PL02", garment_type: pants, material: sheep, tier: full_leather,
+     complexity: medium, proxy_sf: 12.16, n_poms: 14, lined: 0, n_sub: 1, n_acc: 2, dcm: 34.5}
+
+# ---- DXF PATH (Source 1c) -------------------------------------------------------
+# dxf_yield_factor multiplies the TRUE net pattern area from the DXF, so it is the pure
+# cutting/hide-waste multiplier and runs HIGHER than calibration.yield_factor (1.40/1.45),
+# which cancels the crude bounding-box proxy. Bootstrap from order 1579: sheep 34.5/13.77
+# = 2.51, goat 2.6/1.22 = 2.13 (natural hide is ~40-55% efficient). Learned per species
+# from confirmed orders as data lands (the resolver averages observations over these).
+dxf_yield_factor: {sheep: 2.50, goat: 2.10, calf: 2.30, lamb: 2.50, _default: 2.30}
+
+# fabric_role: maps a DXF FABRIC label -> role/category/is_leather (the ONE table a
+# non-technical operator extends, like pom_dictionary). is_leather:false rows
+# (pocketing/elastic/lining) are EXCLUDED from leather DCM — this is what prevents the
+# old all-pieces conflation (leather + pocketing + elastic) that produced a bogus 1.73.
+# Species is NOT here; it comes from the spec materials at resolve time. CreaCompo JP vocab:
+fabric_role:
+  - {label: "表生地", role: main,         category: main_material, is_leather: true}   # omote-kiji (shell)
+  - {label: "別布",       role: sub_material, category: sub_material,   is_leather: true}   # beppu (contrast)
+  - {label: "裏地",       role: lining,       category: lining,        is_leather: false}  # uraji
+  - {label: "スレーキ", role: pocketing, category: lining,     is_leather: false}  # pocketing textile
+  - {label: "芯地",       role: interlining,  category: interlining,   is_leather: false}  # shinji
+  - {label: "平ゴム", role: elastic,      category: accessory,     is_leather: false}  # flat elastic

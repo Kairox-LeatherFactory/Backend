@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
+from app.modules.clients.service import make_sku_code
 
 
 class ClientRepository:
@@ -96,6 +97,59 @@ class ClientRepository:
                 agg[("NA", None, str(size)[:10])] = int(qty)
         for (color_code, color_name, size), qty in agg.items():
             self.db.add(SKU(style_id=st.id, color_code=color_code,
-                            color_name=color_name, size=size, qty_ordered=int(qty)))
+                            color_name=color_name, size=size, qty_ordered=int(qty),
+                            code=make_sku_code(order.order_number, st.name, 
+                                color_name or color_code, size),))
         await self.db.commit()
         return co.id, st.id
+    
+    async def sku_label_context(self, sku_id) -> dict | None:
+        row = (await self.db.execute(
+            select(
+                SKU.id, SKU.code, ClientOrder.order_number, Style.name,
+                SKU.color_code, SKU.color_name, SKU.size, SKU.qty_ordered,
+            )
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .where(SKU.id == sku_id)
+        )).first()
+        if not row:
+            return None
+        _id, code, order_number, style_name, color_code, color_name, size, qty = row
+        return {
+            "sku_id": _id, "code": code, "order_number": order_number,
+            "style_name": style_name, "color_code": color_code,
+            "color_name": color_name, "size": size, "qty_ordered": int(qty or 0),
+        }
+ 
+    async def list_sku_options(self, *, order_id=None, style_id=None) -> list[dict]:
+        stmt = (
+            select(
+                SKU.id, SKU.code, ClientOrder.order_number, Style.name,
+                SKU.color_code, SKU.color_name, SKU.size, SKU.qty_ordered,
+            )
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+        )
+        if order_id:
+            stmt = stmt.where(Style.client_order_id == order_id)
+        if style_id:
+            stmt = stmt.where(SKU.style_id == style_id)
+        stmt = stmt.order_by(ClientOrder.order_number, Style.name, SKU.code)
+        rows = (await self.db.execute(stmt)).all()
+        return [
+            {
+                "sku_id": r[0], "code": r[1], "order_number": r[2], "style_name": r[3],
+                "color_code": r[4], "color_name": r[5], "size": r[6],
+                "qty_ordered": int(r[7] or 0),
+            }
+            for r in rows
+        ]
+        
+    async def get_sku_by_code(self, code: str):
+        from app.modules.clients.models import SKU
+        res = await self.db.execute(
+            select(SKU).where(SKU.code == (code or "").strip().upper())
+        )
+        return res.scalar_one_or_none()
+ 

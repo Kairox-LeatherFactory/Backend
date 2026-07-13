@@ -23,9 +23,9 @@ depends_on = None
 def upgrade():
     # order/style are populated only when the breakdown is materialised at approval
     op.alter_column('bom', 'client_order_id',
-                    UUID(), nullable=True)
+                    existing_type=UUID(), nullable=True)
     op.alter_column('bom', 'style_id',
-                    UUID(), nullable=True)
+                    existing_type=UUID(), nullable=True)
 
     op.add_column('bom', sa.Column('submission_id', UUID(), nullable=True))
     op.add_column('bom', sa.Column('client_id', UUID(), nullable=True))
@@ -53,6 +53,6 @@ def downgrade():
     op.drop_column('bom', 'client_id')
     op.drop_column('bom', 'submission_id')
     op.alter_column('bom', 'style_id',
-                    UUID(), nullable=False)
+                    existing_type=UUID(), nullable=False)
     op.alter_column('bom', 'client_order_id',
-                    UUID(), nullable=False)
+                    existing_type=UUID(), nullable=False)

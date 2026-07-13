@@ -1,16 +1,19 @@
 """
 ================================================================================
-modules/analytics/router.py — Read-only dashboard + alerts HTTP API (async)
+modules/analytics/router.py — Read-only dashboard + drill-down HTTP API (async)
+================================================================================
+Drill-down: /orders/{id}/tree  ->  /styles/{id}/detail  ->  /pieces/detail
 ================================================================================
 """
+import uuid
 from datetime import date
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.modules.users.deps import get_current_user
 from app.modules.analytics.service import AnalyticsService
+from app.modules.users.deps import get_current_user
 from app.modules.users.models import User
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
@@ -19,6 +22,40 @@ router = APIRouter(prefix="/analytics", tags=["Analytics"])
 @router.get("/overview")
 async def overview(db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
     return await AnalyticsService(db).factory_overview()
+
+
+@router.get("/orders/{order_id}/tree")
+async def order_tree(
+    order_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Order landing view: styles with piece count + current-stage distribution."""
+    return await AnalyticsService(db).order_tree(order_id)
+
+
+@router.get("/styles/{style_id}/detail")
+async def style_detail(
+    style_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """One style: every piece with its full stage history (employee + date/time)."""
+    return await AnalyticsService(db).style_detail(style_id)
+
+
+@router.get("/pieces/detail")
+async def piece_detail(
+    piece_code: str | None = Query(None),
+    sku_code: str | None = Query(None),
+    seq: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """One piece by piece_code OR (sku_code + seq): header + grouped stages."""
+    return await AnalyticsService(db).piece_detail(
+        piece_code=piece_code, sku_code=sku_code, seq=seq
+    )
 
 
 @router.get("/alerts/stage-spread")

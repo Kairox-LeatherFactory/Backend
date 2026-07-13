@@ -11,6 +11,7 @@ that every block can have a different set of sizes.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
+from datetime import date
 from app.modules.imports.excel_reader import clean_str, to_int, to_date
 
 # Words that appear in a size-column header. Anything that is one of these,
@@ -40,6 +41,7 @@ class OrderLine:
     sizes: dict[str, int]          # {"M": 53, "L": 52, ...}
     total: int
     source_row: int                # for traceability in warnings
+    order_date: "date | None" = None
     warnings: list[str] = field(default_factory=list)
 
 
@@ -64,6 +66,8 @@ def _find_columns(ws, header_row: int):
             col_map["article"] = c
         elif _is_size_header(h):
             size_cols[c] = h.upper()
+        elif H in ("DATE",):
+            col_map["date"] = c
     return col_map, size_cols
 
 
@@ -90,6 +94,7 @@ def parse_order_sheet(ws) -> tuple[list[OrderLine], list[str]]:
     last_article = None
     declared_block_total = None        # the subtotal printed under a block
     running_block_total = 0
+    last_date = None
 
     def close_block():
         nonlocal running_block_total, declared_block_total
@@ -112,8 +117,12 @@ def parse_order_sheet(ws) -> tuple[list[OrderLine], list[str]]:
         style = clean_str(ws.cell(r, col_map.get("style", 2)).value)
         color = clean_str(ws.cell(r, col_map.get("color", 3)).value)
         article = clean_str(ws.cell(r, col_map.get("article", 0) or 999).value) \
-            if col_map.get("article") else None
-
+            if col_map.get("article") else None    
+        row_date = (
+            to_date(ws.cell(r, col_map["date"]).value)
+            if col_map.get("date")
+            else None
+        )
         sizes = {}
         for c, label in size_cols.items():
             q = to_int(ws.cell(r, c).value)
@@ -125,15 +134,19 @@ def parse_order_sheet(ws) -> tuple[list[OrderLine], list[str]]:
         if not style and color and row_total > 0:
             style = last_style
             article = article or last_article
+            row_date = row_date or last_date 
 
         if style and row_total > 0:
             last_style = style
             if article:
                 last_article = article
+            eff_date = row_date or last_date
+            if eff_date:
+               last_date = eff_date 
             running_block_total += row_total
             lines.append(OrderLine(
                 style=style, color=color, article=article,
-                sizes=sizes, total=row_total, source_row=r))
+                sizes=sizes, total=row_total, source_row=r, order_date=eff_date))
         else:
             # Not a data row. It may be a SUBTOTAL row: a lone number sitting in
             # the TOTAL column (or any column) with no style and no size spread.

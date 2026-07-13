@@ -108,6 +108,26 @@ async def upload_order_sheet(
         return _error_response(exc)
 
 
+@router.post("/upload/order-sheet", status_code=201)
+async def upload_order_sheet_direct(
+    file: UploadFile = File(...),
+    force: bool = False,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_DMMD),
+):
+    """Upload an order sheet WITHOUT a pre-existing submission. A new submission is
+    auto-created only when the file passes validation; the returned `submission_id`
+    must be used for the paired spec-sheet upload (and vice-versa). A rejected file
+    returns 4xx diagnostics — no submission is visible to the caller."""
+    try:
+        data = await _read_capped(file)
+        envelope = await ProcurementService(db).upload_order_sheet(
+            user, None, data, file.filename, override_manual_review=force)
+        return JSONResponse(status_code=201, content=envelope)
+    except UploadError as exc:
+        return _error_response(exc)
+
+
 @router.post("/submissions/{submission_id}/spec-sheet")
 async def upload_spec_sheet(
     submission_id: uuid.UUID,
@@ -127,6 +147,26 @@ async def upload_spec_sheet(
         return _error_response(exc)
 
 
+@router.post("/upload/spec-sheet", status_code=201)
+async def upload_spec_sheet_direct(
+    file: UploadFile = File(...),
+    force: bool = False,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_DMMD),
+):
+    """Upload a spec sheet WITHOUT a pre-existing submission. A new submission is
+    auto-created only when the file passes validation; the returned `submission_id`
+    must be used for the paired order-sheet upload (and vice-versa). A rejected file
+    returns 4xx diagnostics — no submission is visible to the caller."""
+    try:
+        data = await _read_capped(file)
+        envelope = await ProcurementService(db).upload_spec_sheet(
+            user, None, data, file.filename, override_manual_review=force)
+        return JSONResponse(status_code=201, content=envelope)
+    except UploadError as exc:
+        return _error_response(exc)
+
+
 @router.get("/submissions/{submission_id}")
 async def submission_status(
     submission_id: uuid.UUID,
@@ -134,20 +174,6 @@ async def submission_status(
     user: User = Depends(_DMMD),
 ):
     return await ProcurementService(db).get_submission_status(submission_id)
-
-
-@router.post("/submissions/{submission_id}/generate-bom", status_code=201)
-async def generate_bom(
-    submission_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(_DMMD),
-):
-    """Stage-1 → Stage-2 trigger: consume a COMPLETE submission into a DRAFT BOM and lock
-    it (CONSUMED). DM/MD only — matches the upload gate. 409 unless the submission is
-    COMPLETE with both slots accepted. No body: the BOM is built from the order + spec
-    sheets alone; the order/style breakdown is created at MD approval."""
-    return await ProcurementService(db).generate_bom_from_submission(user, submission_id)
-
 
 
 @router.get("/submissions/{submission_id}/documents/{document_id}")

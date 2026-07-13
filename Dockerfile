@@ -5,8 +5,14 @@
 # heavy deps (torch/faiss/sentence-transformers) ship as wheels, so a
 # multi-stage build would add complexity for marginal size gain.
 #
-# Same image is used for every role; docker-compose passes the command
-# ("api", "migrate", "seed", "shell") which entrypoint.sh dispatches on.
+# ONE image, every role. docker-compose passes the command — entrypoint.sh
+# dispatches on it:
+#   api      → wait-for-db → migrate → seed → uvicorn   (default)
+#   worker   → wait-for-db + redis → celery worker      (background BOM jobs)
+#   beat     → wait-for-redis → celery beat             (scheduled jobs)
+#   migrate / seed / shell
+# Celery + Redis add NO system deps (redis-py is a pure-Python wheel); they enter
+# via requirements.txt, which must pin:  celery[redis]==5.5.3 , redis==6.4.0
 # ──────────────────────────────────────────────────────────────
 
 # 3.13-slim: matches the Python version requirements.txt was resolved &
@@ -19,8 +25,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # System deps:
-#   - gcc + libpq-dev : build any C extensions that lack a wheel
-#   - curl            : used by the HEALTHCHECK below
+#   - gcc + libpq-dev : build any C extensions that lack a wheel (incl. psycopg2)
+#   - curl            : used by the api HEALTHCHECK below
 #   - dos2unix        : entrypoint.sh is edited on Windows; normalise CRLF so
 #                       the shebang resolves (otherwise: "no such file or directory")
 #   - tesseract-ocr   : the OCR binary pytesseract shells out to, for the scanned-PDF
@@ -51,9 +57,12 @@ RUN dos2unix entrypoint.sh 2>/dev/null || true \
 
 EXPOSE 8000
 
+# Image-level healthcheck targets the API. It is harmless for worker/beat (compose
+# defines their lifecycle); compose's own api healthcheck is the one that gates
+# worker/beat startup.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=5 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# entrypoint.sh dispatches on the command; compose overrides "api" as needed.
+# entrypoint.sh dispatches on the command; compose overrides "api" per service.
 ENTRYPOINT ["./entrypoint.sh"]
 CMD ["api"]

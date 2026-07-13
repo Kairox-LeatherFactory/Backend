@@ -3,21 +3,73 @@
 # ──────────────────────────────────────────────────────────────
 # ZERO-SETUP DEV ONBOARDING. A fresh clone needs nothing but Docker:
 #
-#   docker compose up --build   → Postgres + Backend API
-#                                 (entrypoint: wait-for-db → migrate → seed → uvicorn)
-#   docker compose down         → stop, KEEP data (volume persists)
-#   docker compose down -v      → stop AND wipe the DB (next `up` re-migrates + reseeds)
+#   docker compose up --build   → Postgres + Redis + API + Worker + Beat
+#                                 (api entrypoint: wait-for-db → migrate → seed → uvicorn)
+#   docker compose down         → stop, KEEP data (volumes persist)
+#   docker compose down -v      → stop AND wipe DB + Redis (next `up` re-migrates + reseeds)
 #
 # No `.env` is required — every setting has a safe dev default baked in below and in
-# app/core/config.py. If a `.env` exists (e.g. with real GEMINI/GROQ keys) it is loaded
-# and overrides these; if it's absent, the stack still boots. The DB URLs below always
-# point at the bundled `db` service (compose `environment:` wins over `env_file:`).
+# app/core/config.py. If a `.env` exists (e.g. with real GEMINI/GROQ keys, or an Upstash
+# CELERY_BROKER_URL) it is loaded and overrides these; if absent, the stack still boots.
+# compose `environment:` wins over `env_file:`, so the DB/Redis URLs below always point
+# at the bundled `db` / `redis` services in dev.
+#
+# BOM extraction now runs as a background Celery job: POST /generate-bom returns 202 +
+# job_id, the `worker` builds the BOM, and the UI flips via Realtime. `worker` + `beat`
+# + `redis` are default-on so that flow works on the first `up`. In prod, point
+# CELERY_BROKER_URL / CELERY_RESULT_BACKEND at Upstash (rediss://…) and you can drop the
+# local `redis` service.
 #
 # OPTIONAL virus scanning (Stage-1 upload gate) is OFF by default so the first `up` is
 # fast and never fails-closed. To turn it on:
 #   docker compose --profile scan up        # starts the clamav sidecar
 #   …and set VIRUS_SCAN_ENABLED=true (in .env or your shell env).
 # ──────────────────────────────────────────────────────────────
+
+# ── shared building blocks (DRY across api / worker / beat) ───────────────────
+x-app-base: &app-base
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  # Load .env if present (real API keys, custom knobs), but DON'T require it.
+  env_file:
+    - path: .env
+      required: false
+  volumes:
+    # Bind-mount the source for hot-reload during dev (*.sh are pinned to LF in
+    # .gitattributes so the bind-mounted entrypoint runs on Windows too).
+    # COMMENT THIS OUT to test the baked image exactly as it ships.
+    - ./:/app
+    # Shared document store so LOCAL storage works ACROSS api + worker (the worker
+    # must read bytes the api wrote). A named volume survives even if the bind-mount
+    # above is removed. In prod with STORAGE_BACKEND=supabase this is unused.
+    - procurement_docs:/app/var/procurement-documents
+
+x-app-env: &app-env
+  # Sync URL (Alembic + seed) and async URL (live API), both at the `db` host.
+  DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-factory}:${POSTGRES_PASSWORD:-factory}@db:5432/${POSTGRES_DB:-factory}
+  ASYNC_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-factory}:${POSTGRES_PASSWORD:-factory}@db:5432/${POSTGRES_DB:-factory}
+  # Alembic owns the schema (a single verified baseline). DEBUG stays false so the
+  # app never builds tables behind Alembic's back (CLAUDE.md §7).
+  DEBUG: "false"
+  # Auth: a dev-only signing key so a fresh clone has working JWTs out of the box.
+  # OVERRIDE with a long random SECRET_KEY in .env / real deployments.
+  SECRET_KEY: "${SECRET_KEY:-dev-only-insecure-change-me-in-prod}"
+  # Celery / Redis. Broker on db 0, results on db 1. Override with Upstash rediss://
+  # in prod. (config.py must expose celery_broker_url / celery_result_backend.)
+  CELERY_BROKER_URL: "${CELERY_BROKER_URL:-redis://redis:6379/0}"
+  CELERY_RESULT_BACKEND: "${CELERY_RESULT_BACKEND:-redis://redis:6379/1}"
+  # Stage-1 upload gate. OFF by default (uploads record scan_status=skipped) so the
+  # stack boots without the clamav sidecar. Turn on with `--profile scan` + true.
+  VIRUS_SCAN_ENABLED: "${VIRUS_SCAN_ENABLED:-false}"
+  CLAMD_HOST: clamav
+  CLAMD_PORT: "3310"
+  # Storage stays on the local driver inside the container by default; set
+  # STORAGE_BACKEND=supabase + the SUPABASE_* vars in prod (see .env.example).
+  STORAGE_BACKEND: "${STORAGE_BACKEND:-local}"
+  LOCAL_STORAGE_DIR: "/app/var/procurement-documents"
+  MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-25}"
 
 services:
   # ────────────────────────────────────────────────────────────
@@ -34,7 +86,7 @@ services:
     ports:
       # Exposed on the host so devs can connect with psql/DBeaver.
       # Drop this in production — Docker-internal access only.
-      - "${POSTGRES_HOST_PORT:-5432}:5432"
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -43,6 +95,28 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+
+  # ────────────────────────────────────────────────────────────
+  # Redis 7 — Celery broker (db 0) + result backend (db 1)
+  # Lightweight + fast to pull, so it's default-on (the 202 BOM flow needs the worker,
+  # which needs the broker). appendonly persistence keeps queued jobs across restarts.
+  # ────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: factory_redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      # Exposed for local debugging (redis-cli). Drop in production.
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
   # ────────────────────────────────────────────────────────────
   # ClamAV — virus scanner sidecar (Stage-1 upload gate, §7) — OPT-IN.
@@ -69,52 +143,24 @@ services:
   # ────────────────────────────────────────────────────────────
   # Backend API — FastAPI / uvicorn
   # entrypoint.sh runs: wait-for-db → migrate → seed → uvicorn
+  # (api OWNS migrations + seed; worker/beat wait for it to be healthy)
   # ────────────────────────────────────────────────────────────
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    <<: *app-base
     container_name: factory_api
-    restart: unless-stopped
     command: ["api"]
-    # Load .env if present (real API keys, custom knobs), but DON'T require it — a
-    # fresh clone boots on the defaults below + app/core/config.py.
-    env_file:
-      - path: .env
-        required: false
     environment:
-      # Sync URL (Alembic + seed) and async URL (live API), both at the `db` host.
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-factory}:${POSTGRES_PASSWORD:-factory}@db:5432/${POSTGRES_DB:-factory}
-      ASYNC_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-factory}:${POSTGRES_PASSWORD:-factory}@db:5432/${POSTGRES_DB:-factory}
-      # Alembic owns the schema (a single verified baseline). DEBUG stays false so the
-      # app never builds tables behind Alembic's back (CLAUDE.md §7).
-      DEBUG: "false"
+      <<: *app-env
       RUN_MIGRATIONS: "true"      # alembic upgrade head before serving
       RUN_SEED: "true"            # idempotent seed from the bundled spreadsheets
       UVICORN_RELOAD: "true"      # hot-reload in dev; remove for a production-like run
-      # Auth: a dev-only signing key so a fresh clone has working JWTs out of the box.
-      # OVERRIDE with a long random SECRET_KEY in .env / real deployments.
-      SECRET_KEY: "${SECRET_KEY:-dev-only-insecure-change-me-in-prod}"
-      # Stage-1 upload gate. OFF by default (uploads record scan_status=skipped) so the
-      # stack boots without the clamav sidecar. Turn on with `--profile scan` + true.
-      VIRUS_SCAN_ENABLED: "${VIRUS_SCAN_ENABLED:-false}"
-      CLAMD_HOST: clamav
-      CLAMD_PORT: "3310"
-      # Storage stays on the local driver inside the container by default; set
-      # STORAGE_BACKEND=supabase + the SUPABASE_* vars in prod (see .env.example).
-      STORAGE_BACKEND: "${STORAGE_BACKEND:-local}"
-      LOCAL_STORAGE_DIR: "/app/var/procurement-documents"
-      MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-25}"
     ports:
       - "${BACKEND_HOST_PORT:-8000}:8000"
     depends_on:
       db:
         condition: service_healthy
-    volumes:
-      # Bind-mount the source for hot-reload during dev (*.sh are pinned to LF in
-      # .gitattributes so the bind-mounted entrypoint runs on Windows too).
-      # COMMENT THIS OUT to test the baked image exactly as it ships.
-      - ./:/app
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s
@@ -122,6 +168,53 @@ services:
       retries: 5
       start_period: 90s   # first boot runs migrations + seed (≈ 870 inventory rows)
 
+  # ────────────────────────────────────────────────────────────
+  # Celery worker — background BOM extraction/generation jobs.
+  # Same image; entrypoint role "worker". Waits for db + redis, and for `api` to be
+  # HEALTHY (so migrate+seed are done) before processing. Never migrates/seeds itself.
+  # ────────────────────────────────────────────────────────────
+  worker:
+    <<: *app-base
+    container_name: factory_worker
+    command: ["worker"]
+    environment:
+      <<: *app-env
+      RUN_MIGRATIONS: "false"
+      RUN_SEED: "false"
+      CELERY_CONCURRENCY: "${CELERY_CONCURRENCY:-4}"
+      CELERY_LOGLEVEL: "${CELERY_LOGLEVEL:-info}"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy   # api owns schema; wait until migrate+seed finished
+    # no ports — not web-facing
+
+  # ────────────────────────────────────────────────────────────
+  # Celery beat — scheduler for periodic jobs (freight-risk scan, review escalation).
+  # Only talks to the broker; task bodies execute in `worker`.
+  # ────────────────────────────────────────────────────────────
+  beat:
+    <<: *app-base
+    container_name: factory_beat
+    command: ["beat"]
+    environment:
+      <<: *app-env
+      RUN_MIGRATIONS: "false"
+      RUN_SEED: "false"
+      CELERY_LOGLEVEL: "${CELERY_LOGLEVEL:-info}"
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
 volumes:
   pgdata:
     name: factory_pgdata
+  redisdata:
+    name: factory_redis_data
+  procurement_docs:
+    name: factory_procurement_docs

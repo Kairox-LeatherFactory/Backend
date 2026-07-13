@@ -105,12 +105,31 @@ def _check_pitch_monotonic(rule: dict, ctx: dict) -> dict:
 def _check_qty_sum(rule: dict, ctx: dict) -> dict:
     per_size = ctx.get("per_size_qty") or {}
     total = ctx.get("order_qty")
-    if total is None:
-        return _flag(rule, True, "order_qty unknown (skipped)")
+
+    if total is None or not per_size:
+        warn_rule = dict(rule)
+        warn_rule["severity"] = "warn"
+
+        return _flag(
+            warn_rule,
+            True,
+            "size quantity check skipped: missing order_qty or per_size_qty",
+        )
+
     s = sum(per_size.values())
+
     if int(s) != int(total):
-        return _flag(rule, False, f"Σ per-size qty ({s}) != order total ({total})")
-    return _flag(rule, True, f"Σ per-size qty == order total ({total})")
+        return _flag(
+            rule,
+            False,
+            f"Σ per-size qty ({s}) != order total ({total})",
+        )
+
+    return _flag(
+        rule,
+        True,
+        f"Σ per-size qty == order total ({total})",
+    )
 
 
 def _check_pattern_ref(rule: dict, ctx: dict) -> dict:
@@ -135,7 +154,11 @@ def run_checks(client_code: str | None, ctx: dict, checks_cfg: tuple | None = No
     """Run the configured checks for `client_code` against `ctx`. Returns a list of
     flags; the service blocks finalization iff any flag has severity 'error' and ok
     is False. Unknown client → no checks (empty list)."""
-    cfg = checks_cfg if checks_cfg is not None else load_checks()
+    if checks_cfg is not None:
+        cfg = checks_cfg
+    else:
+        from app.modules.bom import config_store
+        cfg = config_store.get_bom_checks()
     flags: list[dict] = []
     for entry in cfg:
         if entry.get("client_code") != client_code:

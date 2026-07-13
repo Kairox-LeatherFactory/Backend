@@ -1,0 +1,293 @@
+{
+  "contract_number": "49/26",
+  "contract_date": "2026-04-01",
+  "seller": {
+    "name": "PAKKAR TANVEER EXPORTS",
+    "address": "No.1 Hyder Garden, 2nd Street Extn., Jamaliya Nagar, Perambur, Chennai 600012, India"
+  },
+  "buyer": {
+    "client_id": "ORFATTI-001",
+    "client_name": "CONFEZIONI ORFATTI SRL",
+    "address": "Via E. e P. Salani 24, 50050 Limite S/Arno FI, Italy"
+  },
+  "agent": {
+    "name": "MEA SRL",
+    "address": "Via Capoquadri 8, 50053 Empoli (FI), Italy",
+    "email": "mea.srl@tin.it"
+  },
+  "delivery_date": "2026-05-15",
+  "delivery_terms": "EX CHENNAI",
+  "currency": "EUR",
+  "total_order_quantity": 168,
+  "size_range": "DONNA 38-56 (XS–XXXL)",
+  "style_id": "SP72705",
+  "internal_style_ref": "SP72705 (FOIL DOLLY)",
+  "collection": "VLAB",
+  "season": "SS2027",
+  "garment_type": "Jacket",
+  "garment_subtype": "Short Boxy Jacket – Clean-Cut Workmanship, Unlined Body",
+  "gender": "Women (Donna)",
+  "size_range_ordered": "42 (S)",
+  "order_quantity": 11,
+  "colour": "Light Green",
+  "colour_code": "Light Green – follow leather swatch",
+  "unit_price_eur": "TBC",
+  "leather": {
+    "type": "202 DOLLY",
+    "finish": "Foil / Metallic Finish",
+    "animal": "Not specified – specialist foil-coated leather",
+    "thickness_mm": "TBC – standard garment leather ~0.6–0.8mm for DOLLY",
+    "selection_grade": "Same as original sample",
+    "colour_direction": "Light Green – follow order swatch",
+    "grain_restriction": "Net-cut workmanship; all cuts must be clean-cut; raw edges visible",
+    "anti_dust_treatment": false,
+    "napalan_treatment": false,
+    "special_finish": "Foil surface – do not crease or mark during handling; avoid fold marks in packaging",
+    "DCM_norm": 355,
+    "costing_DCM_lay_avg": 335,
+    "unit_price_inr_per_dcm": 14,
+    "total_leather_cost_inr": 4970,
+    "foil_charges_sqft": 26,
+    "calibration": {
+      "extra_leather_dcm": 20,
+      "calibration_percent": 5.97,
+      "allocated_dcm": 355,
+      "expected_consumption_dcm": 335,
+      "purpose": "Grace allowance for leather defects, matching, cutting losses and production variation."
+    }
+  },
+  "pattern": {
+    "base_pattern_ref": "SP62507 (carry-over, adapted without body lining)",
+    "pattern_type": "Fitted short jacket, round sleeve",
+    "paper_pattern_source": "Original sample held by client",
+    "size_base": "42 (labelled as S)",
+    "grading_increment_cm": 2,
+    "grading_method": "Proportional Italian system"
+  },
+  "measurements_cm": {
+    "size_reference": "S/42",
+    "back_length_A": 57.0,
+    "front_length_B": "per grade",
+    "shoulder_length_C": "per grade",
+    "sleeve_length_incl_cuff_D": {
+      "target": 42.5,
+      "proto": 38.5,
+      "comment": "Lengthen sleeve to 42.5cm per proto comment"
+    },
+    "half_bottom_sleeve_circunf_E": {
+      "target": 15.0,
+      "proto": 15.5
+    },
+    "elbow_position_F": "per grade",
+    "half_muscle_circunf_F2": {
+      "target": 19.0,
+      "proto": 19.2
+    },
+    "half_chest_circunf_G": {
+      "target": 50.0,
+      "proto": 50.5
+    },
+    "half_waist_circunf_H1": {
+      "target": 51.0,
+      "proto": 51.0
+    },
+    "half_bottom_hem_L": {
+      "target": 55.0,
+      "proto": 53.7
+    },
+    "collar_height_back_M": {
+      "target": 6.5,
+      "proto": 7.0
+    },
+    "front_collar_width_M1": 4.0,
+    "stand_collar_width_M2": 3.5,
+    "shoulder_to_shoulder_N": {
+      "target": 57.0,
+      "proto": 57.0
+    },
+    "back_width_at_15cm_N1": {
+      "target": 50.0,
+      "proto": 50.0
+    },
+    "pocket_position_from_hsp_P": "per grade",
+    "pocket_length_P2": "per grade",
+    "pocket_width_P3": "per grade",
+    "back_neckhole_breadth_V": "per grade",
+    "front_neckhole_depth_V1": "per grade",
+    "round_sleeve_vertical_depth": "per grade"
+  },
+  "construction": {
+    "lining": {
+      "body": "Unlined",
+      "sleeves": "Polyester lining – matching Light Green",
+      "pocket_sac": "One layer polyester lining – matching Light Green",
+      "adhesive_locations": [
+        "Front edge",
+        "Front facing",
+        "Collar",
+        "Stand collar",
+        "Body hem",
+        "Sleeve hem"
+      ],
+      "lining_colour": "Light Green (matching leather)"
+    },
+    "collar": {
+      "type": "Stand collar + collar",
+      "construction": "Outside and inside collar; outside and inside stand collar; clean-cut",
+      "collar_height_back_cm": 6.5,
+      "front_collar_width_cm": 4.0
+    },
+    "front_closure": "Button – Shell Button 2 holes Size 36",
+    "front_facing": "Leather, extended to bottom body hem; inside raw cut; fixed by hand stitching",
+    "bottom_hem": "Leather inside hem; raw cut; arrives to front facing; hand-stitched",
+    "pocket_construction": {
+      "type": "Inseam / welt style",
+      "visible_layer": "Leather (same as garment)",
+      "hidden_layer": "Viscose matching colour",
+      "pocket_sac_finishing": "As original sample",
+      "buttonhole_type": "Handmade – NOT machine button holes (per proto comment)"
+    },
+    "yoke": false,
+    "cargo_pockets": false,
+    "back_slit": false,
+    "decorative_panels": {
+      "back_neck_patch": {
+        "present": true,
+        "material": "Leather patch on back neck lining",
+        "print": "LAB IT ON – Silver + Red finish (same as yellow original sample)"
+      }
+    },
+    "curl_hanger": "Leather curl hanger",
+    "seam_allowance_general_cm": 1.0,
+    "seam_type": "Clean-cut / raw edge as indicated",
+    "open_seam_locations": [
+      "Collar neck sewing",
+      "Back/front round sleeve",
+      "Body flanks",
+      "Under vertical sleeve cut",
+      "Bottom horizontal sleeve cut"
+    ],
+    "panel_curvature": "Moderate – fitted silhouette, shaped front facing",
+    "panel_pieces_estimated": 12,
+    "workmanship_notes": [
+      "Check paper pattern SP62507 – correct to exactly match original sample for net-cut all over",
+      "Pocket cleaned workmanship and collar/stand collar cleaned stitching same as original",
+      "Front facing longer till bottom body as on yellow garment",
+      "Bottom body inside hem must arrive till front facing",
+      "Pocket sac finishing inside as on original sample",
+      "Back neck patch LAB IT ON workmanship same as yellow original garment",
+      "Make handmade button holes (not machine)",
+      "Use same quality and size 2-hole button as original sample – send photo for confirmation",
+      "Lengthen sleeve to 42.5cm",
+      "Lining must completely match leather colour"
+    ]
+  },
+  "accessories": [
+    {
+      "item": "Shell Button 2-Holes Size 36",
+      "colour": "Grey – same as original sample",
+      "qty_per_garment": "1+1 (spare)",
+      "position": "Centre front"
+    },
+    {
+      "item": "Under Button 4-Holes Size 18",
+      "colour": "Transparent",
+      "qty_per_garment": "1+1 (spare)",
+      "position": "Inside garment"
+    },
+    {
+      "item": "Leather Curl Hanger",
+      "colour": "Matching",
+      "qty_per_garment": 1,
+      "position": "Back neck"
+    },
+    {
+      "item": "LAB IT ON Print Patch (Leather)",
+      "colour": "Silver + Red",
+      "qty_per_garment": 1,
+      "position": "Inside back neck line"
+    },
+    {
+      "item": "Polybag for Spare Buttons",
+      "colour": "Clear",
+      "qty_per_garment": 1,
+      "position": "On left flank applied to size label"
+    },
+    {
+      "item": "Transparent Plastic Pin",
+      "colour": "Transparent",
+      "qty_per_garment": 1,
+      "position": "On size label – left flank"
+    }
+  ],
+  "labels": [
+    {
+      "type": "Main Label",
+      "brand": "VLAB",
+      "qty": 1,
+      "position": "Inside front left side on pocket sac",
+      "construction": "Applied directly on lining – woven quality, black ground, white writing"
+    },
+    {
+      "type": "Size Label",
+      "qty": 1,
+      "position": "Left flank at 10cm from round sleeves"
+    },
+    {
+      "type": "Composition Label",
+      "qty": 1,
+      "position": "Inside left flank, under size label"
+    },
+    {
+      "type": "Care Label + Prodotto Importato",
+      "qty": 1,
+      "position": "Inside left flank, under size label"
+    }
+  ],
+  "threads": [
+    {
+      "type": "Thread Size 30",
+      "colour": "Light Green (matching)",
+      "use": "All outside stitching"
+    },
+    {
+      "type": "Thread (SMS size)",
+      "colour": "Light Green (matching)",
+      "use": "All inside stitching"
+    }
+  ],
+  "costing": {
+    "leather_inr_no_gst": 4970,
+    "leather_inr_with_gst": 5218.5,
+    "materials_inr_no_gst": 2984.85,
+    "materials_inr_with_gst": 3022.23,
+    "total_cost_inr_no_gst": 7954.85,
+    "making_cost_inr": 1000,
+    "freight_inr": 450,
+    "commission_pct": 6,
+    "exchange_rate_eur_inr": 85,
+    "fob_price_eur_approx": 94
+  },
+  "yardage_estimation": {
+    "leather_DCM": 355,
+    "lay_avg_DCM": 335,
+    "lining_MTR": 1.0,
+    "fusing_MTS": 0.5,
+    "solutions_litre": 0.15,
+    "pakka_tape_MTS": 3.75
+  },
+  "complexity_assessment": {
+    "overall_complexity": "High",
+    "rationale": "Foil leather requires careful handling; clean-cut raw-edge workmanship throughout; handmade button holes; unlined body with full-length facing; partial sleeve and pocket lining; decorative print patch; collar and stand collar construction.",
+    "complexity_score": 8,
+    "complexity_max": 10
+  },
+  "proto_sample_status": "Proto sample to be made and returned with original",
+  "label_brand": "VLAB",
+  "collection_label": "MONTEREGGI",
+  "source_files": [
+    "SP72705_202_DOLLY.xls",
+    "SAMPLE_COSTING_SHEET_FOR_SIR.xlsx",
+    "49-26-01-04-2026.pdf"
+  ]
+}

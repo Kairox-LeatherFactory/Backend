@@ -85,18 +85,40 @@ class NotificationService:
         from app.modules.users.service import UserService
 
         roles = [UserRole.MANAGING_DIRECTOR]
+        # checking notify_dm_on_review = true 
+        # here first notify send to md if he didnt the see mail  it goes to dm
+        # What happens after 2 hours?
+        # MD in-app notification
+        #     |
+        # 2 hours pass
+        #     |
+        # +--> Email sent to MD
         if settings.notify_dm_on_review:
             roles.append(UserRole.DIRECT_MANAGER)
         recipients = await UserService(self.db).list_by_roles(roles)
         if not recipients:
             return []
+        
+        
+        # Suppose:
 
+        # now = 10:00 AM
+
+        # and
+
+        # escalation_hours = 2
+
+        # Then:
+
+        # deadline = 12:00 PM
+        
         now = datetime.now(timezone.utc)
         deadline = now + timedelta(hours=settings.bom_review_escalation_hours)
         subject = "BOM ready for review"
         label = style_name or "a style"
         if order_number:
             label = f"{label} (order {order_number})"
+            # SEND TO FRONTEND AS NOTIFICATION
         link = f"{settings.frontend_base_url}/boms/{bom_id}"
         body = f"BOM for {label} is ready for your review and approval. {link}"
 
@@ -129,6 +151,7 @@ class NotificationService:
     async def list_for_user(self, user_id: uuid.UUID, *, unread_only: bool = False) -> dict:
         rows = await self.repo.list_notifications_for_user(user_id, unread_only=unread_only)
         items = [self._view(n) for n in rows]
+        # VIEW IS USED FOR CONVERTING INTO JSON FORMAAT 
         return {"notifications": items, "unread": sum(1 for n in rows if n.opened_at is None)}
 
     async def mark_opened(self, notification_id: uuid.UUID, user) -> dict:
@@ -137,8 +160,21 @@ class NotificationService:
         n = await self.repo.get_notification(notification_id)
         if n is None:
             raise HTTPException(404, "Notification not found.")
+        
+        # not needed
         if n.recipient_user_id != getattr(user, "id", None):
             raise HTTPException(403, "Not your notification.")
+        
+        # Before:
+
+        # status = pending
+        # opened_at = null
+
+        # After:
+
+        # status = opened
+        # opened_at = 2026-06-19 10:15
+        
         if n.opened_at is None:
             n.opened_at = datetime.now(timezone.utc)
             n.status = NotificationStatus.OPENED.value
@@ -148,6 +184,8 @@ class NotificationService:
     # ══════════════════════════════════════════════════════════════════════
     # SSE — the live push (§2a). Backbone is still the table; this is a view.
     # ══════════════════════════════════════════════════════════════════════
+    
+    # Provides live notifications using SSE.
     async def stream(self, user_id: uuid.UUID, *, poll_seconds: int | None = None):
         """Async generator of `text/event-stream` frames for one recipient. Emits the
         unseen backlog on connect (marking each SENT so it isn't re-pushed), then
@@ -159,12 +197,24 @@ class NotificationService:
         interval = poll_seconds or STREAM_POLL_SECONDS
         seen_ids: set[str] = set()
 
+        # Fetches unread notifications.
         async def _emit_new() -> list[str]:
             rows = await self.repo.list_notifications_for_user(user_id, unread_only=True)
+            
+        # Mark as Sent
+        # if n.status == PENDING:
+        # n.status = SENT
+
+        # Meaning:
+
+        # Notification delivered to browser
+        
             frames: list[str] = []
             for n in rows:
+                # prevent duplicates
                 if str(n.id) in seen_ids:
                     continue
+                
                 seen_ids.add(str(n.id))
                 if n.status == NotificationStatus.PENDING.value:
                     n.status = NotificationStatus.SENT.value
@@ -175,8 +225,10 @@ class NotificationService:
             return frames
 
         # initial backlog
+        # tajke one by one
         for frame in await _emit_new():
             yield frame
+            # yield is used in Python to create a generator.
         # live loop
         while True:
             await asyncio.sleep(interval)
@@ -197,17 +249,55 @@ class NotificationService:
         from app.modules.users.service import UserService
 
         now = datetime.now(timezone.utc)
+        # overdue mail
+        # These are notifications that:
+
+        # ✅ Were sent in-app
+        # ✅ Have not been opened
+        # ✅ Escalation time has arrived
         due = await self.repo.due_escalations(now)
         if not due:
             return 0
-        notifier = get_notifier()
-        users = UserService(self.db)
-        count = 0
+        notifier = get_notifier() # now we have log | smtp | noop
+    #     Suppose:
+
+    #     settings.email_backend = "smtp"
+
+    #     and
+
+    #     _BACKENDS = {
+    # "smtp": SMTPEmailBackend,
+    # "sendgrid": SendGridEmailBackend,
+    # "log": LogEmailBackend
+    #     }
+
+    #     Then:
+
+    #     cls = SMTPEmailBackend
+    #     users = UserService(self.db)
+    #     count = 0
         for parent in due:
+            # Loop through every overdue notification
             recipient = await users.get(parent.recipient_user_id) if parent.recipient_user_id else None
+            
+            # Determine email address getting email phone 
             to = (getattr(recipient, "email", None)
                   or getattr(recipient, "phone", None)
-                  or "unknown@leatherfactory.local")
+                   or "unknown@leatherfactory.local") # fallback we keep unknown
+            
+            # creating child notification parent -> in app notify , child --> email notify
+            
+            # The original notification:
+
+            # Notification #101
+            # Channel: IN_APP
+
+            # Escalated notification:
+
+            # Notification #205
+            # Channel: EMAIL
+            # Parent: 101
+            
             child = Notification(
                 recipient_user_id=parent.recipient_user_id,
                 channel=NotificationChannel.EMAIL.value,
@@ -217,6 +307,12 @@ class NotificationService:
                 parent_notification_id=parent.id,
                 scheduled_for=parent.scheduled_for,
             )
+            
+            # Send email
+            
+            # mail sending is usually synchronous.
+
+            # Instead of blocking FastAPI:
             ok = await run_in_threadpool(
                 notifier.send, to=to,
                 subject=f"[Action needed] {parent.subject}",
@@ -224,6 +320,16 @@ class NotificationService:
                      "\n\n(You have not opened the in-app notification within "
                      f"{settings.bom_review_escalation_hours}h.)",
             )
+            
+            # Actual email:
+
+            # subject=f"[Action needed] {parent.subject}"
+
+            # Example:
+
+            # [Action needed] BOM Review Pending
+            
+            
             child.status = (NotificationStatus.SENT.value if ok
                             else NotificationStatus.FAILED.value)
             child.sent_at = now if ok else None

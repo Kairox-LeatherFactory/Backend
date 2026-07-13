@@ -1,0 +1,245 @@
+{
+  "contract_number": "49/26",
+  "contract_date": "2026-04-01",
+  "seller": {
+    "name": "PAKKAR TANVEER EXPORTS",
+    "address": "No.1 Hyder Garden, 2nd Street Extn., Jamaliya Nagar, Perambur, Chennai 600012, India"
+  },
+  "buyer": {
+    "client_id": "ORFATTI-001",
+    "client_name": "CONFEZIONI ORFATTI SRL",
+    "address": "Via E. e P. Salani 24, 50050 Limite S/Arno FI, Italy"
+  },
+  "agent": {
+    "name": "MEA SRL",
+    "address": "Via Capoquadri 8, 50053 Empoli (FI), Italy",
+    "email": "mea.srl@tin.it"
+  },
+  "delivery_date": "2026-05-15",
+  "delivery_terms": "EX CHENNAI",
+  "currency": "EUR",
+  "total_order_quantity": 168,
+  "size_range": "DONNA 38-56 (XS–XXXL)",
+  "style_id": "SP74018-MilitaryGreen",
+  "internal_style_ref": "SP74018",
+  "collection": "MONTEREGGI",
+  "season": "SS2027",
+  "garment_type": "Trousers / Pants",
+  "garment_subtype": "Slim Leather Trousers with Leather Piping, Fake Horn Buttons, Anti-Dust Treatment",
+  "gender": "Women (Donna)",
+  "size_range_ordered": "42 (labelled XS per client instruction)",
+  "order_quantity": 19,
+  "colour": "Military Green",
+  "colour_code": "Military Green – follow order swatch",
+  "unit_price_eur": "TBC",
+  "leather": {
+    "type": "200 NAPLIN – Goat Nappalan",
+    "finish": "Nappalan – smooth, anti-dust treated on inside",
+    "animal": "Goat",
+    "thickness_mm": "TBC – Nappalan grade typically 0.6–0.8mm",
+    "selection_grade": "Standard Nappalan quality",
+    "quality_notes": "Anti-dust / Napalan treatment on inside of leather; supplier: TANVEER; material: MADRAS",
+    "colour_direction": "Military Green – follow order",
+    "grain_restriction": "Consistent nap/grain direction across all panels; no directional restrictions specified beyond standard",
+    "anti_dust_treatment": true,
+    "napalan_treatment": true,
+    "DCM_norm": 375,
+    "costing_DCM_lay_avg": 360,
+    "unit_price_inr_per_dcm": 11,
+    "total_leather_cost_inr": 4125,
+    "calibration": {
+      "extra_leather_dcm": 15,
+      "calibration_percent": 4.17,
+      "allocated_dcm": 375,
+      "expected_consumption_dcm": 360,
+      "purpose": "Grace allowance for leather defects, matching, cutting losses and production variation."
+    }
+  },
+  "pattern": {
+    "base_pattern_ref": "Original sample from ORFATTI / TANVEER archive",
+    "pattern_type": "Slim fitted trousers; straight-leg; waistband with piping",
+    "paper_pattern_source": "Client original sample – paper pattern issued by Mrs. Laura",
+    "size_base": "42 (labelled XS at client request)",
+    "outseam_correction_cm": "+4cm to leg length (new outseam = 48cm, waistband excluded)",
+    "grading_increment_cm": 2,
+    "grading_method": "Proportional Italian system"
+  },
+  "measurements_cm": {
+    "size_reference": "42/XS – SMS",
+    "half_waist_top_edge_A": 37.5,
+    "half_waist_at_joint_B": "TBC",
+    "half_flank_at_18cm_from_waist_C": 50.0,
+    "front_crotch_length_excl_waistband_D": 31.5,
+    "back_crotch_length_excl_waistband_E": 40.5,
+    "half_thigh_at_crotch_F": 35.0,
+    "knee_circunf_G": "TBC",
+    "half_bottom_hem_H": 35.5,
+    "outseam_waistband_excluded_I": 48.0,
+    "inseam_L": 15.5,
+    "waistband_width_M": 4.0
+  },
+  "construction": {
+    "lining": {
+      "body": "Body lining – same quality and softness as original sample (Black)",
+      "front_pocket_sac": "Polyester lining – Black",
+      "back_pocket_sac": "Polyester lining – Black",
+      "left_front_leg_zip_motif": "Polyester lining – Black",
+      "waistband": "Light cotton lining – Ecru (always same colour as SMS)",
+      "lining_colours": {
+        "body": "Black",
+        "pocket_sac": "Black",
+        "waistband_cotton": "Ecru"
+      }
+    },
+    "waistband": {
+      "construction": "Inside waistband lined with Ecru cotton fabric",
+      "leather_piping": "Leather piping in middle of inside waistband – matching colour",
+      "piping_construction": "Made of leather, same as on original sample"
+    },
+    "front_closure": "Nylon Zip T3 Close End + Fake Horn Button",
+    "closure_details": {
+      "zip_type": "Nylon T3 Close End",
+      "zip_position": "Centre front",
+      "zip_colour": "Matching",
+      "button": "4 Holes Size 32 (Fake Horn) – 1+1 spare",
+      "button_position": "Waist",
+      "under_button": "4 Holes Size 18 (Transparent) – 1+1 spare"
+    },
+    "pocket_construction": {
+      "front_pockets": "Front + back pocket sac in polyester Black lining",
+      "left_front_leg": "Zip motif – lined with polyester Black",
+      "type": "Inseam / welt pockets",
+      "cargo_pockets": false,
+      "breast_pocket": false
+    },
+    "yoke": false,
+    "back_slit": false,
+    "decorative_panels": {
+      "waistband_piping": "Leather piping on inside waistband centre",
+      "front_leg_zip_motif": "Left front leg decorative zip motif"
+    },
+    "seam_allowance_general_cm": 1.0,
+    "panel_curvature": "Moderate – trouser curves at crotch and seat; straight leg",
+    "panel_pieces_estimated": 8,
+    "workmanship_notes": [
+      "Label garment size XS (even though it fits size S body)",
+      "Correct leg length: outseam waistband excluded = 48cm (add +4cm from proto)",
+      "Inside waistband: Ecru cotton lining – always same as SMS",
+      "Leather piping in middle of inside waistband – same as original sample",
+      "Fake horn buttons: follow swatch; size 32 (note: late comment changed to size 28 – VERIFY)",
+      "Main label: small 3cm×3cm, on centre back, directly on lining (cancel big front-side main label)",
+      "Anti-dust / Napalan treatment on inside leather throughout",
+      "Lining confirmed OK quality and colour for SMS"
+    ]
+  },
+  "accessories": [
+    {
+      "item": "Nylon Zip T3 Close End",
+      "colour": "Matching",
+      "qty_per_garment": 1,
+      "position": "Centre front"
+    },
+    {
+      "item": "Fake Horn Button 4-Holes Size 32",
+      "colour": "Fake Horn – per swatch",
+      "qty_per_garment": "1+1 spare",
+      "position": "Waist"
+    },
+    {
+      "item": "Under Button 4-Holes Size 18",
+      "colour": "Transparent",
+      "qty_per_garment": "1+1 spare",
+      "position": "Waist (inside)"
+    },
+    {
+      "item": "Leather Piping",
+      "colour": "Matching",
+      "qty_per_garment": 1,
+      "position": "Inside waistband centre"
+    },
+    {
+      "item": "Polybag for Spare Accessories",
+      "colour": "Clear",
+      "qty_per_garment": 1,
+      "position": "Size label left flank"
+    },
+    {
+      "item": "Transparent Plastic Pin",
+      "colour": "Transparent",
+      "qty_per_garment": 1,
+      "position": "Size label left flank"
+    }
+  ],
+  "labels": [
+    {
+      "type": "Main Label",
+      "brand": "MONTEREGGI",
+      "qty": 1,
+      "size": "3cm×3cm",
+      "position": "Left front leg inside lining (centre back)",
+      "note": "Small label only – cancel large front-side label"
+    },
+    {
+      "type": "Size Label",
+      "qty": 1,
+      "position": "Left flank at 10cm from waistband"
+    },
+    {
+      "type": "Composition Label",
+      "qty": 1,
+      "position": "Inside left flank, under size label"
+    },
+    {
+      "type": "Care Label + Prodotto Importato",
+      "qty": 1,
+      "position": "Inside left flank, under size label"
+    }
+  ],
+  "threads": [
+    {
+      "type": "Thread Size 30",
+      "colour": "Matching",
+      "use": "All outside stitching"
+    }
+  ],
+  "costing": {
+    "leather_inr_no_gst": 4125,
+    "leather_inr_with_gst": 4331.25,
+    "materials_inr_no_gst": 2811.65,
+    "materials_inr_with_gst": 2847.83,
+    "total_cost_inr_no_gst": 6936.65,
+    "making_cost_inr": 1000,
+    "freight_inr": 450,
+    "commission_pct": 6,
+    "exchange_rate_eur_inr_at_85": 81.6,
+    "exchange_rate_eur_inr_at_95": 73.4,
+    "note": "Costing from SP74006(NAPPLAN) sheet used as closest match for Nappalan trousers"
+  },
+  "yardage_estimation": {
+    "leather_DCM": 375,
+    "lay_avg_DCM": 360,
+    "lining_body_MTR": 1.0,
+    "lining_polyester_pocket_MTR": 0.5,
+    "lining_cotton_waistband_MTR": 0.25,
+    "fusing_MTS": 0.5,
+    "solutions_litre": 0.15,
+    "pakka_tape_MTS": 3.75
+  },
+  "proxy_area_sqft": {
+    "estimated": 40.4,
+    "note": "Derived from 375 DCM / 9.29"
+  },
+  "complexity_assessment": {
+    "overall_complexity": "Medium",
+    "rationale": "Trouser with anti-dust treated leather; multi-zone lining (body/pocket/waistband); leather piping detail; fake horn buttons with waistband construction; decorative leg zip motif.",
+    "complexity_score": 6,
+    "complexity_max": 10
+  },
+  "proto_sample_status": "SMS confirmed OK; leg length corrected +4cm; label XS",
+  "label_brand": "MONTEREGGI",
+  "source_files": [
+    "SP74018_GOAT_SUEDE.xls",
+    "SAMPLE_COSTING_SHEET_FOR_SIR.xlsx",
+    "49-26-01-04-2026.pdf"
+  ]
+}

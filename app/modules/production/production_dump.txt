@@ -1,0 +1,427 @@
+﻿============================================================
+PROJECT STRUCTURE
+============================================================
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\client_dump.txt
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\models.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\repository.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\router.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\schemas.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\service.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\__init__.py
+
+============================================================
+PROJECT FILES
+============================================================
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\__init__.py
+============================================================
+
+"""
+production — the operational heart of the system.
+
+production_event is the finest grain (one worker, one operation, one SKU, one
+day, a quantity). Pieces are NOT assumed to conserve across stages; the spread
+is a metric analytics surfaces, never an error this module rejects. A config
+table (operation_access) maps which manager role may log which operation.
+"""
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\models.py
+============================================================
+
+"""Production: operations, the event log, and the manager->operation mapping.
+
+KEY DESIGN POINTS:
+1. production_event is the finest grain: one manager records that one employee
+   did N pieces of one operation on one SKU on one day.
+2. Events DO NOT reference the previous stage. Pieces are not assumed to conserve
+   across operations (your Carnaby card: Cutting 152, Pasting 155). The spread
+   between stages is a *metric we surface*, never an error we reject.
+3. operation_access maps which manager ROLE may enter which operation — config,
+   not hardcoded, so you re-assign without a code change.
+"""
+import uuid
+from datetime import date
+from sqlalchemy import String, Integer, ForeignKey, Date, UniqueConstraint, Boolean
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.database import Base
+from app.core.models import UUIDMixin, TimestampMixin, GUID
+
+
+class Operation(Base, UUIDMixin, TimestampMixin):
+    """An ordered, named production step. CUTTING, FUSING, ... configurable."""
+    __tablename__ = "operation"
+    code: Mapped[str] = mapped_column(String(30), unique=True)   # CUTTING, FUSING, SHELL, LA, LS, FF
+    label: Mapped[str] = mapped_column(String(60))
+    sequence: Mapped[int] = mapped_column(Integer)              # ordering in the chain
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class OperationAccess(Base, UUIDMixin):
+    """Which manager role may log which operation. Config table — edit freely."""
+    __tablename__ = "operation_access"
+    __table_args__ = (
+        UniqueConstraint("role", "operation_id", name="uq_role_operation"),
+    )
+    role: Mapped[str] = mapped_column(String(40), index=True)   # matches Role enum value
+    operation_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("operation.id"))
+
+
+class StyleOperation(Base, UUIDMixin):
+    """Which operations a given style actually uses (a vest skips some)."""
+    __tablename__ = "style_operation"
+    __table_args__ = (
+        UniqueConstraint("style_id", "operation_id", name="uq_style_operation"),
+    )
+    style_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("style.id"), index=True)
+    operation_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("operation.id"))
+
+
+class ProductionEvent(Base, UUIDMixin, TimestampMixin):
+    """THE central table. One worker, one operation, one SKU, one day, a quantity."""
+    __tablename__ = "production_event"
+    sku_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("sku.id"), index=True)
+    operation_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("operation.id"), index=True)
+    employee_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("employee.id"), index=True)
+    work_date: Mapped[date] = mapped_column(Date, index=True)
+    qty: Mapped[int] = mapped_column(Integer)
+    # Who keyed it in (the manager). Audit trail.
+    entered_by: Mapped[str | None] = mapped_column(String(120))
+    # Optional bundle linkage — present only if you use bundle tickets.
+    bundle_ref: Mapped[str | None] = mapped_column(String(60), index=True)
+    operation: Mapped["Operation"] = relationship()
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\repository.py
+============================================================
+
+"""
+================================================================================
+modules/production/repository.py — Async data access for production
+================================================================================
+production_event is the finest grain: one manager records that one employee did
+N pieces of one operation on one SKU on one day. Aggregations here power the
+live "Carnaby card" (stage totals) and the piece-rate wage inputs.
+================================================================================
+"""
+import uuid
+from datetime import date
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.modules.clients.models import SKU
+from app.modules.production.models import (
+    Operation,
+    OperationAccess,
+    ProductionEvent,
+)
+
+
+class ProductionRepository:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    # --- operations / access ---
+    async def list_operations(self) -> list[Operation]:
+        res = await self.db.execute(
+            select(Operation).where(Operation.is_active.is_(True)).order_by(Operation.sequence)
+        )
+        return list(res.scalars())
+
+    async def get_operation(self, op_id: uuid.UUID) -> Operation | None:
+        return await self.db.get(Operation, op_id)
+
+    async def operations_for_role(self, role: str) -> set[uuid.UUID]:
+        res = await self.db.execute(
+            select(OperationAccess.operation_id).where(OperationAccess.role == role)
+        )
+        return set(res.scalars())
+
+    # --- events ---
+    async def add_event(self, **kw) -> ProductionEvent:
+        ev = ProductionEvent(**kw)
+        self.db.add(ev)
+        await self.db.commit()
+        await self.db.refresh(ev)
+        return ev
+
+    async def list_events(self, sku_id: uuid.UUID | None = None,
+                        employee_id: uuid.UUID | None = None,
+                        start: date | None = None,
+                        end: date | None = None) -> list[ProductionEvent]:
+        stmt = select(ProductionEvent)
+        if sku_id:
+            stmt = stmt.where(ProductionEvent.sku_id == sku_id)
+        if employee_id:
+            stmt = stmt.where(ProductionEvent.employee_id == employee_id)
+        if start:
+            stmt = stmt.where(ProductionEvent.work_date >= start)
+        if end:
+            stmt = stmt.where(ProductionEvent.work_date <= end)
+        res = await self.db.execute(stmt.order_by(ProductionEvent.work_date.desc()))
+        return list(res.scalars())
+
+    async def stage_totals_for_style(self, style_id: uuid.UUID) -> dict[str, int]:
+        """SUM qty per operation across all SKUs of a style — the live card."""
+        stmt = (
+            select(Operation.code, func.coalesce(func.sum(ProductionEvent.qty), 0))
+            .select_from(ProductionEvent)
+            .join(SKU, SKU.id == ProductionEvent.sku_id)
+            .join(Operation, Operation.id == ProductionEvent.operation_id)
+            .where(SKU.style_id == style_id)
+            .group_by(Operation.code)
+        )
+        res = await self.db.execute(stmt)
+        return {code: int(total) for code, total in res.all()}
+
+    async def piece_counts_by_employee_style_op(self, start: date, end: date):
+        """Rows of (employee_id, style_id, operation_id, work_date, total_qty) for a
+        window — the raw material for piece-rate wage calculation.
+
+        work_date is kept in the grouping ON PURPOSE: a rate can change mid-period,
+        so each day's pieces must be priced at the rate effective on THAT day. If we
+        collapsed all dates into one total we'd be forced to apply a single rate and
+        mis-price work done before/after a rate change."""
+        stmt = (
+            select(
+                ProductionEvent.employee_id,
+                SKU.style_id,
+                ProductionEvent.operation_id,
+                ProductionEvent.work_date,
+                func.sum(ProductionEvent.qty),
+            )
+            .join(SKU, SKU.id == ProductionEvent.sku_id)
+            .where(ProductionEvent.work_date >= start, ProductionEvent.work_date <= end)
+            .group_by(
+                ProductionEvent.employee_id,
+                SKU.style_id,
+                ProductionEvent.operation_id,
+                ProductionEvent.work_date,
+            )
+        )
+        res = await self.db.execute(stmt)
+        return res.all()
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\router.py
+============================================================
+
+"""
+================================================================================
+modules/production/router.py — Production HTTP API (async)
+================================================================================
+"""
+import uuid
+from datetime import date
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
+from app.modules.users.deps import get_current_user
+from app.modules.clients.service import ClientService
+from app.modules.production.service import ProductionService
+from app.modules.production import schemas
+from app.modules.users.models import User
+
+router = APIRouter(prefix="/production", tags=["Production"])
+
+
+@router.get("/operations", response_model=list[schemas.OperationRead])
+async def list_operations(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    return await ProductionService(db).list_operations()
+
+
+@router.post("/events", response_model=schemas.ProductionEventRead, status_code=201)
+async def log_event(
+    body: schemas.ProductionEventCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return await ProductionService(db).log_event(
+        user=user, sku_id=body.sku_id, operation_id=body.operation_id,
+        employee_id=body.employee_id, work_date=body.work_date,
+        qty=body.qty, bundle_ref=body.bundle_ref,
+    )
+
+
+@router.get("/events", response_model=list[schemas.ProductionEventRead])
+async def list_events(
+    sku_id: uuid.UUID | None = None,
+    employee_id: uuid.UUID | None = None,
+    start: date | None = Query(None),
+    end: date | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    return await ProductionService(db).list_events(
+        sku_id=sku_id, employee_id=employee_id, start=start, end=end
+    )
+
+
+@router.get("/styles/{style_id}/progress", response_model=schemas.StyleStageProgress)
+async def style_progress(
+    style_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    svc = ProductionService(db)
+    clients = ClientService(db)
+    style = await clients.get_style(style_id)
+    stages = await svc.style_progress(style_id)
+    skus = await clients.get_skus_for_style(style_id)
+    return schemas.StyleStageProgress(
+        style_id=style_id,
+        style_name=style.name if style else "",
+        qty_ordered=sum(s.qty_ordered for s in skus),
+        stages=stages,
+    )
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\schemas.py
+============================================================
+
+import uuid
+from datetime import date
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class OperationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    code: str
+    label: str
+    sequence: int
+
+
+class ProductionEventCreate(BaseModel):
+    sku_id: uuid.UUID
+    operation_id: uuid.UUID
+    employee_id: uuid.UUID
+    work_date: date
+    qty: int = Field(gt=0)
+    bundle_ref: str | None = None
+
+
+class ProductionEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    sku_id: uuid.UUID
+    operation_id: uuid.UUID
+    employee_id: uuid.UUID
+    work_date: date
+    qty: int
+    entered_by: str | None
+    bundle_ref: str | None
+
+
+class StyleStageProgress(BaseModel):
+    """The live status of one style across all its operations."""
+    style_id: uuid.UUID
+    style_name: str
+    qty_ordered: int
+    stages: dict[str, int]   # {"CUTTING": 152, "FUSING": 152, "PASTING": 155, ...}
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\service.py
+============================================================
+
+"""
+================================================================================
+modules/production/service.py — Production logic + role->operation access (async)
+================================================================================
+
+CORE RULE (unchanged from the original design, now async)
+    log_event() validates the referenced SKU/employee/operation exist, enforces
+    that the current user's ROLE is permitted to log that operation (the direct
+    manager bypasses), then records the event. It deliberately does NOT check the
+    quantity against the previous stage — pieces don't conserve across operations
+    (Cutting 152, Pasting 155 is normal); the spread is a metric we surface in
+    analytics, never an error we reject here.
+
+Cross-module access goes through ClientService / EmployeeService, never their
+repositories, preserving module boundaries.
+================================================================================
+"""
+import uuid
+from datetime import date
+
+from fastapi import HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.enums import UserRole
+from app.modules.clients.service import ClientService
+from app.modules.employees.service import EmployeeService
+from app.modules.production.models import Operation, ProductionEvent
+from app.modules.production.repository import ProductionRepository
+from app.modules.users.models import User
+
+
+class ProductionService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+        self.repo = ProductionRepository(db)
+        self.clients = ClientService(db)
+        self.employees = EmployeeService(db)
+
+    async def list_operations(self) -> list[Operation]:
+        return await self.repo.list_operations()
+
+    async def log_event(self, user: User, sku_id: uuid.UUID, operation_id: uuid.UUID,
+                        employee_id: uuid.UUID, work_date: date, qty: int,
+                        bundle_ref: str | None = None) -> ProductionEvent:
+        # 1. Validate referenced entities exist (no orphan events).
+        if not await self.clients.get_sku(sku_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "SKU not found")
+        if not await self.employees.get(employee_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Employee not found")
+        op = await self.repo.get_operation(operation_id)
+        if not op:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Operation not found")
+
+        # 2. Enforce role->operation access. Direct manager bypasses.
+        if user.role != UserRole.DIRECT_MANAGER:
+            allowed = await self.repo.operations_for_role(user.role.value)
+            if operation_id not in allowed:
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    f"Your role may not log operation '{op.code}'",
+                )
+
+        # 3. Attendance cross-check (TODAY only — historical events left alone).
+        # A worker who hasn't checked in TODAY cannot have produced TODAY. This
+        # blocks fraud and data-entry mistakes without touching past records.
+        if work_date == date.today():
+            from app.modules.attendance.service import AttendanceService
+            if not await AttendanceService(self.db).is_present_today(employee_id):
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "Employee is not checked in today — cannot log production. "
+                    "Mark attendance first.",
+                )
+
+        # 4. Record. No cross-stage quantity check by design.
+        return await self.repo.add_event(
+            sku_id=sku_id, operation_id=operation_id, employee_id=employee_id,
+            work_date=work_date, qty=qty, bundle_ref=bundle_ref,
+            entered_by=user.name,
+        )
+
+    async def list_events(self, **filters) -> list[ProductionEvent]:
+        return await self.repo.list_events(**filters)
+
+    async def style_progress(self, style_id: uuid.UUID) -> dict[str, int]:
+        return await self.repo.stage_totals_for_style(style_id)
+
+    # Public interface for the wages module:
+    async def piece_counts(self, start: date, end: date):
+        return await self.repo.piece_counts_by_employee_style_op(start, end)
+

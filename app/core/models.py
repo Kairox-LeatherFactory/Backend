@@ -105,7 +105,7 @@ class Document(Base, UUIDMixin, TimestampMixin):
     filename: Mapped[str] = mapped_column(String(300))
     mime: Mapped[str | None] = mapped_column(String(120))
     storage_url: Mapped[str | None] = mapped_column(String(600))
-    sha256: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
     page_count: Mapped[int | None] = mapped_column(Integer)
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("app_user.id"), nullable=True, index=True

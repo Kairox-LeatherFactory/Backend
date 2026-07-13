@@ -46,17 +46,26 @@ FUNCTION GUIDE  (all async; every method is called only by BomService)
 """
 from __future__ import annotations
 
+from decimal import Decimal
+from decimal import Decimal
+import hashlib
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.enums import NotificationChannel, NotificationType
 from app.core.models import Document, Notification
+from app.modules.bom.fabric_roles import attribute_fabrics
 from app.modules.bom.models import (
     Bom,
+    DxfYieldObservation,
     GarmentType,
+    OrderStyle,
+    PatternExtraction,
+    PatternPiece,
+    PatternReference,
     PomDictionary,
     PomMeasurement,
     SpecSheet,
@@ -64,6 +73,7 @@ from app.modules.bom.models import (
     SpecExtraction,
     OrderExtraction
 )
+from app.modules.bom import dcm as C
 
 
 class BomRepository:
@@ -122,6 +132,12 @@ class BomRepository:
             select(PomMeasurement).where(PomMeasurement.spec_sheet_id == spec_sheet_id)
         )
         return list(res.scalars())
+    
+    async def replace_pom_measurements_atomic(self, spec_sheet: SpecSheet, pom_rows: list[PomMeasurement]) -> None:
+        await self.db.execute(
+                delete(PomMeasurement).where(PomMeasurement.spec_sheet_id == spec_sheet.id))
+        if pom_rows:
+                self.db.add_all(pom_rows)
 
     # ── garment_type ──────────────────────────────────────────────────────────
     async def get_garment_type(self, code: str | None) -> GarmentType | None:
@@ -297,3 +313,239 @@ class BomRepository:
         """Lookup by primary key — used to stamp promoted_at after the Bom row
         is created."""
         return await self.db.get(OrderExtraction, oe_id)
+    
+    
+    # ── load: row -> PatternData for the resolver ──────────────────────────────
+    async def get_current_pattern(self, style_signature: str,
+                                  client_id=None) -> PatternExtraction | None:
+        q = select(PatternExtraction).where(
+            PatternExtraction.style_signature == style_signature,
+            PatternExtraction.is_current.is_(True),
+        )
+        if client_id is not None:
+            q = q.where(PatternExtraction.client_id == client_id)
+        return await self.db.scalar(q.order_by(PatternExtraction.created_at.desc()).limit(1))
+    
+    async def supersede_patterns(self, style_signature: str, client_id=None) -> None:
+        q = select(PatternExtraction).where(
+            PatternExtraction.style_signature == style_signature,
+            PatternExtraction.is_current.is_(True),
+        )
+        if client_id is not None:
+            q = q.where(PatternExtraction.client_id == client_id)
+        for p in (await self.db.scalars(q)).all():
+            p.is_current = False
+        await self.db.flush()
+        
+    # ── learning loop: yield observations ──────────────────────────────────────
+    async def add_yield_observation(self, obs: dict, *, source_bom_id=None,
+                                    confirmed_by=None, confirmed_at=None) -> None:
+        """Persist one (net area -> confirmed DCM) reconciliation from pattern.learn_yield."""
+        self.db.add(DxfYieldObservation(
+            style_signature=obs["style"], species=obs["species"], size=obs.get("size"),
+            net_qty_sf=Decimal(str(obs["net_qty_sf"])),
+            confirmed_dcm_sf=Decimal(str(obs["confirmed_dcm_sf"])),
+            implied_yield=Decimal(str(obs["implied_yield"])),
+            source_bom_id=source_bom_id, confirmed_by=confirmed_by, confirmed_at=confirmed_at))
+        await self.db.flush()
+
+    async def yields_by_species(self) -> dict[str, list[float]]:
+        """All implied yields grouped by species -> feeds effective_dxf_yields() so the
+        seed bootstrap (2.50/2.10) is replaced by measured means as confirms land."""
+        rows = await self.db.execute(
+            select(DxfYieldObservation.species, DxfYieldObservation.implied_yield))
+        out: dict[str, list[float]] = {}
+        for sp, y in rows.all():
+            out.setdefault(sp, []).append(float(y))
+        return out
+    
+    
+    async def persist_dxf(self, data: bytes, *, style_signature: str | None = None,
+                          client_id=None, garment_type_id=None,
+                          source_document_id=None, storage_key: str | None = None
+                          ) -> tuple[PatternExtraction, list[str]]:
+        """Parse DXF bytes, attribute fabrics, write PatternExtraction + its
+        PatternPieces, flipping any earlier current pattern of the same style to
+        is_current=False. Returns (row, unknown_fabrics). Does NOT commit.
+        Idempotency: the (style_signature, sha256) unique constraint makes a re-upload
+        of the identical file a duplicate-key error — catch it upstream as a 409/no-op."""
+        import os
+        import tempfile
+
+        from starlette.concurrency import run_in_threadpool
+        from app.modules.bom import dxf_pattern as DP
+
+        sha = hashlib.sha256(data).hexdigest()
+
+        def _parse():
+            with tempfile.NamedTemporaryFile(suffix=".dxf", delete=False) as fh:
+                fh.write(data)
+                tmp = fh.name
+            try:
+                return DP.parse_pattern(tmp)
+            finally:
+                os.remove(tmp)
+
+        parsed = await run_in_threadpool(_parse)
+        from app.modules.bom.dcm import slugify, style_signature as _sig
+        sig = style_signature or _sig(customer_ref=None, internal_ref=None, name=parsed.style) or ""
+        if not sig:
+            raise ValueError("DXF carries no DESIGN/style tag; pass style_signature.")
+
+        await self.supersede_patterns(sig, client_id=client_id)
+
+        roles, unknown = attribute_fabrics(parsed.fabrics, C.fabric_lexicon())
+        fabric_roles = {f: {"role": r.role, "category": r.category, "is_leather": r.is_leather}
+                        for f, r in roles.items()}
+        warnings = list(parsed.warnings or [])
+        if unknown:
+            warnings.append("dxf_unknown_fabric:" + "|".join(unknown))
+
+        row = PatternExtraction(
+            client_id=client_id, style_signature=sig, garment_type_id=garment_type_id,
+            source_document_id=source_document_id, source_system=parsed.source_system,
+            parser_version=parsed.parser_version, unit=parsed.unit,
+            master_size=parsed.master_size, n_pieces=len(parsed.pieces), sha256=sha,
+            storage_key=storage_key, is_current=True, area_matrix=parsed.area_matrix,
+            fabric_matrix=parsed.fabric_matrix, fabric_roles=fabric_roles, warnings=warnings,
+        )
+        row.pieces = [PatternPiece(
+            block=p.block, name=p.name, fabric=p.fabric, size=p.size, qty=p.qty,
+            net_area_sf=Decimal(str(p.net_area_sf)), longest_cm=Decimal(str(p.longest_cm)),
+        ) for p in parsed.pieces]
+        self.db.add(row)
+        await self.db.flush()
+        return row, unknown
+    
+    async def upsert_dxf_yield(self, *, species, factor, note=None):
+        from app.modules.bom.models import DxfYield
+        row = await self.db.scalar(select(DxfYield).where(DxfYield.species == species))
+        if row:
+            row.factor, row.note = factor, note
+        else:
+            row = DxfYield(species=species, factor=factor, note=note)
+            self.db.add(row)
+        await self.db.commit()
+        return row
+
+    async def upsert_fabric_role(self, *, label, role, category, is_leather=False,
+                                 status="confirmed", confidence=None, source=None,
+                                 suggested_by=None, confirmed_by=None):
+        from app.modules.bom.models import FabricRoleRow
+        row = await self.db.scalar(select(FabricRoleRow).where(FabricRoleRow.label == label))
+        if row:
+            row.role, row.category, row.is_leather = role, category, is_leather
+            row.status, row.confidence, row.source = status, confidence, source
+            if suggested_by is not None: row.suggested_by = suggested_by
+            if confirmed_by is not None: row.confirmed_by = confirmed_by
+        else:
+            row = FabricRoleRow(label=label, role=role, category=category,
+                                is_leather=is_leather, status=status, confidence=confidence,
+                                source=source, suggested_by=suggested_by, confirmed_by=confirmed_by)
+            self.db.add(row)
+        await self.db.commit()
+        return row
+
+    async def replace_cost_catalog(self, garment_code: str, lines: list[dict]):
+            from app.modules.bom.models import CostCatalogLine
+            from sqlalchemy import delete
+            await self.db.execute(delete(CostCatalogLine).where(
+                CostCatalogLine.garment_code == garment_code))
+            for i, ln in enumerate(lines):
+                self.db.add(CostCatalogLine(garment_code=garment_code, sort_order=i, **ln))
+            await self.db.commit()
+            
+    async def replace_client_checks(self, client_code: str, rules: list[dict]):
+            from app.modules.bom.models import ClientCheckRule
+            from sqlalchemy import delete
+            await self.db.execute(delete(ClientCheckRule).where(
+                ClientCheckRule.client_code == client_code))
+            for i, r in enumerate(rules):
+                rng = r.get("range") or [None, None]
+                self.db.add(ClientCheckRule(
+                    client_code=client_code, rule_id=r["id"], kind=r["kind"],
+                    severity=r.get("severity", "warn"), field=r.get("field"),
+                    range_lo=rng[0], range_hi=rng[1], params=r.get("params"), sort_order=i))
+            await self.db.commit()
+            
+    async def upsert_pom_mapping(self, *, language, source_term, pom_code,
+                                    garment_type_id=None, weight=1):
+        from app.modules.bom.models import PomDictionary
+        row = await self.db.scalar(select(PomDictionary).where(
+            PomDictionary.language == language,
+            PomDictionary.source_term == source_term,
+            PomDictionary.garment_type_id == garment_type_id))
+        if row:
+            row.pom_code, row.weight = pom_code, weight
+        else:
+            row = PomDictionary(language=language, source_term=source_term,
+                                pom_code=pom_code, garment_type_id=garment_type_id, weight=weight)
+            self.db.add(row)
+        await self.db.commit()
+        return row
+
+    async def list_pom_mappings(self):
+        from app.modules.bom.models import PomDictionary
+        return list(await self.db.scalars(
+            select(PomDictionary).order_by(PomDictionary.source_term)))
+        
+    async def get_order_styles(self, submission_id) -> list["OrderStyle"]:
+            from sqlalchemy import select
+            from sqlalchemy.orm import selectinload
+            from app.modules.bom.models import OrderStyle
+            res = await self.db.execute(
+                select(OrderStyle)
+                .where(OrderStyle.submission_id == submission_id)
+                .options(selectinload(OrderStyle.colors))
+                .order_by(OrderStyle.style_name))
+            return list(res.scalars().all())
+
+    async def get_order_style(self, order_style_id) -> "OrderStyle | None":
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+        from app.modules.bom.models import OrderStyle
+        res = await self.db.execute(
+            select(OrderStyle)
+            .where(OrderStyle.id == order_style_id)
+            .options(selectinload(OrderStyle.colors)))
+        return res.scalar_one_or_none()
+
+    async def patterns_for_client(self, client_id) -> list["PatternReference"]:
+        from sqlalchemy import select
+        from app.modules.bom.models import PatternReference
+        stmt = select(PatternReference)
+        if client_id is not None:
+            stmt = stmt.where(PatternReference.client_id == client_id)
+        res = await self.db.execute(stmt.order_by(PatternReference.created_at.desc()))
+        return list(res.scalars().all())
+    
+    @staticmethod
+    def _rate_key(name: str) -> str:
+        return " ".join((name or "").strip().casefold().split())
+
+    async def get_material_rate(self, name, uom=None):
+        from app.modules.bom.models import MaterialRate
+        key = self._rate_key(name)
+        if not key:
+            return None
+        q = select(MaterialRate).where(MaterialRate.material_key == key,
+                                       MaterialRate.is_current.is_(True))
+        if uom:                                    # prefer exact uom, tolerate uom-agnostic rows
+            q = q.where((MaterialRate.uom == uom) | (MaterialRate.uom.is_(None)))
+        return await self.db.scalar(q.order_by(MaterialRate.created_at.desc()).limit(1))
+
+    async def upsert_material_rate(self, *, name, unit_price, uom=None,
+                                   currency="USD", supplier=None):
+        from app.modules.bom.models import MaterialRate
+        key = self._rate_key(name)
+        row = await self.db.scalar(select(MaterialRate).where(
+            MaterialRate.material_key == key, MaterialRate.uom == uom,
+            MaterialRate.supplier == supplier))
+        if row:
+            row.unit_price, row.currency, row.display_name = unit_price, currency, name
+        else:
+            row = MaterialRate(material_key=key, display_name=name, uom=uom,
+                               unit_price=unit_price, currency=currency, supplier=supplier)
+            self.db.add(row)
+        await self.db.commit()
+        return row

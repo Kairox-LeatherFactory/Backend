@@ -136,8 +136,26 @@ class SKU(Base, UUIDMixin, TimestampMixin):
     color_name: Mapped[str | None] = mapped_column(String(80))  # "PINE GREEN"
     size: Mapped[str] = mapped_column(String(10))           # "M", "42" — string by design
     qty_ordered: Mapped[int] = mapped_column(Integer, default=0)
+    code: Mapped[str | None] = mapped_column(String(120), unique=True, index=True)
     # johnpeter.xlsx carries SUEDE + KNIT + NYLON colour dimensions per line; the
     # suede/main colour stays in color_code/color_name, the other two live here.
     nylon_color: Mapped[str | None] = mapped_column(String(80))
     knit_color: Mapped[str | None] = mapped_column(String(80))
     style: Mapped["Style"] = relationship(back_populates="skus")
+    order_lines: Mapped[list["SkuOrderLine"]] = relationship(back_populates="sku", cascade="all, delete-orphan")
+
+class SkuOrderLine(Base, UUIDMixin, TimestampMixin):
+    """One dated order-line quantity for a SKU.
+ 
+    The breakdown sheet lists the same (style, colour, size) across several dated
+    rows. The SKU stays unique (one per triple, qty_ordered = SUM of its lines);
+    each dated row is kept here for traceability. Multiple lines may share a
+    (sku_id, order_date) — source_row distinguishes them."""
+    __tablename__ = "sku_order_line"
+    sku_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("sku.id", ondelete="CASCADE"), index=True
+    )
+    order_date: Mapped[date | None] = mapped_column(Date, index=True)
+    qty: Mapped[int] = mapped_column(Integer, default=0)
+    source_row: Mapped[int | None] = mapped_column(Integer)
+    sku: Mapped["SKU"] = relationship(back_populates="order_lines")

@@ -1,0 +1,246 @@
+﻿============================================================
+PROJECT STRUCTURE
+============================================================
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\analytics_dump.txt
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\models.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\repository.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\router.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\schemas.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\service.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\__init__.py
+
+============================================================
+PROJECT FILES
+============================================================
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\__init__.py
+============================================================
+
+"""
+employees — shop-floor workers.
+
+Distinct from logins: an Employee is a payroll/production identity; a User is a
+credential. wage_type (monthly vs piece_rate) is a property of the PERSON, set
+explicitly, NOT inferred from designation.
+"""
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\models.py
+============================================================
+
+"""
+================================================================================
+modules/employees/models.py — Shop-floor employee records
+================================================================================
+
+PURPOSE
+    The people who physically make garments. Distinct from `app_user` (logins):
+    an Employee is a payroll/production identity; a User is a credential. A user
+    of role EMPLOYEE links to one Employee via User.employee_id.
+
+WAGE TYPE drives the payroll fork and is a property of the PERSON, set
+    explicitly — NOT inferred from designation. The source file proves it:
+    'TAILOR' and 'CUTTER' appear in BOTH the monthly and piece-rate blocks.
+
+phone / email
+    Added so a login can be provisioned for each worker. The real files have no
+    contact details yet, so the seed script MOCKS them deterministically
+    (e.g. phone = 90000000NN). Replace with real data when available.
+================================================================================
+"""
+from sqlalchemy import Boolean, Enum, Numeric, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+from app.core.enums import WageType
+from app.core.models import TimestampMixin, UUIDMixin
+
+
+class Employee(Base, UUIDMixin, TimestampMixin):
+    __tablename__ = "employee"
+
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    designation: Mapped[str | None] = mapped_column(String(80))   # TAILOR, CUTTER, ...
+    wage_type: Mapped[WageType] = mapped_column(
+        Enum(WageType, name="wage_type"), default=WageType.PIECE_RATE
+    )
+    monthly_salary: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    daily_rate: Mapped[float | None] = mapped_column(Numeric(10, 2))   # for PIECE_RATE workers
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Mocked contact details (used to provision logins). Nullable + unique-light.
+    phone: Mapped[str | None] = mapped_column(String(30), index=True)
+    email: Mapped[str | None] = mapped_column(String(160))
+
+# Back-compat re-export: some modules import WageType from here.
+__all__ = ["Employee", "WageType"]
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\repository.py
+============================================================
+
+"""
+================================================================================
+modules/employees/repository.py — Async data access for employees
+================================================================================
+"""
+import uuid
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.enums import WageType
+from app.modules.employees.models import Employee
+
+
+class EmployeeRepository:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def list_all(self, active_only: bool = True) -> list[Employee]:
+        stmt = select(Employee).order_by(Employee.name)
+        if active_only:
+            stmt = stmt.where(Employee.is_active.is_(True))
+        res = await self.db.execute(stmt)
+        return list(res.scalars())
+
+    async def get(self, employee_id: uuid.UUID) -> Employee | None:
+        return await self.db.get(Employee, employee_id)
+
+    async def list_by_wage_type(self, wt: WageType) -> list[Employee]:
+        res = await self.db.execute(
+            select(Employee).where(
+                Employee.wage_type == wt, Employee.is_active.is_(True)
+            )
+        )
+        return list(res.scalars())
+
+    async def create(self, **kw) -> Employee:
+        e = Employee(**kw)
+        self.db.add(e)
+        await self.db.commit()
+        await self.db.refresh(e)
+        return e
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\router.py
+============================================================
+
+"""
+================================================================================
+modules/employees/router.py — Employee HTTP API (async)
+================================================================================
+"""
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
+from app.core.enums import UserRole
+from app.modules.users.deps import get_current_user, require_roles
+from app.modules.employees.service import EmployeeService
+from app.modules.employees import schemas
+from app.modules.users.models import User
+
+router = APIRouter(prefix="/employees", tags=["Employees"])
+
+
+@router.get("", response_model=list[schemas.EmployeeRead])
+async def list_employees(
+    active_only: bool = True,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    return await EmployeeService(db).list_all(active_only)
+
+
+@router.post("", response_model=schemas.EmployeeRead, status_code=201)
+async def create_employee(
+    body: schemas.EmployeeCreate,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+):
+    return await EmployeeService(db).create(**body.model_dump())
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\schemas.py
+============================================================
+
+"""
+================================================================================
+modules/employees/schemas.py — API contract for the employees module
+================================================================================
+phone/email are MOCKED at seed time (the source files carry no contact data);
+they are surfaced here so a manager can provision logins and contact workers.
+================================================================================
+"""
+import uuid
+
+from pydantic import BaseModel, ConfigDict
+
+from app.core.enums import WageType
+
+
+class EmployeeRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    name: str
+    designation: str | None
+    wage_type: WageType
+    monthly_salary: float | None
+    is_active: bool
+    phone: str | None = None
+    email: str | None = None
+
+
+class EmployeeCreate(BaseModel):
+    name: str
+    designation: str | None = None
+    wage_type: WageType = WageType.PIECE_RATE
+    monthly_salary: float | None = None
+    phone: str | None = None
+    email: str | None = None
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\service.py
+============================================================
+
+"""
+================================================================================
+modules/employees/service.py — Employee business logic (async)
+================================================================================
+Exposes the public interface the wages module depends on (monthly_employees, get).
+================================================================================
+"""
+import uuid
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.enums import WageType
+from app.modules.employees.models import Employee
+from app.modules.employees.repository import EmployeeRepository
+
+
+class EmployeeService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+        self.repo = EmployeeRepository(db)
+
+    async def list_all(self, active_only: bool = True) -> list[Employee]:
+        return await self.repo.list_all(active_only)
+
+    async def create(self, **kw) -> Employee:
+        return await self.repo.create(**kw)
+
+    # Public interface for the wages module:
+    async def get(self, employee_id: uuid.UUID) -> Employee | None:
+        return await self.repo.get(employee_id)
+
+    async def monthly_employees(self) -> list[Employee]:
+        return await self.repo.list_by_wage_type(WageType.MONTHLY)
+

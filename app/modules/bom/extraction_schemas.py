@@ -1,17 +1,20 @@
+# extraction_schemas.py
 """
 ================================================================================
 modules/bom/extraction_schemas.py — the Stage-2 extraction CONTRACT (Pydantic v2)
 ================================================================================
 
 PURPOSE
-    The single typed contract the whole new extraction pipeline speaks. It mirrors
-    the two Option-B staging tables 1:1 (SpecExtraction / OrderExtraction), so the
-    LLM rungs, the heuristic rungs, the orchestrators, and the service-layer
-    persistence all agree on shape without re-describing it.
+    The single typed contract the whole extraction pipeline speaks. It mirrors the
+    two Option-B staging tables 1:1 (SpecExtraction / OrderExtraction), so the LLM
+    rungs, the orchestrators, and the service-layer persistence all agree on shape
+    without re-describing it.
 
-    The LLM is the PRIMARY extractor (Gemini -> Groq); the heuristic is degraded
-    mode only. Whichever engine wins, its result is coerced into THESE models and
-    re-validated — so range/coherence checks run identically regardless of source.
+    The LLM is the PRIMARY extractor (Gemini -> Groq); manual is the degraded mode.
+    Whichever engine wins, its result is coerced into THESE models and re-validated
+    — so range/coherence checks run identically regardless of source. The extraction
+    module now returns THESE models directly (no legacy dict shim); the service layer
+    consumes them typed.
 
 WHY DERIVED TOTALS ARE NEVER LLM-TRUSTED
     OCR/Gemini routinely transpose or hallucinate a printed GRAND TOTAL. So
@@ -24,13 +27,13 @@ GRACEFUL POSTURE
     Field validators CLEAN rather than hard-reject wherever a messy-but-recoverable
     value appears (coerce "5" -> 5.0, drop non-positive measurements, dedupe+sort
     sizes). Truly malformed *types* still raise ValidationError — which the LLM path
-    treats as "try the next rung", and which the heuristic path never triggers
-    because it only ever feeds clean primitives in.
+    treats as "try the next rung".
 
 FUNCTION / MODEL GUIDE
   size_sort_key(s)        XS<S<M<L<XL<XXL<XXXL < numeric < everything-else; alias-aware.
   POMRow                  one measurement row: native term + per-size cm + pitch.
-  Accessory               one trim item: type, who supplies it, placement, spec, finish.
+  Accessory               one trim item: type, supplier, placement, spec, finish, qty.
+  SubMaterial             a secondary leather/fabric (contrast panel) → own DCM line.
   PatternRef              a "follow pattern X in size Y" reference (NOT new POMs).
   TechInstruction         one categorised workmanship/stitching/cutting/finishing note.
   ExtractedSpec           the full spec-sheet result (mirrors spec_extraction).
@@ -49,6 +52,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 # ── size ordering (shared by spec sizes + order sizes) ───────────────────────
 _SIZE_ORDER = ["XS", "S", "M", "L", "XL", "XXL", "XXXL", "XXXXL"]
 _SIZE_ALIAS = {"2XL": "XXL", "3XL": "XXXL", "4XL": "XXXXL", "1X": "XL"}
+
+# Measurements outside this band (in the spec's working unit) are almost certainly
+# OCR noise or a transposed value. We WARN, never drop — the cutting manager decides.
+_MEASURE_MIN = 1.0
+_MEASURE_MAX = 300.0
 
 
 def size_sort_key(s: Any):
@@ -80,9 +88,7 @@ def _to_float(v: Any) -> float | None:
 
 def _to_str_or_none(v: Any) -> str | None:
     """Coerce a value to a clean trimmed string for fields the LLM might emit as a
-    number (e.g. style_no=12345). None / blank / bool / complex types -> None. The LLM
-    occasionally returns numeric order numbers or season years — accept them as strings
-    instead of raising ValidationError on the whole record."""
+    number (e.g. style_no=12345). None / blank / bool / complex types -> None."""
     if v is None or isinstance(v, bool):
         return None
     if isinstance(v, str):
@@ -93,9 +99,7 @@ def _to_str_or_none(v: Any) -> str | None:
     return None
 
 
-# Synonyms the LLM tends to emit for who supplies a trim. Anything else -> None
-# (no rejection — the field is informational; the heuristic still records placement
-# and spec even when supplied_by is unknown).
+# Synonyms the LLM tends to emit for who supplies a trim. Anything else -> None.
 _SUPPLIED_BY_CLIENT = {"client", "buyer", "customer", "you", "the buyer", "buyer-supplied",
                        "provided by you", "supplied by buyer", "supplied by client"}
 _SUPPLIED_BY_FACTORY = {"factory", "us", "supplier", "vendor", "the factory",
@@ -104,8 +108,7 @@ _SUPPLIED_BY_FACTORY = {"factory", "us", "supplier", "vendor", "the factory",
 
 
 def _norm_supplied_by(v: Any) -> str | None:
-    """Coerce free-text supplied_by to 'factory' | 'client' | None. Replaces the strict
-    Literal that silently rejected the whole ExtractedSpec on one bad accessory."""
+    """Coerce free-text supplied_by to 'factory' | 'client' | None."""
     if v is None:
         return None
     s = str(v).strip().lower()
@@ -122,9 +125,7 @@ _UNIT_INCH = {"inch", "inches", "in", "in.", '"', "''", "imperial"}
 
 
 def _norm_unit(v: Any) -> str:
-    """Coerce free-text unit to 'cm' | 'inch'. Defaults to 'cm' (the factory's working
-    unit) on anything unknown. Replaces the strict Literal that rejected the whole spec
-    when an LLM returned 'inches' / 'centimeter' / 'CM ' (case + trailing space)."""
+    """Coerce free-text unit to 'cm' | 'inch'. Defaults to 'cm' on anything unknown."""
     if v is None:
         return "cm"
     s = str(v).strip().lower().rstrip(".")
@@ -147,8 +148,6 @@ class POMRow(BaseModel):
     @field_validator("by_size", mode="before")
     @classmethod
     def _clean_by_size(cls, v: Any) -> dict[str, float]:
-        # Coerce values to float and drop anything non-positive or unparseable, so a
-        # POMRow only ever carries real measurements (the "values positive" contract).
         if not isinstance(v, dict):
             return {}
         out: dict[str, float] = {}
@@ -179,21 +178,39 @@ class Accessory(BaseModel):
     placement: str | None = None
     spec: str | None = None
     finish: str | None = None
+    qty_per_garment: int = 1              # count of THIS trim per garment (2 rear zips -> 2)
 
     @field_validator("supplied_by", mode="before")
     @classmethod
     def _norm_supplied(cls, v: Any) -> str | None:
-        # The LLM frequently emits synonyms ('buyer', 'us', 'vendor'). A strict Literal
-        # raised on ANY of these and silently dropped the entire ExtractedSpec to the
-        # heuristic — replaced with coercion so unknown values become None, not failures.
         return _norm_supplied_by(v)
 
     @field_validator("type", "placement", "spec", "finish", mode="before")
     @classmethod
     def _coerce_str(cls, v: Any) -> str | None:
-        # Coerce LLM-emitted numbers/booleans to strings so a quirky type:1 or finish:0
-        # doesn't reject the whole record. type is required str — if coercion returns
-        # None Pydantic raises on the empty value (a typeless accessory is meaningless).
+        return _to_str_or_none(v)
+
+    @field_validator("qty_per_garment", mode="before")
+    @classmethod
+    def _clean_qty(cls, v: Any) -> int:
+        # Default to 1 when absent/zero/garbage — a trim line always uses at least one.
+        f = _to_float(v)
+        if f is None or f < 1:
+            return 1
+        return int(round(f))
+
+
+class SubMaterial(BaseModel):
+    """A SECONDARY leather/fabric that is neither the main shell nor the lining
+    (e.g. a contrast panel, '別布'). Becomes its own DCM-resolved BOM line."""
+    model_config = ConfigDict(extra="ignore")
+
+    name: str | None = None               # native label as printed (e.g. '別布')
+    material: str | None = None           # the actual material (e.g. 'GOAT')
+
+    @field_validator("name", "material", mode="before")
+    @classmethod
+    def _coerce_str(cls, v: Any) -> str | None:
         return _to_str_or_none(v)
 
 
@@ -207,7 +224,6 @@ class PatternRef(BaseModel):
     @field_validator("pattern_code", "base_size", "source_term", mode="before")
     @classmethod
     def _coerce_str(cls, v: Any) -> str | None:
-        # Pattern codes and base sizes are sometimes emitted as numbers (base_size:42).
         return _to_str_or_none(v)
 
 
@@ -233,14 +249,17 @@ class ExtractedSpec(BaseModel):
     style_no: str | None = None
     article: str | None = None
     client_name: str | None = None
+    season: str | None = None
     garment_type_guess: str | None = None
     sizes: list[str] = Field(default_factory=list)
     unit: str = "cm"                                      # coerced to 'cm' | 'inch'
     measurements: list[POMRow] = Field(default_factory=list)
     technical_details: list[TechInstruction] = Field(default_factory=list)
     materials: dict[str, Any] = Field(default_factory=dict)   # leather_quality, leather_substance_mm:[..], ...
-    lining: dict[str, Any] = Field(default_factory=dict)      # lined:bool|None, details, material
-    brand_label: dict[str, Any] = Field(default_factory=dict)  # type, text, dimensions, placement, instructions
+    sub_materials: list[SubMaterial] = Field(default_factory=list)
+    interlining: dict[str, Any] = Field(default_factory=dict)  # present:bool, material, placement
+    lining: dict[str, Any] = Field(default_factory=dict)       # lined:bool|None, details, material
+    brand_label: dict[str, Any] = Field(default_factory=dict)  # type, text, dimensions, placement
     size_label: str | None = None
     accessories: list[Accessory] = Field(default_factory=list)
     color_details: dict[str, Any] = Field(default_factory=dict)
@@ -249,18 +268,15 @@ class ExtractedSpec(BaseModel):
     confidence_overall: float = 0.5
     warnings: list[str] = Field(default_factory=list)
 
-    @field_validator("style_no", "article", "client_name", "garment_type_guess",
-                     "size_label", mode="before")
+    @field_validator("style_no", "article", "client_name", "season",
+                     "garment_type_guess", "size_label", mode="before")
     @classmethod
     def _coerce_str(cls, v: Any) -> str | None:
-        # LLMs sometimes emit style_no:12345 (integer) or season:2026. Coerce instead
-        # of raising — a numeric identifier is still a usable identifier.
         return _to_str_or_none(v)
 
     @field_validator("unit", mode="before")
     @classmethod
     def _norm_unit_value(cls, v: Any) -> str:
-        # 'inches' / 'CM ' / 'centimeter' all used to reject the whole spec; coerce.
         return _norm_unit(v)
 
     @field_validator("confidence_overall", mode="before")
@@ -268,6 +284,10 @@ class ExtractedSpec(BaseModel):
     def _clamp(cls, v: Any) -> float:
         f = _to_float(v)
         return min(1.0, max(0.0, f)) if f is not None else 0.5
+    
+    @field_validator("materials","interlining","lining","brand_label","color_details", mode="before")
+    @classmethod
+    def _none_to_dict(cls, v): return v or {}
 
     @model_validator(mode="after")
     def _dedupe_sort_sizes(self) -> "ExtractedSpec":
@@ -281,19 +301,39 @@ class ExtractedSpec(BaseModel):
         self.sizes = sorted({s for s in seen if s}, key=size_sort_key)
         return self
 
+    @model_validator(mode="after")
+    def _warn_out_of_range(self) -> "ExtractedSpec":
+        # Coherence WARNINGS (never failures) — this is the home the old
+        # extraction.validate_intermediate range check used to live in, now that the
+        # contract is typed. 'size_not_in_declared_set' is obsolete: _dedupe_sort_sizes
+        # makes `sizes` the union of every measurement's sizes, so it can never fire.
+        for pom in self.measurements:
+            for size, val in pom.by_size.items():
+                if val < _MEASURE_MIN or val > _MEASURE_MAX:
+                    self.warnings.append(
+                        f"measurement_out_of_range: {pom.source_term} {size}={val}")
+        return self
+
 
 # ── order-sheet result (mirrors order_extraction) ────────────────────────────
 class OrderLine(BaseModel):
     model_config = ConfigDict(extra="ignore")
-
+    
+    model: str | None = None            # NEW: style/Modello this line belongs to
     color: str | None = None
     article: str | None = None
     sizes: dict[str, int] = Field(default_factory=dict)
+    printed_total: int | None = None    # NEW: the row's printed TOTALE CAPI —
+                                        # cross-check only; qty is ALWAYS recomputed
+    
+    @field_validator("model", "color", "article", mode="before")
+    @classmethod
+    def _coerce_str(cls, v: Any) -> str | None:
+        return _to_str_or_none(v)
 
     @field_validator("color", "article", mode="before")
     @classmethod
     def _coerce_str(cls, v: Any) -> str | None:
-        # Colour codes occasionally arrive as numbers (color:840 for a Pantone-like code).
         return _to_str_or_none(v)
 
     @field_validator("sizes", mode="before")
@@ -313,7 +353,6 @@ class ExtractedOrder(BaseModel):
     """The full result of parsing an order sheet. order_qty + per_size_qty are DERIVED
     from `lines` on construction and are never trusted from the model directly."""
     model_config = ConfigDict(extra="ignore")
-
     order_number: str | None = None
     style_no: str | None = None
     article: str | None = None
@@ -335,10 +374,6 @@ class ExtractedOrder(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _surface_dropped_qtys(cls, data: Any) -> Any:
-        # Before field-level cleaning silently drops negative / unparseable line qtys,
-        # walk the raw LLM payload and append a warning per drop so the user knows
-        # what was lost. Heuristic path passes OrderLine instances (not raw dicts) and
-        # is skipped naturally — it never produces negatives anyway.
         if not isinstance(data, dict):
             return data
         raw_lines = data.get("lines")
@@ -368,7 +403,6 @@ class ExtractedOrder(BaseModel):
                      "currency", "delivery_date", "payment_term", mode="before")
     @classmethod
     def _coerce_str(cls, v: Any) -> str | None:
-        # season:2026 / order_number:12345 / currency:840 are all real LLM emissions.
         return _to_str_or_none(v)
 
     @field_validator("price_per_garment", mode="before")
@@ -385,9 +419,6 @@ class ExtractedOrder(BaseModel):
 
     @model_validator(mode="after")
     def _derive_totals(self) -> "ExtractedOrder":
-        # Recompute per-size aggregate + order_qty from the lines (the only trustworthy
-        # source). If there are no lines but a per_size_qty was supplied (e.g. a PDF
-        # best-effort that found sizes without colour lines), derive the total from that.
         per_size: dict[str, int] = {}
         for ln in self.lines:
             for size, qty in ln.sizes.items():
@@ -408,11 +439,12 @@ class ExtractedOrder(BaseModel):
 # ── emptiness probes (the LLM path: "ValidationError OR empty -> next rung") ──
 def is_empty_spec(spec: ExtractedSpec) -> bool:
     """A spec is 'empty' (model produced nothing usable) when it has no measurements,
-    no materials/lining/colour/accessories, no labels, and no pattern reference."""
+    no materials/sub-materials/interlining/lining/colour/accessories, no labels, and
+    no pattern reference."""
     return not (
-        spec.measurements or spec.materials or spec.lining or spec.color_details
-        or spec.accessories or spec.brand_label or spec.size_label
-        or spec.technical_details or spec.pattern_reference
+        spec.measurements or spec.materials or spec.sub_materials or spec.interlining
+        or spec.lining or spec.color_details or spec.accessories or spec.brand_label
+        or spec.size_label or spec.technical_details or spec.pattern_reference
         or spec.style_no or spec.article
     )
 
@@ -420,3 +452,37 @@ def is_empty_spec(spec: ExtractedSpec) -> bool:
 def is_empty_order(order: ExtractedOrder) -> bool:
     """An order is 'empty' when no per-size quantities survived derivation."""
     return order.order_qty <= 0 and not order.lines
+
+
+class StyleColorBreakdown(BaseModel):
+    """One leather color within a style: aggregated across ALL order blocks."""
+    color_key: str                       # normalised code ('06', '651', '724')
+    color_label: str                     # richest label seen ('06 DARK BROWN')
+    per_size_qty: dict[str, int]
+    qty: int
+    warnings: list[str] = Field(default_factory=list)   # e.g. printed-total mismatch
+
+
+class StyleBreakdown(BaseModel):
+    """One style within the order document — the unit a BOM is minted for."""
+    style_key: str                       # normalised ('SHINOBI KNIT DETACH')
+    material: str | None = None          # from the Materiale column
+    qty: int
+    per_size_qty: dict[str, int]
+    colors: list[StyleColorBreakdown]
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ExtractedOrderDoc(BaseModel):
+    """A parsed order DOCUMENT: header + one StyleBreakdown per distinct style.
+    Totals are recomputed from size cells; printed totals are checks only."""
+    model_config = ConfigDict(extra="ignore")
+    order_number: str | None = None
+    client_name: str | None = None
+    season: str | None = None
+    currency: str | None = None
+    delivery_date: str | None = None
+    payment_term: str | None = None
+    styles: list[StyleBreakdown] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    extracted_by: str = "manual"

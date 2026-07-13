@@ -63,6 +63,7 @@ from app.modules.procurement.enums import (
     SubmissionStatus,
     ValidationStatus,
 )
+from app.modules.bom.service import BomService
 from app.modules.procurement import presenters
 from app.modules.procurement.errors import UploadError
 from app.core.models import AuditLog, Document
@@ -125,23 +126,49 @@ class ProcurementService:
     # ══════════════════════════════════════════════════════════════════════
     async def upload_order_sheet(self, user, submission_id, data, filename,
                                  override_manual_review: bool = False) -> dict:
-        # check already exist
-        return await self._upload_slot(user, submission_id, DocumentKind.ORDER_SHEET.value,
+        sub_id = await self._resolve_or_create_submission(user, submission_id)
+        return await self._upload_slot(user, sub_id, DocumentKind.ORDER_SHEET.value,
                                        data, filename, override_manual_review)
 
     async def upload_spec_sheet(self, user, submission_id, data, filename,
                                 override_manual_review: bool = False) -> dict:
-        return await self._upload_slot(user, submission_id, DocumentKind.SPEC_SHEET.value,
+        sub_id = await self._resolve_or_create_submission(user, submission_id)
+        return await self._upload_slot(user, sub_id, DocumentKind.SPEC_SHEET.value,
                                        data, filename, override_manual_review)
 
+    async def _resolve_or_create_submission(
+        self, user, submission_id: uuid.UUID | None
+    ) -> uuid.UUID:
+        """Return an existing submission_id as-is, or create a new OPEN submission
+        when none is provided. The submission is created HERE (before the pipeline)
+        so the document row has a valid submission_id FK. If the pipeline later rejects
+        the file, the empty submission stays in OPEN state — it will never reach COMPLETE
+        and can be ignored or GC'd. Only a successful accept fills a slot and makes the
+        submission useful."""
+        if submission_id is not None:
+            return submission_id
+        sub = await self.repo.create_submission(
+            client_id=None,
+            created_by=getattr(user, "id", None),
+            status=SubmissionStatus.OPEN.value,
+        )
+        return sub.id
+ 
     async def _upload_slot(self, user, submission_id, kind, data, filename,
                            override_manual_review: bool = False) -> dict:
         sub = await self._load_submission(submission_id)
-        # Lock-after-Stage-2: a consumed submission rejects further uploads (§5c).
-        if sub.status == SubmissionStatus.CONSUMED.value:
+        # Lock-after-Stage-2, NARROWED to the ORDER slot: once the breakdown has
+        # claimed the submission (CONSUMED), the order document is the source of
+        # truth for the style/qty breakdown and must not change under it. Spec
+        # sheets are the OPPOSITE case — in the guided flow they are EXPECTED to
+        # arrive after the breakdown (one per style) and attach via
+        # POST /boms/order-styles/{id}/attachments, so spec uploads stay open.
+        if (sub.status == SubmissionStatus.CONSUMED.value
+                and kind == DocumentKind.ORDER_SHEET.value):
             raise UploadError(
                 RejectReason.SUBMISSION_LOCKED,
-                "Submission already consumed by Stage 2; start a new submission.",
+                "Order already consumed by the style breakdown; start a new "
+                "submission to change the order document.",
                 payload=presenters.fingerprint(filename, data),
             )
 
@@ -149,16 +176,15 @@ class ProcurementService:
         logger.info("upload received: submission=%s kind=%s filename=%s size=%d sha=%s force=%s",
                     submission_id, kind, filename, len(data), sha[:12], override_manual_review)
 
-        # ── idempotency: byte-identical re-upload → cached result, no re-bill ─
-        # A cached ACCEPT or hard REJECT short-circuits here; a cached NEEDS_MANUAL_REVIEW
-        # is evicted and returns None so we fall through and RE-RUN the pipeline (that
-        # verdict is "unresolved", and the OCR/vision rungs may now settle it).
-        existing = await self.repo.get_document_by_sha(sha)
-        if existing is not None:
-            # helps to remove duplicate files
-            replay = await self._handle_existing(sub, kind, existing)
-            if replay is not None:
-                return replay
+        # ── TESTING PHASE: dedupe/idempotency check disabled ──────────────────
+        # Re-uploading byte-identical content now always re-runs the full pipeline as
+        # if it were a brand-new file (no duplicate_content 409, no sha-cache replay).
+        # To restore production dedupe behavior, uncomment the block below.
+        # existing = await self.repo.get_document_by_sha(sha)
+        # if existing is not None:
+        #     replay = await self._handle_existing(sub, kind, existing)
+        #     if replay is not None:
+        #         return replay
 
         # ── run the blocking pipeline off the event loop ─────────────────────
         templates = await self.repo.active_templates(kind)
@@ -320,85 +346,6 @@ class ProcurementService:
             raise HTTPException(404, "Document not found in this submission.")
         return {"submission_id": str(sub.id), "document": presenters.document_block(doc)}
 
-    # ══════════════════════════════════════════════════════════════════════
-    # Stage-1 → Stage-2 trigger (the production entry point)
-    # ══════════════════════════════════════════════════════════════════════
-    async def generate_bom_from_submission(
-        self, user, submission_id: uuid.UUID,
-    ) -> dict:
-        """Consume a COMPLETE submission into a DRAFT BOM and lock it. The submission
-        lifecycle (open → complete → consumed) is procurement's, so the orchestration
-        lives here: validate the Stage-2 gate, load BOTH accepted slots' bytes (the key
-        layout is procurement's), hand off to bom.service to build the BOM (which owns the
-        spec_sheet/bom tables), then write the `complete → consumed` transition Stage 1
-        never had. The BOM is anchored on this submission and built from the order + spec
-        sheets ALONE — no order/style is required up front; the Client→Order→Style→SKU
-        breakdown is created (and the submission's client_order link set) only at MD
-        approval. bom stays ignorant of submissions beyond the id; we pass it only
-        primitives — a permitted procurement → bom.service edge (procurement/__init__.py)."""
-        from app.modules.bom.service import BomService
-        from app.modules.procurement.sniffing import _EXT_FOR_MIME
-        from app.core.storage import get_storage, submission_key
-
-        sub = await self._load_submission(submission_id)
-        if sub.status == SubmissionStatus.CONSUMED.value:
-            raise HTTPException(409, detail={
-                "error": "submission_already_consumed",
-                "message": "This submission has already generated a BOM."})
-
-        # Idempotent retry: a prior run may have created the BOM but died/failed BEFORE
-        # flipping the submission to consumed (the two are separate commits). Re-running
-        # would re-extract and re-insert a BOM with the same submission_id → uq_bom_submission
-        # IntegrityError + orphaned spec_sheet/pom rows. Detect the existing BOM, finish the
-        # missed `consumed` transition, and replay it instead of duplicating.
-        existing_bom = await BomService(self.db).get_bom_view_for_submission(submission_id)
-        if existing_bom is not None:
-            sub.status = SubmissionStatus.CONSUMED.value
-            await self.repo.save(sub)
-            return {"submission_id": str(sub.id), "status": "consumed",
-                    "replayed": True, "bom": existing_bom}
-
-        if sub.status != SubmissionStatus.COMPLETE.value:
-            raise HTTPException(409, detail={
-                "error": "submission_not_ready",
-                "message": "Stage 2 requires a COMPLETE submission (both slots accepted).",
-                "current_status": sub.status})
-        spec = await self._slot_doc(sub.spec_document_id)
-        if spec is None or spec.validation_status != ValidationStatus.ACCEPTED.value:
-            raise HTTPException(409, detail={
-                "error": "spec_sheet_missing",
-                "message": "No accepted spec sheet on this submission."})
-        order = await self._slot_doc(sub.order_document_id)
-        if order is None or order.validation_status != ValidationStatus.ACCEPTED.value:
-            raise HTTPException(409, detail={
-                "error": "order_sheet_missing",
-                "message": "No accepted order sheet on this submission."})
-
-        # Load the promoted bytes for BOTH slots off the event loop (storage.get blocks).
-        spec_key = submission_key(str(sub.id), "spec-sheet", spec.sha256,
-                                  _EXT_FOR_MIME.get(spec.mime, ""))
-        order_key = submission_key(str(sub.id), "order-sheet", order.sha256,
-                                   _EXT_FOR_MIME.get(order.mime, ""))
-        spec_bytes = await run_in_threadpool(get_storage().get, spec_key)
-        order_bytes = await run_in_threadpool(get_storage().get, order_key)
-
-        result = await BomService(self.db).generate_for_order(
-            user, spec_bytes=spec_bytes, filename=spec.filename,
-            spec_type=spec.classified_spec_type,
-            client_match_code=spec.client_match_code,
-            client_id=sub.client_id, submission_id=sub.id,
-            order_bytes=order_bytes, order_filename=order.filename,
-            order_mime=order.mime, order_match_code=order.client_match_code,
-            source_document_id=spec.id,
-        )
-
-        # The missing `complete → consumed` transition: lock the submission (further
-        # uploads → 409). The client_order link is written later, at approval, by
-        # link_submission_to_order once the breakdown materialises.
-        sub.status = SubmissionStatus.CONSUMED.value
-        await self.repo.save(sub)
-        return {"submission_id": str(sub.id), "status": "consumed", **result}
-
     async def link_submission_to_order(self, submission_id: uuid.UUID,
                                        client_order_id: uuid.UUID) -> None:
         """Set the submission's client_order link once bom.service materialises the
@@ -408,6 +355,61 @@ class ProcurementService:
         if sub is not None:
             sub.client_order_id = client_order_id
             await self.repo.save(sub)
+            
+    # ══════════════════════════════════════════════════════════════════════
+    # Fan-out v2: the bom module's window into procurement-owned state.
+    # Same permitted edge as link_submission_to_order — bom.service calls
+    # THESE; it never touches submission/document rows directly.
+    # ══════════════════════════════════════════════════════════════════════
+    async def claim_submission_for_breakdown(self, submission_id: uuid.UUID) -> bool:
+        """Atomic claim so two breakdown POSTs can't both enqueue: compare-and-set
+        COMPLETE -> CONSUMED in one UPDATE. True exactly once. False when the
+        submission is OPEN (order not accepted yet), already CONSUMED (someone
+        else claimed), or unknown."""
+        return await self.repo.cas_submission_status(
+            submission_id,
+            expect=SubmissionStatus.COMPLETE.value,
+            to=SubmissionStatus.CONSUMED.value,
+        )
+
+    async def release_breakdown_claim(self, submission_id: uuid.UUID) -> None:
+        """Worker failed before committing any breakdown rows — hand the claim
+        back (CONSUMED -> COMPLETE) so the operator can re-trigger after a fix."""
+        await self.repo.cas_submission_status(
+            submission_id,
+            expect=SubmissionStatus.CONSUMED.value,
+            to=SubmissionStatus.COMPLETE.value,
+        )
+
+    async def is_breakdown_claimed(self, submission_id: uuid.UUID) -> bool:
+        sub = await self.repo.get_submission(submission_id)
+        return sub is not None and sub.status == SubmissionStatus.CONSUMED.value
+
+    async def get_accepted_order_bytes(self, submission_id: uuid.UUID
+                                       ) -> tuple[bytes, str, str | None] | None:
+        """(bytes, filename, mime) of the submission's ACCEPTED order document,
+        loaded from storage; None when the slot is empty or bytes are missing.
+        This is what the breakdown worker extracts from."""
+        sub = await self.repo.get_submission(submission_id)
+        if sub is None or sub.order_document_id is None:
+            return None
+        doc = await self.repo.get_document(sub.order_document_id)
+        if doc is None or not doc.storage_url:
+            return None
+        from app.core.storage import get_storage
+        data = await run_in_threadpool(get_storage().get, doc.storage_url)
+        return (data, doc.filename, doc.mime) if data else None
+
+    async def get_submission_client_id(self, submission_id: uuid.UUID) -> uuid.UUID | None:
+        """Return the submission's client_id, or None if the submission is missing."""
+        sub = await self.repo.get_submission(submission_id)
+        return sub.client_id if sub is not None else None
+
+    async def spec_documents_for_client(self, client_id) -> list[Document]:
+        """Accepted spec-sheet documents for this client — the suggestion pool
+        the breakdown's name-matcher runs over."""
+        return await self.repo.accepted_documents(
+            kind=DocumentKind.SPEC_SHEET.value, client_id=client_id)
 
     async def _slot_doc(self, doc_id) -> Document | None:
         return await self.repo.get_document(doc_id) if doc_id else None
@@ -450,13 +452,18 @@ class ProcurementService:
         await self.repo.save(sub)
 
     def _recompute_status(self, sub: Submission, just_accepted: Document, kind: str) -> str:
+        # Fan-out v2: COMPLETE (= ready for the style breakdown) requires ONLY the
+        # ORDER slot. The spec is per-STYLE now — one order document can carry 18
+        # styles, each with its own spec sheet that arrives later and is attached
+        # during the operator's confirm step. Requiring a spec here would deadlock
+        # every multi-style submission. A spec uploaded up-front is still accepted
+        # into its slot below — it simply joins the per-style suggestion pool
+        # instead of gating readiness.
         if sub.status == SubmissionStatus.CONSUMED.value:
             return sub.status
         order_ok = self._slot_ok(sub.order_document_id, just_accepted,
                                  kind == DocumentKind.ORDER_SHEET.value)
-        spec_ok = self._slot_ok(sub.spec_document_id, just_accepted,
-                                kind == DocumentKind.SPEC_SHEET.value)
-        return SubmissionStatus.COMPLETE.value if (order_ok and spec_ok) else SubmissionStatus.OPEN.value
+        return SubmissionStatus.COMPLETE.value if order_ok else SubmissionStatus.OPEN.value
 
     @staticmethod
     def _slot_ok(slot_id, just_accepted: Document, is_this_slot: bool) -> bool:

@@ -119,7 +119,25 @@ def _coerce(raw) -> dict | None:
     if "```" in s:
         s = s.split("```", 2)[1]
         s = s[4:] if s.lower().startswith("json") else s
+        s = s.strip()
 
+    # Try the whole payload first — this is the ONLY branch that can see a
+    # top-level JSON ARRAY. Gemini/Groq, told to "emit one line per row", often
+    # return `[{...}, {...}]`; the brace-slice fallback below mangles that into
+    # `{...}, {...}` (invalid) and drops every line. A bare list is an ORDER's
+    # `lines`, so wrap it as {"lines": [...]} for ExtractedOrder to read. (A spec
+    # never emits a bare array; if one did it would just yield an empty spec ->
+    # next rung, unchanged.)
+    try:
+        whole = json.loads(s)
+    except json.JSONDecodeError:
+        whole = None
+    if isinstance(whole, list):
+        return {"lines": whole}
+    if isinstance(whole, dict):
+        return whole
+
+    # Fallback: a prose-wrapped JSON OBJECT — slice from the first { to the last }.
     start, end = s.find("{"), s.rfind("}")
     if start == -1 or end == -1:
         return None
@@ -147,8 +165,24 @@ def _init_model(spec: str):
                 return None
             from langchain_google_genai import ChatGoogleGenerativeAI
 
-            return ChatGoogleGenerativeAI(model=model, google_api_key=settings.gemini_api_key,
-                                          temperature=0, timeout=100, max_retries=retries)
+            # max_output_tokens caps the answer so a large consolidated order can't
+            # truncate; thinking_budget=0 keeps gemini-2.5-flash (a thinking model)
+            # from spending the budget on thinking and returning empty/short JSON.
+            # Both are passed defensively so an older wrapper that lacks a kwarg still
+            # builds (we retry without the newer kwarg on TypeError).
+            gk = dict(model=model, google_api_key=settings.gemini_api_key,
+                      temperature=0, max_retries=retries,
+                      max_output_tokens=settings.llm_max_output_tokens,
+                      thinking_budget=0)
+            try:
+                return ChatGoogleGenerativeAI(**gk)
+            except TypeError:
+                gk.pop("thinking_budget", None)
+                try:
+                    return ChatGoogleGenerativeAI(**gk)
+                except TypeError:
+                    gk.pop("max_output_tokens", None)
+                    return ChatGoogleGenerativeAI(**gk)
         if provider == "groq":
             if not settings.groq_api_key:
                 return None

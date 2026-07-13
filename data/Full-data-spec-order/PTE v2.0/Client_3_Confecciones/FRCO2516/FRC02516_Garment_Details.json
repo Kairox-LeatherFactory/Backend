@@ -1,0 +1,342 @@
+{
+    "style_id": "FRC02516",
+    "order_id": "TBD",
+    "client_name": "FRYE / CONFECCIONES MODA PIEL",
+    "client_id": "FRYE",
+    "client_detail": "Confecciones Moda Piel - Fall Winter 2025 Collection",
+    "supplier": "PAKKAR",
+    "target_fob_unit_price": "$65",
+    "sizes": [
+        "S",
+        "M",
+        "L",
+        "XL"
+    ],
+    "sample_size": "MEDIUM",
+    "style_details_and_description": "Men's leather jacket featuring goat suede antic in gray/beige, a banded collar with a snap closure, front zipper, zippered cuffs, side pockets with hidden snaps, and decorative multistitched/quilted panels on the shoulders and lower back.",
+    "pattern_type_and_description": "Cut-and-sew leather jacket pattern. Features include set-in sleeves with zippered openings, curved side body panels (princess seams), front and back shoulder yokes, a lower back horizontal panel, and an inner lining pattern with an interior welt pocket.",
+    "yardage": {
+        "shell_goat_suede": "Approx 300-350 DM (Estimated for leather)",
+        "lining_spandex_polyester": "Approx 1.5 - 2.0 MTS"
+    },
+    "complexity_of_garment": "High (Leather outerwear requiring specialized machine feet, multistitching, zipper insertions, and lining)",
+    "proxy_area": "Chennai, India (Inferred from typical Pakkar operations)",
+    "estimated_pattern_pieces": "Approx. 35-45 pieces (including shell, lining, facings, pockets, and fusings)",
+    "yokes": "Yes, front and back shoulder yokes with decorative multistitching.",
+    "pocket_construction": "Two exterior side slash/welt pockets with hidden generic rounded snaps and antibacterial fabric inside. One interior welt pocket matching the shell material.",
+    "seam_allowances_and_types": [
+        "Open seam",
+        "Edge seam 1/16\"",
+        "Double seam 1/4\"",
+        "Seam 1/2\"",
+        "Seam 1/8\"",
+        "Seam 1/4\"",
+        "Seam 1\"",
+        "Glove seam 1/16\"",
+        "Multistitch"
+    ],
+    "decorative_panels": "Multistitched/quilted panels located on the front/back shoulders and the lower back hem.",
+    "panel_curvature": "Curved side panels joining front and back, curved armholes, and ergonomically curved two-piece sleeves.",
+    "cargo_pockets": false,
+    "leather_grain_restrictions": "Goat Suede Antic requires strict nap/hair direction matching across all panels during cutting.",
+    "bom": [
+        {
+            "Group": "SHELL/EXTERIOR",
+            "Material": "GOAT SUEDE ANTIC",
+            "For": "SHELL",
+            "Color": "BEIGE",
+            "Qty": null,
+            "Unit": "DM"
+        },
+        {
+            "Group": "FABRIC",
+            "Material": "SPANDEX POLYESTER FABRIC",
+            "For": "BODY AND SLEEVES LINING",
+            "Color": "DARK BROWN",
+            "Qty": null,
+            "Unit": "MTS"
+        },
+        {
+            "Group": "ZIPPER",
+            "Material": "#8 OPEN DIA METAL ZIPPER W/ BLACK TAPE ANTIQUE NICKEL",
+            "For": "MAIN ZIPPER",
+            "Color": "ANTIQUE NICKEL",
+            "Qty": 1.0,
+            "Unit": "PIECE"
+        },
+        {
+            "Group": "ZIPPER",
+            "Material": "#3 OPEN DIA METAL ZIPPER W/ BLACK TAPE ANTIQUE NICKEL",
+            "For": "CUFFS",
+            "Color": "ANTIQUE NICKEL",
+            "Qty": 2.0,
+            "Unit": "PIECE"
+        },
+        {
+            "Group": "HARDWARE",
+            "Material": "HIDDEN GENERIC ROUNDED SNAP 27L",
+            "For": "POCKETS",
+            "Color": "ANTIQUE NICKEL",
+            "Qty": 2.0,
+            "Unit": "SETS"
+        },
+        {
+            "Group": "HARDWARE",
+            "Material": "FRYE ROUNDED SNAP 27L",
+            "For": "COLLAR",
+            "Color": "ANTIQUE NICKEL",
+            "Qty": 1.0,
+            "Unit": "SETS"
+        },
+        {
+            "Group": "LABEL",
+            "Material": "FRYE MAIN LABEL",
+            "For": "LINING",
+            "Color": "RES OLD CUERO",
+            "Qty": 1.0,
+            "Unit": "PIECE"
+        }
+    ],
+    "measurements": [
+        {
+            "No": 1,
+            "Measurement_Point": "Garment length from front HIPS",
+            "Tolerance": 1.3,
+            "Scaling": 1.25,
+            "S": 68.75,
+            "M": 70.0,
+            "L": 71.25,
+            "XL": 72.5
+        },
+        {
+            "No": 2,
+            "Measurement_Point": "1/2 Chest circumference at armhole",
+            "Tolerance": 1.0,
+            "Scaling": 2.5,
+            "S": 56.5,
+            "M": 59.0,
+            "L": 61.5,
+            "XL": 64.0
+        },
+        {
+            "No": 3,
+            "Measurement_Point": "Cross chest (7\" down from HIPS)",
+            "Tolerance": 1.3,
+            "Scaling": 2.5,
+            "S": 41.5,
+            "M": 44.0,
+            "L": 46.5,
+            "XL": 49.0
+        },
+        {
+            "No": 4,
+            "Measurement_Point": "Half waist circumference at 17\" from natural HIPS",
+            "Tolerance": 1.0,
+            "Scaling": 2.5,
+            "S": 55.5,
+            "M": 58.0,
+            "L": 60.5,
+            "XL": 63.0
+        },
+        {
+            "No": 5,
+            "Measurement_Point": "Half sweep circumference at bottom (REDUCE)",
+            "Tolerance": 1.0,
+            "Scaling": 2.5,
+            "S": 53.5,
+            "M": 56.0,
+            "L": 58.5,
+            "XL": 61.0
+        },
+        {
+            "No": 6,
+            "Measurement_Point": "Cross shoulder",
+            "Tolerance": 1.3,
+            "Scaling": 2.5,
+            "S": 47.5,
+            "M": 50.0,
+            "L": 52.5,
+            "XL": 55.0
+        },
+        {
+            "No": 7,
+            "Measurement_Point": "Shoulder slope height from ",
+            "Tolerance": 0.3,
+            "Scaling": 0.0,
+            "S": 5.7,
+            "M": 5.7,
+            "L": 5.7,
+            "XL": 5.7
+        },
+        {
+            "No": 8,
+            "Measurement_Point": "Armhole depth from HIPS",
+            "Tolerance": 0.6,
+            "Scaling": 0.6,
+            "S": 29.4,
+            "M": 30.0,
+            "L": 30.6,
+            "XL": 31.2
+        },
+        {
+            "No": 9,
+            "Measurement_Point": "Armhole circumference at seam or edge",
+            "Tolerance": 0.6,
+            "Scaling": 1.25,
+            "S": 56.75,
+            "M": 58.0,
+            "L": 59.25,
+            "XL": 60.5
+        },
+        {
+            "No": 10,
+            "Measurement_Point": "Center back length from neck seam",
+            "Tolerance": 1.3,
+            "Scaling": 1.25,
+            "S": 66.75,
+            "M": 68.0,
+            "L": 69.25,
+            "XL": 70.5
+        },
+        {
+            "No": 11,
+            "Measurement_Point": "Cross back - 5\" from center back ",
+            "Tolerance": 1.3,
+            "Scaling": 2.5,
+            "S": 42.5,
+            "M": 45.0,
+            "L": 47.5,
+            "XL": 50.0
+        },
+        {
+            "No": 12,
+            "Measurement_Point": "Neck width at front HIPS",
+            "Tolerance": 0.3,
+            "Scaling": 0.6,
+            "S": 19.4,
+            "M": 20.0,
+            "L": 20.6,
+            "XL": 21.2
+        },
+        {
+            "No": 13,
+            "Measurement_Point": "Front neck drop (imaginary line at HIPS to seam)",
+            "Tolerance": 0.3,
+            "Scaling": 0.5,
+            "S": 11.0,
+            "M": 11.5,
+            "L": 12.0,
+            "XL": 12.5
+        },
+        {
+            "No": 14,
+            "Measurement_Point": "Back neck drop (imaginary line at HIPS to seam)",
+            "Tolerance": 0.3,
+            "Scaling": 0.0,
+            "S": 2.0,
+            "M": 2.0,
+            "L": 2.0,
+            "XL": 2.0
+        },
+        {
+            "No": 15,
+            "Measurement_Point": "Neckline circumference - CF to CF",
+            "Tolerance": 0.6,
+            "Scaling": 2.0,
+            "S": 51.0,
+            "M": 53.0,
+            "L": 55.0,
+            "XL": 57.0
+        },
+        {
+            "No": 16,
+            "Measurement_Point": "Collar point",
+            "Tolerance": 0.3,
+            "Scaling": 0.0,
+            "S": 3.0,
+            "M": 3.0,
+            "L": 3.0,
+            "XL": 3.0
+        },
+        {
+            "No": 17,
+            "Measurement_Point": "Collar height at CB neck",
+            "Tolerance": 0.3,
+            "Scaling": 0.0,
+            "S": 3.0,
+            "M": 3.0,
+            "L": 3.0,
+            "XL": 3.0
+        },
+        {
+            "No": 18,
+            "Measurement_Point": "Jacket collar spread ",
+            "Tolerance": 0.0,
+            "Scaling": 0.0,
+            "S": 0.0,
+            "M": 0.0,
+            "L": 0.0,
+            "XL": 0.0
+        },
+        {
+            "No": 19,
+            "Measurement_Point": "Sleeve length from shoulder to MID",
+            "Tolerance": 0.6,
+            "Scaling": 1.25,
+            "S": 64.75,
+            "M": 66.0,
+            "L": 67.25,
+            "XL": 68.5
+        },
+        {
+            "No": 20,
+            "Measurement_Point": "Length of sleeve from CB to cuff",
+            "Tolerance": 0.0,
+            "Scaling": 0.0,
+            "S": 0.0,
+            "M": 0.0,
+            "L": 0.0,
+            "XL": 0.0
+        },
+        {
+            "No": 21,
+            "Measurement_Point": "Half muscle circumference - 1\" below armhole",
+            "Tolerance": 0.3,
+            "Scaling": 0.6,
+            "S": 20.4,
+            "M": 21.0,
+            "L": 21.6,
+            "XL": 22.2
+        },
+        {
+            "No": 22,
+            "Measurement_Point": "Cap height",
+            "Tolerance": 0.3,
+            "Scaling": 0.6,
+            "S": 15.9,
+            "M": 16.5,
+            "L": 17.1,
+            "XL": 17.7
+        },
+        {
+            "No": 23,
+            "Measurement_Point": "Half forearm circumference - 8\" from bottom of sleeve ",
+            "Tolerance": 0.3,
+            "Scaling": 0.5,
+            "S": 16.3,
+            "M": 16.8,
+            "L": 17.3,
+            "XL": 17.8
+        },
+        {
+            "No": 24,
+            "Measurement_Point": "Half sleeve opening circumference (REDUCE)",
+            "Tolerance": 0.3,
+            "Scaling": 0.3,
+            "S": 13.2,
+            "M": 13.5,
+            "L": 13.8,
+            "XL": 14.1
+        }
+    ]
+}
