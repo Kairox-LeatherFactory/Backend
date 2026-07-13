@@ -53,8 +53,7 @@ import uuid
 from types import SimpleNamespace
 from typing import Any
 
-from celery import Celery
-from celery.schedules import crontab
+
 from app.core.celery import celery_app
 
 from app.core.config import settings
