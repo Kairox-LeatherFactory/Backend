@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.enums import UserRole
 from app.modules.analytics.service import AnalyticsService
 from app.modules.users.deps import get_current_user
 from app.modules.users.models import User
@@ -23,6 +24,19 @@ router = APIRouter(prefix="/analytics", tags=["Analytics"])
 async def overview(db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
     return await AnalyticsService(db).factory_overview()
 
+
+@router.get("/explorer")
+async def explorer(
+    include_pieces: bool = Query(True),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Left-panel nav tree: Client -> Order -> Style -> Piece, scoped to the
+    signed-in user. CLIENT-role users see only their own client."""
+    client_id = user.client_id if user.role == UserRole.CLIENT else None
+    return await AnalyticsService(db).explorer_tree(
+        client_id=client_id, include_pieces=include_pieces
+    )
 
 @router.get("/orders/{order_id}/tree")
 async def order_tree(

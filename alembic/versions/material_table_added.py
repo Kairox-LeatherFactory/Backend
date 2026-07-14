@@ -14,7 +14,11 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "add_material_rate"
+<<<<<<< HEAD
 down_revision = "20260704_client_checks"# TODO: set to current head
+=======
+down_revision = "20260704_client_checks"          # TODO: set to current head
+>>>>>>> dd750998bf64fb0bd2ae4f36ef3382041f7dd1b1
 branch_labels = None
 depends_on = None
 
