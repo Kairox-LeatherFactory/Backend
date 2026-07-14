@@ -53,6 +53,105 @@ class AnalyticsService:
             "total_pieces_ordered": int(total_ordered),
             "total_operations_logged": int(total_produced),
         }
+        
+    # =============================================== explorer navigation tree
+    async def explorer_tree(self, *, client_id: uuid.UUID | None = None,
+                            include_pieces: bool = True) -> dict:
+        """Full Client -> Order -> Style -> Piece nav tree for the left explorer.
+        Scoped to one client (CLIENT-role users) or all clients. Piece leaves are
+        LIGHT — enough to render + click through to /pieces/detail; full history
+        stays in the drill-downs. Built with 4 bounded queries, no N+1.
+        Set include_pieces=False at scale to get the skeleton (styles + counts
+        only) and lazy-load pieces on style-expand."""
+        cstmt = select(Client.id, Client.name).order_by(Client.name)
+        if client_id:
+            cstmt = cstmt.where(Client.id == client_id)
+        clients = (await self.db.execute(cstmt)).all()
+        if not clients:
+            return {"clients": []}
+        client_ids = [c[0] for c in clients]
+
+        orders = (await self.db.execute(
+            select(ClientOrder.id, ClientOrder.client_id, ClientOrder.order_number)
+            .where(ClientOrder.client_id.in_(client_ids))
+            .order_by(ClientOrder.order_number)
+        )).all()
+        order_ids = [o[0] for o in orders]
+
+        styles = []
+        if order_ids:
+            styles = (await self.db.execute(
+                select(Style.id, Style.client_order_id, Style.name, Style.article)
+                .where(Style.client_order_id.in_(order_ids))
+                .order_by(Style.name)
+            )).all()
+        style_ids = [s[0] for s in styles]
+
+        pieces_by_style: dict[uuid.UUID, list[dict]] = {}
+        count_by_style: dict[uuid.UUID, int] = {}
+        if style_ids:
+            if include_pieces:
+                rows = (await self.db.execute(
+                    select(Piece.id, SKU.style_id, Piece.code, Piece.seq,
+                           SKU.color_name, SKU.color_code, SKU.size, Operation.code)
+                    .select_from(Piece)
+                    .join(SKU, SKU.id == Piece.sku_id)
+                    .outerjoin(Operation, Operation.id == Piece.current_operation_id)
+                    .where(SKU.style_id.in_(style_ids))
+                    .order_by(SKU.code, Piece.seq)
+                )).all()
+                for pid, sid, code, seq, cname, ccode, size, stage in rows:
+                    pieces_by_style.setdefault(sid, []).append({
+                        "piece_id": str(pid),
+                        "piece_code": code,
+                        "seq": seq,
+                        "colour": cname or ccode,
+                        "size": size,
+                        "current_stage": stage,
+                    })
+                count_by_style = {sid: len(v) for sid, v in pieces_by_style.items()}
+            else:
+                crows = (await self.db.execute(
+                    select(SKU.style_id, func.count(Piece.id))
+                    .select_from(Piece)
+                    .join(SKU, SKU.id == Piece.sku_id)
+                    .where(SKU.style_id.in_(style_ids))
+                    .group_by(SKU.style_id)
+                )).all()
+                count_by_style = {sid: int(n) for sid, n in crows}
+
+        styles_by_order: dict[uuid.UUID, list[dict]] = {}
+        for sid, oid, name, article in styles:
+            styles_by_order.setdefault(oid, []).append({
+                "style_id": str(sid),
+                "style_name": name,
+                "article": article,
+                "piece_count": count_by_style.get(sid, 0),
+                "pieces": pieces_by_style.get(sid, []),
+            })
+
+        orders_by_client: dict[uuid.UUID, list[dict]] = {}
+        for oid, cid, onum in orders:
+            ostyles = styles_by_order.get(oid, [])
+            orders_by_client.setdefault(cid, []).append({
+                "order_id": str(oid),
+                "order_number": onum,
+                "style_count": len(ostyles),
+                "piece_count": sum(s["piece_count"] for s in ostyles),
+                "styles": ostyles,
+            })
+
+        return {
+            "clients": [
+                {
+                    "client_id": str(cid),
+                    "client_name": cname,
+                    "order_count": len(orders_by_client.get(cid, [])),
+                    "orders": orders_by_client.get(cid, []),
+                }
+                for cid, cname in clients
+            ],
+        }
 
     # ================================================================ LEVEL 1
     async def order_tree(self, order_id: uuid.UUID) -> dict:
