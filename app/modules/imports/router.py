@@ -24,7 +24,12 @@ from __future__ import annotations
 import os
 import tempfile
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from sqlalchemy.ext.asyncio import AsyncSession     
+from app.core.database import SessionLocal, get_db     
+from app.modules.clients.service import ClientService    
+from app.modules.imports.load_to_db import load_preview, load_preview_into_order  # add new fn
+
 from starlette.concurrency import run_in_threadpool
 
 from app.core.database import SessionLocal
@@ -45,6 +50,23 @@ def _save_upload(file: UploadFile) -> str:
         f.write(file.file.read())
     return path
 
+async def _require_order(db: AsyncSession, order_number: str):
+    """Reject early if the entered number doesn't match a client's order."""
+    order = await ClientService(db).get_order_by_number(order_number)
+    if not order:
+        raise HTTPException(
+            404, "Order number not found. Please verify with the client record.")
+    return order
+
+def _do_commit_into_order(path: str, order_number: str) -> dict:
+    preview = build_preview(path)
+    summary = preview.summary()
+    db = SessionLocal()
+    try:
+        stats = load_preview_into_order(db, preview, order_number=order_number)
+    finally:
+        db.close()
+    return {"summary": summary, "written": stats}
 
 def _do_preview(path: str) -> dict:
     return build_preview(path).summary()
@@ -63,10 +85,13 @@ def _do_commit(path: str) -> dict:
 
 @router.post("/preview")
 async def preview_import(
+    order_number: str = Form(...),
     file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
     _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
 ):
-    """Dry-run: parse the workbook and return a structured preview (no writes)."""
+    """Dry-run. Validates the order number first, then parses (no writes)."""
+    await _require_order(db, order_number)
     path = _save_upload(file)
     try:
         return await run_in_threadpool(_do_preview, path)
@@ -76,12 +101,15 @@ async def preview_import(
 
 @router.post("/commit")
 async def commit_import(
+    order_number: str = Form(...),
     file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
     _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
 ):
-    """Parse, validate, and write the workbook to the database (idempotent)."""
+    """Validate order number, parse, and write SKUs INTO that order (idempotent)."""
+    await _require_order(db, order_number)
     path = _save_upload(file)
     try:
-        return await run_in_threadpool(_do_commit, path)
+        return await run_in_threadpool(_do_commit_into_order, path, order_number)
     finally:
         os.remove(path)

@@ -59,6 +59,20 @@ class ClientRepository:
         res = await self.db.execute(select(SKU).where(SKU.style_id == style_id))
         return list(res.scalars())
 
+    async def create_order(self, *, client_id: uuid.UUID, order_number: str,
+                           order_date=None, delivery_deadline=None,
+                           sea_cutoff_date=None, ship_mode: str = "sea",
+                           currency: str | None = None, agent: str | None = None,
+                           line: str | None = None) -> ClientOrder:
+        co = ClientOrder(
+            client_id=client_id, order_number=order_number, order_date=order_date,
+            delivery_deadline=delivery_deadline, sea_cutoff_date=sea_cutoff_date,
+            ship_mode=ship_mode or "sea", currency=currency, agent=agent, line=line)
+        self.db.add(co)
+        await self.db.commit()
+        await self.db.refresh(co)
+        return co
+    
     async def create_order_with_breakdown(
         self, *, client_id: uuid.UUID, order: dict, style: dict,
         lines: list[dict], per_size: dict,
@@ -153,3 +167,24 @@ class ClientRepository:
         )
         return res.scalar_one_or_none()
  
+    async def create_client_with_order(
+        self, *, name: str, country: str | None, order_number: str,
+    ) -> tuple[Client, ClientOrder]:
+        """Client + its first ClientOrder in one transaction. The unique
+        constraint on order_number is the real guard (see IntegrityError catch
+        in the service)."""
+        c = Client(name=name, country=country)
+        self.db.add(c)
+        await self.db.flush()                     # assign c.id
+        co = ClientOrder(client_id=c.id, order_number=order_number)
+        self.db.add(co)
+        await self.db.commit()
+        await self.db.refresh(c)
+        await self.db.refresh(co)
+        return c, co
+
+    async def get_order_by_number(self, order_number: str) -> ClientOrder | None:
+        res = await self.db.execute(
+            select(ClientOrder).where(
+                ClientOrder.order_number == (order_number or "").strip()))
+        return res.scalar_one_or_none()
