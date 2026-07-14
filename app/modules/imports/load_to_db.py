@@ -167,3 +167,83 @@ def load_preview(db: Session, preview, country_map: dict | None = None,
 
     db.commit()
     return stats
+
+
+def load_preview_into_order(db, preview, *, order_number: str,
+                            replace: bool = True) -> dict:
+    """Write a parsed breakdown sheet INTO the ClientOrder identified by
+    order_number (created at client-creation). SKU codes use that order_number,
+    so every SKU traces back to the client + order. Idempotent: replace=True
+    clears this order's prior styles/SKUs first."""
+    from fastapi import HTTPException          # local import: keep loader fastapi-light
+    order_number = (order_number or "").strip()
+    order = db.scalar(select(ClientOrder).where(
+        ClientOrder.order_number == order_number))
+    if not order:                              # backstop; endpoint already checked
+        raise HTTPException(
+            404, "Order number not found. Please verify with the client record.")
+
+    OP_SEQ = {"CUTTING":1,"FUSING":2,"PASTING":3,"SHELL":4,"L/A":5,
+              "LINING STICH":6,"FF":7,"FF-SAMPLE":8,"FF-SMS":9,"FF-SAMPLE ":8}
+    stats = {"order_number": order_number, "styles": 0,
+             "skus_created": 0, "skus_updated": 0, "operations": 0, "rates": 0}
+    op_cache: dict[str, Operation] = {}
+    seen_rates: set = set()
+
+    if replace:
+        for st in db.scalars(select(Style).where(
+                Style.client_order_id == order.id)).all():
+            for sk in db.scalars(select(SKU).where(SKU.style_id == st.id)).all():
+                for ol in db.scalars(select(SkuOrderLine).where(
+                        SkuOrderLine.sku_id == sk.id)).all():
+                    db.delete(ol)
+                db.delete(sk)
+            for rt in db.scalars(select(Rate).where(Rate.style_id == st.id)).all():
+                db.delete(rt)
+            db.delete(st)
+        db.flush()
+
+    styles_seen = set()
+    for cp in preview.clients.values():        # flatten all parsed lines → this order
+        for line in cp.order_lines:
+            style = _get_or_create_style(db, order, line.style, line.article)
+            if style.id not in styles_seen:
+                styles_seen.add(style.id); stats["styles"] += 1
+            for size, qty in line.sizes.items():
+                sku, res = _upsert_sku(db, order, style, line.color, size, qty)
+                if res == "created": stats["skus_created"] += 1
+                elif res == "updated": stats["skus_updated"] += 1
+                db.add(SkuOrderLine(sku_id=sku.id, order_date=line.order_date,
+                                    qty=qty, source_row=line.source_row))
+
+        for card in cp.production_cards:
+            for opcode in card.operations:
+                if opcode not in op_cache:
+                    op_cache[opcode] = _get_or_create_operation(
+                        db, opcode, OP_SEQ.get(opcode, 99))
+                    stats["operations"] += 1
+            tprefix = card.title.split("-")[0].strip().upper()
+            ref_style = None
+            for st in db.scalars(select(Style).where(
+                    Style.client_order_id == order.id)):
+                if st.name.upper() in card.title.upper() or tprefix in st.name.upper():
+                    ref_style = st; break
+            if ref_style:
+                for opcode, rate_val in card.rate.items():
+                    if not rate_val:
+                        continue
+                    op = op_cache[opcode]
+                    if (ref_style.id, op.id) in seen_rates:
+                        continue
+                    existing = db.scalar(select(Rate).where(
+                        Rate.style_id == ref_style.id, Rate.operation_id == op.id,
+                        Rate.effective_from == date(2026, 1, 1)))
+                    if not existing:
+                        db.add(Rate(style_id=ref_style.id, operation_id=op.id,
+                                    rate=rate_val, effective_from=date(2026, 1, 1)))
+                        db.flush(); stats["rates"] += 1
+                    seen_rates.add((ref_style.id, op.id))
+
+    db.commit()
+    return stats
+

@@ -10,7 +10,7 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SKURead(BaseModel):
@@ -23,6 +23,18 @@ class SKURead(BaseModel):
     nylon_color: str | None = None
     knit_color: str | None = None
 
+# add near ClientOrderRead
+class ClientOrderCreate(BaseModel):
+    """Add another order to an existing client. Only order_number is required;
+    the rest are optional order-level fields (dates drive freight-risk)."""
+    order_number: str = Field(min_length=1)   # globally unique across ALL clients
+    order_date: date | None = None
+    delivery_deadline: date | None = None
+    sea_cutoff_date: date | None = None
+    ship_mode: str = "sea"                     # "sea" | "air"
+    currency: str | None = None
+    agent: str | None = None
+    line: str | None = None
 
 class StyleRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -62,11 +74,18 @@ class ClientRead(BaseModel):
     code: str | None = None
     currency: str | None = None
     default_size_system: str | None = None
+    
+# add after ClientRead:
+class CreatedClientRead(ClientRead):
+    """POST /clients response — the client plus the order minted for it."""
+    order_number: str
+    order_id: uuid.UUID
 
 
 class ClientCreate(BaseModel):
     name: str
     country: str | None = None
+    order_number: str = Field(min_length=1)   # manager-entered; globally unique
 
 
 class StyleCreate(BaseModel):
