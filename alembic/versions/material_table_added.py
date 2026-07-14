@@ -14,7 +14,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "add_material_rate"
-down_revision = "20260704_1500_config_client_checks"          # TODO: set to current head
+down_revision = "20260704_client_checks"# TODO: set to current head
 branch_labels = None
 depends_on = None
 

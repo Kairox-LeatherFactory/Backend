@@ -160,7 +160,7 @@ def seed_orders(db: Session) -> None:
     for line in lines:
         style = _get_or_create_style(db, order, line.style, line.article)
         for size, qty in line.sizes.items():
-            _upsert_sku(db, style, line.color, size, qty)
+            _upsert_sku(db, order, style, line.color, size, qty)
     db.commit()
 
 
