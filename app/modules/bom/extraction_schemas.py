@@ -328,12 +328,12 @@ class OrderLine(BaseModel):
     
     @field_validator("model", "color", "article", mode="before")
     @classmethod
-    def _coerce_str(cls, v: Any) -> str | None:
+    def _coerce_str_model(cls, v: Any) -> str | None:
         return _to_str_or_none(v)
 
     @field_validator("color", "article", mode="before")
     @classmethod
-    def _coerce_str(cls, v: Any) -> str | None:
+    def _coerce_str_color(cls, v: Any) -> str | None:
         return _to_str_or_none(v)
 
     @field_validator("sizes", mode="before")

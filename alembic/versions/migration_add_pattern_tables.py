@@ -43,10 +43,10 @@ def upgrade() -> None:
         sa.Column("sha256", sa.String(64), nullable=False),
         sa.Column("storage_key", sa.String(300)),
         sa.Column("is_current", sa.Boolean(), nullable=False, server_default=sa.true()),
-        sa.Column("area_matrix", JSON_VARIANT()),
-        sa.Column("fabric_matrix", JSON_VARIANT()),
-        sa.Column("fabric_roles", JSON_VARIANT()),
-        sa.Column("warnings", JSON_VARIANT()),
+        sa.Column("area_matrix", JSON_VARIANT),
+        sa.Column("fabric_matrix", JSON_VARIANT),
+        sa.Column("fabric_roles", JSON_VARIANT),
+        sa.Column("warnings", JSON_VARIANT),
         sa.UniqueConstraint("style_signature", "sha256", name="uq_pattern_extraction_file"),
     )
     op.create_index("ix_pattern_extraction_client_id", "pattern_extraction", ["client_id"])

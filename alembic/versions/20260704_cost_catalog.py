@@ -3,8 +3,8 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
 
-revision = "20260704_1400_config_cost_catalog"
-down_revision = "20260704_1300_config_dxf_yield_fabric_role"
+revision = "20260704_cost_catalog"
+down_revision = "20260704_dxf_yield_fabric_role"
 branch_labels = None
 depends_on = None
 

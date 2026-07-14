@@ -2,8 +2,8 @@
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
-revision = "20260704_1500_config_client_checks"
-down_revision = "20260704_1400_config_cost_catalog"
+revision = "20260704_client_checks"
+down_revision = "20260704_cost_catalog"
 branch_labels = None
 depends_on = None
 
