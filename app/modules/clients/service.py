@@ -14,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
 from app.modules.clients.repository import ClientRepository
+from fastapi import HTTPException, status          # add
+from sqlalchemy.exc import IntegrityError
 
 
 def _slug(s: str | None) -> str:
@@ -51,8 +53,45 @@ class ClientService:
     async def list_clients(self) -> list[Client]:
         return await self.repo.list_clients()
 
-    async def create_client(self, name: str, country: str | None) -> Client:
-        return await self.repo.create_client(name, country)
+    async def add_order(self, *, client_id: uuid.UUID, order_number: str,
+                        order_date=None, delivery_deadline=None,
+                        sea_cutoff_date=None, ship_mode: str = "sea",
+                        currency=None, agent=None, line=None) -> ClientOrder:
+        order_number = (order_number or "").strip()
+        if not order_number:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "order_number is required")
+        if not await self.repo.get_client(client_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
+        if await self.repo.get_order_by_number(order_number):     # friendly pre-check
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                f"Order number '{order_number}' already exists. Choose a unique one.")
+        try:
+            return await self.repo.create_order(
+                client_id=client_id, order_number=order_number, order_date=order_date,
+                delivery_deadline=delivery_deadline, sea_cutoff_date=sea_cutoff_date,
+                ship_mode=ship_mode, currency=currency, agent=agent, line=line)
+        except IntegrityError:                                    # race-safe backstop
+            await self.db.rollback()
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                f"Order number '{order_number}' already exists. Choose a unique one.")
+    
+    async def create_client(self, name: str, country: str | None,
+                            order_number: str) -> tuple[Client, ClientOrder]:
+        order_number = (order_number or "").strip()
+        if not order_number:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "order_number is required")
+        # Friendly pre-check; DB constraint is the hard guarantee (race-safe).
+        if await self.repo.get_order_by_number(order_number):
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                f"Order number '{order_number}' already exists. Choose a unique one.")
+        try:
+            return await self.repo.create_client_with_order(
+                name=name, country=country, order_number=order_number)
+        except IntegrityError:
+            await self.db.rollback()
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                f"Order number '{order_number}' already exists. Choose a unique one.")
 
     async def get_client_orders(self, client_id: uuid.UUID) -> list[ClientOrder]:
         return await self.repo.get_orders_for_client(client_id)
@@ -101,3 +140,6 @@ class ClientService:
     
     async def get_sku_by_code(self, code: str):
         return await self.repo.get_sku_by_code(code)
+    
+    async def get_order_by_number(self, order_number: str):
+        return await self.repo.get_order_by_number(order_number)

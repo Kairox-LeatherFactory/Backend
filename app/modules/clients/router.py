@@ -31,13 +31,20 @@ async def list_clients(
     return await ClientService(db).list_clients()
 
 
-@router.post("", response_model=schemas.ClientRead, status_code=201)
+@router.post("", response_model=schemas.CreatedClientRead, status_code=201)
 async def create_client(
     body: schemas.ClientCreate,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
 ):
-    return await ClientService(db).create_client(body.name, body.country)
+    client, order = await ClientService(db).create_client(
+        body.name, body.country, body.order_number)
+    return schemas.CreatedClientRead(
+        id=client.id, name=client.name, country=client.country,
+        code=client.code, currency=client.currency,
+        default_size_system=client.default_size_system,
+        order_number=order.order_number, order_id=order.id)
+
 
 
 @router.get("/{client_id}/orders", response_model=list[schemas.ClientOrderRead])
@@ -50,3 +57,21 @@ async def client_orders(
     if user.role == UserRole.CLIENT and user.client_id != client_id:
         raise HTTPException(403, "Clients may only view their own orders")
     return await ClientService(db).get_client_orders(client_id)
+
+@router.post("/{client_id}/orders", response_model=schemas.ClientOrderRead,
+             status_code=201)
+async def add_order(
+    client_id: uuid.UUID,
+    body: schemas.ClientOrderCreate,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+):
+    """Add another order (new unique order_number) to an existing client."""
+    order = await ClientService(db).add_order(client_id=client_id, **body.model_dump())
+    # Build the response explicitly — a fresh order has no styles, and touching
+    # order.styles here would trigger an async-unsafe lazy load.
+    return schemas.ClientOrderRead(
+        id=order.id, order_number=order.order_number, order_date=order.order_date,
+        delivery_deadline=order.delivery_deadline,
+        sea_cutoff_date=order.sea_cutoff_date, ship_mode=order.ship_mode,
+        currency=order.currency, agent=order.agent, line=order.line, styles=[])

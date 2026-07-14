@@ -53,7 +53,7 @@ class ClientOrder(Base, UUIDMixin, TimestampMixin):
     supplier PO (procurement module). `order_number` holds 1579 / "Proposta N.2"."""
     __tablename__ = "client_order"
     client_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("client.id"), index=True)
-    order_number: Mapped[str] = mapped_column(String(50), index=True)
+    order_number: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     order_date: Mapped[date | None] = mapped_column(Date)
     delivery_deadline: Mapped[date | None] = mapped_column(Date)
     sea_cutoff_date: Mapped[date | None] = mapped_column(Date)  # last day to make sea freight
