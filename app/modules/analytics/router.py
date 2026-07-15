@@ -57,7 +57,6 @@ async def style_detail(
     """One style: every piece with its full stage history (employee + date/time)."""
     return await AnalyticsService(db).style_detail(style_id)
 
-
 @router.get("/pieces/detail")
 async def piece_detail(
     piece_code: str | None = Query(None),
