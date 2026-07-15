@@ -179,3 +179,29 @@ class ProductionRepository:
         )
         res = await self.db.execute(stmt)
         return res.all()
+    
+    async def list_pieces_for_sku(
+        self, sku_id: uuid.UUID
+    ) -> list[tuple[Piece, str | None, str | None]]:
+        """Every active piece of a SKU + its current stage (code, label)."""
+        res = await self.db.execute(
+            select(Piece, Operation.code, Operation.label)
+            .outerjoin(Operation, Operation.id == Piece.current_operation_id)
+            .where(Piece.sku_id == sku_id, Piece.is_active.is_(True))
+            .order_by(Piece.seq)
+        )
+        return [(p, c, l) for p, c, l in res.all()]
+
+    async def piece_ids_done_at_op(
+        self, piece_ids: list[uuid.UUID], operation_id: uuid.UUID
+    ) -> set[uuid.UUID]:
+        """Batch form of has_event_at_op — ONE query, no N+1 on the scan screen."""
+        if not piece_ids:
+            return set()
+        res = await self.db.execute(
+            select(ProductionEvent.piece_id)
+            .where(ProductionEvent.operation_id == operation_id,
+                   ProductionEvent.piece_id.in_(piece_ids))
+            .distinct()
+        )
+        return set(res.scalars())

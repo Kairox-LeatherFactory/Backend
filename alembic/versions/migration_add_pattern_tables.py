@@ -14,8 +14,9 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-from sqlalchemy.dialects.postgresql import UUID
-from app.core.models import JSON_VARIANT 
+from sqlalchemy.dialects.postgresql import JSONB, UUID 
+
+JSON_VARIANT = sa.JSON().with_variant(JSONB, "postgresql")
 
 revision = "b7d4f1a9c2e0"
 down_revision = "f3a9c1d2e8b7"  # <-- set to your current head

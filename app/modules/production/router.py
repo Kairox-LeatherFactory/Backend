@@ -64,6 +64,19 @@ async def scan(
         work_date=body.work_date, sku_id=body.sku_id,
         piece_seqs=body.piece_seqs, piece_codes=body.piece_codes,
     )
+    
+@router.get("/skus/{sku_id}/pieces", response_model=schemas.SkuPieceList)
+async def list_pieces_for_sku(
+    sku_id: uuid.UUID,
+    operation_id: uuid.UUID | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Pieces minted for a SKU + each one's current stage. Pass operation_id to
+    flag which are already logged at that stage (the scan screen's checklist)."""
+    return await ProductionService(db).list_pieces_for_sku(
+        sku_id=sku_id, operation_id=operation_id
+    )
 
 
 # @router.post("/events", response_model=schemas.ProductionEventRead, status_code=201)

@@ -18,7 +18,7 @@ Two SEPARATE axes on bom_item (do not conflate):
 from alembic import op
 import sqlalchemy as sa
 
-from app.core.models import GUID
+from sqlalchemy.dialects.postgresql import UUID as GUID
 
 revision = "fiber_role_bom_item"
 down_revision = "add_material_rate"          # TODO: set to current head (see note above)

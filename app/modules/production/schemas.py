@@ -43,7 +43,6 @@ class CuttingCreate(BaseModel):
     work_date: date
     count: int = Field(gt=0)
     
-    
     @model_validator(mode="after")
     def _one_sku(self):
         if not self.sku_id and not self.sku_code:
@@ -82,6 +81,27 @@ class ScanBatchResult(BaseModel):
     rework: list[str]         # pieces already seen at this stage (looped back)
     not_found: list[str]      # unknown seqs/codes — skipped, never written
 
+
+class PieceOption(BaseModel):
+    piece_id: uuid.UUID
+    code: str                        # "KJ2451-CLERMONT-57-M-005" — show this
+    seq: int                         # 5 — what /scan takes in piece_seqs
+    current_stage: str | None        # "CUTTING"; null if never logged
+    current_stage_label: str | None
+    done_at_op: bool = False         # already logged at the requested operation
+
+
+class SkuPieceList(BaseModel):
+    sku_id: uuid.UUID
+    sku_code: str | None
+    colour: str | None
+    size: str | None
+    operation_id: uuid.UUID | None
+    operation_code: str | None
+    total: int
+    done: int
+    pending: int
+    pieces: list[PieceOption]
 
 # ---- Legacy generic event --------------------------------------------------
 class ProductionEventCreate(BaseModel):

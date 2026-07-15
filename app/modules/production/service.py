@@ -166,6 +166,50 @@ class ProductionService:
             "rework": rework,
             "not_found": not_found,
         }
+        
+        
+    async def list_pieces_for_sku(self, *, sku_id: uuid.UUID | None = None,
+                                  sku_code: str | None = None,
+                                  operation_id: uuid.UUID | None = None) -> dict:
+        """Every minted piece of a SKU — the scan screen's checklist.
+        With operation_id each piece is flagged done_at_op so the UI can badge
+        the ones already logged there. Deliberately NOT gated on the previous
+        stage: surface state, let the manager decide (same as scan())."""
+        sku_id = await self._resolve_sku_id(sku_id, sku_code)
+        if not sku_id:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "Provide sku_id or sku_code.")
+        sku = await self.clients.get_sku(sku_id)
+        if not sku:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "SKU not found")
+
+        op = None
+        if operation_id:
+            op = await self.repo.get_operation(operation_id)
+            if not op:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Operation not found")
+
+        rows = await self.repo.list_pieces_for_sku(sku_id)
+        done_ids: set[uuid.UUID] = set()
+        if op:
+            done_ids = await self.repo.piece_ids_done_at_op(
+                [p.id for p, _, _ in rows], op.id)
+
+        pieces = [
+            {"piece_id": p.id, "code": p.code, "seq": p.seq,
+             "current_stage": scode, "current_stage_label": slabel,
+             "done_at_op": p.id in done_ids}
+            for p, scode, slabel in rows
+        ]
+        done = sum(1 for x in pieces if x["done_at_op"])
+        return {
+            "sku_id": sku_id, "sku_code": sku.code,
+            "colour": sku.color_name or sku.color_code, "size": sku.size,
+            "operation_id": op.id if op else None,
+            "operation_code": op.code if op else None,
+            "total": len(pieces), "done": done, "pending": len(pieces) - done,
+            "pieces": pieces,
+        }
 
     # # --------------------------------------------------- legacy generic event
     
