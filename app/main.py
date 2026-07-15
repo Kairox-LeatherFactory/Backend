@@ -218,7 +218,7 @@ app.add_middleware(
         "http://localhost:8081",     # Expo web
         "http://localhost:19006",    # Expo web alt
         "http://localhost:3000",     # React dev
-        "*",                         # tighten to your frontend origin in production
+        "https://frontend-rust-pi-23.vercel.app/",                         # tighten to your frontend origin in production
     ],
     allow_credentials=True,
     allow_methods=["*"],
