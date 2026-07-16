@@ -160,7 +160,7 @@ class AttendanceService:
     async def proxy_mark_present(self, supervisor: User,
                                 body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
         # Permission: SUPERVISOR (and DIRECT_MANAGER as superuser) only.
-        if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER):
+        if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER , UserRole.HR, UserRole.MANAGING_DIRECTOR):
             raise HTTPException(403, "Only a supervisor may proxy-mark attendance.")
         dist = await self._enforce_geofence(body.lat, body.lon)
 
@@ -168,7 +168,10 @@ class AttendanceService:
         for emp_id in body.employee_ids:
             emp = await self.employees.get(emp_id)
             if not emp:
-                continue                                    # silently skip unknown ids
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Employee {emp_id} not found."
+                )                                    # silently skip unknown ids
             # Spec restricts PROXY to piece-rate workers.
             if emp.wage_type != WageType.PIECE_RATE:
                 raise HTTPException(
@@ -182,7 +185,7 @@ class AttendanceService:
 
     async def proxy_check_out(self, supervisor: User,
                               body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
-        if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER):
+        if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR):
             raise HTTPException(403, "Only a supervisor may proxy check-out.")
         await self._enforce_geofence(body.lat, body.lon)
         out = []

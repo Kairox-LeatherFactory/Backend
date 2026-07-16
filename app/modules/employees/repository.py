@@ -37,5 +37,6 @@ class EmployeeRepository:
     async def create(self, **kw) -> Employee:
         e = Employee(**kw)
         self.db.add(e)
+        await self.db.flush()
         await self.db.refresh(e)
         return e
