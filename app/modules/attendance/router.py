@@ -48,7 +48,7 @@ async def check_out(body: schemas.CheckOutRequest,
 @router.post("/proxy/check-in", response_model=list[schemas.AttendanceRead], status_code=201)
 async def proxy_check_in(body: schemas.ProxyMarkRequest,
                         db: AsyncSession = Depends(get_db),
-                        user: User = Depends(get_current_user)):
+                        user: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR))):
     """Spec Flow B. require_roles isn't used here because the SERVICE enforces
     SUPERVISOR/DIRECT_MANAGER and also validates the worker is daily-wage."""
     return await AttendanceService(db).proxy_mark_present(user, body)
@@ -57,14 +57,14 @@ async def proxy_check_in(body: schemas.ProxyMarkRequest,
 @router.post("/proxy/check-out", response_model=list[schemas.AttendanceRead])
 async def proxy_check_out(body: schemas.ProxyMarkRequest,
                         db: AsyncSession = Depends(get_db),
-                        user: User = Depends(get_current_user)):
+                        user: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR))):
     return await AttendanceService(db).proxy_check_out(user, body)
 
 
 @router.post("/daily-workers", status_code=201)
 async def add_daily_worker(body: schemas.AddDailyWorkerRequest,
                         db: AsyncSession = Depends(get_db),
-                        user: User = Depends(get_current_user)):
+                        user: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR))):
     emp = await AttendanceService(db).add_daily_worker(user, body)
     return {"id": str(emp.id), "name": emp.name, "wage_type": emp.wage_type.value}
 
@@ -112,6 +112,6 @@ async def get_config(
 async def update_config(
     body: schemas.ShiftConfigUpdate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR)),
 ):
     return await AttendanceService(db).update_config(body)

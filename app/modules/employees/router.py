@@ -29,6 +29,6 @@ async def list_employees(
 async def create_employee(
     body: schemas.EmployeeCreate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR)),
 ):
     return await EmployeeService(db).create(**body.model_dump())

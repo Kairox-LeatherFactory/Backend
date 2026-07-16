@@ -49,12 +49,11 @@ class UserRepository:
         res = await self.db.execute(stmt)
         return list(res.scalars())
 
+    async def from_user_create(self, **kw) -> User:
+        user = User(**kw); self.db.add(user); await self.db.flush(); await self.db.commit(user); return user
+
     async def create(self, **kw) -> User:
-        user = User(**kw)
-        self.db.add(user)
-        await self.db.commit()
-        await self.db.refresh(user)
-        return user
+        user = User(**kw); self.db.add(user); await self.db.flush(); return user
 
     async def save(self, user: User) -> User:
         await self.db.commit()

@@ -37,6 +37,5 @@ class EmployeeRepository:
     async def create(self, **kw) -> Employee:
         e = Employee(**kw)
         self.db.add(e)
-        await self.db.commit()
         await self.db.refresh(e)
         return e

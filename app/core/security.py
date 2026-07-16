@@ -95,7 +95,6 @@ def get_password_hash(password: str) -> str:
     pw = password.encode("utf-8")[:72]
     return bcrypt.hashpw(pw, bcrypt.gensalt()).decode("utf-8")
 
-print(get_password_hash("9000000001"))
 
 
 # ══════════════════════════════════════════════════════════════════════════

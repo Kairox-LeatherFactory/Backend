@@ -8,9 +8,10 @@ they are surfaced here so a manager can provision logins and contact workers.
 """
 import uuid
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.core.enums import WageType
+
 
 
 class EmployeeRead(BaseModel):
@@ -30,5 +31,22 @@ class EmployeeCreate(BaseModel):
     designation: str | None = None
     wage_type: WageType = WageType.PIECE_RATE
     monthly_salary: float | None = None
+    daily_rate: float | None = None          # was missing entirely
     phone: str | None = None
     email: str | None = None
+    password: str | None = None              # REQUIRED for MONTHLY. Never persisted.
+
+    @model_validator(mode="after")
+    def _login_fields(self):
+        if self.wage_type is WageType.MONTHLY:
+            missing = [f for f in ("phone", "password") if not getattr(self, f)]
+            if missing:
+                raise ValueError(f"{', '.join(missing)} required for MONTHLY employees")
+        elif self.password:
+            raise ValueError("password is only accepted for MONTHLY employees")
+        return self
+
+
+class EmployeeCreateRead(EmployeeRead):
+    user_created: bool = False
+    login_phone: str | None = None

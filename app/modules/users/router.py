@@ -65,7 +65,7 @@ users_router = APIRouter(tags=["Users"])
 async def list_users(
     active_only: bool = True,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR)),
 ):
     return await UserService(db).list_users(active_only)
 
@@ -74,7 +74,7 @@ async def list_users(
 async def create_user(
     body: schemas.UserCreate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR)),
 ):
     return await UserService(db).create_user(body)
 
@@ -83,7 +83,7 @@ async def create_user(
 async def create_client_user(
     body: schemas.ClientUserCreate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR)),
 ):
     """Direct manager provisions a client's login so they can track their orders."""
     return await UserService(db).create_client_user(body)

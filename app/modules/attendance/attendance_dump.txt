@@ -1,0 +1,771 @@
+﻿============================================================
+PROJECT STRUCTURE
+============================================================
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\geofence.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\models.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\repository.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\router.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\schemas.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\service.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\USER_dump.txt
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\__init__.py
+
+============================================================
+PROJECT FILES
+============================================================
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\__init__.py
+============================================================
+
+"""
+attendance — geofenced punch-in/out, shift policy, piece-rate floor hours.
+
+Three flows from the spec:
+  A. Self-service (managers / HR / permanent workers)
+  B. Proxy by supervisor (piece-rate workers)
+  C. Supervisor onboards a new piece-rate worker on the floor
+
+Cross-module integration: production uses is_present_today() to refuse logging
+output for workers not on the floor; wages uses total_hours() / days_present()
+to compute pay for the PIECE_RATE wage type.
+"""
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\geofence.py
+============================================================
+
+"""
+================================================================================
+modules/attendance/geofence.py — Haversine distance + the 100-m rule
+================================================================================
+The Haversine formula gives the great-circle distance between two lat/lon
+points on Earth — exact enough for a 100-meter geofence (sub-metre error).
+Pure function, no I/O, trivially unit-testable with known coordinates.
+================================================================================
+"""
+import math
+
+
+EARTH_RADIUS_M = 6_371_000.0
+
+
+def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Distance in metres between two (lat, lon) points."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlam / 2) ** 2
+    return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(a))
+
+
+def within_geofence(device_lat: float, device_lon: float,
+                    factory_lat: float, factory_lon: float,
+                    radius_m: int) -> tuple[bool, float]:
+    """Returns (allowed, distance_metres). Spec rule: distance <= radius."""
+    d = haversine_m(device_lat, device_lon, factory_lat, factory_lon)
+    return d <= radius_m, round(d, 2)
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\models.py
+============================================================
+
+"""
+================================================================================
+modules/attendance/models.py — Attendance domain tables
+================================================================================
+
+PURPOSE
+    Tables that make the requirement spec real:
+      ShiftConfig       Factory-wide shift policy + geofence center & radius.
+                        ONE row (singleton). Stored in DB so HR can change it
+                        without redeploying — start time, length, grace minutes,
+                        factory_lat/lon, radius_m.
+      AttendanceLog     One row per (employee, work_date). check_in_at,
+                        check_out_at, source (SELF / PROXY), is_late, is_short,
+                        is_overtime, distance_m (at check-in), recorded_by_user
+                        (the supervisor for proxy entries — accountability).
+
+WHY DATES NOT JUST TIMESTAMPS
+    work_date is a separate column so the unique-per-day rule
+    ("one attendance row per employee per day") is enforced by the DATABASE,
+    not the application. UniqueConstraint on (employee_id, work_date) makes a
+    duplicate check-in physically impossible.
+
+WHY recorded_by_user
+    Spec Flow B says supervisors mark daily-wage workers. We MUST know which
+    supervisor did each proxy entry (accountability + fraud trail). NULL means
+    the worker checked themselves in (Flow A).
+================================================================================
+"""
+import uuid
+from datetime import date, datetime
+
+from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Numeric, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+from app.core.models import GUID, TimestampMixin, UUIDMixin
+
+import enum
+
+
+class AttendanceSource(str, enum.Enum):
+    SELF = "self"          # Flow A: worker themself
+    PROXY = "proxy"        # Flow B: supervisor marked them
+
+
+class ShiftConfig(Base, UUIDMixin, TimestampMixin):
+    """Singleton row holding factory-wide shift + geofence policy. HR can
+    update via API; no redeploy needed."""
+    __tablename__ = "shift_config"
+
+    # Shift policy
+    shift_start: Mapped[str] = mapped_column(String(5), default="09:00")    # "HH:MM" (factory wall-clock)
+    shift_length_hours: Mapped[float] = mapped_column(Numeric(4, 2), default=8.0)
+    late_grace_minutes: Mapped[int] = mapped_column(default=15)
+
+    # Factory timezone (IANA name, e.g. "Asia/Kolkata"). SINGLE source of truth
+    # for interpreting wall-clock policy (shift_start -> is_late) and for which
+    # calendar day a punch belongs to (work_date). Storage stays UTC; this is
+    # only applied at the business-logic + display boundaries.
+    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Kolkata")
+
+    # Geofence (100-meter rule from the spec)
+    factory_lat: Mapped[float] = mapped_column(Numeric(10, 7), default=0.0)
+    factory_lon: Mapped[float] = mapped_column(Numeric(10, 7), default=0.0)
+    radius_m: Mapped[int] = mapped_column(default=100)
+
+
+class AttendanceLog(Base, UUIDMixin, TimestampMixin):
+    """One row per (employee, work_date). The unique constraint guarantees
+    'one attendance per day'."""
+    __tablename__ = "attendance_log"
+    __table_args__ = (UniqueConstraint("employee_id", "work_date", name="uq_att_emp_day"),)
+
+    employee_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("employee.id"), index=True)
+    work_date: Mapped[date] = mapped_column(Date, index=True)
+
+    check_in_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    check_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    source: Mapped[AttendanceSource] = mapped_column(
+        Enum(AttendanceSource, name="attendance_source"), default=AttendanceSource.SELF
+    )
+    # Supervisor (User) who recorded a PROXY entry. NULL for SELF entries.
+    recorded_by_user_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("app_user.id"))
+
+    # Computed at write time so dashboards never recompute on read.
+    is_late: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_short: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_overtime: Mapped[bool] = mapped_column(Boolean, default=False)
+    distance_m: Mapped[float | None] = mapped_column(Numeric(8, 2))   # at check-in
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\repository.py
+============================================================
+
+"""Async data access for attendance + the shift-config singleton."""
+import uuid
+from datetime import date
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.modules.attendance.models import AttendanceLog, ShiftConfig
+
+
+class AttendanceRepository:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    # ── ShiftConfig (singleton) ──────────────────────────────────────────
+    async def get_config(self) -> ShiftConfig:
+        cfg = (await self.db.execute(select(ShiftConfig).limit(1))).scalar_one_or_none()
+        if cfg is None:
+            cfg = ShiftConfig()                # create with defaults on first read
+            self.db.add(cfg)
+            await self.db.commit()
+            await self.db.refresh(cfg)
+        return cfg
+
+    async def save(self, obj) -> None:
+        await self.db.commit()
+        await self.db.refresh(obj)
+
+    # ── Attendance log ───────────────────────────────────────────────────
+    async def find(self, employee_id: uuid.UUID, work_date: date) -> AttendanceLog | None:
+        res = await self.db.execute(select(AttendanceLog).where(
+            AttendanceLog.employee_id == employee_id,
+            AttendanceLog.work_date == work_date))
+        return res.scalar_one_or_none()
+
+    async def add(self, log: AttendanceLog) -> AttendanceLog:
+        self.db.add(log)
+        await self.db.commit()
+        await self.db.refresh(log)
+        return log
+
+    async def for_employee(self, employee_id: uuid.UUID,
+                           start: date, end: date) -> list[AttendanceLog]:
+        res = await self.db.execute(
+            select(AttendanceLog).where(
+                AttendanceLog.employee_id == employee_id,
+                AttendanceLog.work_date >= start,
+                AttendanceLog.work_date <= end,
+            ).order_by(AttendanceLog.work_date)
+        )
+        return list(res.scalars())
+
+    async def by_day(self, work_date: date) -> list[AttendanceLog]:
+        res = await self.db.execute(
+            select(AttendanceLog).where(AttendanceLog.work_date == work_date))
+        return list(res.scalars())
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\router.py
+============================================================
+
+"""
+================================================================================
+modules/attendance/router.py — Attendance HTTP API
+================================================================================
+Endpoints (all mounted under /api/v1):
+  POST   /attendance/check-in            Flow A: self check-in (GPS required)
+  POST   /attendance/check-out           Flow A: self check-out
+  POST   /attendance/proxy/check-in      Flow B: supervisor marks daily workers
+  POST   /attendance/proxy/check-out     Flow B: supervisor closes them
+  POST   /attendance/daily-workers       Flow C: supervisor onboards a daily worker
+  GET    /attendance/me                  Own attendance history (calendar view)
+  GET    /attendance/me/status           Live shift status (server-anchored countdown)
+  GET    /attendance/today               Today's roster (manager/HR view)
+  GET    /attendance/config              Read shift + geofence policy
+  PATCH  /attendance/config              Manager/HR updates policy
+================================================================================
+"""
+import uuid
+from datetime import date, timedelta
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
+from app.core.enums import UserRole
+from app.modules.attendance import schemas
+from app.modules.attendance.service import AttendanceService
+from app.modules.users.deps import get_current_user, require_roles
+from app.modules.users.models import User
+
+router = APIRouter(prefix="/attendance", tags=["Attendance"])
+
+
+@router.post("/check-in", response_model=schemas.AttendanceRead, status_code=201)
+async def check_in(body: schemas.CheckInRequest,
+            db: AsyncSession = Depends(get_db),
+            user: User = Depends(get_current_user)):
+    return await AttendanceService(db).self_check_in(user, body)
+
+
+@router.post("/check-out", response_model=schemas.AttendanceRead)
+async def check_out(body: schemas.CheckOutRequest,
+                    db: AsyncSession = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    return await AttendanceService(db).self_check_out(user, body)
+
+
+@router.post("/proxy/check-in", response_model=list[schemas.AttendanceRead], status_code=201)
+async def proxy_check_in(body: schemas.ProxyMarkRequest,
+                        db: AsyncSession = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    """Spec Flow B. require_roles isn't used here because the SERVICE enforces
+    SUPERVISOR/DIRECT_MANAGER and also validates the worker is daily-wage."""
+    return await AttendanceService(db).proxy_mark_present(user, body)
+
+
+@router.post("/proxy/check-out", response_model=list[schemas.AttendanceRead])
+async def proxy_check_out(body: schemas.ProxyMarkRequest,
+                        db: AsyncSession = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    return await AttendanceService(db).proxy_check_out(user, body)
+
+
+@router.post("/daily-workers", status_code=201)
+async def add_daily_worker(body: schemas.AddDailyWorkerRequest,
+                        db: AsyncSession = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    emp = await AttendanceService(db).add_daily_worker(user, body)
+    return {"id": str(emp.id), "name": emp.name, "wage_type": emp.wage_type.value}
+
+
+@router.get("/me", response_model=list[schemas.AttendanceRead])
+async def my_history(
+    start: date | None = Query(None), end: date | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if user.employee_id is None:
+        return []
+    end = end or date.today()
+    start = start or (end - timedelta(days=30))
+    return await AttendanceService(db).history(user.employee_id, start, end)
+
+
+@router.get("/me/status", response_model=schemas.ShiftStatus)
+async def my_status(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Server-anchored data for the live shift countdown. Frontend computes a
+    one-time (server_now - device_now) offset and ticks toward shift_end_at."""
+    return await AttendanceService(db).my_status(user)
+
+
+@router.get("/today", response_model=list[schemas.AttendanceRead])
+async def today_roster(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    return await AttendanceService(db).today_roster()
+
+
+@router.get("/config", response_model=schemas.ShiftConfigRead)
+async def get_config(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    return await AttendanceService(db).get_config()
+
+
+@router.patch("/config", response_model=schemas.ShiftConfigRead)
+async def update_config(
+    body: schemas.ShiftConfigUpdate,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+):
+    return await AttendanceService(db).update_config(body)
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\schemas.py
+============================================================
+
+"""API contract for attendance."""
+import uuid
+from datetime import date, datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.modules.attendance.models import AttendanceSource
+
+
+class GpsPoint(BaseModel):
+    lat: float = Field(..., ge=-90, le=90)
+    lon: float = Field(..., ge=-180, le=180)
+
+
+class CheckInRequest(GpsPoint):
+    """SELF check-in by the worker themselves (Flow A).
+
+    Frontend sends ONLY the device GPS — the worker's identity comes from the
+    auth token (user.employee_id), and the timestamp is set server-side to
+    block client-side clock manipulation. Payload: {"lat": ..., "lon": ...}.
+    """
+    pass
+
+
+class CheckOutRequest(GpsPoint):
+    """SELF check-out (Flow A). Same payload as check-in: {"lat", "lon"}."""
+    pass
+
+
+class ProxyMarkRequest(BaseModel):
+    """Supervisor marks daily-wage workers present (Flow B). The GPS pinged is
+    the SUPERVISOR's device — that's the spec."""
+    employee_ids: list[uuid.UUID]
+    lat: float = Field(..., ge=-90, le=90)
+    lon: float = Field(..., ge=-180, le=180)
+
+
+class AddDailyWorkerRequest(BaseModel):
+    """Supervisor onboards a new daily-wage worker on the floor (Flow C)."""
+    name: str
+    phone: str
+    designation: str
+    daily_rate: float | None = None
+
+
+class AttendanceRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    employee_id: uuid.UUID
+    work_date: date
+    check_in_at: datetime
+    check_out_at: datetime | None
+    source: AttendanceSource
+    is_late: bool
+    is_short: bool
+    is_overtime: bool
+    distance_m: float | None
+
+
+class ShiftStatus(BaseModel):
+    """Server-anchored payload for the frontend live countdown.
+
+    All timestamps are UTC. The frontend renders them in `timezone` and ticks
+    the remaining time toward `shift_end_at` using a server-clock offset
+    (server_now - device_now) so a wrong device clock can't skew the display.
+    This is display-only; the backend recomputes hours at check-out.
+    """
+    server_now: datetime          # UTC 'now' — anchor for the live timer
+    timezone: str                 # IANA factory tz, for local rendering
+    shift_length_hours: float
+    checked_in: bool              # has an open/closed log today
+    checked_out: bool             # already checked out today
+    check_in_at: datetime | None  # UTC
+    shift_end_at: datetime | None # UTC = check_in_at + shift_length_hours
+    remaining_seconds: int | None # max(0, shift_end_at - server_now)
+
+
+class ShiftConfigRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    shift_start: str
+    shift_length_hours: float
+    late_grace_minutes: int
+    timezone: str
+    factory_lat: float
+    factory_lon: float
+    radius_m: int
+
+
+class ShiftConfigUpdate(BaseModel):
+    shift_start: str | None = None
+    shift_length_hours: float | None = None
+    late_grace_minutes: int | None = None
+    timezone: str | None = None
+    factory_lat: float | None = None
+    factory_lon: float | None = None
+    radius_m: int | None = None
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\service.py
+============================================================
+
+"""
+================================================================================
+modules/attendance/service.py — Attendance business rules (async)
+================================================================================
+
+WHAT THIS FILE OWNS
+  - Geofence validation BEFORE any database write (the spec's hard rule).
+  - Server-side timestamps (block client-side clock manipulation — spec).
+  - Late / short / overtime flags computed at write time (so dashboards never
+    recompute on read).
+  - Self-service check-in/out (Flow A) and supervisor proxy check-in (Flow B).
+  - Supervisor onboarding of a daily-wage worker (Flow C).
+  - The production-link helper used by the production module: is THIS worker
+    actually checked in TODAY? (See "Why this matters for production" below.)
+  - Daily-wage payroll: hours worked * daily_rate, summed over the period.
+
+WHY THIS MATTERS FOR PRODUCTION
+  A piece-rate worker who hasn't checked in cannot have legitimately produced
+  pieces today. We use is_present_today() from the production service to BLOCK
+  obvious fraud / data-entry mistakes (logging output for a worker who isn't on
+  the floor). The flag also feeds the analytics: if 5 cutters checked in but
+  CUTTING throughput is low, your bottleneck isn't headcount — it's process.
+================================================================================
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from fastapi import HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.enums import UserRole, WageType
+from app.modules.attendance import schemas
+from app.modules.attendance.geofence import within_geofence
+from app.modules.attendance.models import (
+    AttendanceLog, AttendanceSource, ShiftConfig,
+)
+from app.modules.attendance.repository import AttendanceRepository
+from app.modules.employees.models import Employee
+from app.modules.employees.service import EmployeeService
+from app.modules.users.models import User
+
+
+class AttendanceService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+        self.repo = AttendanceRepository(db)
+        self.employees = EmployeeService(db)
+
+    # ══════════════════════════════════════════════════════════════════
+    # Internal helpers
+    # ══════════════════════════════════════════════════════════════════
+    async def _config(self) -> ShiftConfig:
+        return await self.repo.get_config()
+
+    async def _enforce_geofence(self, lat: float, lon: float) -> float:
+        """Spec: distance > radius -> block with a clear error."""
+        cfg = await self._config()
+        ok, dist = within_geofence(lat, lon, float(cfg.factory_lat),
+                                float(cfg.factory_lon), cfg.radius_m)
+        if not ok:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"You must be within {cfg.radius_m} meters of the factory "
+                f"(you are {dist:.0f} m away).",
+            )
+        return dist
+
+    def _now(self) -> datetime:
+        """SERVER timestamp in UTC (spec: 'blocking client-side time manipulation').
+
+        UTC is the ONLY thing we store. Wall-clock is derived from cfg.timezone
+        at the two boundaries that need it: is_late and work_date.
+        """
+        return datetime.now(timezone.utc)
+
+    @staticmethod
+    def _tz(cfg: ShiftConfig) -> ZoneInfo:
+        """Factory timezone. Falls back to UTC if the configured name is bad
+        (so a typo in config can never crash a check-in)."""
+        try:
+            return ZoneInfo(cfg.timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            return ZoneInfo("UTC")
+
+    @staticmethod
+    def _as_utc(dt: datetime) -> datetime:
+        """Normalize to a tz-aware UTC instant. SQLite returns naive datetimes
+        even for DateTime(timezone=True); we stored UTC, so tag it as UTC."""
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    def _local_now(self, cfg: ShiftConfig) -> datetime:
+        return self._now().astimezone(self._tz(cfg))
+
+    async def _local_today(self) -> date:
+        """The factory's current calendar day. This is the work_date boundary —
+        NOT the server's local date — so a punch lands on the right day
+        regardless of where the server is hosted."""
+        cfg = await self._config()
+        return self._local_now(cfg).date()
+
+    def _flags(self, cfg: ShiftConfig, check_in: datetime,
+            check_out: datetime | None) -> tuple[bool, bool, bool]:
+        """Compute (is_late, is_short, is_overtime) from policy + punches.
+
+        is_late is a WALL-CLOCK comparison, so we convert the (UTC) check-in to
+        factory-local time before building shift_start. is_short/is_overtime are
+        durations, which are timezone-independent.
+        """
+        tz = self._tz(cfg)
+        local_in = self._as_utc(check_in).astimezone(tz)
+        h, m = (int(x) for x in cfg.shift_start.split(":"))
+        shift_start_today = local_in.replace(hour=h, minute=m, second=0, microsecond=0)
+        grace = timedelta(minutes=cfg.late_grace_minutes)
+        is_late = local_in > (shift_start_today + grace)
+
+        is_short = is_ot = False
+        if check_out:
+            worked_h = (self._as_utc(check_out) - self._as_utc(check_in)).total_seconds() / 3600.0
+            std = float(cfg.shift_length_hours)
+            is_short = worked_h < std
+            is_ot = worked_h > std
+        return is_late, is_short, is_ot
+
+    def _shift_end_at(self, cfg: ShiftConfig, check_in: datetime) -> datetime:
+        """When the shift is 'complete' for this punch, as a UTC instant.
+
+        Anchored to check-in + shift_length so it matches the backend's
+        is_short/is_overtime calc EXACTLY — this is the target the frontend
+        live countdown ticks toward, guaranteeing both agree.
+        """
+        return self._as_utc(check_in) + timedelta(hours=float(cfg.shift_length_hours))
+
+    # ══════════════════════════════════════════════════════════════════
+    # Flow A — Self-service check-in / check-out
+    # ══════════════════════════════════════════════════════════════════
+    async def self_check_in(self, user: User, body: schemas.CheckInRequest) -> AttendanceLog:
+        """The acting user IS the worker (manager / HR / permanent worker)."""
+        if user.employee_id is None:
+            raise HTTPException(400, "This login is not linked to an employee record.")
+        dist = await self._enforce_geofence(body.lat, body.lon)
+        return await self._open_or_reject(
+            employee_id=user.employee_id, source=AttendanceSource.SELF,
+            recorded_by=None, distance_m=dist,
+        )
+
+    async def self_check_out(self, user: User, body: schemas.CheckOutRequest) -> AttendanceLog:
+        if user.employee_id is None:
+            raise HTTPException(400, "This login is not linked to an employee record.")
+        await self._enforce_geofence(body.lat, body.lon)
+        return await self._close(employee_id=user.employee_id)
+
+    # ══════════════════════════════════════════════════════════════════
+    # Flow B — Supervisor proxy-marks daily-wage workers
+    # ══════════════════════════════════════════════════════════════════
+    async def proxy_mark_present(self, supervisor: User,
+                                body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
+        # Permission: SUPERVISOR (and DIRECT_MANAGER as superuser) only.
+        if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER):
+            raise HTTPException(403, "Only a supervisor may proxy-mark attendance.")
+        dist = await self._enforce_geofence(body.lat, body.lon)
+
+        out: list[AttendanceLog] = []
+        for emp_id in body.employee_ids:
+            emp = await self.employees.get(emp_id)
+            if not emp:
+                continue                                    # silently skip unknown ids
+            # Spec restricts PROXY to piece-rate workers.
+            if emp.wage_type != WageType.PIECE_RATE:
+                raise HTTPException(
+                    400, f"{emp.name} is not a piece-rate worker — proxy not allowed.")
+            log = await self._open_or_reject(
+                employee_id=emp.id, source=AttendanceSource.PROXY,
+                recorded_by=supervisor.id, distance_m=dist,
+            )
+            out.append(log)
+        return out
+
+    async def proxy_check_out(self, supervisor: User,
+                              body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
+        if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER):
+            raise HTTPException(403, "Only a supervisor may proxy check-out.")
+        await self._enforce_geofence(body.lat, body.lon)
+        out = []
+        for emp_id in body.employee_ids:
+            out.append(await self._close(employee_id=emp_id))
+        return out
+
+    # ══════════════════════════════════════════════════════════════════
+    # Flow C — Onboard a new daily-wage worker on the floor
+    # ══════════════════════════════════════════════════════════════════
+    async def add_daily_worker(self, supervisor: User,
+                               body: schemas.AddDailyWorkerRequest) -> Employee:
+        if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER):
+            raise HTTPException(403, "Only a supervisor may add daily workers.")
+        return await self.employees.create(
+            name=body.name, designation=body.designation,
+            wage_type=WageType.PIECE_RATE,
+            daily_rate=body.daily_rate, phone=body.phone, email=None,
+        )
+
+    # ══════════════════════════════════════════════════════════════════
+    # Open / close primitives (used by both flows)
+    # ══════════════════════════════════════════════════════════════════
+    async def _open_or_reject(self, *, employee_id: uuid.UUID, source: AttendanceSource,
+                            recorded_by: uuid.UUID | None, distance_m: float) -> AttendanceLog:
+        cfg = await self._config()
+        now = self._now()
+        today = now.astimezone(self._tz(cfg)).date()    # factory-local calendar day
+        existing = await self.repo.find(employee_id, today)
+        if existing:
+            # Idempotent + safe: re-tapping check-in same day is a no-op, not a duplicate.
+            return existing
+        is_late, _, _ = self._flags(cfg, now, None)
+        log = AttendanceLog(
+            employee_id=employee_id, work_date=today,
+            check_in_at=now, source=source, recorded_by_user_id=recorded_by,
+            is_late=is_late, is_short=False, is_overtime=False, distance_m=distance_m,
+        )
+        return await self.repo.add(log)
+
+    async def _close(self, *, employee_id: uuid.UUID) -> AttendanceLog:
+        today = await self._local_today()
+        log = await self.repo.find(employee_id, today)
+        if not log:
+            raise HTTPException(400, "No open check-in to close for today.")
+        log.check_out_at = self._now()
+        cfg = await self._config()
+        log.is_late, log.is_short, log.is_overtime = self._flags(cfg, log.check_in_at, log.check_out_at)
+        await self.repo.save(log)
+        return log
+
+    # ══════════════════════════════════════════════════════════════════
+    # Public helpers for OTHER modules (production + wages)
+    # ══════════════════════════════════════════════════════════════════
+    async def is_present_today(self, employee_id: uuid.UUID) -> bool:
+        """Used by the production service to validate event entry."""
+        log = await self.repo.find(employee_id, await self._local_today())
+        return log is not None
+
+    async def total_hours(self, employee_id: uuid.UUID, start: date, end: date) -> float:
+        """Sum worked hours in the window — the input to daily-wage payroll."""
+        rows = await self.repo.for_employee(employee_id, start, end)
+        total = 0.0
+        for r in rows:
+            if r.check_in_at and r.check_out_at:
+                total += (r.check_out_at - r.check_in_at).total_seconds() / 3600.0
+        return round(total, 2)
+
+    async def days_present(self, employee_id: uuid.UUID, start: date, end: date) -> int:
+        """Number of distinct days the worker checked in within the window."""
+        return len(await self.repo.for_employee(employee_id, start, end))
+
+    # ══════════════════════════════════════════════════════════════════
+    # Reads (dashboards / history)
+    # ══════════════════════════════════════════════════════════════════
+    async def history(self, employee_id: uuid.UUID, start: date, end: date) -> list[AttendanceLog]:
+        return await self.repo.for_employee(employee_id, start, end)
+
+    async def today_roster(self) -> list[AttendanceLog]:
+        return await self.repo.by_day(await self._local_today())
+
+    async def my_status(self, user: User) -> schemas.ShiftStatus:
+        """Server-anchored data for the frontend live countdown.
+
+        The frontend must NOT trust the device clock. It computes a one-time
+        offset (server_now - device_now) and ticks the remaining time toward
+        shift_end_at. All values are UTC; the backend remains the source of
+        truth — at check-out it recomputes hours from the stored timestamps.
+        """
+        cfg = await self._config()
+        now = self._now()
+        log = None
+        if user.employee_id is not None:
+            log = await self.repo.find(user.employee_id, now.astimezone(self._tz(cfg)).date())
+
+        check_in_at = self._as_utc(log.check_in_at) if log and log.check_in_at else None
+        checked_out = bool(log and log.check_out_at)
+        shift_end_at = self._shift_end_at(cfg, check_in_at) if (check_in_at and not checked_out) else None
+        remaining = (
+            max(0, int((shift_end_at - now).total_seconds())) if shift_end_at else None
+        )
+        return schemas.ShiftStatus(
+            server_now=now,
+            timezone=cfg.timezone,
+            shift_length_hours=float(cfg.shift_length_hours),
+            checked_in=bool(log),
+            checked_out=checked_out,
+            check_in_at=check_in_at,
+            shift_end_at=shift_end_at,
+            remaining_seconds=remaining,
+        )
+
+    async def get_config(self) -> ShiftConfig:
+        return await self._config()
+
+    async def update_config(self, body: schemas.ShiftConfigUpdate) -> ShiftConfig:
+        cfg = await self._config()
+        data = body.model_dump(exclude_unset=True)
+        if "timezone" in data and data["timezone"] is not None:
+            try:
+                ZoneInfo(data["timezone"])
+            except (ZoneInfoNotFoundError, ValueError):
+                raise HTTPException(
+                    400, f"Unknown timezone '{data['timezone']}'. Use an IANA name like 'Asia/Kolkata'.")
+        for k, v in data.items():
+            setattr(cfg, k, v)
+        await self.repo.save(cfg)
+        return cfg
+
