@@ -6,6 +6,8 @@ Exposes the public interface the wages module depends on (monthly_employees, get
 ================================================================================
 """
 import uuid
+import logging
+logger = logging.getLogger(__name__)
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +18,7 @@ from app.modules.employees import schemas
 from app.modules.users.models import User
 from app.modules.users.service import UserService
 from app.modules.users.schemas import UserCreate
+from app.modules.employees.schemas import EmployeeRead
 
 
 class EmployeeService:
@@ -26,7 +29,7 @@ class EmployeeService:
     async def list_all(self, active_only: bool = True) -> list[Employee]:
         return await self.repo.list_all(active_only)
 
-    async def create(self, body: schemas.EmployeeCreate) -> tuple[Employee, User | None]:
+    async def create(self, body: schemas.EmployeeCreate) -> EmployeeRead:
         emp = await self.repo.create(**body.model_dump(exclude={"password"}))  # flush only
         user = None
         if body.wage_type is WageType.MONTHLY:
@@ -39,7 +42,8 @@ class EmployeeService:
             )
         await self.db.commit()
         await self.db.refresh(emp)
-        return emp, user
+        logger.info(f"EmployeeService.create: created employee {emp} and user {user}")
+        return emp
 
     # Public interface for the wages module:
     async def get(self, employee_id: uuid.UUID) -> Employee | None:

@@ -50,7 +50,7 @@ class UserRepository:
         return list(res.scalars())
 
     async def from_user_create(self, **kw) -> User:
-        user = User(**kw); self.db.add(user); await self.db.flush(); await self.db.commit(user); return user
+        user = User(**kw); self.db.add(user); await self.db.flush(); await self.db.commit(); return user
 
     async def create(self, **kw) -> User:
         user = User(**kw); self.db.add(user); await self.db.flush(); return user

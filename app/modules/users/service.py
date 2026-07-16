@@ -108,7 +108,7 @@ class UserService:
         notification recipient's email."""
         return await self.repo.get(user_id)
     
-    async def provision_user(self, body: schemas.UserCreate) -> User:
+    async def provision_user(self, body: schemas.UserCreate,must_change_password: bool) -> User:
         """Validate + stage. Does NOT commit — the caller owns the transaction."""
         if await self.repo.get_by_username(body.phone):
             raise HTTPException(409, "Phone already registered")
@@ -118,5 +118,5 @@ class UserService:
             name=body.name, phone=body.phone, email=body.email, role=body.role,
             password_hash=get_password_hash(body.password),
             employee_id=body.employee_id,
-            must_change_password=body.password is None,
+            must_change_password=must_change_password,
         )
