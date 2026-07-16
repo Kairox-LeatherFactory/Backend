@@ -72,7 +72,7 @@ class UserService:
         if body.email and await self.repo.get_by_email(body.email):
             raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
         raw = body.password          # default password = phone
-        return await self.repo.create(
+        return await self.repo.from_user_create(
             name=body.name, phone=body.phone, email=body.email, role=body.role,
             password_hash=get_password_hash(raw), employee_id=body.employee_id,
             must_change_password=body.password is None,
@@ -82,7 +82,7 @@ class UserService:
         if await self.repo.get_by_username(body.phone):
             raise HTTPException(status.HTTP_409_CONFLICT, "Phone already registered")
         raw = body.password
-        return await self.repo.create(
+        return await self.repo.from_user_create(
             name=body.name, phone=body.phone, email=body.email,
             role=UserRole.CLIENT, password_hash=get_password_hash(raw),
             client_id=body.client_id, must_change_password=body.password is None,
@@ -107,3 +107,16 @@ class UserService:
         """One user by id — used by the procurement escalation sweeper to resolve a
         notification recipient's email."""
         return await self.repo.get(user_id)
+    
+    async def provision_user(self, body: schemas.UserCreate) -> User:
+        """Validate + stage. Does NOT commit — the caller owns the transaction."""
+        if await self.repo.get_by_username(body.phone):
+            raise HTTPException(409, "Phone already registered")
+        if body.email and await self.repo.get_by_email(body.email):
+            raise HTTPException(409, "Email already registered")
+        return await self.repo.create(
+            name=body.name, phone=body.phone, email=body.email, role=body.role,
+            password_hash=get_password_hash(body.password),
+            employee_id=body.employee_id,
+            must_change_password=body.password is None,
+        )

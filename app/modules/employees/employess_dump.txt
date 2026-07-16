@@ -1,12 +1,13 @@
 ﻿============================================================
 PROJECT STRUCTURE
 ============================================================
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\analytics_dump.txt
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\employees_dump.txt
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\models.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\repository.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\router.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\schemas.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\service.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\USER_dump.txt
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\__init__.py
 
 ============================================================
