@@ -18,6 +18,8 @@ PASSWORD DEFAULTING (v1)
 ================================================================================
 """
 import uuid
+import logging
+logger = logging.getLogger(__name__)
 
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -110,6 +112,8 @@ class UserService:
     
     async def provision_user(self, body: schemas.UserCreate,must_change_password: bool) -> User:
         """Validate + stage. Does NOT commit — the caller owns the transaction."""
+        logger.info("Entered provision_user")
+        logger.info("Creating user for phone=%s", body.phone)
         if await self.repo.get_by_username(body.phone):
             raise HTTPException(409, "Phone already registered")
         if body.email and await self.repo.get_by_email(body.email):

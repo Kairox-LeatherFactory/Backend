@@ -30,6 +30,11 @@ class EmployeeService:
         return await self.repo.list_all(active_only)
 
     async def create(self, body: schemas.EmployeeCreate) -> EmployeeRead:
+        logger.info("EmployeeCreate body: %s", body.model_dump())
+        logger.info("Wage type: %s", body.wage_type)
+        logger.info("Password: %r", body.password)
+        logger.info("Is monthly? %s", body.wage_type is WageType.MONTHLY)
+        logger.info("Equals monthly? %s", body.wage_type == WageType.MONTHLY)
         emp = await self.repo.create(**body.model_dump(exclude={"password"}))  # flush only
         user = None
         if body.wage_type.lower() == WageType.MONTHLY.value:
