@@ -75,3 +75,12 @@ async def add_order(
         delivery_deadline=order.delivery_deadline,
         sea_cutoff_date=order.sea_cutoff_date, ship_mode=order.ship_mode,
         currency=order.currency, agent=order.agent, line=order.line, styles=[])
+    
+@router.get("/styles", response_model=list[schemas.StyleOption])
+async def list_styles(
+    order_id: uuid.UUID | None = None,
+    client_id: uuid.UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    return await ClientService(db).list_style_options(order_id=order_id, client_id=client_id)

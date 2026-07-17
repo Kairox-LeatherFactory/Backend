@@ -7,7 +7,7 @@ C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\users\re
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\users\router.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\users\schemas.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\users\service.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\users\USER_dump.txt
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\users\users_dump.txt
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\users\__init__.py
 
 ============================================================
@@ -242,12 +242,11 @@ class UserRepository:
         res = await self.db.execute(stmt)
         return list(res.scalars())
 
+    async def from_user_create(self, **kw) -> User:
+        user = User(**kw); self.db.add(user); await self.db.flush(); await self.db.commit(); return user
+
     async def create(self, **kw) -> User:
-        user = User(**kw)
-        self.db.add(user)
-        await self.db.commit()
-        await self.db.refresh(user)
-        return user
+        user = User(**kw); self.db.add(user); await self.db.flush(); return user
 
     async def save(self, user: User) -> User:
         await self.db.commit()
@@ -326,7 +325,7 @@ users_router = APIRouter(tags=["Users"])
 async def list_users(
     active_only: bool = True,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR)),
 ):
     return await UserService(db).list_users(active_only)
 
@@ -335,7 +334,7 @@ async def list_users(
 async def create_user(
     body: schemas.UserCreate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR)),
 ):
     return await UserService(db).create_user(body)
 
@@ -344,7 +343,7 @@ async def create_user(
 async def create_client_user(
     body: schemas.ClientUserCreate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR)),
 ):
     """Direct manager provisions a client's login so they can track their orders."""
     return await UserService(db).create_client_user(body)
@@ -446,6 +445,8 @@ PASSWORD DEFAULTING (v1)
 ================================================================================
 """
 import uuid
+import logging
+logger = logging.getLogger(__name__)
 
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -500,7 +501,7 @@ class UserService:
         if body.email and await self.repo.get_by_email(body.email):
             raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
         raw = body.password          # default password = phone
-        return await self.repo.create(
+        return await self.repo.from_user_create(
             name=body.name, phone=body.phone, email=body.email, role=body.role,
             password_hash=get_password_hash(raw), employee_id=body.employee_id,
             must_change_password=body.password is None,
@@ -510,7 +511,7 @@ class UserService:
         if await self.repo.get_by_username(body.phone):
             raise HTTPException(status.HTTP_409_CONFLICT, "Phone already registered")
         raw = body.password
-        return await self.repo.create(
+        return await self.repo.from_user_create(
             name=body.name, phone=body.phone, email=body.email,
             role=UserRole.CLIENT, password_hash=get_password_hash(raw),
             client_id=body.client_id, must_change_password=body.password is None,
@@ -535,4 +536,19 @@ class UserService:
         """One user by id — used by the procurement escalation sweeper to resolve a
         notification recipient's email."""
         return await self.repo.get(user_id)
+    
+    async def provision_user(self, body: schemas.UserCreate,must_change_password: bool) -> User:
+        """Validate + stage. Does NOT commit — the caller owns the transaction."""
+        logger.info("Entered provision_user")
+        logger.info("Creating user for phone=%s", body.phone)
+        if await self.repo.get_by_username(body.phone):
+            raise HTTPException(409, "Phone already registered")
+        if body.email and await self.repo.get_by_email(body.email):
+            raise HTTPException(409, "Email already registered")
+        return await self.repo.create(
+            name=body.name, phone=body.phone, email=body.email, role=body.role,
+            password_hash=get_password_hash(body.password),
+            employee_id=body.employee_id,
+            must_change_password=must_change_password,
+        )
 
