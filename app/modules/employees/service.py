@@ -32,7 +32,7 @@ class EmployeeService:
     async def create(self, body: schemas.EmployeeCreate) -> EmployeeRead:
         emp = await self.repo.create(**body.model_dump(exclude={"password"}))  # flush only
         user = None
-        if body.wage_type is WageType.MONTHLY:
+        if body.wage_type.lower() == WageType.MONTHLY.value:
             user = await UserService(self.db).provision_user(
                UserCreate(
                     name=body.name, phone=body.phone, email=body.email,
