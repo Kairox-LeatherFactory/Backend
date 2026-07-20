@@ -5,7 +5,11 @@ Revises: 20260713_0900_sku_order_line
 """
 from alembic import op
 
+<<<<<<< HEAD
 revision = "20260714_1000_order_num_uniq"   # 29 chars, fits
+=======
+revision = "20260714_1000_order_num_uniq"
+>>>>>>> ismail-dev
 down_revision = "20260713_0900_sku_order_line"
 branch_labels = None
 depends_on = None

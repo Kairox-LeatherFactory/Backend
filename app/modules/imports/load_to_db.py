@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import date
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-
+from app.modules.clients.utlis import make_style_code   # ← "utlis" typo
 from app.modules.clients.models import Client, ClientOrder, Style, SKU,SkuOrderLine
 from app.modules.production.models import Operation, ProductionEvent
 from app.modules.wages.models import Rate

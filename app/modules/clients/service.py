@@ -40,6 +40,9 @@ def sku_label(style_name, color_name, color_code, size) -> str:
     colour = color_name or color_code or "NA"
     return " · ".join(p for p in (style_name or "NA", colour, size or "NA"))
 
+# app/modules/clients/service.py
+from sqlalchemy import select
+from app.modules.clients.models import ClientOrder
 
 class ClientService:
     def __init__(self, db: AsyncSession):

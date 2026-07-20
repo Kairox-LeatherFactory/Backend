@@ -16,10 +16,11 @@ from app.modules.imports.excel_reader import clean_str, to_int, to_date
 
 # Words that appear in a size-column header. Anything that is one of these,
 # or looks like a numeric size, is treated as a size column.
-ALPHA_SIZES = {"XS", "S", "M", "L", "XL", "XXL", "2XL", "3XL", "4XL"}
-# Column-header words that are NOT sizes (so we can tell them apart).
+ALPHA_SIZES = {"XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL", "3XL", "4XL",
+              "F", "FREE"}
 NON_SIZE_HEADERS = {"S.NO", "SNO", "STYLE", "COLOUR", "COLOR", "SUEDE COLOUR",
-                    "SUEDE COLOR", "ARTICLE", "TOTAL", "TOTAL QTY", "DATE"}
+                    "SUEDE COLOR", "ARTICLE", "ARTICLES", "TOTAL", "TOTAL QTY",
+                    "DATE", "SIZES", "DESCRIPTION"}
 
 
 def _is_size_header(text: str | None) -> bool:
@@ -28,9 +29,10 @@ def _is_size_header(text: str | None) -> bool:
     t = text.strip().upper()
     if t in NON_SIZE_HEADERS:
         return False
-    if t in ALPHA_SIZES:
+    base = t.split("/")[0].strip()      # "S/7" -> "S"
+    if base in ALPHA_SIZES:
         return True
-    return t.replace(".", "").isdigit()      # "38", "46" ...
+    return base.replace(".", "").isdigit()
 
 
 @dataclass
@@ -46,36 +48,33 @@ class OrderLine:
 
 
 def _find_columns(ws, header_row: int):
-    """Read a header row and return (col_map, size_cols).
-
-    col_map maps logical fields (style/color/article) to column indexes.
-    size_cols maps a column index -> size label.
-    """
     col_map = {}
     size_cols = {}
+    sub_row = header_row + 1
     for c in range(1, ws.max_column + 1):
         h = clean_str(ws.cell(header_row, c).value)
-        if not h:
-            continue
-        H = h.upper()
-        if H in ("STYLE",):
+        sub = clean_str(ws.cell(sub_row, c).value)
+        H = h.upper() if h else None
+        if H == "STYLE":
             col_map["style"] = c
         elif H in ("COLOUR", "COLOR", "SUEDE COLOUR", "SUEDE COLOR"):
             col_map["color"] = c
-        elif H == "ARTICLE":
+        elif H in ("ARTICLE", "ARTICLES"):
             col_map["article"] = c
+        elif H and "DATE" in H and "date" not in col_map and "DELIVERY" not in H:
+            col_map["date"] = c
+        elif _is_size_header(sub):
+            size_cols[c] = sub.upper()
         elif _is_size_header(h):
             size_cols[c] = h.upper()
-        elif H in ("DATE",):
-            col_map["date"] = c
     return col_map, size_cols
 
 
+# _is_header_row — substring match on DATE
 def _is_header_row(ws, r) -> bool:
-    """A header row has S.NO in col A or B, or starts with 'Date' (flat sheets)."""
     a = clean_str(ws.cell(r, 1).value)
     b = clean_str(ws.cell(r, 2).value)
-    if a and a.upper() in ("S.NO", "SNO", "DATE"):
+    if a and (a.upper() in ("S.NO", "SNO") or "DATE" in a.upper()):
         return True
     if b and b.upper() in ("S.NO", "SNO"):
         return True
