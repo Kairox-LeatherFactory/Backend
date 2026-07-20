@@ -158,7 +158,7 @@ async def _draft_bom(db, *, per_size=None):
     out = await svc.generate_bom(
         users["cutting"], spec_sheet=spec, spec_bytes=_read("spec_sheet_1.xlsx"),
         filename="s.xlsx", identity=identity, client_match_code="beau_geste",
-        line_seeds=_bmo1_seeds(), currency="USD", extractor=None)
+        line_seeds=_bmo1_seeds(), currency="USD")
     return svc, users, identity, uuid.UUID(out["bom"]["id"])
 
 
@@ -445,7 +445,7 @@ async def test_http_stage3_rbac(monkeypatch):
         out = await BomService(db).generate_bom(
             cutting, spec_sheet=spec, spec_bytes=_read("spec_sheet_1.xlsx"), filename="s.xlsx",
             identity=identity, client_match_code="beau_geste", line_seeds=_bmo1_seeds(),
-            currency="USD", extractor=None)
+            currency="USD")
         bom_id = out["bom"]["id"]
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:

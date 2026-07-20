@@ -158,7 +158,7 @@ async def test_beau_geste_pom_extraction(db):
     out = await svc.generate_bom(
         user, spec_sheet=spec, spec_bytes=_read("spec_sheet_1.xlsx"),
         filename="spec_sheet_1.xlsx", identity=identity, client_match_code="beau_geste",
-        line_seeds=_bmo1_seeds(), currency="USD", extractor=None)  # no LLM
+        line_seeds=_bmo1_seeds(), currency="USD")  # no LLM
 
     rows = (await db.execute(select(PomMeasurement)
                              .where(PomMeasurement.spec_sheet_id == spec.id))).scalars().all()
@@ -269,7 +269,7 @@ async def test_cost_math_reproduces_bmo1(db):
     out = await svc.generate_bom(
         user, spec_sheet=spec, spec_bytes=_read("spec_sheet_1.xlsx"),
         filename="spec_sheet_1.xlsx", identity=identity, client_match_code="beau_geste",
-        line_seeds=_bmo1_seeds(), currency="USD", extractor=None)
+        line_seeds=_bmo1_seeds(), currency="USD")
 
     items = {i["name"]: i for i in out["bom"]["items"]}
     sheep = items["SHEEP GLASS"]
@@ -296,7 +296,7 @@ async def test_ai_estimate_flagged_and_blocks_approval(db):
     out = await svc.generate_bom(
         user, spec_sheet=spec, spec_bytes=_read("spec_sheet_1.xlsx"),
         filename="spec_sheet_1.xlsx", identity=identity, client_match_code="beau_geste",
-        line_seeds=_bmo1_seeds(), currency="USD", extractor=None)
+        line_seeds=_bmo1_seeds(), currency="USD")
     bom_id = uuid.UUID(out["bom"]["id"])
     sheep = next(i for i in out["bom"]["items"] if i["name"] == "SHEEP GLASS")
     assert sheep["dcm_source"] == DcmSource.AI_ESTIMATE.value
@@ -326,7 +326,7 @@ async def test_memory_learns_across_orders(db):
     out1 = await svc.generate_bom(
         user, spec_sheet=spec1, spec_bytes=_read("spec_sheet_1.xlsx"),
         filename="s.xlsx", identity=id1, client_match_code="beau_geste",
-        line_seeds=_bmo1_seeds(), currency="USD", extractor=None)
+        line_seeds=_bmo1_seeds(), currency="USD")
     bom1 = uuid.UUID(out1["bom"]["id"])
     sheep1 = next(i for i in out1["bom"]["items"] if i["name"] == "SHEEP GLASS")
     await svc.edit_bom_items(user, bom1, out1["bom"]["revision"],
@@ -345,7 +345,7 @@ async def test_memory_learns_across_orders(db):
     out2 = await svc.generate_bom(
         user, spec_sheet=spec2, spec_bytes=_read("spec_sheet_1.xlsx"),
         filename="s.xlsx", identity=id2, client_match_code="beau_geste",
-        line_seeds=_bmo1_seeds(), currency="USD", extractor=None)
+        line_seeds=_bmo1_seeds(), currency="USD")
     sheep2 = next(i for i in out2["bom"]["items"] if i["name"] == "SHEEP GLASS")
     assert sheep2["dcm_source"] == DcmSource.TEMPLATE.value      # not a re-estimate
     assert sheep2["qty_per_garment"] == 34.5
@@ -363,7 +363,7 @@ async def test_editable_contract_revision_locking(db):
     out = await svc.generate_bom(
         user, spec_sheet=spec, spec_bytes=_read("spec_sheet_1.xlsx"), filename="s.xlsx",
         identity=identity, client_match_code="beau_geste", line_seeds=_bmo1_seeds(),
-        currency="USD", extractor=None)
+        currency="USD")
     bom_id = uuid.UUID(out["bom"]["id"])
     sheep = next(i for i in out["bom"]["items"] if i["name"] == "SHEEP GLASS")
     rev = out["bom"]["revision"]
@@ -410,7 +410,7 @@ async def test_gate_reopens_on_post_confirm_dcm_edit(db):
     out = await svc.generate_bom(
         user, spec_sheet=spec, spec_bytes=_read("spec_sheet_1.xlsx"), filename="s.xlsx",
         identity=identity, client_match_code="beau_geste", line_seeds=_bmo1_seeds(),
-        currency="USD", extractor=None)
+        currency="USD")
     bom_id = uuid.UUID(out["bom"]["id"])
     sheep = next(i for i in out["bom"]["items"] if i["name"] == "SHEEP GLASS")
 
@@ -444,7 +444,7 @@ async def test_cross_checks_fire(db):
     out = await svc.generate_bom(
         user, spec_sheet=spec, spec_bytes=_read("spec_sheet_1.xlsx"), filename="s.xlsx",
         identity=identity, client_match_code="beau_geste", line_seeds=_bmo1_seeds(),
-        currency="USD", extractor=None)
+        currency="USD")
     flags = {f["id"]: f for f in out["flags"]}
     assert flags["qty_sum"]["severity"] == "error" and flags["qty_sum"]["ok"] is False
 
@@ -505,7 +505,7 @@ async def test_new_client_by_config_only(db):
         identity=identity, client_match_code="australia",
         line_seeds=[LineSeed(BomItemCategory.MAIN_MATERIAL.value, "AUSSIE LEATHER",
                              uom="dm²", unit_price=2.0)],
-        currency="AUD", extractor=None,
+        currency="AUD",
         adapters=[_AUSTRALIA_ADAPTER], checks_cfg=_AUSTRALIA_CHECKS)   # CONFIG only
 
     # the new client's adapter extracted the grid, and its configured check ran
@@ -575,7 +575,7 @@ async def _http_setup(monkeypatch):
         out = await BomService(db).generate_bom(
             cutting, spec_sheet=spec, spec_bytes=_read("spec_sheet_1.xlsx"), filename="s.xlsx",
             identity=identity, client_match_code="beau_geste", line_seeds=_bmo1_seeds(),
-            currency="USD", extractor=None)
+            currency="USD")
         bom_id = out["bom"]["id"]
         rev = out["bom"]["revision"]
         item_id = next(i["id"] for i in out["bom"]["items"] if i["name"] == "SHEEP GLASS")

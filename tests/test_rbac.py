@@ -36,11 +36,14 @@ async def test_cutting_manager_cannot_log_stitching(db):
     cutting_mgr = User(id=uuid.uuid4(), name="C", phone="1", role=UserRole.CUTTING_MANAGER,
                        password_hash="x", is_active=True)
 
-    # allowed: cutting
-    await ps.log_event(cutting_mgr, sku.id, cut.id, emp.id, date(2026, 3, 23), 10)
-    # forbidden: shell stitch
+    # allowed: cutting — cut() logs the CUTTING op, which this role is granted.
+    await ps.cut(user=cutting_mgr, sku_id=sku.id, employee_id=emp.id,
+                 work_date=date(2026, 3, 23), count=10)
+    # forbidden: shell stitch — scan() runs _assert_can_log before resolving pieces,
+    # so the role gate fires (log_event was removed; scan/cut carry the same gate).
     with pytest.raises(HTTPException) as exc:
-        await ps.log_event(cutting_mgr, sku.id, shell.id, emp.id, date(2026, 3, 23), 10)
+        await ps.scan(user=cutting_mgr, operation_id=shell.id, employee_id=emp.id,
+                      work_date=date(2026, 3, 23), sku_id=sku.id, piece_seqs=[1])
     assert exc.value.status_code == 403
 
 
@@ -50,6 +53,11 @@ async def test_direct_manager_bypasses_access(db):
     ps = ProductionService(db)
     direct = User(id=uuid.uuid4(), name="D", phone="2", role=UserRole.DIRECT_MANAGER,
                   password_hash="x", is_active=True)
-    # direct manager can log ANY operation, including shell
-    ev = await ps.log_event(direct, sku.id, shell.id, emp.id, date(2026, 3, 23), 5)
-    assert ev.qty == 5
+    # direct manager can log ANY operation, including shell (which has no access row):
+    # mint pieces at cutting, then advance them through shell — both bypass the gate.
+    pieces = await ps.cut(user=direct, sku_id=sku.id, employee_id=emp.id,
+                          work_date=date(2026, 3, 23), count=5)
+    res = await ps.scan(user=direct, operation_id=shell.id, employee_id=emp.id,
+                        work_date=date(2026, 3, 23), sku_id=sku.id,
+                        piece_seqs=[p.seq for p in pieces])
+    assert res["count_logged"] == 5

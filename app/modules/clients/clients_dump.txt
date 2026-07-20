@@ -1,22 +1,7 @@
-﻿============================================================
-PROJECT STRUCTURE
-============================================================
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\client_dump.txt
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\models.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\repository.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\router.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\schemas.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\service.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\__init__.py
-
-============================================================
-PROJECT FILES
-============================================================
-
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\__init__.py
-============================================================
-
+﻿
+========================================================================================================================
+FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\clients\__init__.py
+========================================================================================================================
 """
 clients — the order hierarchy: Client -> ClientOrder -> Style -> SKU.
 
@@ -28,10 +13,10 @@ NAMING: the buyer order is `client_order` (was `purchase_order`); the name
 """
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\models.py
-============================================================
 
+========================================================================================================================
+FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\clients\models.py
+========================================================================================================================
 """Order hierarchy: Client -> ClientOrder -> Style -> SKU.
 
 NAMING (BOM Procurement Workflow, Stage 0)
@@ -170,17 +155,34 @@ class SKU(Base, UUIDMixin, TimestampMixin):
     color_name: Mapped[str | None] = mapped_column(String(80))  # "PINE GREEN"
     size: Mapped[str] = mapped_column(String(10))           # "M", "42" — string by design
     qty_ordered: Mapped[int] = mapped_column(Integer, default=0)
+    code: Mapped[str | None] = mapped_column(String(120), unique=True, index=True)
     # johnpeter.xlsx carries SUEDE + KNIT + NYLON colour dimensions per line; the
     # suede/main colour stays in color_code/color_name, the other two live here.
     nylon_color: Mapped[str | None] = mapped_column(String(80))
     knit_color: Mapped[str | None] = mapped_column(String(80))
     style: Mapped["Style"] = relationship(back_populates="skus")
+    order_lines: Mapped[list["SkuOrderLine"]] = relationship(back_populates="sku", cascade="all, delete-orphan")
+
+class SkuOrderLine(Base, UUIDMixin, TimestampMixin):
+    """One dated order-line quantity for a SKU.
+ 
+    The breakdown sheet lists the same (style, colour, size) across several dated
+    rows. The SKU stays unique (one per triple, qty_ordered = SUM of its lines);
+    each dated row is kept here for traceability. Multiple lines may share a
+    (sku_id, order_date) — source_row distinguishes them."""
+    __tablename__ = "sku_order_line"
+    sku_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("sku.id", ondelete="CASCADE"), index=True
+    )
+    order_date: Mapped[date | None] = mapped_column(Date, index=True)
+    qty: Mapped[int] = mapped_column(Integer, default=0)
+    source_row: Mapped[int | None] = mapped_column(Integer)
+    sku: Mapped["SKU"] = relationship(back_populates="order_lines")
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\repository.py
-============================================================
-
+========================================================================================================================
+FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\clients\repository.py
+========================================================================================================================
 """
 ================================================================================
 modules/clients/repository.py — Async data access for the order hierarchy
@@ -198,6 +200,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
+from app.modules.clients.utlis import make_sku_code
 
 
 class ClientRepository:
@@ -279,15 +282,68 @@ class ClientRepository:
                 agg[("NA", None, str(size)[:10])] = int(qty)
         for (color_code, color_name, size), qty in agg.items():
             self.db.add(SKU(style_id=st.id, color_code=color_code,
-                            color_name=color_name, size=size, qty_ordered=int(qty)))
+                            color_name=color_name, size=size, qty_ordered=int(qty),
+                            code=make_sku_code(order.order_number, st.name, 
+                                color_name or color_code, size),))
         await self.db.commit()
         return co.id, st.id
+    
+    async def sku_label_context(self, sku_id) -> dict | None:
+        row = (await self.db.execute(
+            select(
+                SKU.id, SKU.code, ClientOrder.order_number, Style.name,
+                SKU.color_code, SKU.color_name, SKU.size, SKU.qty_ordered,
+            )
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .where(SKU.id == sku_id)
+        )).first()
+        if not row:
+            return None
+        _id, code, order_number, style_name, color_code, color_name, size, qty = row
+        return {
+            "sku_id": _id, "code": code, "order_number": order_number,
+            "style_name": style_name, "color_code": color_code,
+            "color_name": color_name, "size": size, "qty_ordered": int(qty or 0),
+        }
+ 
+    async def list_sku_options(self, *, order_id=None, style_id=None) -> list[dict]:
+        stmt = (
+            select(
+                SKU.id, SKU.code, ClientOrder.order_number, Style.name,
+                SKU.color_code, SKU.color_name, SKU.size, SKU.qty_ordered,
+            )
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+        )
+        if order_id:
+            stmt = stmt.where(Style.client_order_id == order_id)
+        if style_id:
+            stmt = stmt.where(SKU.style_id == style_id)
+        stmt = stmt.order_by(ClientOrder.order_number, Style.name, SKU.code)
+        rows = (await self.db.execute(stmt)).all()
+        return [
+            {
+                "sku_id": r[0], "code": r[1], "order_number": r[2], "style_name": r[3],
+                "color_code": r[4], "color_name": r[5], "size": r[6],
+                "qty_ordered": int(r[7] or 0),
+            }
+            for r in rows
+        ]
+        
+    async def get_sku_by_code(self, code: str):
+        from app.modules.clients.models import SKU
+        res = await self.db.execute(
+            select(SKU).where(SKU.code == (code or "").strip().upper())
+        )
+        return res.scalar_one_or_none()
+ 
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\router.py
-============================================================
 
+========================================================================================================================
+FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\clients\router.py
+========================================================================================================================
 """
 ================================================================================
 modules/clients/router.py — HTTP API for clients & their orders (async)
@@ -342,10 +398,10 @@ async def client_orders(
     return await ClientService(db).get_client_orders(client_id)
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\schemas.py
-============================================================
 
+========================================================================================================================
+FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\clients\schemas.py
+========================================================================================================================
 """Pydantic schemas — the API contract for the clients module.
 
 These shapes ARE the contract your frontend mocks against.
@@ -426,10 +482,10 @@ class StyleCreate(BaseModel):
     thickness: str | None = None
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\service.py
-============================================================
 
+========================================================================================================================
+FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\clients\service.py
+========================================================================================================================
 """
 ================================================================================
 modules/clients/service.py — Business logic for clients/orders (async)
@@ -439,6 +495,7 @@ through this service, never the repository directly. This keeps module
 boundaries clean so a module can later be lifted into its own service.
 ================================================================================
 """
+import re
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -447,10 +504,37 @@ from app.modules.clients.models import SKU, Client, ClientOrder, Style
 from app.modules.clients.repository import ClientRepository
 
 
+def _slug(s: str | None) -> str:
+    """UPPER, runs of non-alnum -> single '_', trimmed. '' -> 'NA'."""
+    out = re.sub(r"[^A-Za-z0-9]+", "_", (s or "").strip()).strip("_").upper()
+    return out or "NA"
+ 
+ 
+def make_sku_code(order_number: str | None, style_name: str | None,
+                  colour: str | None, size: str | None) -> str:
+    """Deterministic, globally-unique, readable SKU code.
+    e.g. make_sku_code('JP','CLERMONT + VEST','DARK BROWN','46')
+         -> 'JP-CLERMONT_VEST-DARK_BROWN-46'
+    Deterministic => idempotent across re-imports (survives delete+recreate)."""
+    return "-".join((
+        _slug(order_number), _slug(style_name), _slug(colour), _slug(size),
+    ))
+ 
+ 
+# sku_label (display name) is UNCHANGED — keep it:
+def sku_label(style_name, color_name, color_code, size) -> str:
+    colour = color_name or color_code or "NA"
+    return " · ".join(p for p in (style_name or "NA", colour, size or "NA"))
+
+
 class ClientService:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.repo = ClientRepository(db)
+
+    def sku_label(self, style_name: str | None, color_name: str | None,
+                  color_code: str | None, size: str | None) -> str:
+        return sku_label(style_name, color_name, color_code, size)
 
     async def list_clients(self) -> list[Client]:
         return await self.repo.list_clients()
@@ -486,4 +570,51 @@ class ClientService:
         return await self.repo.create_order_with_breakdown(
             client_id=client_id, order=order, style=style,
             lines=lines or [], per_size=per_size or {})
+        
+    async def sku_label_context(self, sku_id) -> dict | None:
+        ctx = await self.repo.sku_label_context(sku_id)
+        if ctx:
+            ctx["label"] = sku_label(
+                ctx["style_name"], ctx["color_name"], ctx["color_code"], ctx["size"]
+            )
+        return ctx
+ 
+    async def list_sku_options(self, *, order_id=None, style_id=None) -> list[dict]:
+        rows = await self.repo.list_sku_options(order_id=order_id, style_id=style_id)
+        for r in rows:
+            r["label"] = sku_label(
+                r["style_name"], r["color_name"], r["color_code"], r["size"]
+            )
+        return rows
+    
+    async def get_sku_by_code(self, code: str):
+        return await self.repo.get_sku_by_code(code)
+
+
+========================================================================================================================
+FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\clients\utlis.py
+========================================================================================================================
+import re
+def _slug(s: str | None) -> str:
+    """UPPER, runs of non-alnum -> single '_', trimmed. '' -> 'NA'."""
+    out = re.sub(r"[^A-Za-z0-9]+", "_", (s or "").strip()).strip("_").upper()
+    return out or "NA"
+ 
+ 
+def make_sku_code(order_number: str | None, style_name: str | None,
+                  colour: str | None, size: str | None) -> str:
+    """Deterministic, globally-unique, readable SKU code.
+    e.g. make_sku_code('JP','CLERMONT + VEST','DARK BROWN','46')
+         -> 'JP-CLERMONT_VEST-DARK_BROWN-46'
+    Deterministic => idempotent across re-imports (survives delete+recreate)."""
+    return "-".join((
+        _slug(order_number), _slug(style_name), _slug(colour), _slug(size),
+    ))
+ 
+ 
+# sku_label (display name) is UNCHANGED — keep it:
+def sku_label(style_name, color_name, color_code, size) -> str:
+    colour = color_name or color_code or "NA"
+    return " · ".join(p for p in (style_name or "NA", colour, size or "NA"))
+
 

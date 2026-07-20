@@ -95,3 +95,11 @@ class StyleCreate(BaseModel):
     label: str | None = None
     article: str | None = None
     thickness: str | None = None
+    
+class StyleOption(BaseModel):
+    style_id: uuid.UUID
+    style_name: str
+    article: str | None
+    order_number: str
+    sku_count: int
+    qty_ordered: int

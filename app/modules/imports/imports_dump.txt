@@ -1,25 +1,7 @@
-﻿============================================================
-PROJECT STRUCTURE
-============================================================
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\alembic_dump.txt
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\excel_reader.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\import_engine.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\load_to_db.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\parse_orders.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\parse_production.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\README.md
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\router.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\service.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\__init__.py
-
-============================================================
-PROJECT FILES
-============================================================
-
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\__init__.py
-============================================================
-
+﻿
+========================================================================================================================
+FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\imports\__init__.py
+========================================================================================================================
 """
 imports — idempotent Excel ingestion.
 
@@ -31,10 +13,10 @@ spaces, numbers-as-text, stacked multi-size blocks).
 """
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\excel_reader.py
-============================================================
 
+========================================================================================================================
+FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\imports\excel_reader.py
+========================================================================================================================
 """
 excel_reader.py — Low-level, defensive cell reading.
 
@@ -125,10 +107,10 @@ def is_summary_label(text: str | None) -> str | None:
     return None
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\import_engine.py
-============================================================
 
+========================================================================================================================
+FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\imports\import_engine.py
+========================================================================================================================
 """
 import_engine.py — Orchestrates the whole import.
 
@@ -236,10 +218,10 @@ def build_preview(path: str) -> ImportPreview:
     return preview
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\load_to_db.py
-============================================================
 
+========================================================================================================================
+FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\imports\load_to_db.py
+========================================================================================================================
 """
 load_to_db.py — Take a validated ImportPreview and write it to the database.
 
@@ -257,9 +239,10 @@ from datetime import date
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.modules.clients.models import Client, ClientOrder, Style, SKU
+from app.modules.clients.models import Client, ClientOrder, Style, SKU,SkuOrderLine
 from app.modules.production.models import Operation, ProductionEvent
 from app.modules.wages.models import Rate
+from app.modules.clients.service import make_sku_code
 
 
 def _get_or_create_client(db: Session, name: str, country: str | None) -> Client:
@@ -289,22 +272,27 @@ def _get_or_create_style(db: Session, order: ClientOrder, name: str,
     return st
 
 
-def _upsert_sku(db: Session, style: Style, color: str | None,
-                size: str, qty: int) -> str:
+def _upsert_sku(db, order, style, color, size, qty):
+    """Returns (SKU, status). Sums qty into the one-per-triple SKU and sets its
+    deterministic code on first creation."""
+    from sqlalchemy import select
+    from app.modules.clients.models import SKU
+    from app.modules.clients.service import make_sku_code
+ 
     color_code = (color or "—")
     existing = db.scalar(select(SKU).where(
         SKU.style_id == style.id, SKU.color_code == color_code, SKU.size == size))
     if existing:
-        # Same SKU seen again. Real data sometimes splits one colourway+size across
-        # multiple order rows (e.g. across two order sheets), so we ADD the new
-        # quantity rather than collide or overwrite. A true re-import of the SAME
-        # file is handled at a higher level by clearing prior rows first.
         existing.qty_ordered = (existing.qty_ordered or 0) + qty
-        return "updated"
-    db.add(SKU(style_id=style.id, color_code=color_code, color_name=color,
-               size=size, qty_ordered=qty))
-    db.flush()        # make visible so the next lookup for the same SKU finds it
-    return "created"
+        return existing, "updated"
+    sku = SKU(
+        style_id=style.id, color_code=color_code, color_name=color,
+        size=size, qty_ordered=qty,
+        code=make_sku_code(order.order_number, style.name, color or color_code, size),
+    )
+    db.add(sku)
+    db.flush()          # visible to the next lookup, and gives sku.id for lines
+    return sku, "created"
 
 
 def _get_or_create_operation(db: Session, code: str, seq: int) -> Operation:
@@ -347,6 +335,9 @@ def load_preview(db: Session, preview, country_map: dict | None = None,
                 Style.client_order_id == order.id)).all()
             for st in old_styles:
                 for sk in db.scalars(select(SKU).where(SKU.style_id == st.id)).all():
+                    for ol in db.scalars(                                                # <-- ADD
+                    select(SkuOrderLine).where(SkuOrderLine.sku_id == sk.id)).all():
+                        db.delete(ol)
                     db.delete(sk)
                 for rt in db.scalars(select(Rate).where(Rate.style_id == st.id)).all():
                     db.delete(rt)
@@ -360,9 +351,12 @@ def load_preview(db: Session, preview, country_map: dict | None = None,
             if style.id not in styles_seen:
                 styles_seen.add(style.id); stats["styles"] += 1
             for size, qty in line.sizes.items():
-                res = _upsert_sku(db, style, line.color, size, qty)
+                sku, res = _upsert_sku(db, order, style, line.color, size, qty)
                 if res == "created": stats["skus_created"] += 1
                 elif res == "updated": stats["skus_updated"] += 1
+                db.add(SkuOrderLine(                                             
+                   sku_id=sku.id, order_date=line.order_date,
+                   qty=qty, source_row=line.source_row))
 
         # operations + rates from production cards
         for card in cp.production_cards:
@@ -399,10 +393,10 @@ def load_preview(db: Session, preview, country_map: dict | None = None,
     return stats
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\parse_orders.py
-============================================================
 
+========================================================================================================================
+FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\imports\parse_orders.py
+========================================================================================================================
 """
 parse_orders.py — Parse ORDER sheets into structured rows.
 
@@ -416,6 +410,7 @@ that every block can have a different set of sizes.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
+from datetime import date
 from app.modules.imports.excel_reader import clean_str, to_int, to_date
 
 # Words that appear in a size-column header. Anything that is one of these,
@@ -445,6 +440,7 @@ class OrderLine:
     sizes: dict[str, int]          # {"M": 53, "L": 52, ...}
     total: int
     source_row: int                # for traceability in warnings
+    order_date: "date | None" = None
     warnings: list[str] = field(default_factory=list)
 
 
@@ -469,6 +465,8 @@ def _find_columns(ws, header_row: int):
             col_map["article"] = c
         elif _is_size_header(h):
             size_cols[c] = h.upper()
+        elif H in ("DATE",):
+            col_map["date"] = c
     return col_map, size_cols
 
 
@@ -495,6 +493,7 @@ def parse_order_sheet(ws) -> tuple[list[OrderLine], list[str]]:
     last_article = None
     declared_block_total = None        # the subtotal printed under a block
     running_block_total = 0
+    last_date = None
 
     def close_block():
         nonlocal running_block_total, declared_block_total
@@ -517,8 +516,12 @@ def parse_order_sheet(ws) -> tuple[list[OrderLine], list[str]]:
         style = clean_str(ws.cell(r, col_map.get("style", 2)).value)
         color = clean_str(ws.cell(r, col_map.get("color", 3)).value)
         article = clean_str(ws.cell(r, col_map.get("article", 0) or 999).value) \
-            if col_map.get("article") else None
-
+            if col_map.get("article") else None    
+        row_date = (
+            to_date(ws.cell(r, col_map["date"]).value)
+            if col_map.get("date")
+            else None
+        )
         sizes = {}
         for c, label in size_cols.items():
             q = to_int(ws.cell(r, c).value)
@@ -530,15 +533,19 @@ def parse_order_sheet(ws) -> tuple[list[OrderLine], list[str]]:
         if not style and color and row_total > 0:
             style = last_style
             article = article or last_article
+            row_date = row_date or last_date 
 
         if style and row_total > 0:
             last_style = style
             if article:
                 last_article = article
+            eff_date = row_date or last_date
+            if eff_date:
+               last_date = eff_date 
             running_block_total += row_total
             lines.append(OrderLine(
                 style=style, color=color, article=article,
-                sizes=sizes, total=row_total, source_row=r))
+                sizes=sizes, total=row_total, source_row=r, order_date=eff_date))
         else:
             # Not a data row. It may be a SUBTOTAL row: a lone number sitting in
             # the TOTAL column (or any column) with no style and no size spread.
@@ -580,10 +587,10 @@ def parse_order_sheet(ws) -> tuple[list[OrderLine], list[str]]:
     return lines, warnings
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\parse_production.py
-============================================================
 
+========================================================================================================================
+FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\imports\parse_production.py
+========================================================================================================================
 """
 parse_production.py — Parse PRODUCTION sheets into structured cards.
 
@@ -746,10 +753,10 @@ def parse_production_sheet(ws) -> tuple[list[ProductionCard], list[str]]:
     return cards, warnings
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\router.py
-============================================================
 
+========================================================================================================================
+FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\imports\router.py
+========================================================================================================================
 """
 ================================================================================
 modules/imports/router.py — Excel import endpoints (async-friendly)
@@ -839,10 +846,10 @@ async def commit_import(
         os.remove(path)
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\service.py
-============================================================
 
+========================================================================================================================
+FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\imports\service.py
+========================================================================================================================
 """
 ================================================================================
 modules/imports/service.py — Import module facade (kept for API stability)
@@ -879,4 +886,6 @@ def commit_workbook(db: Session, path: str, country_map: dict | None = None) -> 
     preview = build_preview(path)
     return {"summary": preview.summary(),
             "written": load_preview(db, preview, country_map=country_map)}
+
+
 

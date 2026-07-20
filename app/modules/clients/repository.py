@@ -10,12 +10,12 @@ without triggering lazy loads (which are unsafe under async).
 """
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import select ,func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
-from app.modules.clients.utlis import make_sku_code
+from app.modules.clients.utlis import make_sku_code,make_style_code
 
 
 class ClientRepository:
@@ -92,7 +92,7 @@ class ClientRepository:
             client_order_id=co.id, name=str(style.get("name") or "UNSPECIFIED")[:120],
             customer_ref=style.get("customer_ref"), internal_ref=style.get("internal_ref"),
             season=style.get("season"), unit_price=style.get("unit_price"),
-            currency=style.get("currency"),
+            currency=style.get("currency"), code=make_style_code(co.order_number, str(style.get("name") or "UNSPECIFIED")[:120]),
         )
         self.db.add(st)
         await self.db.flush()
@@ -188,3 +188,75 @@ class ClientRepository:
             select(ClientOrder).where(
                 ClientOrder.order_number == (order_number or "").strip()))
         return res.scalar_one_or_none()
+    
+    async def get_style_by_code(self, code: str) -> Style | None:
+        res = await self.db.execute(select(Style).where(Style.code == code))
+        return res.scalar_one_or_none()
+
+    async def get_style_summary_by_code(self, code: str) -> dict | None:
+        """Resolve a style code -> ids + display fields, in one query.
+
+        NOT get_style_by_code() + style.client_order.order_number: client_order is a
+        lazy relationship and touching it on an AsyncSession raises MissingGreenlet.
+        The join has to be explicit.
+        """
+        row = (await self.db.execute(
+            select(Style.id, Style.code, Style.name, ClientOrder.order_number)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .where(Style.code == code)
+        )).first()
+        if not row:
+            return None
+        return {"style_id": row[0], "style_code": row[1],
+                "style_name": row[2], "order_number": row[3]}
+
+    async def get_style_codes(self, style_ids: list[uuid.UUID]) -> dict:
+        """{style_id: {style_code, style_name}} for a batch of ids.
+
+        Used to turn compute_run's unrated-operation warnings into codes the
+        frontend can link on. Raw UUIDs there make the warning unactionable — the
+        manager sees 340 pieces went unpaid with no route to the rate sheet.
+        """
+        if not style_ids:
+            return {}
+        rows = (await self.db.execute(
+            select(Style.id, Style.code, Style.name).where(Style.id.in_(style_ids))
+        )).all()
+        return {r[0]: {"style_code": r[1], "style_name": r[2]} for r in rows}
+
+    async def list_style_options(
+        self, *, order_number: str | None = None, client_id: uuid.UUID | None = None
+    ) -> list[dict]:
+        """Styles as picker options, with SKU counts.
+
+        Filters on order_NUMBER, not order_id — the caller is a UI that speaks
+        codes. style_id is returned for the caller's internal joins (wages needs it
+        to count rates) and is stripped before it reaches the response model.
+
+        outerjoin, not join — a style whose SKUs have not been imported yet must
+        still appear, or its rates can never be set.
+        """
+        stmt = (
+            select(
+                Style.id, Style.code, Style.name, Style.article,
+                ClientOrder.order_number,
+                func.count(SKU.id),
+                func.coalesce(func.sum(SKU.qty_ordered), 0),
+            )
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .outerjoin(SKU, SKU.style_id == Style.id)
+            .where(Style.code.is_not(None))
+            .group_by(Style.id, Style.code, Style.name, Style.article,
+                      ClientOrder.order_number)
+        )
+        if order_number:
+            stmt = stmt.where(ClientOrder.order_number == order_number)
+        if client_id:
+            stmt = stmt.where(ClientOrder.client_id == client_id)
+        stmt = stmt.order_by(ClientOrder.order_number, Style.name)
+        return [
+            {"style_id": r[0], "style_code": r[1], "style_name": r[2],
+             "article": r[3], "order_number": r[4],
+             "sku_count": int(r[5]), "qty_ordered": int(r[6])}
+            for r in (await self.db.execute(stmt)).all()
+        ]

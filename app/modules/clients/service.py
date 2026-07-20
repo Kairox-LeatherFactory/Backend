@@ -138,8 +138,15 @@ class ClientService:
             )
         return rows
     
-    async def get_sku_by_code(self, code: str):
-        return await self.repo.get_sku_by_code(code)
-    
-    async def get_order_by_number(self, order_number: str):
-        return await self.repo.get_order_by_number(order_number)
+    async def get_style_by_code(self, code: str) -> Style | None:
+        return await self.repo.get_style_by_code(code)
+
+    async def get_style_summary_by_code(self, code: str) -> dict | None:
+        return await self.repo.get_style_summary_by_code(code)
+
+    async def get_style_codes(self, style_ids: list[uuid.UUID]) -> dict:
+        return await self.repo.get_style_codes(style_ids)
+
+    async def list_style_options(self, *, order_number=None, client_id=None) -> list[dict]:
+        return await self.repo.list_style_options(
+            order_number=order_number, client_id=client_id)

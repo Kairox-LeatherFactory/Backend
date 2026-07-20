@@ -1,0 +1,340 @@
+﻿============================================================
+PROJECT STRUCTURE
+============================================================
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\wages\models.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\wages\repository.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\wages\router.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\wages\schemas.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\wages\service.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\wages\wage_dump.txt
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\wages\__init__.py
+
+============================================================
+PROJECT FILES
+============================================================
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\wages\__init__.py
+============================================================
+
+"""
+wages — payroll.
+
+Effective-dated Rates (per style x operation) and FROZEN wage runs. A closed run
+is a snapshot: editing an old production event can never silently rewrite past
+payroll. Forks on wage_type — piece_rate sums qty*rate; monthly is a fixed line.
+"""
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\wages\models.py
+============================================================
+
+"""Wages: rate table (per style x operation, effective-dated) and frozen wage runs.
+
+WHY effective_from: when you reprint April payroll in June, you must use the rate
+that was active in April — not today's rate. We pick the latest rate <= work_date.
+
+WHY wage_run/wage_line: a closed run is a SNAPSHOT. We never recompute a closed
+period, so editing an old production event can't silently rewrite past payroll.
+"""
+import uuid
+from datetime import date
+from sqlalchemy import String, Numeric, ForeignKey, Date, Integer, Enum, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.database import Base
+from app.core.enums import RunStatus
+from app.core.models import UUIDMixin, TimestampMixin, GUID
+
+
+class Rate(Base, UUIDMixin, TimestampMixin):
+    __tablename__ = "rate"
+    __table_args__ = (
+        UniqueConstraint("style_id", "operation_id", "effective_from", name="uq_rate"),
+    )
+    style_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("style.id"), index=True)
+    operation_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("operation.id"), index=True)
+    rate: Mapped[float] = mapped_column(Numeric(10, 2))     # rupees per piece
+    effective_from: Mapped[date] = mapped_column(Date)
+
+
+
+class WageRun(Base, UUIDMixin, TimestampMixin):
+    __tablename__ = "wage_run"
+    period_start: Mapped[date] = mapped_column(Date)
+    period_end: Mapped[date] = mapped_column(Date)
+    status: Mapped[RunStatus] = mapped_column(
+        Enum(RunStatus, name="run_status"), default=RunStatus.OPEN
+    )
+    lines: Mapped[list["WageLine"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
+
+
+class WageLine(Base, UUIDMixin):
+    """One frozen payroll line for one employee in one run."""
+    __tablename__ = "wage_line"
+    wage_run_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("wage_run.id"), index=True)
+    employee_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("employee.id"), index=True)
+    wage_type: Mapped[str] = mapped_column(String(20))      # snapshot of type at run time
+    pieces: Mapped[int] = mapped_column(Integer, default=0)  # 0 for monthly staff
+    amount: Mapped[float] = mapped_column(Numeric(12, 2))
+    run: Mapped["WageRun"] = relationship(back_populates="lines")
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\wages\repository.py
+============================================================
+
+"""
+================================================================================
+modules/wages/repository.py — Async data access for rates & wage runs
+================================================================================
+effective_rate picks the latest rate <= work_date (effective-dated rates).
+A CLOSED run is a frozen snapshot of wage_line rows — never recomputed.
+================================================================================
+"""
+import uuid
+from datetime import date
+
+from sqlalchemy import and_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.core.enums import RunStatus
+from app.modules.wages.models import Rate, WageLine, WageRun
+
+
+class WageRepository:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def effective_rate(self, style_id: uuid.UUID, operation_id: uuid.UUID,
+                            on: date) -> float | None:
+        stmt = (
+            select(Rate.rate)
+            .where(
+                Rate.style_id == style_id,
+                Rate.operation_id == operation_id,
+                Rate.effective_from <= on,
+            )
+            .order_by(Rate.effective_from.desc())
+            .limit(1)
+        )
+        val = await self.db.scalar(stmt)
+        return float(val) if val is not None else None
+
+    async def upsert_rate(self, style_id, operation_id, rate, effective_from) -> Rate:
+        existing = await self.db.scalar(select(Rate).where(and_(
+            Rate.style_id == style_id, Rate.operation_id == operation_id,
+            Rate.effective_from == effective_from)))
+        if existing:
+            existing.rate = rate
+            await self.db.commit()
+            await self.db.refresh(existing)
+            return existing
+        r = Rate(style_id=style_id, operation_id=operation_id,
+                rate=rate, effective_from=effective_from)
+        self.db.add(r)
+        await self.db.commit()
+        await self.db.refresh(r)
+        return r
+    
+    async def create_run(self, period_start: date, period_end: date) -> WageRun:
+        run = WageRun(period_start=period_start, period_end=period_end)
+        self.db.add(run)
+        await self.db.commit()
+        await self.db.refresh(run)
+        return run
+
+    async def get_run(self, run_id: uuid.UUID) -> WageRun | None:
+        stmt = select(WageRun).where(WageRun.id == run_id).options(selectinload(WageRun.lines))
+        return await self.db.scalar(stmt)
+
+    async def add_lines(self, lines: list[WageLine]) -> None:
+        self.db.add_all(lines)
+        await self.db.commit()
+
+    async def close_run(self, run: WageRun) -> WageRun | None:
+        run.status = RunStatus.CLOSED
+        await self.db.commit()
+        # Re-load with lines eagerly so the response serialises cleanly.
+        return await self.get_run(run.id)
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\wages\router.py
+============================================================
+
+"""
+================================================================================
+modules/wages/router.py — Wages HTTP API (async). Direct-manager only for writes.
+================================================================================
+"""
+import uuid
+
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
+from app.core.enums import UserRole
+from app.modules.users.deps import get_current_user, require_roles
+from app.modules.wages.service import WageService
+from app.modules.wages import schemas
+from app.modules.users.models import User
+
+router = APIRouter(prefix="/wages", tags=["Wages"])
+
+
+@router.post("/rates")
+async def set_rate(
+    body: schemas.RateSet,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+):
+    r = await WageService(db).set_rate(
+        body.style_id, body.operation_id, body.rate, body.effective_from
+    )
+    return {"id": str(r.id), "rate": float(r.rate)}
+
+
+@router.post("/runs", response_model=schemas.WageRunRead)
+async def compute_run(
+    body: schemas.RunRequest,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+):
+    return await WageService(db).compute_run(body.period_start, body.period_end)
+
+
+@router.get("/runs/{run_id}", response_model=schemas.WageRunRead)#extracting the attributes from the ORM object and returning them as a dict that can be serialized to JSON. By defining the model_config with from_attributes=True.
+async def get_run(
+    run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    return await WageService(db).get_run(run_id)
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\wages\schemas.py
+============================================================
+
+import uuid
+from datetime import date
+from pydantic import BaseModel, ConfigDict
+
+
+class RateSet(BaseModel):
+    style_id: uuid.UUID
+    operation_id: uuid.UUID
+    rate: float
+    effective_from: date
+
+
+class WageLineRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    employee_id: uuid.UUID
+    wage_type: str
+    pieces: int
+    amount: float
+
+
+class WageRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True) #This tells Pydantic: Read attributes from ORM objects
+    id: uuid.UUID
+    period_start: date
+    period_end: date
+    status: str
+    lines: list[WageLineRead] = []
+
+
+class RunRequest(BaseModel):
+    period_start: date
+    period_end: date
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\wages\service.py
+============================================================
+
+"""
+================================================================================
+modules/wages/service.py — Wage-calc engine (async)
+================================================================================
+Forks on wage_type:
+  piece_rate : sum(qty * effective_rate(style, op, work_date)) from production —
+               each day's pieces are priced at the rate effective on THAT day, so
+               a mid-period rate change splits correctly across earlier/later work.
+  monthly    : a single line of monthly_salary, independent of production
+Results are FROZEN into wage_line rows so a closed run never recomputes.
+================================================================================
+"""
+import uuid
+from collections import defaultdict
+from datetime import date
+
+from fastapi import HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.enums import WageType
+from app.modules.employees.service import EmployeeService
+from app.modules.production.service import ProductionService
+from app.modules.wages.models import WageLine, WageRun
+from app.modules.wages.repository import WageRepository
+
+
+class WageService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+        self.repo = WageRepository(db)
+        self.production = ProductionService(db)
+        self.employees = EmployeeService(db)
+
+    async def set_rate(self, style_id, operation_id, rate, effective_from):
+        return await self.repo.upsert_rate(style_id, operation_id, rate, effective_from)
+
+    async def compute_run(self, period_start: date, period_end: date) -> WageRun | None:
+        """Compute and FREEZE payroll for a window. Returns a closed run."""
+        run = await self.repo.create_run(period_start, period_end)
+        
+        lines: list[WageLine] = []
+        per_emp_amount: dict[uuid.UUID, float] = defaultdict(float)
+        per_emp_pieces: dict[uuid.UUID, int] = defaultdict(int)
+
+        # piece-rate population. Rows are grouped per (emp, style, op, work_date) so
+        # each day is priced at the rate effective on THAT day — a rate change inside
+        # the period prices earlier work at the old rate and later work at the new one.
+        # rate_cache collapses the per-row effective_rate lookups: most employees
+        # share the same (style, op, work_date), so we hit the DB only once per key.
+        rate_cache: dict[tuple[uuid.UUID, uuid.UUID, date], float | None] = {}
+        rows = await self.production.piece_counts(period_start, period_end)
+        for emp_id, style_id, op_id, work_date, qty in rows:
+            key = (style_id, op_id, work_date)
+            if key not in rate_cache:
+                rate_cache[key] = await self.repo.effective_rate(style_id, op_id, work_date)
+            rate = rate_cache[key]
+            if rate is None:
+                continue          # no rate configured — skip
+            per_emp_amount[emp_id] += float(qty) * rate
+            per_emp_pieces[emp_id] += int(qty)
+
+        for emp_id, amount in per_emp_amount.items():
+            lines.append(WageLine(
+                wage_run_id=run.id, employee_id=emp_id, wage_type=WageType.PIECE_RATE,
+                pieces=per_emp_pieces[emp_id], amount=round(amount, 2),
+            ))
+
+        # monthly population (independent of production)
+        for emp in await self.employees.monthly_employees():
+            lines.append(WageLine(
+                wage_run_id=run.id, employee_id=emp.id, wage_type=WageType.MONTHLY,
+                pieces=0, amount=float(emp.monthly_salary or 0),
+            ))
+
+        await self.repo.add_lines(lines)
+        return await self.repo.close_run(run)
+
+    async def get_run(self, run_id: uuid.UUID) -> WageRun | None:
+        run = await self.repo.get_run(run_id)
+        if not run:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Wage run not found")
+        return run

@@ -91,6 +91,7 @@ class Style(Base, UUIDMixin, TimestampMixin):
     label: Mapped[str | None] = mapped_column(String(80))
     article: Mapped[str | None] = mapped_column(String(80))
     thickness: Mapped[str | None] = mapped_column(String(40))
+    code: Mapped[str | None] = mapped_column(String(200), unique=True, index=True)
     # BOM workflow additions (straight off the order/spec sheets).
     season: Mapped[str | None] = mapped_column(String(20))         # 2026AW / SS26
     customer_ref: Mapped[str | None] = mapped_column(String(80))   # CR1-02F5-PL02

@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app.modules.clients.models import Client, ClientOrder, Style, SKU,SkuOrderLine
 from app.modules.production.models import Operation, ProductionEvent
 from app.modules.wages.models import Rate
-from app.modules.clients.service import make_sku_code
+from app.modules.clients.utlis import make_style_code
 
 
 def _get_or_create_client(db: Session, name: str, country: str | None) -> Client:
@@ -43,7 +43,8 @@ def _get_or_create_style(db: Session, order: ClientOrder, name: str,
     st = db.scalar(select(Style).where(
         Style.client_order_id == order.id, Style.name == name))
     if not st:
-        st = Style(client_order_id=order.id, name=name, article=article)
+        st = Style(client_order_id=order.id, name=name, article=article,
+                   code=make_style_code(order.order_number, name))
         db.add(st); db.flush()
     return st
 

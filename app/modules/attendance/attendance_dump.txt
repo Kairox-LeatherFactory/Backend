@@ -1,13 +1,13 @@
 ﻿============================================================
 PROJECT STRUCTURE
 ============================================================
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\attendance_dump.txt
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\geofence.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\models.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\repository.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\router.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\schemas.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\service.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\USER_dump.txt
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\__init__.py
 
 ============================================================
@@ -280,7 +280,7 @@ async def check_out(body: schemas.CheckOutRequest,
 @router.post("/proxy/check-in", response_model=list[schemas.AttendanceRead], status_code=201)
 async def proxy_check_in(body: schemas.ProxyMarkRequest,
                         db: AsyncSession = Depends(get_db),
-                        user: User = Depends(get_current_user)):
+                        user: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR))):
     """Spec Flow B. require_roles isn't used here because the SERVICE enforces
     SUPERVISOR/DIRECT_MANAGER and also validates the worker is daily-wage."""
     return await AttendanceService(db).proxy_mark_present(user, body)
@@ -289,14 +289,14 @@ async def proxy_check_in(body: schemas.ProxyMarkRequest,
 @router.post("/proxy/check-out", response_model=list[schemas.AttendanceRead])
 async def proxy_check_out(body: schemas.ProxyMarkRequest,
                         db: AsyncSession = Depends(get_db),
-                        user: User = Depends(get_current_user)):
+                        user: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR))):
     return await AttendanceService(db).proxy_check_out(user, body)
 
 
 @router.post("/daily-workers", status_code=201)
 async def add_daily_worker(body: schemas.AddDailyWorkerRequest,
                         db: AsyncSession = Depends(get_db),
-                        user: User = Depends(get_current_user)):
+                        user: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR))):
     emp = await AttendanceService(db).add_daily_worker(user, body)
     return {"id": str(emp.id), "name": emp.name, "wage_type": emp.wage_type.value}
 
@@ -344,7 +344,7 @@ async def get_config(
 async def update_config(
     body: schemas.ShiftConfigUpdate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR)),
 ):
     return await AttendanceService(db).update_config(body)
 
@@ -617,7 +617,7 @@ class AttendanceService:
     async def proxy_mark_present(self, supervisor: User,
                                 body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
         # Permission: SUPERVISOR (and DIRECT_MANAGER as superuser) only.
-        if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER):
+        if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER , UserRole.HR, UserRole.MANAGING_DIRECTOR):
             raise HTTPException(403, "Only a supervisor may proxy-mark attendance.")
         dist = await self._enforce_geofence(body.lat, body.lon)
 
@@ -625,7 +625,10 @@ class AttendanceService:
         for emp_id in body.employee_ids:
             emp = await self.employees.get(emp_id)
             if not emp:
-                continue                                    # silently skip unknown ids
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Employee {emp_id} not found."
+                )                                    # silently skip unknown ids
             # Spec restricts PROXY to piece-rate workers.
             if emp.wage_type != WageType.PIECE_RATE:
                 raise HTTPException(
@@ -639,7 +642,7 @@ class AttendanceService:
 
     async def proxy_check_out(self, supervisor: User,
                               body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
-        if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER):
+        if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR):
             raise HTTPException(403, "Only a supervisor may proxy check-out.")
         await self._enforce_geofence(body.lat, body.lon)
         out = []
