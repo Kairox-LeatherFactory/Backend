@@ -45,6 +45,9 @@ class ClientService:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.repo = ClientRepository(db)
+        
+    def get_order_by_number(self, order_number: str) -> ClientOrder | None:
+        return self.repo.get_order_by_number(order_number)
 
     def sku_label(self, style_name: str | None, color_name: str | None,
                   color_code: str | None, size: str | None) -> str:

@@ -59,7 +59,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260717_1000_style_code"
-down_revision = "20260713_0900_sku_order_line"   # VERIFY with `alembic heads`
+down_revision = "20260714_1000_order_num_uniq"   # VERIFY with `alembic heads`
 branch_labels = None
 depends_on = None
 

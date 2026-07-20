@@ -9,13 +9,17 @@ C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\202
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260615_0900_bom_submission_anchor.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260615_1500_nullable_client_id_satellite.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260621_1200_drop_document_sha256_unique.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260704_1300_config_dxf_yield_fabric_role.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260704_1400_config_cost_catalog.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260704_1500_config_client_checks.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260704_client_checks.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260704_cost_catalog.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260704_dxf_yield_fabric_role.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260712_1000_piece_tracking.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260713_0900_sku_order_line.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260714_1000_order_num_uniq.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260717_1000_style_code.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260717_1100_drop_employee_daily_rate.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\fiber_role_bom_item.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\material_table_added.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\migration_add_pattern_tables.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\project_dump.txt
 
 ============================================================
 PROJECT FILES
@@ -1231,14 +1235,81 @@ def downgrade() -> None:
     op.create_index("ix_document_sha256", "document", ["sha256"], unique=True)
 
 ============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260704_1300_config_dxf_yield_fabric_role.py
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260704_client_checks.py
+============================================================
+
+"""config→DB: client_check_rule"""
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import UUID
+revision = "20260704_client_checks"
+down_revision = "20260704_cost_catalog"
+branch_labels = None
+depends_on = None
+
+def upgrade():
+    op.create_table(
+        "client_check_rule",
+        sa.Column("id", UUID(), primary_key=True),
+        sa.Column("client_code", sa.String(60), nullable=False, index=True),
+        sa.Column("rule_id", sa.String(60), nullable=False),
+        sa.Column("kind", sa.String(40), nullable=False),
+        sa.Column("severity", sa.String(10), server_default="warn"),
+        sa.Column("field", sa.String(60)),
+        sa.Column("range_lo", sa.Float()),
+        sa.Column("range_hi", sa.Float()),
+        sa.Column("params", sa.JSON()),
+        sa.Column("sort_order", sa.Integer(), server_default="0"),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.UniqueConstraint("client_code", "rule_id", name="uq_check_rule"),
+    )
+
+def downgrade():
+    op.drop_table("client_check_rule")
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260704_cost_catalog.py
+============================================================
+
+"""config→DB: cost_catalog_line"""
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import UUID
+
+revision = "20260704_cost_catalog"
+down_revision = "20260704_dxf_yield_fabric_role"
+branch_labels = None
+depends_on = None
+
+def upgrade():
+    op.create_table(
+        "cost_catalog_line",
+        sa.Column("id", UUID(), primary_key=True),
+        sa.Column("garment_code", sa.String(40), nullable=False, index=True),
+        sa.Column("category", sa.String(20), nullable=False),
+        sa.Column("name", sa.String(120), nullable=False),
+        sa.Column("uom", sa.String(20)),
+        sa.Column("unit_price", sa.Numeric(12, 2)),
+        sa.Column("qty_per_garment", sa.Numeric(12, 3), server_default="1"),
+        sa.Column("sort_order", sa.Integer(), server_default="0"),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.UniqueConstraint("garment_code", "category", "name", name="uq_cost_line"),
+    )
+
+def downgrade():
+    op.drop_table("cost_catalog_line")
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260704_dxf_yield_fabric_role.py
 ============================================================
 
 """config→DB: dxf_yield + fabric_role"""
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
-revision = "20260704_1300_config_dxf_yield_fabric_role"
+revision = "20260704_dxf_yield_fabric_role"
 down_revision = "b7d4f1a9c2e0"   # or your current head
 branch_labels = None
 depends_on = None
@@ -1269,71 +1340,417 @@ def downgrade():
     op.drop_table("dxf_yield")
 
 ============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260704_1400_config_cost_catalog.py
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260712_1000_piece_tracking.py
 ============================================================
 
-"""config→DB: cost_catalog_line"""
+"""per-piece tracking + sku.code slug: piece table, production_event.piece_id, sku.code
+
+Revision ID: 20260712_1000_piece_tracking
+Revises: fiber_role_bom_item
+Create Date: 2026-07-12
+
+Three coherent changes:
+  1. sku.code — a deterministic, globally-unique, readable slug
+     {ORDER}-{STYLE}-{COLOUR}-{SIZE} (article excluded), backfilled for existing
+     rows to EXACTLY match make_sku_code() in clients.service, then given a
+     unique index. Users pick this in the UI; sku_id stays internal.
+  2. piece — per-piece table; identity (sku_id, seq); code is the printed id
+     ({sku.code}-{seq}). NO unique(piece_id, operation_id): rework is permitted.
+  3. production_event — nullable piece_id (legacy rows stay valid), and DROP
+     bundle_ref + its index (the piece is the tracked unit; no bundle_ref).
+
+Runs on Postgres. The SQLite test harness builds from models via create_all.
+NOTE (per-date lines): this migration keeps SKU one-per-triple. The separate
+sku_order_line table for per-date quantities is a FOLLOW-UP migration, not here.
+"""
+import re
+
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
 
-revision = "20260704_1400_config_cost_catalog"
-down_revision = "20260704_1300_config_dxf_yield_fabric_role"
+revision = "20260712_1000_piece_tracking"
+down_revision = "fiber_role_bom_item"
 branch_labels = None
 depends_on = None
 
-def upgrade():
+
+def _slug(s) -> str:
+    out = re.sub(r"[^A-Za-z0-9]+", "_", (str(s) if s is not None else "").strip()).strip("_").upper()
+    return out or "NA"
+
+
+def upgrade() -> None:
+    # 1) sku.code -----------------------------------------------------------
+    op.add_column("sku", sa.Column("code", sa.String(length=120), nullable=True))
+    bind = op.get_bind()
+    rows = bind.execute(sa.text(
+        """
+        SELECT s.id AS id, co.order_number AS order_number, st.name AS style_name,
+               s.color_code AS color_code, s.color_name AS color_name, s.size AS size
+        FROM sku s
+        JOIN style st ON st.id = s.style_id
+        JOIN client_order co ON co.id = st.client_order_id
+        WHERE s.code IS NULL
+        """
+    )).mappings().all()
+    for r in rows:
+        code = "-".join((
+            _slug(r["order_number"]), _slug(r["style_name"]),
+            _slug(r["color_name"] or r["color_code"]), _slug(r["size"]),
+        ))
+        bind.execute(sa.text("UPDATE sku SET code = :c WHERE id = :i"),
+                     {"c": code, "i": r["id"]})
+    # Unique: a slug collision (e.g. two colours differing only by punctuation)
+    # will FAIL LOUDLY here rather than silently duplicate — fix the data and re-run.
+    op.create_index(op.f("ix_sku_code"), "sku", ["code"], unique=True)
+
+    # 2) piece --------------------------------------------------------------
     op.create_table(
-        "cost_catalog_line",
-        sa.Column("id", UUID(), primary_key=True),
-        sa.Column("garment_code", sa.String(40), nullable=False, index=True),
-        sa.Column("category", sa.String(20), nullable=False),
-        sa.Column("name", sa.String(120), nullable=False),
-        sa.Column("uom", sa.String(20)),
-        sa.Column("unit_price", sa.Numeric(12, 2)),
-        sa.Column("qty_per_garment", sa.Numeric(12, 3), server_default="1"),
-        sa.Column("sort_order", sa.Integer(), server_default="0"),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
-        sa.UniqueConstraint("garment_code", "category", "name", name="uq_cost_line"),
+        "piece",
+        sa.Column("code", sa.String(length=100), nullable=False),
+        sa.Column("seq", sa.Integer(), nullable=False),
+        sa.Column("sku_id", UUID(), nullable=False),
+        sa.Column("current_operation_id", UUID(), nullable=True),
+        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
+        sa.Column("id", UUID(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True),
+                  server_default=sa.text("now()"), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True),
+                  server_default=sa.text("now()"), nullable=False),
+        sa.ForeignKeyConstraint(["sku_id"], ["sku.id"],
+                                name=op.f("fk_piece_sku_id_sku")),
+        sa.ForeignKeyConstraint(["current_operation_id"], ["operation.id"],
+                                name=op.f("fk_piece_current_operation_id_operation")),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_piece")),
+        sa.UniqueConstraint("sku_id", "seq", name="uq_piece_sku_seq"),
     )
+    op.create_index(op.f("ix_piece_code"), "piece", ["code"], unique=True)
+    op.create_index(op.f("ix_piece_sku_id"), "piece", ["sku_id"], unique=False)
 
-def downgrade():
-    op.drop_table("cost_catalog_line")
+    # 3) production_event: +piece_id, -bundle_ref ---------------------------
+    op.add_column("production_event", sa.Column("piece_id", UUID(), nullable=True))
+    op.create_foreign_key(
+        op.f("fk_production_event_piece_id_piece"),
+        "production_event", "piece", ["piece_id"], ["id"],
+    )
+    op.create_index(op.f("ix_production_event_piece_id"), "production_event",
+                    ["piece_id"], unique=False)
+    op.drop_index(op.f("ix_production_event_bundle_ref"), table_name="production_event")
+    op.drop_column("production_event", "bundle_ref")
+
+
+def downgrade() -> None:
+    op.add_column("production_event",
+                  sa.Column("bundle_ref", sa.String(length=60), nullable=True))
+    op.create_index(op.f("ix_production_event_bundle_ref"), "production_event",
+                    ["bundle_ref"], unique=False)
+    op.drop_index(op.f("ix_production_event_piece_id"), table_name="production_event")
+    op.drop_constraint(op.f("fk_production_event_piece_id_piece"),
+                       "production_event", type_="foreignkey")
+    op.drop_column("production_event", "piece_id")
+
+    op.drop_index(op.f("ix_piece_sku_id"), table_name="piece")
+    op.drop_index(op.f("ix_piece_code"), table_name="piece")
+    op.drop_table("piece")
+
+    op.drop_index(op.f("ix_sku_code"), table_name="sku")
+    op.drop_column("sku", "code")
 
 ============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260704_1500_config_client_checks.py
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260713_0900_sku_order_line.py
 ============================================================
 
-"""config→DB: client_check_rule"""
+"""per-date order lines: sku_order_line
+
+Revision ID: 20260713_0900_sku_order_line
+Revises: 20260712_1000_piece_tracking
+Create Date: 2026-07-13
+
+The breakdown sheet lists the same (style, colour, size) across several dated
+rows. The SKU stays ONE-per-triple (qty_ordered = SUM of its lines); each dated
+row is preserved here for traceability. No unique constraint — two lines may
+share a (sku_id, order_date) if the sheet repeats a triple on the same day; the
+source_row keeps them distinguishable. FK ondelete CASCADE so clearing a client's
+SKUs on re-import also clears its lines.
+"""
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
-revision = "20260704_1500_config_client_checks"
-down_revision = "20260704_1400_config_cost_catalog"
+
+revision = "20260713_0900_sku_order_line"
+down_revision = "20260712_1000_piece_tracking"
 branch_labels = None
 depends_on = None
 
-def upgrade():
-    op.create_table(
-        "client_check_rule",
-        sa.Column("id", UUID(), primary_key=True),
-        sa.Column("client_code", sa.String(60), nullable=False, index=True),
-        sa.Column("rule_id", sa.String(60), nullable=False),
-        sa.Column("kind", sa.String(40), nullable=False),
-        sa.Column("severity", sa.String(10), server_default="warn"),
-        sa.Column("field", sa.String(60)),
-        sa.Column("range_lo", sa.Float()),
-        sa.Column("range_hi", sa.Float()),
-        sa.Column("params", sa.JSON()),
-        sa.Column("sort_order", sa.Integer(), server_default="0"),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
-        sa.UniqueConstraint("client_code", "rule_id", name="uq_check_rule"),
-    )
 
-def downgrade():
-    op.drop_table("client_check_rule")
+def upgrade() -> None:
+    op.create_table(
+        "sku_order_line",
+        sa.Column("sku_id", UUID(), nullable=False),
+        sa.Column("order_date", sa.Date(), nullable=True),
+        sa.Column("qty", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("source_row", sa.Integer(), nullable=True),
+        sa.Column("id", UUID(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True),
+                  server_default=sa.text("now()"), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True),
+                  server_default=sa.text("now()"), nullable=False),
+        sa.ForeignKeyConstraint(["sku_id"], ["sku.id"],
+                                name=op.f("fk_sku_order_line_sku_id_sku"),
+                                ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_sku_order_line")),
+    )
+    op.create_index(op.f("ix_sku_order_line_sku_id"), "sku_order_line",
+                    ["sku_id"], unique=False)
+    op.create_index(op.f("ix_sku_order_line_order_date"), "sku_order_line",
+                    ["order_date"], unique=False)
+
+
+def downgrade() -> None:
+    op.drop_index(op.f("ix_sku_order_line_order_date"), table_name="sku_order_line")
+    op.drop_index(op.f("ix_sku_order_line_sku_id"), table_name="sku_order_line")
+    op.drop_table("sku_order_line")
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260714_1000_order_num_uniq.py
+============================================================
+
+"""client_order.order_number globally unique
+
+Revision ID: 20260714_1000_order_num_uniq
+Revises: 20260713_0900_sku_order_line
+"""
+from alembic import op
+
+revision = "20260713_0900_sku_order_line"   # 29 chars, fits
+down_revision = "20260713_0900_sku_order_line"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.drop_index("ix_client_order_order_number", table_name="client_order")
+    op.create_unique_constraint(
+        "uq_client_order_order_number", "client_order", ["order_number"])
+
+
+def downgrade() -> None:
+    op.drop_constraint("uq_client_order_order_number", "client_order",
+                       type_="unique")
+    op.create_index("ix_client_order_order_number", "client_order",
+                    ["order_number"], unique=False)
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260717_1000_style_code.py
+============================================================
+
+"""style.code — readable per-style handle for the wages rate API
+
+Revision ID: 20260717_1000_style_code
+Revises: 20260713_0900_sku_order_line
+Create Date: 2026-07-17
+
+WHAT THIS DOES
+  1. style.code           new column, backfilled, then made unique+indexed.
+  2. wage_run period idx  ix_wage_run_period_start / _period_end.
+
+WHY style.code
+  The wages rate API addresses styles by a readable code, never by uuid — the same
+  contract as /production/scan taking sku_code. A style code is make_sku_code's
+  first two segments:
+
+      style code   JP-CLERMONT_VEST
+      sku codes    JP-CLERMONT_VEST-DARK_BROWN-46
+                   JP-CLERMONT_VEST-BLACK-48 ...
+
+  so it is the exact prefix of every SKU code beneath it, and a manager reads it
+  straight off a printed traveler. A Rate is per style x operation, so the rate
+  picker must be style-level: a SKU picker would list 12 codes for one style that
+  all write to the same Rate row.
+
+WHY THE SLUG IS COPIED IN HERE INSTEAD OF IMPORTED
+  A migration must reproduce its historical behaviour forever. Importing
+  app.modules.clients.utlis.make_style_code would mean that editing _slug next year
+  silently changes what this migration does on a fresh database, and the codes in a
+  rebuilt dev DB would stop matching the codes in production. The duplication is the
+  point. Keep the two in sync by hand; if _slug ever changes, that is a NEW data
+  migration, not an edit to this one.
+
+WHY IT RAISES ON A COLLISION INSTEAD OF SKIPPING
+  _slug is lossy: 'CLERMONT + VEST' and 'CLERMONT VEST' in the same order both
+  become JP-CLERMONT_VEST. Leaving the loser NULL would let the migration pass
+  quietly and then hide that style from GET /wages/styles — so its rates can never
+  be set, so every piece-rate worker on it earns zero. Silent underpayment is worse
+  than a failed migration. This is payroll; fail loud.
+
+  Note this collision already exists today at the SKU level — make_sku_code collapses
+  those two names identically, so sku.code's unique index already breaks on them.
+  This constraint surfaces the same data problem one step earlier, with an error that
+  names the style.
+
+BEFORE RUNNING — the chain must have exactly ONE head.
+  add_material_rate and fiber_role_bom_item both ship with down_revision = None,
+  which makes them extra roots; `alembic upgrade head` fails with "multiple heads"
+  until they are chained:
+      add_material_rate.down_revision    = "20260704_1500_config_client_checks"
+      fiber_role_bom_item.down_revision  = "add_material_rate"
+  Then confirm this file's down_revision against `alembic heads` — the two most
+  recent migrations (20260712_1000_piece_tracking, 20260713_0900_sku_order_line)
+  were not in the dump I verified against, so the value below is an assumption, not
+  a checked fact.
+"""
+import re
+
+import sqlalchemy as sa
+from alembic import op
+
+revision = "20260717_1000_style_code"
+down_revision = "20260713_0900_sku_order_line"   # VERIFY with `alembic heads`
+branch_labels = None
+depends_on = None
+
+
+# ── frozen copy of clients.utlis._slug / make_style_code — see module docstring ──
+def _slug(s: str | None) -> str:
+    """UPPER, runs of non-alnum -> single '_', trimmed. '' -> 'NA'."""
+    out = re.sub(r"[^A-Za-z0-9]+", "_", (s or "").strip()).strip("_").upper()
+    return out or "NA"
+
+
+def _make_style_code(order_number: str | None, style_name: str | None) -> str:
+    return "-".join((_slug(order_number), _slug(style_name)))
+
+
+def upgrade() -> None:
+    # ── 1. style.code ───────────────────────────────────────────────────────
+    # Added nullable so existing rows survive the ALTER; backfilled below; the
+    # unique index goes on last, once every row has a value. Adding it NOT NULL
+    # up front would fail on the first existing style.
+    op.add_column("style", sa.Column("code", sa.String(200), nullable=True))
+
+    bind = op.get_bind()
+    rows = bind.execute(sa.text("""
+        SELECT s.id, s.name, o.order_number
+          FROM style s
+          JOIN client_order o ON o.id = s.client_order_id
+         WHERE s.code IS NULL
+    """)).fetchall()
+
+    taken: dict[str, str] = {}
+    updates: list[dict] = []
+    clashes: list[tuple[str, str, str]] = []
+
+    for style_id, name, order_number in rows:
+        code = _make_style_code(order_number, name)
+        if code in taken:
+            clashes.append((code, taken[code], name or "(null)"))
+            continue
+        taken[code] = name or "(null)"
+        updates.append({"code": code, "sid": style_id})
+
+    if clashes:
+        detail = "\n".join(
+            f"    {code}  <-  '{kept}'  AND  '{dropped}'" for code, kept, dropped in clashes
+        )
+        raise RuntimeError(
+            f"\n{len(clashes)} style-code collision(s). These style names slug to the "
+            f"same code within one order:\n{detail}\n\n"
+            "  Rename one style of each pair in the source data (they are already "
+            "colliding at the SKU level today — make_sku_code collapses them the same "
+            "way), then re-run this migration.\n"
+            "  Nothing has been committed; the transaction rolls back.\n"
+        )
+
+    if updates:
+        bind.execute(
+            sa.text("UPDATE style SET code = :code WHERE id = :sid"), updates
+        )
+
+    # Unique now that every row is populated. Left nullable at the column level:
+    # a style created by a code path that forgets to set it should fail on the
+    # index (loud, named) rather than on a NOT NULL (loud, anonymous), and NULLs
+    # do not collide in a Postgres unique index.
+    op.create_index("ix_style_code", "style", ["code"], unique=True)
+
+    # ── 2. wage_run period indexes ──────────────────────────────────────────
+    # Every compute_run does an overlap check filtering status + both period
+    # columns. At this table's scale (hundreds of rows for years) Postgres will
+    # seq-scan regardless — these exist so the models and the DB do not drift and
+    # the next autogenerate produces an empty diff, not because payroll is slow.
+    op.create_index("ix_wage_run_period_start", "wage_run", ["period_start"])
+    op.create_index("ix_wage_run_period_end", "wage_run", ["period_end"])
+
+
+def downgrade() -> None:
+    op.drop_index("ix_wage_run_period_end", table_name="wage_run")
+    op.drop_index("ix_wage_run_period_start", table_name="wage_run")
+    op.drop_index("ix_style_code", table_name="style")
+    op.drop_column("style", "code")
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260717_1100_drop_employee_daily_rate.py
+============================================================
+
+"""drop employee.daily_rate — dead column
+
+Revision ID: 20260717_1100_drop_employee_daily_rate
+Revises: 20260717_1000_style_code
+Create Date: 2026-07-17
+
+SEPARATE FROM THE STYLE-CODE MIGRATION ON PURPOSE.
+  20260717_1000_style_code is REQUIRED — the wages rate API cannot address a style
+  without it. This one is optional cleanup that DESTROYS DATA. Splitting them lets
+  you `alembic upgrade 20260717_1000_style_code` and ship the rate screens while
+  still thinking about this. Do not merge them.
+
+WHY
+  daily_rate is never read. Not by wages (a piece-rate wage is qty * rate, with no
+  daily floor and no minimum guarantee — confirmed), not by attendance, not by
+  anything. It is a column that looks authoritative and is not, which is exactly the
+  kind of thing that gets wired into a payroll calculation by someone who assumes it
+  means what it says.
+
+  The attendance module's __init__ docstring still advertises "piece-rate floor
+  hours", which is where the field's original intent lived. Fix that docstring in the
+  same PR or the next reader re-adds the column.
+
+BEFORE RUNNING
+  A downgrade restores the column but NOT the values — there is nothing to restore
+  them from. If any row has a non-null daily_rate you want to keep, dump it first:
+
+      \\copy (SELECT id, name, daily_rate FROM employee WHERE daily_rate IS NOT NULL)
+        TO 'daily_rate_backup.csv' CSV HEADER
+
+  The upgrade below prints the count it is about to destroy. Read it.
+"""
+import sqlalchemy as sa
+from alembic import op
+
+revision = "20260717_1100_drop_employee_daily_rate"
+down_revision = "20260717_1000_style_code"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    bind = op.get_bind()
+    n = bind.execute(
+        sa.text("SELECT count(*) FROM employee WHERE daily_rate IS NOT NULL")
+    ).scalar_one()
+    if n:
+        print(
+            f"  [20260717_1100] dropping employee.daily_rate — {n} non-null value(s) "
+            f"will be destroyed and are NOT recoverable by downgrade."
+        )
+    op.drop_column("employee", "daily_rate")
+
+
+def downgrade() -> None:
+    # Restores the column, not the data. The values are gone.
+    op.add_column("employee", sa.Column("daily_rate", sa.Numeric(10, 2), nullable=True))
+
 
 ============================================================
 FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\fiber_role_bom_item.py
@@ -1359,10 +1776,10 @@ Two SEPARATE axes on bom_item (do not conflate):
 from alembic import op
 import sqlalchemy as sa
 
-from app.core.models import GUID
+from sqlalchemy.dialects.postgresql import UUID as GUID
 
 revision = "fiber_role_bom_item"
-down_revision = None          # TODO: set to current head (see note above)
+down_revision = "add_material_rate"          # TODO: set to current head (see note above)
 branch_labels = None
 depends_on = None
 
@@ -1415,7 +1832,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "add_material_rate"
-down_revision = None          # TODO: set to current head
+down_revision = "20260704_client_checks"          # TODO: set to current head
 branch_labels = None
 depends_on = None
 
@@ -1462,8 +1879,9 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-from sqlalchemy.dialects.postgresql import UUID
-from app.core.models import JSON_VARIANT 
+from sqlalchemy.dialects.postgresql import JSONB, UUID 
+
+JSON_VARIANT = sa.JSON().with_variant(JSONB, "postgresql")
 
 revision = "b7d4f1a9c2e0"
 down_revision = "f3a9c1d2e8b7"  # <-- set to your current head
@@ -1491,10 +1909,10 @@ def upgrade() -> None:
         sa.Column("sha256", sa.String(64), nullable=False),
         sa.Column("storage_key", sa.String(300)),
         sa.Column("is_current", sa.Boolean(), nullable=False, server_default=sa.true()),
-        sa.Column("area_matrix", JSON_VARIANT()),
-        sa.Column("fabric_matrix", JSON_VARIANT()),
-        sa.Column("fabric_roles", JSON_VARIANT()),
-        sa.Column("warnings", JSON_VARIANT()),
+        sa.Column("area_matrix", JSON_VARIANT),
+        sa.Column("fabric_matrix", JSON_VARIANT),
+        sa.Column("fabric_roles", JSON_VARIANT),
+        sa.Column("warnings", JSON_VARIANT),
         sa.UniqueConstraint("style_signature", "sha256", name="uq_pattern_extraction_file"),
     )
     op.create_index("ix_pattern_extraction_client_id", "pattern_extraction", ["client_id"])
