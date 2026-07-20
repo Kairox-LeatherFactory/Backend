@@ -12,6 +12,7 @@ from app.modules.employees import models as em
 from app.modules.production import models as pm
 from app.modules.production.service import ProductionService
 from app.modules.users.models import User
+from app.modules.wages.schemas import RateSet
 from app.modules.wages.service import WageService
 
 
@@ -19,7 +20,7 @@ from app.modules.wages.service import WageService
 async def test_one_employee_multiple_operations(db):
     client = cm.Client(name="C"); db.add(client); await db.flush()
     po = cm.ClientOrder(client_id=client.id, order_number="PO1"); db.add(po); await db.flush()
-    carnaby = cm.Style(client_order_id=po.id, name="CARNABY"); db.add(carnaby); await db.flush()
+    carnaby = cm.Style(client_order_id=po.id, name="CARNABY", code="CARNABY"); db.add(carnaby); await db.flush()
     sku = cm.SKU(style_id=carnaby.id, color_code="57", size="M", qty_ordered=50)
     db.add(sku); await db.flush()
     cut = pm.Operation(code="CUTTING", label="Cutting", sequence=1)
@@ -28,22 +29,26 @@ async def test_one_employee_multiple_operations(db):
     multi = em.Employee(name="MD Afzal", designation="CUTTER/MULTI", wage_type=WageType.PIECE_RATE)
     db.add(multi); await db.commit()
 
-    ps = ProductionService(db)
-    direct = User(id=uuid.uuid4(), name="D", phone="2", role=UserRole.DIRECT_MANAGER,
-                  password_hash="x", is_active=True)
-    await ps.log_event(direct, sku.id, cut.id, multi.id, date(2026, 3, 23), 20)
-    await ps.log_event(direct, sku.id, paste.id, multi.id, date(2026, 3, 25), 15)
+    # Same worker logged at two operations on two days. log_event was removed; insert
+    # the equivalent qty-grouped ProductionEvents directly — piece_counts groups by
+    # (employee, style, operation, day), which is all the wage engine consumes.
+    db.add_all([
+        pm.ProductionEvent(sku_id=sku.id, operation_id=cut.id, employee_id=multi.id,
+                           work_date=date(2026, 3, 23), qty=20),
+        pm.ProductionEvent(sku_id=sku.id, operation_id=paste.id, employee_id=multi.id,
+                           work_date=date(2026, 3, 25), qty=15),
+    ])
+    await db.commit()
 
     ws = WageService(db)
-    await ws.set_rate(carnaby.id, cut.id, 80, date(2026, 3, 1))
-    await ws.set_rate(carnaby.id, paste.id, 40, date(2026, 3, 1))
+    await ws.set_rate(RateSet(style_code="CARNABY", operation_code="CUTTING",
+                              rate=80, effective_from=date(2026, 3, 1)))
+    await ws.set_rate(RateSet(style_code="CARNABY", operation_code="PASTING",
+                              rate=40, effective_from=date(2026, 3, 1)))
 
     run = await ws.compute_run(date(2026, 3, 1), date(2026, 3, 31))
-    line = None
-    for l in run.lines:
-        e = await db.get(em.Employee, l.employee_id)
-        if e.name == "MD Afzal":
-            line = l
+    detail = await ws.get_run_detail(run["id"])
+    line = next((l for l in detail["lines"] if l["employee_name"] == "MD Afzal"), None)
     assert line is not None
-    assert line.pieces == 35                      # 20 + 15
-    assert float(line.amount) == 20 * 80 + 15 * 40  # 2200
+    assert line["pieces"] == 35                        # 20 + 15
+    assert float(line["amount"]) == 20 * 80 + 15 * 40  # 2200

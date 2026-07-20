@@ -35,6 +35,7 @@ from app.core.enums import ShipMode, UserRole, WageType
 from app.modules.analytics.service import AnalyticsService
 from app.modules.clients import models as cm
 from app.modules.clients.service import ClientService, sku_label
+from app.modules.employees.schemas import EmployeeCreate
 from app.modules.employees.service import EmployeeService
 from app.modules.production import models as pm
 from app.modules.production.service import ProductionService
@@ -74,12 +75,14 @@ async def _seed_catalog(db) -> dict:
     ff = pm.Operation(code="FF", label="Final finish", sequence=7)
     db.add_all([cutting, pasting, ff]); await db.flush()
 
-    afzal = await EmployeeService(db).create(
+    afzal = await EmployeeService(db).create(EmployeeCreate(
         name="Afzal", designation="CUTTER", wage_type=WageType.PIECE_RATE,
-        phone="9100000001", email="afzal@factory.local")
-    rahim = await EmployeeService(db).create(
+        phone="9100000001", email="afzal@factory.local"))
+    # MONTHLY employees are provisioned a login, so phone + password are required.
+    rahim = await EmployeeService(db).create(EmployeeCreate(
         name="Rahim", designation="TAILOR", wage_type=WageType.MONTHLY,
-        monthly_salary=20000, phone="9100000002", email="rahim@factory.local")
+        monthly_salary=20000, phone="9100000002", email="rahim@factory.local",
+        password="9100000002"))
     await db.commit()
 
     return dict(client=client, order=order, carnaby=carnaby, clermont=clermont,
@@ -102,9 +105,13 @@ async def _run_production(db, cat, actor) -> list[str]:
                   employee_id=cat["afzal"].id, work_date=PAST,
                   piece_codes=codes[:3])
 
-    # legacy qty path (no piece linkage) on the other style
-    await ps.log_event(actor, cat["sku_clermont"].id, cat["cutting"].id,
-                       cat["afzal"].id, PAST, qty=30)
+    # Legacy qty path: ProductionService.log_event was removed (superseded by the
+    # per-piece cut()/scan() flow), so the equivalent 30-qty CLERMONT/CUTTING event
+    # is inserted directly — the analytics/progress assertions sum qty, not rows.
+    db.add(pm.ProductionEvent(sku_id=cat["sku_clermont"].id,
+                              operation_id=cat["cutting"].id,
+                              employee_id=cat["afzal"].id, work_date=PAST, qty=30))
+    await db.commit()
     return codes
 
 
@@ -117,8 +124,10 @@ async def test_clients_service(db):
     clients = await cs.list_clients()
     assert [c.name for c in clients] == ["MockCo"]
 
-    made = await cs.create_client("Extra Buyer", "France")
-    assert made.id is not None
+    # create_client now provisions the client's first order in one call, so it takes
+    # an order_number and returns (client, order).
+    made, made_order = await cs.create_client("Extra Buyer", "France", "EXTRA-PO-1")
+    assert made.id is not None and made_order.order_number == "EXTRA-PO-1"
     assert len(await cs.list_clients()) == 2
 
     style = await cs.get_style(cat["carnaby"].id)
@@ -133,7 +142,28 @@ async def test_clients_service(db):
     orders = await cs.get_client_orders(cat["client"].id)
     assert [o.order_number for o in orders] == ["MOCK-PO-1"]
 
-    # create_order_with_breakdown: dict-in, (order_id, style_id)-out
+    # create_order_with_breakdown is exercised in its own (xfail) test below — it hits
+    # a live service bug (see test_create_order_with_breakdown_service_bug).
+
+    assert cs.sku_label("CARNABY", "PINE GREEN", "57", "M") == "CARNABY · PINE GREEN · M"
+    assert sku_label("X", None, "57", None) == "X · 57 · NA"   # module-level fallback
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="SERVICE BUG (report only, do not fix in tests): "
+           "app/modules/clients/repository.py:115 calls `order.order_number` on the "
+           "`order` DICT (every other line uses order.get(...); line 95 correctly uses "
+           "co.order_number). create_order_with_breakdown therefore raises "
+           "AttributeError whenever SKU lines/per_size exist. The real caller "
+           "bom/service.py:1429 passes a dict too, so MD approval breaks in production. "
+           "Fix: use co.order_number (or order['order_number']) at repository.py:115.",
+)
+@pytest.mark.asyncio
+async def test_create_order_with_breakdown_service_bug(db):
+    cat = await _seed_catalog(db)
+    cs = ClientService(db)
+    # dict-in, (order_id, style_id)-out — the documented contract.
     order_id, style_id = await cs.create_order_with_breakdown(
         client_id=cat["client"].id,
         order={"order_number": "MOCK-PO-2"},
@@ -143,9 +173,6 @@ async def test_clients_service(db):
     assert order_id is not None and style_id is not None
     tower_skus = await cs.get_skus_for_style(style_id)
     assert sum(s.qty_ordered for s in tower_skus) == 10
-
-    assert cs.sku_label("CARNABY", "PINE GREEN", "57", "M") == "CARNABY · PINE GREEN · M"
-    assert sku_label("X", None, "57", None) == "X · 57 · NA"   # module-level fallback
 
 
 # ────────────────────────────────────────────────────────────── EMPLOYEES
@@ -163,8 +190,8 @@ async def test_employees_service(db):
     monthly = await es.monthly_employees()
     assert [e.name for e in monthly] == ["Rahim"]        # Afzal is piece_rate
 
-    fresh = await es.create(name="Zaid", designation="HELPER",
-                            wage_type=WageType.PIECE_RATE, phone="9100000009")
+    fresh = await es.create(EmployeeCreate(name="Zaid", designation="HELPER",
+                            wage_type=WageType.PIECE_RATE, phone="9100000009"))
     assert fresh.id is not None
     assert len(await es.list_all()) == 3
 
@@ -226,10 +253,9 @@ async def test_analytics_service(db):
     assert mine, "order within sea-cutoff window should surface a freight risk"
     assert mine[0]["days_left"] == 3 and mine[0]["ordered"] == 80
 
-    feed = await an.production_feed(style_id=cat["carnaby"].id)
-    assert feed, "per-piece events should show in the feed"
-    assert all("bundle_id" in row for row in feed)
-
-    hist = await an.piece_history(codes[0])
+    # production_feed was removed from AnalyticsService; per-piece stage history is
+    # now served by piece_detail(piece_code=...), which returns the same bundle_id +
+    # stages shape.
+    hist = await an.piece_detail(piece_code=codes[0])
     assert hist["bundle_id"] == codes[0].upper()
     assert len(hist["stages"]) >= 1

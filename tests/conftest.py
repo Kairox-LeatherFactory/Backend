@@ -8,9 +8,18 @@ within a test. The app is fully async, so tests are async too.
 ================================================================================
 """
 import os
+import tempfile
 
 os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 os.environ.setdefault("SECRET_KEY", "test-secret")
+# Tests must never reach the production Supabase storage backend (the local .env
+# sets STORAGE_BACKEND=supabase, whose SDK isn't installed here). Force the
+# dependency-free local filesystem driver into an isolated temp dir. Must be set
+# BEFORE app.core.config builds its settings singleton (first app import below).
+os.environ["STORAGE_BACKEND"] = "local"
+os.environ.setdefault(
+    "LOCAL_STORAGE_DIR", tempfile.mkdtemp(prefix="factory-test-storage-")
+)
 
 import pytest
 import pytest_asyncio
