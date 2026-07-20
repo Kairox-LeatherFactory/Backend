@@ -33,7 +33,7 @@ BEFORE RUNNING
 import sqlalchemy as sa
 from alembic import op
 
-revision = "20260717_1100_drop_employee_daily_rate"
+revision = "20260717_1100_drop_daily_rate"
 down_revision = "20260717_1000_style_code"
 branch_labels = None
 depends_on = None

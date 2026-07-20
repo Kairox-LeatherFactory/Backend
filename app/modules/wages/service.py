@@ -158,7 +158,6 @@ class WageService:
         ops, _ = await self._resolve_operations()
         total_ops = len(ops)
         counts = await self.repo.rated_operation_counts([r["style_id"] for r in rows], on)
-
         out = []
         for r in rows:
             rated = counts.get(r["style_id"], 0)
