@@ -63,6 +63,28 @@ async def test_carnaby_wage_matches_card(db):
 
 
 @pytest.mark.asyncio
+async def test_compute_run_returns_employee_level_lines(db):
+    ops, carnaby, cutter, monthly = await _setup(db)
+    skus = (await db.execute(select(cm.SKU).where(cm.SKU.style_id == carnaby.id))).scalars().all()
+    ws = WageService(db)
+    await ws.set_rate(RateSet(style_code="CARNABY", operation_code="CUTTING",
+                              rate=80, effective_from=date(2026, 3, 1)))
+
+    db.add(pm.ProductionEvent(sku_id=skus[0].id, operation_id=ops["CUTTING"].id,
+                              employee_id=cutter.id, work_date=date(2026, 3, 23), qty=10))
+    await db.commit()
+
+    run = await ws.compute_run(date(2026, 3, 1), date(2026, 3, 31))
+
+    assert run["lines"]
+    assert any(line["employee_name"] == "Cutter1" for line in run["lines"])
+    assert any(line["employee_name"] == "Monthly1" for line in run["lines"])
+    cutter_line = next(line for line in run["lines"] if line["employee_name"] == "Cutter1")
+    assert cutter_line["pieces"] == 10
+    assert cutter_line["amount"] == 800
+
+
+@pytest.mark.asyncio
 async def test_pieces_do_not_need_to_conserve(db):
     ops, carnaby, cutter, monthly = await _setup(db)
     skus = (await db.execute(select(cm.SKU).where(cm.SKU.style_id == carnaby.id))).scalars().all()

@@ -33,7 +33,7 @@ class EmployeeCreate(BaseModel):
     monthly_salary: float | None = None
     phone: str | None = None
     email: str | None = None
-    password: str | None = None              # REQUIRED for MONTHLY. Never persisted.
+    password: str | None = None
 
     @model_validator(mode="after")
     def _login_fields(self):
