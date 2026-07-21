@@ -51,9 +51,9 @@ def _find_columns(ws, header_row: int):
     col_map = {}
     size_cols = {}
     sub_row = header_row + 1
+
     for c in range(1, ws.max_column + 1):
         h = clean_str(ws.cell(header_row, c).value)
-        sub = clean_str(ws.cell(sub_row, c).value)
         H = h.upper() if h else None
         if H == "STYLE":
             col_map["style"] = c
@@ -63,10 +63,30 @@ def _find_columns(ws, header_row: int):
             col_map["article"] = c
         elif H and "DATE" in H and "date" not in col_map and "DELIVERY" not in H:
             col_map["date"] = c
-        elif _is_size_header(sub):
-            size_cols[c] = sub.upper()
-        elif _is_size_header(h):
+
+    # Is the row right below the header itself a second header row (sheets
+    # with a merged "SIZES" band over real S/M/L/... sub-labels), or is it
+    # already the first real data row (flat single-header sheets)? Tell them
+    # apart by checking whether the STYLE cell is populated on that row: a
+    # real data row always has a style, a sub-header row never does. Only
+    # when it's a genuine sub-header row do we trust its values as size
+    # labels -- otherwise a value like a printed row total sitting under a
+    # "TOTAL"/"TOTAL QTY" column gets misread as a size label, double-
+    # counting that column.
+    style_col = col_map.get("style", 2)
+    sub_is_data_row = clean_str(ws.cell(sub_row, style_col).value) is not None
+    two_row_header = not sub_is_data_row
+
+    for c in range(1, ws.max_column + 1):
+        if c in col_map.values():
+            continue
+        h = clean_str(ws.cell(header_row, c).value)
+        if _is_size_header(h):
             size_cols[c] = h.upper()
+        elif two_row_header:
+            sub = clean_str(ws.cell(sub_row, c).value)
+            if _is_size_header(sub):
+                size_cols[c] = sub.upper()
     return col_map, size_cols
 
 

@@ -1,3 +1,4 @@
+
 """
 import_engine.py — Orchestrates the whole import.
 
@@ -28,15 +29,13 @@ def _client_key(sheet_name: str) -> str:
 
 
 def _sheet_type(ws) -> str:
-    """Decide if a sheet is an ORDER sheet or a PRODUCTION sheet."""
-    # Production sheets contain a 'WEEK PERIOD' header somewhere near the top.
-    for r in range(1, min(ws.max_row, 6) + 1):
+    scan_rows = min(ws.max_row, 20)   # or just ws.max_row for small sheets
+    for r in range(1, scan_rows + 1):
         for c in (1, 2):
             v = clean_str(ws.cell(r, c).value)
             if v and v.upper() == "WEEK PERIOD":
                 return "PRODUCTION"
-    # Order sheets contain an 'S.NO' or 'STYLE' / 'Date' header.
-    for r in range(1, min(ws.max_row, 6) + 1):
+    for r in range(1, scan_rows + 1):
         for c in range(1, 5):
             v = clean_str(ws.cell(r, c).value)
             if v and v.upper() in ("S.NO", "SNO", "STYLE", "DATE"):
@@ -63,6 +62,17 @@ class ImportPreview:
         for key, cp in self.clients.items():
             pcs = sum(l.total for l in cp.order_lines)
             styles = sorted({l.style for l in cp.order_lines})
+
+            # Per-style size breakdown (e.g. {"S": 40, "M": 53, "L": 52, "XL": 7})
+            # instead of only a collapsed grand total. Lines for the same style
+            # (continuation rows, multiple colours, etc.) are summed together.
+            by_style: dict[str, dict] = {}
+            for line in cp.order_lines:
+                entry = by_style.setdefault(line.style, {"sizes": {}, "pieces_ordered": 0})
+                for size, qty in line.sizes.items():
+                    entry["sizes"][size] = entry["sizes"].get(size, 0) + qty
+                entry["pieces_ordered"] += line.total
+
             warns = list(cp.warnings)
             for card in cp.production_cards:
                 warns += [f"[{card.title}] {w}" for w in card.warnings]
@@ -70,6 +80,7 @@ class ImportPreview:
                 "order_lines": len(cp.order_lines),
                 "pieces_ordered": pcs,
                 "styles": styles,
+                "by_style": by_style,
                 "production_cards": len(cp.production_cards),
                 "warnings": warns,
             }
