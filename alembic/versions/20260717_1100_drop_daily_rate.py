@@ -38,7 +38,6 @@ down_revision = "20260717_1000_style_code"
 branch_labels = None
 depends_on = None
 
-
 def upgrade() -> None:
     bind = op.get_bind()
     n = bind.execute(

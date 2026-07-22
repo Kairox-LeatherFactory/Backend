@@ -225,11 +225,11 @@ class ClientRepository:
         return {r[0]: {"style_code": r[1], "style_name": r[2]} for r in rows}
 
     async def list_style_options(
-        self, *, order_number: str | None = None, client_id: uuid.UUID | None = None
+        self, *, order_id: uuid.UUID | None = None, client_id: uuid.UUID | None = None
     ) -> list[dict]:
         """Styles as picker options, with SKU counts.
 
-        Filters on order_NUMBER, not order_id — the caller is a UI that speaks
+        Filters on order_ID, not order_number — the caller is a UI that speaks
         codes. style_id is returned for the caller's internal joins (wages needs it
         to count rates) and is stripped before it reaches the response model.
 
@@ -249,8 +249,8 @@ class ClientRepository:
             .group_by(Style.id, Style.code, Style.name, Style.article,
                       ClientOrder.order_number)
         )
-        if order_number:
-            stmt = stmt.where(ClientOrder.order_number == order_number)
+        if order_id:
+            stmt = stmt.where(ClientOrder.id == order_id)
         if client_id:
             stmt = stmt.where(ClientOrder.client_id == client_id)
         stmt = stmt.order_by(ClientOrder.order_number, Style.name)
