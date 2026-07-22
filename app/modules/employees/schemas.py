@@ -31,10 +31,9 @@ class EmployeeCreate(BaseModel):
     designation: str | None = None
     wage_type: WageType = WageType.PIECE_RATE
     monthly_salary: float | None = None
-    daily_rate: float | None = None          # was missing entirely
     phone: str | None = None
     email: str | None = None
-    password: str | None = None              # REQUIRED for MONTHLY. Never persisted.
+    password: str | None = None
 
     @model_validator(mode="after")
     def _login_fields(self):

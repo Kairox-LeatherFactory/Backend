@@ -48,12 +48,9 @@ class ClientService:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.repo = ClientRepository(db)
-    
-    async def get_order_by_number(self, order_number: str) -> ClientOrder | None:
-        result = await self.db.execute(
-            select(ClientOrder).where(ClientOrder.order_number == order_number)
-        )
-        return result.scalar_one_or_none()
+        
+    def get_order_by_number(self, order_number: str) -> ClientOrder | None:
+        return self.repo.get_order_by_number(order_number)
 
     def sku_label(self, style_name: str | None, color_name: str | None,
                   color_code: str | None, size: str | None) -> str:

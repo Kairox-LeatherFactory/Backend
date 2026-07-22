@@ -130,21 +130,6 @@ class UnratedOperation(BaseModel):
     unpaid_pieces: int
 
 
-class WageRunSummary(BaseModel):
-    id: uuid.UUID
-    period_start: date
-    period_end: date
-    status: RunStatus
-    total_amount: float
-    total_pieces: int
-    employee_count: int
-    unrated_operations: list[UnratedOperation] = []
-    # Days between the last closed run's end and this run's start. Non-zero means a
-    # stretch of work was never covered by any payroll. Informational — hand-typed
-    # periods make gaps possible and nothing else would catch them.
-    gap_days: int = 0
-
-
 class WageLineDetail(BaseModel):
     id: uuid.UUID
     employee_id: uuid.UUID
@@ -153,6 +138,22 @@ class WageLineDetail(BaseModel):
     wage_type: str
     pieces: int
     amount: float
+
+
+class WageRunSummary(BaseModel):
+    id: uuid.UUID
+    period_start: date
+    period_end: date
+    status: RunStatus
+    total_amount: float
+    total_pieces: int
+    employee_count: int
+    unrated_operations: list[UnratedOperation] = Field(default_factory=list)
+    lines: list[WageLineDetail] = Field(default_factory=list)
+    # Days between the last closed run's end and this run's start. Non-zero means a
+    # stretch of work was never covered by any payroll. Informational — hand-typed
+    # periods make gaps possible and nothing else would catch them.
+    gap_days: int = 0
 
 
 class WageRunDetail(WageRunSummary):

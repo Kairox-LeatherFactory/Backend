@@ -158,7 +158,6 @@ class WageService:
         ops, _ = await self._resolve_operations()
         total_ops = len(ops)
         counts = await self.repo.rated_operation_counts([r["style_id"] for r in rows], on)
-
         out = []
         for r in rows:
             rated = counts.get(r["style_id"], 0)
@@ -385,6 +384,22 @@ class WageService:
             await self.repo.delete_run(run)
             raise
 
+        employee_lookup = {emp.id: emp for emp in employees}
+        line_payloads = []
+        for ln in lines:
+            emp = employee_lookup.get(ln.employee_id)
+            line_payloads.append(
+                {
+                    "id": ln.id,
+                    "employee_id": ln.employee_id,
+                    "employee_name": emp.name if emp else "Unknown",
+                    "designation": getattr(emp, "designation", None),
+                    "wage_type": str(ln.wage_type),
+                    "pieces": int(ln.pieces),
+                    "amount": round(float(ln.amount), 2),
+                }
+            )
+
         return {
             "id": run.id,
             "period_start": period_start,
@@ -394,6 +409,7 @@ class WageService:
             "total_pieces": sum(int(ln.pieces) for ln in lines),
             "employee_count": len(lines),
             "unrated_operations": unrated_out,
+            "lines": line_payloads,
             "gap_days": gap_days,
         }
 
