@@ -1,6 +1,6 @@
 """drop employee.daily_rate — dead column
 
-Revision ID: 20260717_1100_drop_employee_daily_rate
+Revision ID: 20260717_1100_drop_daily_rate
 Revises: 20260717_1000_style_code
 Create Date: 2026-07-17
 
