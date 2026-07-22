@@ -200,11 +200,16 @@ class AttendanceService:
                                body: schemas.AddDailyWorkerRequest) -> Employee:
         if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER):
             raise HTTPException(403, "Only a supervisor may add daily workers.")
-        return await self.employees.create(
-            name=body.name, designation=body.designation,
+        from app.modules.employees.schemas import EmployeeCreate
+
+        emp_create = EmployeeCreate(
+            name=body.name,
+            designation=body.designation,
             wage_type=WageType.PIECE_RATE,
-            daily_rate=body.daily_rate, phone=body.phone, email=None,
+            phone=body.phone,
+            email=None,
         )
+        return await self.employees.create(emp_create)
 
     # ══════════════════════════════════════════════════════════════════
     # Open / close primitives (used by both flows)

@@ -153,6 +153,6 @@ class ClientService:
     async def get_style_codes(self, style_ids: list[uuid.UUID]) -> dict:
         return await self.repo.get_style_codes(style_ids)
 
-    async def list_style_options(self, *, order_number=None, client_id=None) -> list[dict]:
+    async def list_style_options(self, *, order_id=None, client_id=None) -> list[dict]:
         return await self.repo.list_style_options(
-            order_number=order_number, client_id=client_id)
+            order_id=order_id, client_id=client_id)
