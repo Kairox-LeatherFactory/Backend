@@ -60,7 +60,7 @@ class ProductionService:
 
     # ------------------------------------------------------------------ helpers
     async def _assert_can_log(self, user: User, op: Operation) -> None:
-        if user.role != UserRole.DIRECT_MANAGER:
+        if user.role != UserRole.DIRECT_MANAGER and user.role != UserRole.MANAGER_DIRECT:
             allowed = await self.repo.operations_for_role(user.role.value)
             if op.id not in allowed:
                 raise HTTPException(
