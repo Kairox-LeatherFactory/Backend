@@ -1,7 +1,25 @@
-﻿
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\imports\__init__.py
-========================================================================================================================
+﻿============================================================
+PROJECT STRUCTURE
+============================================================
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\excel_reader.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\imports_dump.txt
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\import_engine.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\load_to_db.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\parse_orders.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\parse_production.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\README.md
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\router.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\service.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\__init__.py
+
+============================================================
+PROJECT FILES
+============================================================
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\__init__.py
+============================================================
+
 """
 imports — idempotent Excel ingestion.
 
@@ -13,10 +31,10 @@ spaces, numbers-as-text, stacked multi-size blocks).
 """
 
 
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\excel_reader.py
+============================================================
 
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\imports\excel_reader.py
-========================================================================================================================
 """
 excel_reader.py — Low-level, defensive cell reading.
 
@@ -107,10 +125,10 @@ def is_summary_label(text: str | None) -> str | None:
     return None
 
 
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\import_engine.py
+============================================================
 
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\imports\import_engine.py
-========================================================================================================================
 """
 import_engine.py — Orchestrates the whole import.
 
@@ -141,15 +159,13 @@ def _client_key(sheet_name: str) -> str:
 
 
 def _sheet_type(ws) -> str:
-    """Decide if a sheet is an ORDER sheet or a PRODUCTION sheet."""
-    # Production sheets contain a 'WEEK PERIOD' header somewhere near the top.
-    for r in range(1, min(ws.max_row, 6) + 1):
+    scan_rows = min(ws.max_row, 20)   # or just ws.max_row for small sheets
+    for r in range(1, scan_rows + 1):
         for c in (1, 2):
             v = clean_str(ws.cell(r, c).value)
             if v and v.upper() == "WEEK PERIOD":
                 return "PRODUCTION"
-    # Order sheets contain an 'S.NO' or 'STYLE' / 'Date' header.
-    for r in range(1, min(ws.max_row, 6) + 1):
+    for r in range(1, scan_rows + 1):
         for c in range(1, 5):
             v = clean_str(ws.cell(r, c).value)
             if v and v.upper() in ("S.NO", "SNO", "STYLE", "DATE"):
@@ -176,6 +192,17 @@ class ImportPreview:
         for key, cp in self.clients.items():
             pcs = sum(l.total for l in cp.order_lines)
             styles = sorted({l.style for l in cp.order_lines})
+
+            # Per-style size breakdown (e.g. {"S": 40, "M": 53, "L": 52, "XL": 7})
+            # instead of only a collapsed grand total. Lines for the same style
+            # (continuation rows, multiple colours, etc.) are summed together.
+            by_style: dict[str, dict] = {}
+            for line in cp.order_lines:
+                entry = by_style.setdefault(line.style, {"sizes": {}, "pieces_ordered": 0})
+                for size, qty in line.sizes.items():
+                    entry["sizes"][size] = entry["sizes"].get(size, 0) + qty
+                entry["pieces_ordered"] += line.total
+
             warns = list(cp.warnings)
             for card in cp.production_cards:
                 warns += [f"[{card.title}] {w}" for w in card.warnings]
@@ -183,6 +210,7 @@ class ImportPreview:
                 "order_lines": len(cp.order_lines),
                 "pieces_ordered": pcs,
                 "styles": styles,
+                "by_style": by_style,
                 "production_cards": len(cp.production_cards),
                 "warnings": warns,
             }
@@ -217,11 +245,10 @@ def build_preview(path: str) -> ImportPreview:
 
     return preview
 
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\load_to_db.py
+============================================================
 
-
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\imports\load_to_db.py
-========================================================================================================================
 """
 load_to_db.py — Take a validated ImportPreview and write it to the database.
 
@@ -238,11 +265,11 @@ from __future__ import annotations
 from datetime import date
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-
+from app.modules.clients.utlis import make_style_code   # ← "utlis" typo
 from app.modules.clients.models import Client, ClientOrder, Style, SKU,SkuOrderLine
 from app.modules.production.models import Operation, ProductionEvent
 from app.modules.wages.models import Rate
-from app.modules.clients.service import make_sku_code
+from app.modules.clients.utlis import make_style_code
 
 
 def _get_or_create_client(db: Session, name: str, country: str | None) -> Client:
@@ -267,7 +294,8 @@ def _get_or_create_style(db: Session, order: ClientOrder, name: str,
     st = db.scalar(select(Style).where(
         Style.client_order_id == order.id, Style.name == name))
     if not st:
-        st = Style(client_order_id=order.id, name=name, article=article)
+        st = Style(client_order_id=order.id, name=name, article=article,
+                   code=make_style_code(order.order_number, name))
         db.add(st); db.flush()
     return st
 
@@ -393,10 +421,90 @@ def load_preview(db: Session, preview, country_map: dict | None = None,
     return stats
 
 
+def load_preview_into_order(db, preview, *, order_number: str,
+                            replace: bool = True) -> dict:
+    """Write a parsed breakdown sheet INTO the ClientOrder identified by
+    order_number (created at client-creation). SKU codes use that order_number,
+    so every SKU traces back to the client + order. Idempotent: replace=True
+    clears this order's prior styles/SKUs first."""
+    from fastapi import HTTPException          # local import: keep loader fastapi-light
+    order_number = (order_number or "").strip()
+    order = db.scalar(select(ClientOrder).where(
+        ClientOrder.order_number == order_number))
+    if not order:                              # backstop; endpoint already checked
+        raise HTTPException(
+            404, "Order number not found. Please verify with the client record.")
 
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\imports\parse_orders.py
-========================================================================================================================
+    OP_SEQ = {"CUTTING":1,"FUSING":2,"PASTING":3,"SHELL":4,"L/A":5,
+              "LINING STICH":6,"FF":7,"FF-SAMPLE":8,"FF-SMS":9,"FF-SAMPLE ":8}
+    stats = {"order_number": order_number, "styles": 0,
+             "skus_created": 0, "skus_updated": 0, "operations": 0, "rates": 0}
+    op_cache: dict[str, Operation] = {}
+    seen_rates: set = set()
+
+    if replace:
+        for st in db.scalars(select(Style).where(
+                Style.client_order_id == order.id)).all():
+            for sk in db.scalars(select(SKU).where(SKU.style_id == st.id)).all():
+                for ol in db.scalars(select(SkuOrderLine).where(
+                        SkuOrderLine.sku_id == sk.id)).all():
+                    db.delete(ol)
+                db.delete(sk)
+            for rt in db.scalars(select(Rate).where(Rate.style_id == st.id)).all():
+                db.delete(rt)
+            db.delete(st)
+        db.flush()
+
+    styles_seen = set()
+    for cp in preview.clients.values():        # flatten all parsed lines → this order
+        for line in cp.order_lines:
+            style = _get_or_create_style(db, order, line.style, line.article)
+            if style.id not in styles_seen:
+                styles_seen.add(style.id); stats["styles"] += 1
+            for size, qty in line.sizes.items():
+                sku, res = _upsert_sku(db, order, style, line.color, size, qty)
+                if res == "created": stats["skus_created"] += 1
+                elif res == "updated": stats["skus_updated"] += 1
+                db.add(SkuOrderLine(sku_id=sku.id, order_date=line.order_date,
+                                    qty=qty, source_row=line.source_row))
+
+        for card in cp.production_cards:
+            for opcode in card.operations:
+                if opcode not in op_cache:
+                    op_cache[opcode] = _get_or_create_operation(
+                        db, opcode, OP_SEQ.get(opcode, 99))
+                    stats["operations"] += 1
+            tprefix = card.title.split("-")[0].strip().upper()
+            ref_style = None
+            for st in db.scalars(select(Style).where(
+                    Style.client_order_id == order.id)):
+                if st.name.upper() in card.title.upper() or tprefix in st.name.upper():
+                    ref_style = st; break
+            if ref_style:
+                for opcode, rate_val in card.rate.items():
+                    if not rate_val:
+                        continue
+                    op = op_cache[opcode]
+                    if (ref_style.id, op.id) in seen_rates:
+                        continue
+                    existing = db.scalar(select(Rate).where(
+                        Rate.style_id == ref_style.id, Rate.operation_id == op.id,
+                        Rate.effective_from == date(2026, 1, 1)))
+                    if not existing:
+                        db.add(Rate(style_id=ref_style.id, operation_id=op.id,
+                                    rate=rate_val, effective_from=date(2026, 1, 1)))
+                        db.flush(); stats["rates"] += 1
+                    seen_rates.add((ref_style.id, op.id))
+
+    db.commit()
+    return stats
+
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\parse_orders.py
+============================================================
+
 """
 parse_orders.py — Parse ORDER sheets into structured rows.
 
@@ -415,10 +523,11 @@ from app.modules.imports.excel_reader import clean_str, to_int, to_date
 
 # Words that appear in a size-column header. Anything that is one of these,
 # or looks like a numeric size, is treated as a size column.
-ALPHA_SIZES = {"XS", "S", "M", "L", "XL", "XXL", "2XL", "3XL", "4XL"}
-# Column-header words that are NOT sizes (so we can tell them apart).
+ALPHA_SIZES = {"XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL", "3XL", "4XL",
+              "F", "FREE"}
 NON_SIZE_HEADERS = {"S.NO", "SNO", "STYLE", "COLOUR", "COLOR", "SUEDE COLOUR",
-                    "SUEDE COLOR", "ARTICLE", "TOTAL", "TOTAL QTY", "DATE"}
+                    "SUEDE COLOR", "ARTICLE", "ARTICLES", "TOTAL", "TOTAL QTY",
+                    "DATE", "SIZES", "DESCRIPTION"}
 
 
 def _is_size_header(text: str | None) -> bool:
@@ -427,9 +536,10 @@ def _is_size_header(text: str | None) -> bool:
     t = text.strip().upper()
     if t in NON_SIZE_HEADERS:
         return False
-    if t in ALPHA_SIZES:
+    base = t.split("/")[0].strip()      # "S/7" -> "S"
+    if base in ALPHA_SIZES:
         return True
-    return t.replace(".", "").isdigit()      # "38", "46" ...
+    return base.replace(".", "").isdigit()
 
 
 @dataclass
@@ -445,36 +555,53 @@ class OrderLine:
 
 
 def _find_columns(ws, header_row: int):
-    """Read a header row and return (col_map, size_cols).
-
-    col_map maps logical fields (style/color/article) to column indexes.
-    size_cols maps a column index -> size label.
-    """
     col_map = {}
     size_cols = {}
+    sub_row = header_row + 1
+
     for c in range(1, ws.max_column + 1):
         h = clean_str(ws.cell(header_row, c).value)
-        if not h:
-            continue
-        H = h.upper()
-        if H in ("STYLE",):
+        H = h.upper() if h else None
+        if H == "STYLE":
             col_map["style"] = c
         elif H in ("COLOUR", "COLOR", "SUEDE COLOUR", "SUEDE COLOR"):
             col_map["color"] = c
-        elif H == "ARTICLE":
+        elif H in ("ARTICLE", "ARTICLES"):
             col_map["article"] = c
-        elif _is_size_header(h):
-            size_cols[c] = h.upper()
-        elif H in ("DATE",):
+        elif H and "DATE" in H and "date" not in col_map and "DELIVERY" not in H:
             col_map["date"] = c
+
+    # Is the row right below the header itself a second header row (sheets
+    # with a merged "SIZES" band over real S/M/L/... sub-labels), or is it
+    # already the first real data row (flat single-header sheets)? Tell them
+    # apart by checking whether the STYLE cell is populated on that row: a
+    # real data row always has a style, a sub-header row never does. Only
+    # when it's a genuine sub-header row do we trust its values as size
+    # labels -- otherwise a value like a printed row total sitting under a
+    # "TOTAL"/"TOTAL QTY" column gets misread as a size label, double-
+    # counting that column.
+    style_col = col_map.get("style", 2)
+    sub_is_data_row = clean_str(ws.cell(sub_row, style_col).value) is not None
+    two_row_header = not sub_is_data_row
+
+    for c in range(1, ws.max_column + 1):
+        if c in col_map.values():
+            continue
+        h = clean_str(ws.cell(header_row, c).value)
+        if _is_size_header(h):
+            size_cols[c] = h.upper()
+        elif two_row_header:
+            sub = clean_str(ws.cell(sub_row, c).value)
+            if _is_size_header(sub):
+                size_cols[c] = sub.upper()
     return col_map, size_cols
 
 
+# _is_header_row — substring match on DATE
 def _is_header_row(ws, r) -> bool:
-    """A header row has S.NO in col A or B, or starts with 'Date' (flat sheets)."""
     a = clean_str(ws.cell(r, 1).value)
     b = clean_str(ws.cell(r, 2).value)
-    if a and a.upper() in ("S.NO", "SNO", "DATE"):
+    if a and (a.upper() in ("S.NO", "SNO") or "DATE" in a.upper()):
         return True
     if b and b.upper() in ("S.NO", "SNO"):
         return True
@@ -586,11 +713,10 @@ def parse_order_sheet(ws) -> tuple[list[OrderLine], list[str]]:
 
     return lines, warnings
 
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\parse_production.py
+============================================================
 
-
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\imports\parse_production.py
-========================================================================================================================
 """
 parse_production.py — Parse PRODUCTION sheets into structured cards.
 
@@ -753,10 +879,10 @@ def parse_production_sheet(ws) -> tuple[list[ProductionCard], list[str]]:
     return cards, warnings
 
 
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\router.py
+============================================================
 
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\imports\router.py
-========================================================================================================================
 """
 ================================================================================
 modules/imports/router.py — Excel import endpoints (async-friendly)
@@ -783,15 +909,16 @@ from __future__ import annotations
 import os
 import tempfile
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from starlette.concurrency import run_in_threadpool
-
-from app.core.database import SessionLocal
-from app.core.enums import UserRole
-from app.modules.users.deps import require_roles
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.database import SessionLocal, get_db
+from app.modules.clients.service import ClientService
+from app.modules.imports.load_to_db import load_preview, load_preview_into_order
 from app.modules.imports.import_engine import build_preview
-from app.modules.imports.load_to_db import load_preview
+from app.modules.users.deps import require_roles
 from app.modules.users.models import User
+from app.core.enums import UserRole
+from starlette.concurrency import run_in_threadpool
 
 router = APIRouter(prefix="/imports", tags=["Imports"])
 
@@ -804,6 +931,23 @@ def _save_upload(file: UploadFile) -> str:
         f.write(file.file.read())
     return path
 
+async def _require_order(db: AsyncSession, order_number: str):
+    """Reject early if the entered number doesn't match a client's order."""
+    order = await ClientService(db).get_order_by_number(order_number)
+    if not order:
+        raise HTTPException(
+            404, "Order number not found. Please verify with the client record.")
+    return order
+
+def _do_commit_into_order(path: str, order_number: str) -> dict:
+    preview = build_preview(path)
+    summary = preview.summary()
+    db = SessionLocal()
+    try:
+        stats = load_preview_into_order(db, preview, order_number=order_number)
+    finally:
+        db.close()
+    return {"summary": summary, "written": stats}
 
 def _do_preview(path: str) -> dict:
     return build_preview(path).summary()
@@ -822,10 +966,13 @@ def _do_commit(path: str) -> dict:
 
 @router.post("/preview")
 async def preview_import(
+    order_number: str = Form(...),
     file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
     _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
 ):
-    """Dry-run: parse the workbook and return a structured preview (no writes)."""
+    """Dry-run. Validates the order number first, then parses (no writes)."""
+    await _require_order(db, order_number)
     path = _save_upload(file)
     try:
         return await run_in_threadpool(_do_preview, path)
@@ -835,21 +982,24 @@ async def preview_import(
 
 @router.post("/commit")
 async def commit_import(
+    order_number: str = Form(...),
     file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
     _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
 ):
-    """Parse, validate, and write the workbook to the database (idempotent)."""
+    """Validate order number, parse, and write SKUs INTO that order (idempotent)."""
+    await _require_order(db, order_number)
     path = _save_upload(file)
     try:
-        return await run_in_threadpool(_do_commit, path)
+        return await run_in_threadpool(_do_commit_into_order, path, order_number)
     finally:
         os.remove(path)
 
 
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\imports\service.py
+============================================================
 
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\imports\service.py
-========================================================================================================================
 """
 ================================================================================
 modules/imports/service.py — Import module facade (kept for API stability)
@@ -886,6 +1036,4 @@ def commit_workbook(db: Session, path: str, country_map: dict | None = None) -> 
     preview = build_preview(path)
     return {"summary": preview.summary(),
             "written": load_preview(db, preview, country_map=country_map)}
-
-
 

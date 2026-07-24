@@ -1518,7 +1518,12 @@ def _load_workbook(data: bytes):
             return None
 
 
-def _markdown_from_wb(wb) -> str:
+def _markdown_from_wb(wb, *, tagged: bool = True) -> str:
+    # tagged=True prefixes each cell with its A1 coordinate AND repeats it in an HTML
+    # comment (`A5 <!-- A5 --> val`) — useful context for a spec's measurement grid.
+    # tagged=False emits just `A5 val`, ~halving tokens; a CONSOLIDATED order sheet
+    # (many styles) would otherwise blow the model's output budget / timeout on the
+    # doubled coordinate noise. Callers that route orders pass tagged=False.
     out: list[str] = []
     try:
         for sheet_name in wb.sheetnames:
@@ -1539,7 +1544,8 @@ def _markdown_from_wb(wb) -> str:
                         continue
                     text = text.replace("\r", " ").replace("\n", " / ")
                     coord = f"{_col_letter(c_idx)}{r}"
-                    cells.append(f"{coord} <!-- {coord} --> {text}")
+                    cells.append(f"{coord} <!-- {coord} --> {text}" if tagged
+                                 else f"{coord} {text}")
                 if cells:
                     out.append(" | ".join(cells))
             # Note in-text when a sheet carries pictures, so the (text) model
@@ -1579,14 +1585,16 @@ def _images_from_wb(wb) -> list[bytes]:
     return images
 
 
-def xlsx_to_markdown(data: bytes) -> str:
-    """Flatten ALL sheets to a coordinate-tagged markdown blob. Returns "" on total
-    failure. (Backwards-compatible entry point — unchanged contract.)"""
+def xlsx_to_markdown(data: bytes, *, tagged: bool = True) -> str:
+    """Flatten ALL sheets to a markdown blob. `tagged=True` (default, unchanged
+    contract) double-marks each cell with its coordinate; `tagged=False` emits the
+    leaner `A5 val` form for token-heavy consolidated ORDER sheets. Returns "" on
+    total failure."""
     wb = _load_workbook(data)
     if wb is None:
         return ""
     try:
-        return _markdown_from_wb(wb)
+        return _markdown_from_wb(wb, tagged=tagged)
     finally:
         try:
             wb.close()
@@ -2121,27 +2129,42 @@ The sheet may be in ANY language and ANY layout — a single table, several stac
 order blocks, or a scan. Headers may be missing, merged, abbreviated, or in a
 language you must interpret. Decide each column's ROLE from its VALUES, not its header.
 
-Emit one line per printed (style, colour) row, with:
-- style_code: the stable alphanumeric IDENTIFIER that uniquely tags the garment
-  design on a row (e.g. SP74003, CR1-02F5, 74-018, ROCHE). Usually a short code of
-  letters and/or digits repeated verbatim across that row's size cells. This is the
-  AUTHORITATIVE identity — copy EXACTLY (case + punctuation). If styles are named
-  only by a human NAME with no code column, omit style_code.
-- model: the human style NAME if present; if only a code exists, set model = the code.
-- material: the fabric / leather / quality descriptor (a leather type, mill code,
-  finish). Describes WHAT it is made of, NEVER its identity. Different style_codes
-  often SHARE one material, and a material value may look like a name — it is still
-  the material.
+Return ONE top-level JSON OBJECT with exactly this shape — NEVER a bare array,
+NEVER markdown fences, NEVER prose:
+
+{
+  "order_number": "...",
+  "client_name": "...",
+  "season": "...",
+  "currency": "...",
+  "price_per_garment": 0.0,
+  "delivery_date": "yyyy-mm-dd",
+  "payment_term": "...",
+  "lines": [
+    {"model": "...", "color": "...", "article": "...",
+     "sizes": {"S": 0, "M": 0}, "printed_total": 0}
+  ]
+}
+
+Emit ONE entry in "lines" per printed (style, colour) row, with:
+- model: the style IDENTITY. Prefer the stable alphanumeric CODE that uniquely tags
+  the garment design on a row (e.g. SP74003, CR1-02F5, 74-018, ROCHE) — copy it
+  EXACTLY (case + punctuation). If there is only a human style NAME and no code,
+  use the name. If both a code and a name exist, use the code.
+- article: the fabric / leather / quality descriptor (a leather type, mill code,
+  finish). Describes WHAT it is made of, NEVER its identity. Different styles often
+  SHARE one article value, and an article may look name-like — it is still the
+  material, not the identity.
 - color: the colourway text.
 - sizes: {size: qty}. Size columns hold size labels (alpha S..XXL or numeric 34..58)
   with per-size quantities. Include ONLY true size columns — never price, total,
   note, or date columns.
 - printed_total: the row's own printed total if present; else omit.
 
-Disambiguating identity vs material when BOTH look name-like: the identity column's
-values are unique per design and often coded; the material column REPEATS a small
-set of fabric words across many rows. Unique codes -> style_code; repeated fabric
-words -> material.
+Disambiguating identity (model) vs material (article) when BOTH look name-like: the
+identity value is unique per design and often coded; the material value REPEATS a
+small set of fabric words across many rows. Unique codes -> model; repeated fabric
+words -> article.
 
 Rules:
 - Resolve ditto marks (", '', 〃, ー, blank) to the value from the row above.
@@ -2149,11 +2172,10 @@ Rules:
   (e.g. "TOTAL SP74003", "TOTALE", "Overall Total").
 - The same style in a later block/page is STILL that style — keep its identity exact.
 - Do NOT trust any printed grand total; lines are recomputed downstream.
+- The header fields (order_number, client_name, season, currency, price_per_garment,
+  delivery_date, payment_term) go at the TOP LEVEL, not inside a line.
 
-Also extract header fields: order_number, client_name, season, currency,
-price_per_garment, delivery_date (ISO yyyy-mm-dd), payment_term.
-
-Output ONLY valid JSON. No prose, no markdown fences.
+Output ONLY the JSON object described above. No prose, no markdown fences.
 """
 
 
@@ -2260,14 +2282,26 @@ def _gemini_native_pdf(data: bytes, prompt: str, *,
                     )
                 doc_part = uploaded
 
+            # Cap output + turn thinking OFF for gemini-2.5-flash. Without these a
+            # dense scanned/consolidated order either truncates its JSON (unparseable)
+            # or spends the budget on thinking and returns empty text — both surfaced
+            # as "200 but 0 lines". A dynamic-key `sizes` map cannot be expressed as a
+            # response_schema (controlled generation needs fixed properties), so shape
+            # is pinned by the prompt + the array-tolerant _coerce, not a schema.
+            cfg_kwargs = dict(
+                temperature=0,
+                top_p=0.1,
+                response_mime_type="application/json",
+                max_output_tokens=settings.llm_max_output_tokens,
+            )
+            try:
+                cfg_kwargs["thinking_config"] = gtypes.ThinkingConfig(thinking_budget=0)
+            except Exception:                                   # noqa: BLE001
+                pass                                            # older SDK w/o ThinkingConfig
             resp = client.models.generate_content(
                 model=model_id,
                 contents=[doc_part, prompt],
-                config=gtypes.GenerateContentConfig(
-                    temperature=0,
-                    top_p=0.1,
-                    response_mime_type="application/json",
-                ),
+                config=gtypes.GenerateContentConfig(**cfg_kwargs),
             )
             text = getattr(resp, "text", None)
             if text:
@@ -2347,7 +2381,10 @@ def llm_extract_spec(kind: str, payload: Any) -> ExtractedSpec | None:
         logger.warning("spec schema validation failed for %s: %s", engine, exc)
         return None
     if is_empty_spec(spec):
-        logger.info("LLM (%s) returned empty spec — trying next rung", engine)
+        # Log the raw head so an empty result is diagnosable as envelope-mismatch
+        # (wrong top-level shape, silently dropped) vs a genuinely blank document.
+        logger.info("LLM (%s) returned empty spec — trying next rung; raw_head=%r",
+                    engine, str(raw)[:300])
         return None
     return spec
 
@@ -2371,7 +2408,10 @@ def llm_extract_order(kind: str, payload: Any, *, client_hint=None) -> Extracted
         logger.warning("order schema validation failed for %s: %s", engine, exc)
         return None
     if is_empty_order(order):
-        logger.info("LLM (%s) returned empty order — trying next rung", engine)
+        # Log the raw head so an empty result is diagnosable as envelope-mismatch
+        # (wrong top-level shape, silently dropped) vs a genuinely blank document.
+        logger.info("LLM (%s) returned empty order — trying next rung; raw_head=%r",
+                    engine, str(raw)[:300])
         return None
     return order
 
@@ -2522,7 +2562,10 @@ def extract_order(data: bytes, filename: str, mime: str | None = None,
             return _extract_pdf(data, llm_extract_order, _empty_order)
 
         if kind in ("xlsx", "xls"):
-            markdown = (xlsx_to_markdown if kind == "xlsx" else xls_to_markdown)(data)
+            # Orders use the LEANER flatten (tagged=False) — a consolidated multi-style
+            # sheet otherwise doubles its token count on coordinate noise and truncates.
+            markdown = (xlsx_to_markdown(data, tagged=False) if kind == "xlsx"
+                        else xls_to_markdown(data))
             if not markdown.strip():
                 return _empty_order("xls_unreadable" if kind == "xls" else "xlsx_unreadable")
             return llm_extract_order("text", markdown) or _empty_order("llm_extraction_failed")
@@ -2896,12 +2939,12 @@ class OrderLine(BaseModel):
     
     @field_validator("model", "color", "article", mode="before")
     @classmethod
-    def _coerce_str(cls, v: Any) -> str | None:
+    def _coerce_str_model(cls, v: Any) -> str | None:
         return _to_str_or_none(v)
 
     @field_validator("color", "article", mode="before")
     @classmethod
-    def _coerce_str(cls, v: Any) -> str | None:
+    def _coerce_str_color(cls, v: Any) -> str | None:
         return _to_str_or_none(v)
 
     @field_validator("sizes", mode="before")
@@ -7578,13 +7621,13 @@ import uuid
 from types import SimpleNamespace
 from typing import Any
 
-from celery import Celery
-from celery.schedules import crontab
+
 from app.core.celery import celery_app
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.modules.bom.service import BomService
+from app.modules.users.service import UserService
 
 logger = logging.getLogger(__name__)
 
@@ -7643,15 +7686,19 @@ def build_order_breakdown_for_submission(self, submission_id: str) -> dict:
         async with AsyncSessionLocal() as db:
             svc = BomService(db)
             try:
-                order_doc = await svc.repo.get_accepted_order_document(submission_id)
-                if order_doc is None:
+                accepted = await svc.procurement.get_accepted_order_bytes(submission_id)
+                if accepted is None:
                     await svc.release_breakdown_claim(submission_id)
                     return {"status": "failed", "reason": "no_accepted_order_document"}
-                data, filename, mime = await svc.repo.load_document_bytes_meta(order_doc.id)
+                data, filename, mime = accepted
+                client_id = await svc.procurement.get_submission_client_id(submission_id)
+                if client_id is None:
+                    await svc.release_breakdown_claim(submission_id)
+                    return {"status": "failed", "reason": "submission_not_found"}
                 result = await svc.build_order_breakdown(
                     submission_id,
                     order_bytes=data, order_filename=filename, order_mime=mime,
-                    client_id=order_doc.client_id,
+                    client_id=client_id,
                 )
                 return {"status": "ready", **result}
             except Exception:
@@ -7676,7 +7723,7 @@ def generate_bom_for_style_task(self, order_style_id: str, user_id: str) -> dict
     async def _run() -> dict:
         async with AsyncSessionLocal() as db:
             svc = BomService(db)
-            user = await svc.repo.get_user(user_id) if user_id else None
+            user = await UserService(db).get(user_id) if user_id else None
             return await svc.generate_bom_for_style(user, order_style_id)
 
     result = _run_async(_run())

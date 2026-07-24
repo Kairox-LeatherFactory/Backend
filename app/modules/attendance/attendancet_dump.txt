@@ -1,7 +1,7 @@
 ﻿============================================================
 PROJECT STRUCTURE
 ============================================================
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\attendance_dump.txt
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\attendancet_dump.txt
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\geofence.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\models.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\repository.py
@@ -657,11 +657,16 @@ class AttendanceService:
                                body: schemas.AddDailyWorkerRequest) -> Employee:
         if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER):
             raise HTTPException(403, "Only a supervisor may add daily workers.")
-        return await self.employees.create(
-            name=body.name, designation=body.designation,
+        from app.modules.employees.schemas import EmployeeCreate
+
+        emp_create = EmployeeCreate(
+            name=body.name,
+            designation=body.designation,
             wage_type=WageType.PIECE_RATE,
-            daily_rate=body.daily_rate, phone=body.phone, email=None,
+            phone=body.phone,
+            email=None,
         )
+        return await self.employees.create(emp_create)
 
     # ══════════════════════════════════════════════════════════════════
     # Open / close primitives (used by both flows)
