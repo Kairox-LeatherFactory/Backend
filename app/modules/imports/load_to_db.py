@@ -169,6 +169,28 @@ def load_preview(db: Session, preview, country_map: dict | None = None,
     db.commit()
     return stats
 
+def _assert_no_production_history(db: Session, order: ClientOrder) -> None:
+    """Guard for the replace-on-commit path: refuse to touch an order whose
+    SKUs already have ProductionEvent rows, rather than silently deleting
+    SKUs still referenced by production history."""
+    sku_ids_subq = (
+        select(SKU.id)
+        .join(Style, SKU.style_id == Style.id)
+        .where(Style.client_order_id == order.id)
+    )
+    has_production = db.scalar(
+        select(ProductionEvent.id)
+        .where(ProductionEvent.sku_id.in_(sku_ids_subq))
+        .limit(1)
+    )
+    if has_production:
+        from fastapi import HTTPException
+        raise HTTPException(
+            409,
+            "This order already has production events logged. "
+            "Re-importing would delete SKUs still referenced by production "
+            "history. Void or amend the existing import instead of re-uploading.",
+        )
 
 def load_preview_into_order(db, preview, *, order_number: str,
                             replace: bool = True) -> dict:
@@ -192,6 +214,7 @@ def load_preview_into_order(db, preview, *, order_number: str,
     seen_rates: set = set()
 
     if replace:
+        _assert_no_production_history(db, order)
         for st in db.scalars(select(Style).where(
                 Style.client_order_id == order.id)).all():
             for sk in db.scalars(select(SKU).where(SKU.style_id == st.id)).all():
