@@ -1,7 +1,22 @@
-﻿
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\production\__init__.py
-========================================================================================================================
+﻿============================================================
+PROJECT STRUCTURE
+============================================================
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\models.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\production_dump.txt
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\repository.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\router.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\schemas.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\service.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\__init__.py
+
+============================================================
+PROJECT FILES
+============================================================
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\__init__.py
+============================================================
+
 """
 production — the operational heart of the system.
 
@@ -12,10 +27,10 @@ table (operation_access) maps which manager role may log which operation.
 """
 
 
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\models.py
+============================================================
 
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\production\models.py
-========================================================================================================================
 """Production: operations, pieces, the event log, and the manager->operation map.
 
 PER-PIECE MODEL
@@ -106,10 +121,10 @@ class ProductionEvent(Base, UUIDMixin, TimestampMixin):
     operation: Mapped["Operation"] = relationship()
     piece: Mapped["Piece | None"] = relationship()
 
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\repository.py
+============================================================
 
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\production\repository.py
-========================================================================================================================
 """
 ================================================================================
 modules/production/repository.py — Async data access for production
@@ -291,11 +306,37 @@ class ProductionRepository:
         )
         res = await self.db.execute(stmt)
         return res.all()
+    
+    async def list_pieces_for_sku(
+        self, sku_id: uuid.UUID
+    ) -> list[tuple[Piece, str | None, str | None]]:
+        """Every active piece of a SKU + its current stage (code, label)."""
+        res = await self.db.execute(
+            select(Piece, Operation.code, Operation.label)
+            .outerjoin(Operation, Operation.id == Piece.current_operation_id)
+            .where(Piece.sku_id == sku_id, Piece.is_active.is_(True))
+            .order_by(Piece.seq)
+        )
+        return [(p, c, l) for p, c, l in res.all()]
 
+    async def piece_ids_done_at_op(
+        self, piece_ids: list[uuid.UUID], operation_id: uuid.UUID
+    ) -> set[uuid.UUID]:
+        """Batch form of has_event_at_op — ONE query, no N+1 on the scan screen."""
+        if not piece_ids:
+            return set()
+        res = await self.db.execute(
+            select(ProductionEvent.piece_id)
+            .where(ProductionEvent.operation_id == operation_id,
+                   ProductionEvent.piece_id.in_(piece_ids))
+            .distinct()
+        )
+        return set(res.scalars())
 
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\production\router.py
-========================================================================================================================
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\router.py
+============================================================
+
 """
 ================================================================================
 modules/production/router.py — Production HTTP API (async)
@@ -362,6 +403,19 @@ async def scan(
         work_date=body.work_date, sku_id=body.sku_id,
         piece_seqs=body.piece_seqs, piece_codes=body.piece_codes,
     )
+    
+@router.get("/skus/{sku_id}/pieces", response_model=schemas.SkuPieceList)
+async def list_pieces_for_sku(
+    sku_id: uuid.UUID,
+    operation_id: uuid.UUID | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Pieces minted for a SKU + each one's current stage. Pass operation_id to
+    flag which are already logged at that stage (the scan screen's checklist)."""
+    return await ProductionService(db).list_pieces_for_sku(
+        sku_id=sku_id, operation_id=operation_id
+    )
 
 
 # @router.post("/events", response_model=schemas.ProductionEventRead, status_code=201)
@@ -409,10 +463,10 @@ async def style_progress(
         stages=stages,
     )
 
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\schemas.py
+============================================================
 
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\production\schemas.py
-========================================================================================================================
 import uuid
 from datetime import date
 
@@ -458,7 +512,6 @@ class CuttingCreate(BaseModel):
     work_date: date
     count: int = Field(gt=0)
     
-    
     @model_validator(mode="after")
     def _one_sku(self):
         if not self.sku_id and not self.sku_code:
@@ -498,6 +551,27 @@ class ScanBatchResult(BaseModel):
     not_found: list[str]      # unknown seqs/codes — skipped, never written
 
 
+class PieceOption(BaseModel):
+    piece_id: uuid.UUID
+    code: str                        # "KJ2451-CLERMONT-57-M-005" — show this
+    seq: int                         # 5 — what /scan takes in piece_seqs
+    current_stage: str | None        # "CUTTING"; null if never logged
+    current_stage_label: str | None
+    done_at_op: bool = False         # already logged at the requested operation
+
+
+class SkuPieceList(BaseModel):
+    sku_id: uuid.UUID
+    sku_code: str | None
+    colour: str | None
+    size: str | None
+    operation_id: uuid.UUID | None
+    operation_code: str | None
+    total: int
+    done: int
+    pending: int
+    pieces: list[PieceOption]
+
 # ---- Legacy generic event --------------------------------------------------
 class ProductionEventCreate(BaseModel):
     sku_id: uuid.UUID
@@ -526,10 +600,10 @@ class StyleStageProgress(BaseModel):
     qty_ordered: int
     stages: dict[str, int]    # {"CUTTING": 152, "FUSING": 152, "PASTING": 150, ...}
 
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\production\service.py
+============================================================
 
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\production\service.py
-========================================================================================================================
 """
 ================================================================================
 modules/production/service.py — Production logic + role->operation access (async)
@@ -592,7 +666,7 @@ class ProductionService:
 
     # ------------------------------------------------------------------ helpers
     async def _assert_can_log(self, user: User, op: Operation) -> None:
-        if user.role != UserRole.DIRECT_MANAGER:
+        if user.role != UserRole.DIRECT_MANAGER and user.role != UserRole.MANAGER_DIRECT:
             allowed = await self.repo.operations_for_role(user.role.value)
             if op.id not in allowed:
                 raise HTTPException(
@@ -698,6 +772,50 @@ class ProductionService:
             "rework": rework,
             "not_found": not_found,
         }
+        
+        
+    async def list_pieces_for_sku(self, *, sku_id: uuid.UUID | None = None,
+                                  sku_code: str | None = None,
+                                  operation_id: uuid.UUID | None = None) -> dict:
+        """Every minted piece of a SKU — the scan screen's checklist.
+        With operation_id each piece is flagged done_at_op so the UI can badge
+        the ones already logged there. Deliberately NOT gated on the previous
+        stage: surface state, let the manager decide (same as scan())."""
+        sku_id = await self._resolve_sku_id(sku_id, sku_code)
+        if not sku_id:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "Provide sku_id or sku_code.")
+        sku = await self.clients.get_sku(sku_id)
+        if not sku:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "SKU not found")
+
+        op = None
+        if operation_id:
+            op = await self.repo.get_operation(operation_id)
+            if not op:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Operation not found")
+
+        rows = await self.repo.list_pieces_for_sku(sku_id)
+        done_ids: set[uuid.UUID] = set()
+        if op:
+            done_ids = await self.repo.piece_ids_done_at_op(
+                [p.id for p, _, _ in rows], op.id)
+
+        pieces = [
+            {"piece_id": p.id, "code": p.code, "seq": p.seq,
+             "current_stage": scode, "current_stage_label": slabel,
+             "done_at_op": p.id in done_ids}
+            for p, scode, slabel in rows
+        ]
+        done = sum(1 for x in pieces if x["done_at_op"])
+        return {
+            "sku_id": sku_id, "sku_code": sku.code,
+            "colour": sku.color_name or sku.color_code, "size": sku.size,
+            "operation_id": op.id if op else None,
+            "operation_code": op.code if op else None,
+            "total": len(pieces), "done": done, "pending": len(pieces) - done,
+            "pieces": pieces,
+        }
 
     # # --------------------------------------------------- legacy generic event
     
@@ -745,5 +863,3 @@ class ProductionService:
                                     f"Unknown SKU code '{sku_code}'")
             return sku.id
         return None
-
-

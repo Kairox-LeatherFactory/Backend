@@ -1,0 +1,1561 @@
+﻿============================================================
+PROJECT STRUCTURE
+============================================================
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\chatbot_smoke.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\db_inspect.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\demo_gemini_bom.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\export_openapi.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\importer_smoke.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\list_logins.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\rag_smoke.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\scripts_dump.txt
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\seed.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\smoke_test.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\test_wages_e2e.py
+
+============================================================
+PROJECT FILES
+============================================================
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\chatbot_smoke.py
+============================================================
+
+"""
+================================================================================
+scripts/chatbot_smoke.py — End-to-end smoke test of the Intelligence chatbot
+================================================================================
+Seeds a small but realistic factory dataset into an in-memory SQLite DB, then
+exercises every chatbot layer and prints a pass/fail report:
+
+  1. tools.py            — each factory tool returns structured numbers
+  2. agent.py            — DeterministicRouter routes questions -> tools (no key)
+  3. models_catalog.py   — model registry introspection
+  4. rag.py              — answer_from_docs is non-fatal when no doc is present
+  5. langgraph_agent.py  — REAL LangGraph ReAct agent driven by the Groq model
+                           (CHAT_MODEL + GROQ_API_KEY from .env)
+
+Run:  .venv\\Scripts\\python.exe -m scripts.chatbot_smoke
+================================================================================
+"""
+import asyncio
+import os
+import sys
+from datetime import date, timedelta
+
+# Make `import app...` work when run as a module or a file.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Use an isolated in-memory DB for this smoke test (set before importing app).
+os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
+
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
+
+import app.core.database as dbmod
+from app.core.database import Base
+from app.core.config import settings
+from app.core.enums import WageType
+
+# Import models so metadata is complete.
+from app.modules.users import models as _u   # noqa
+from app.modules.clients import models as cm
+from app.modules.employees import models as em
+from app.modules.production import models as pm
+from app.modules.wages import models as _w   # noqa
+
+from app.modules.intelligence import tools
+from app.modules.intelligence.agent import DeterministicRouter
+from app.modules.intelligence.models_catalog import list_models
+from app.modules.intelligence.rag import answer_from_docs
+
+
+TODAY = date.today()
+PASS, FAIL = "\033[92mPASS\033[0m", "\033[91mFAIL\033[0m"
+_results = []
+
+
+def check(name: str, ok: bool, detail: str = ""):
+    _results.append(ok)
+    mark = PASS if ok else FAIL
+    print(f"  [{mark}] {name}" + (f"  — {detail}" if detail else ""))
+
+
+async def seed(db):
+    """A single client/PO/style 'CARNABY', ordered 200, behind schedule, with a
+    clear CUTTING->FF bottleneck in the last 14 days."""
+    client = cm.Client(name="Carnaby Co", country="UK"); db.add(client); await db.flush()
+    po = cm.ClientOrder(
+        client_id=client.id, order_number="PO-CARNABY-01",
+        order_date=TODAY - timedelta(days=40),
+        delivery_deadline=TODAY + timedelta(days=7),   # tight -> behind schedule
+    ); db.add(po); await db.flush()
+    style = cm.Style(client_order_id=po.id, name="CARNABY"); db.add(style); await db.flush()
+    sku = cm.SKU(style_id=style.id, color_code="57", color_name="PINE GREEN",
+                 size="M", qty_ordered=200); db.add(sku); await db.flush()
+
+    ops = {}
+    for i, code in enumerate(["CUTTING", "FUSING", "PASTING", "SHELL", "LA", "LS", "FF"], start=1):
+        op = pm.Operation(code=code, label=code.title(), sequence=i)
+        db.add(op); ops[code] = op
+    await db.flush()
+
+    worker = em.Employee(name="MD Afzal", designation="MULTI", wage_type=WageType.PIECE_RATE)
+    db.add(worker); await db.flush()
+
+    # Production over the last 12 days: CUTTING fast (~16/day), FF slow (~8/day).
+    # => FF is the bottleneck and the style is behind (only ~96 of 200 finished).
+    for d in range(1, 13):
+        wd = TODAY - timedelta(days=d)
+        db.add(pm.ProductionEvent(sku_id=sku.id, operation_id=ops["CUTTING"].id,
+                                  employee_id=worker.id, work_date=wd, qty=16))
+        db.add(pm.ProductionEvent(sku_id=sku.id, operation_id=ops["FF"].id,
+                                  employee_id=worker.id, work_date=wd, qty=8))
+    await db.commit()
+    return style
+
+
+async def main():
+    print("=" * 78)
+    print("CHATBOT SMOKE TEST")
+    print("=" * 78)
+
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    dbmod.async_engine = engine
+    dbmod.AsyncSessionLocal = async_sessionmaker(bind=engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with dbmod.AsyncSessionLocal() as db:
+        await seed(db)
+
+        # ── 1. tools.py ────────────────────────────────────────────────────
+        print("\n[1] tools.py — structured factory tools")
+        ov = await tools.tool_overview(db)
+        check("tool_overview", ov["ok"] and ov["styles"] == 1 and ov["total_ordered"] == 200,
+              f"{ov['total_finished']}/{ov['total_ordered']} finished ({ov['pct_complete']}%)")
+        ss = await tools.tool_schedule_status(db, "carnaby")
+        check("tool_schedule_status", ss["ok"], ss.get("headline", ""))
+        bn = await tools.tool_bottleneck(db)
+        check("tool_bottleneck", bn["ok"], f"flagged={[f['stage'] for f in bn.get('flagged', [])]}")
+        pl = await tools.tool_plan(db)
+        check("tool_plan", pl["ok"] and len(pl["plan"]) >= 1, f"{len(pl['plan'])} style(s) planned")
+
+        # ── 2. agent.py (deterministic router, no key) ─────────────────────
+        print("\n[2] agent.py — DeterministicRouter (no model)")
+        det = DeterministicRouter()
+        for q in ["Is CARNABY on schedule?",
+                  "Where is the bottleneck?",
+                  "Give me a factory overview",
+                  "Plan production, CARNABY leather is late."]:
+            r = await det.answer(db, q)
+            check(f'Q: "{q}"', bool(r.get("answer")), r["answer"][:90])
+
+        # ── 3. models_catalog.py ───────────────────────────────────────────
+        print("\n[3] models_catalog.py — registry")
+        cat = list_models()
+        check("list_models", "embeddings" in cat and "chat_models" in cat,
+              f"{len(cat['embeddings'])} embeddings, {len(cat['chat_models'])} chat models")
+
+        # ── 4. rag.py (non-fatal without a doc) ─────────────────────────────
+        print("\n[4] rag.py — answer_from_docs (graceful)")
+        rag = answer_from_docs("what happens during the fusing stage?")
+        check("answer_from_docs returns a dict (non-fatal)", isinstance(rag, dict),
+              rag.get("note", "ok"))
+
+        # ── 5. langgraph_agent.py with the REAL Groq model ─────────────────
+        print(f"\n[5] langgraph_agent.py — REAL Groq model: CHAT_MODEL={settings.chat_model!r}")
+        spec = settings.chat_model or None
+        has_key = bool(os.environ.get("GROQ_API_KEY"))
+        check("GROQ_API_KEY present in environment", has_key)
+        if not (spec and has_key):
+            check("Groq agent run", False, "CHAT_MODEL / GROQ_API_KEY not set — skipping live call")
+        else:
+            from app.modules.intelligence.langgraph_agent import run_langgraph, load_chat_model
+            model = load_chat_model(spec)
+            check("load_chat_model resolved a real model", model is not None,
+                  type(model).__name__ if model else "None (fell back to fake)")
+            for q in ["Is CARNABY on schedule?", "Where is the production bottleneck?"]:
+                try:
+                    r = await run_langgraph(db, q, model_spec=spec)
+                    used_real = r.get("data", {}).get("model") != "fake"
+                    tool_called = r.get("tool")
+                    ok = bool(r.get("answer")) and used_real
+                    check(f'Groq Q: "{q}"', ok,
+                          f"tool={tool_called} | model={r['data'].get('model')} | "
+                          f"answer={r['answer'][:120]}")
+                except Exception as e:
+                    check(f'Groq Q: "{q}"', False, f"{type(e).__name__}: {e}")
+
+    await engine.dispose()
+
+    print("\n" + "=" * 78)
+    passed, total = sum(_results), len(_results)
+    print(f"RESULT: {passed}/{total} checks passed")
+    print("=" * 78)
+    sys.exit(0 if passed == total else 1)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\db_inspect.py
+============================================================
+
+"""READ-ONLY Supabase/Postgres inspection. Connects, lists public tables and
+row counts, and reports the server version. Writes NOTHING.
+
+Run:  .venv\\Scripts\\python.exe -m scripts.db_inspect
+"""
+import asyncio
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from app.core.config import settings
+
+
+async def main():
+    url = settings.effective_async_url
+    # mask the password in any printout
+    safe = url
+    if "@" in safe and "://" in safe:
+        head, tail = safe.split("://", 1)
+        creds, host = tail.split("@", 1)
+        if ":" in creds:
+            user = creds.split(":", 1)[0]
+            safe = f"{head}://{user}:****@{host}"
+    print("=" * 74)
+    print("SUPABASE / POSTGRES READ-ONLY INSPECTION")
+    print("=" * 74)
+    print(f"Async URL: {safe}")
+
+    # asyncpg on the Supabase pooler: disable statement cache for safety.
+    engine = create_async_engine(
+        url, connect_args={"statement_cache_size": 0}, pool_pre_ping=True
+    )
+    try:
+        async with engine.connect() as conn:
+            ver = (await conn.execute(text("select version()"))).scalar()
+            print(f"\n[OK] Connected. Server: {ver}")
+
+            rows = (await conn.execute(text(
+                "select table_name from information_schema.tables "
+                "where table_schema='public' order by table_name"
+            ))).scalars().all()
+            print(f"\nPublic tables ({len(rows)}):")
+            if not rows:
+                print("  (none — schema is empty)")
+            for t in rows:
+                try:
+                    c = (await conn.execute(text(f'select count(*) from "{t}"'))).scalar()
+                except Exception as e:
+                    c = f"err: {e}"
+                print(f"  - {t:<28} rows={c}")
+        print("\n[OK] Inspection complete. No data was modified.")
+    finally:
+        await engine.dispose()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\demo_gemini_bom.py
+============================================================
+
+"""
+================================================================================
+scripts/demo_gemini_bom.py — END-TO-END demo: upload → Gemini extract → BOM → PDF
+================================================================================
+A one-off driver that exercises the REAL Stage-1→2→3 services against in-memory
+SQLite + local-FS storage, using a live Gemini key for the LLM/vision rungs:
+
+  1. seed the Stage-2 registries (garment types, POM dict) + client templates + a
+     Beau Geste client + a DM user;
+  2. open a submission and UPLOAD both real sheets through the actual validation
+     pipeline (scan→sniff→classify); a needs_manual_review verdict is force-accepted
+     so the demo proceeds (logged as an override);
+  3. generate the DRAFT BOM from the submission — the scanned ORDER PDF goes through
+     Gemini VISION, the spec grid is parsed deterministically;
+  4. confirm cutting → approve (materialises the order/style) → export the BOM PDF;
+  5. copy the rendered PDF to var/demo-output/ and print the path.
+
+The Gemini key is read from the GEMINI_API_KEY env var (set by the caller) — it is
+never written to disk by this script.
+
+Run:  GEMINI_API_KEY=... VIRUS_SCAN_ENABLED=false python -m scripts.demo_gemini_bom
+================================================================================
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import shutil
+import sys
+import uuid
+from pathlib import Path
+
+# ── env MUST be set before importing app.core.config (it caches settings) ─────
+os.environ.setdefault("SECRET_KEY", "demo-secret")
+os.environ.setdefault("VIRUS_SCAN_ENABLED", "false")     # no clamd in this demo
+os.environ.setdefault("EMAIL_BACKEND", "noop")
+os.environ.setdefault("NOTIFICATION_SWEEPER_ENABLED", "false")
+os.environ.setdefault("PO_ESCALATION_SWEEPER_ENABLED", "false")
+os.environ.setdefault("LOG_LEVEL", "INFO")
+# Keep the Gemini free-tier per-minute / input-token budget in reach: the order
+# extraction is the ONE vision call we care about, so send a single low-DPI page.
+os.environ.setdefault("VISION_MAX_PAGES", "1")
+os.environ.setdefault("OCR_DPI", "130")
+# Let the Gemini client RETRY through a transient free-tier per-minute 429 (it honours
+# the server's retry_delay) instead of giving up on the first hit and falling back.
+os.environ.setdefault("LLM_MAX_RETRIES", "6")
+os.environ.setdefault("LLM_REQUEST_TIMEOUT", "60")
+# Seconds to pause after the upload phase so the per-minute Gemini window resets
+# before the (token-heavy) order vision extraction. Override with GENERATE_DELAY.
+GENERATE_DELAY = int(os.environ.get("GENERATE_DELAY", "20"))
+
+REPO = Path(__file__).resolve().parent.parent
+OUT_DIR = REPO / "var" / "demo-output"
+STORAGE_DIR = OUT_DIR / "storage"
+os.environ.setdefault("STORAGE_BACKEND", "local")
+os.environ["LOCAL_STORAGE_DIR"] = str(STORAGE_DIR)
+
+import yaml  # noqa: E402
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
+
+import app.core.database as dbmod  # noqa: E402
+from app.core.database import Base  # noqa: E402
+from app.core.config import settings  # noqa: E402
+
+# import every module's models so create_all builds the full schema
+from app.core import models as _core_models  # noqa: E402,F401
+from app.modules.users import models as _u  # noqa: E402,F401
+from app.modules.clients import models as _c  # noqa: E402,F401
+from app.modules.employees import models as _e  # noqa: E402,F401
+from app.modules.production import models as _p  # noqa: E402,F401
+from app.modules.wages import models as _w  # noqa: E402,F401
+from app.modules.attendance import models as _a  # noqa: E402,F401
+from app.modules.procurement import models as _pr  # noqa: E402,F401
+from app.modules.bom import models as _bom  # noqa: E402,F401
+from app.modules.inventory import models as _inv  # noqa: E402,F401
+from app.modules.supplier_po import models as _spo  # noqa: E402,F401
+
+from app.core.enums import UserRole  # noqa: E402
+from app.modules.bom.models import GarmentType, PomDictionary  # noqa: E402
+from app.modules.bom.seed_stage2 import _GARMENT_YAML, _POM_DICT_YAML  # noqa: E402
+from app.modules.bom.service import BomService  # noqa: E402
+from app.modules.clients.models import Client  # noqa: E402
+from app.modules.procurement.models import ClientTemplate  # noqa: E402
+from app.modules.procurement.seed_templates import load_template_rows  # noqa: E402
+from app.modules.procurement.errors import UploadError  # noqa: E402
+from app.modules.procurement.service import ProcurementService  # noqa: E402
+from app.modules.users.models import User  # noqa: E402
+from app.core.storage import get_storage, reset_storage_cache  # noqa: E402
+
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)-7s %(name)s | %(message)s")
+log = logging.getLogger("demo")
+
+ORDER_PDF = REPO / "data" / "Order-sheet-1.pdf"
+SPEC_XLSX = REPO / "data" / "spec_sheet_1.xlsx"
+PDF_MIME = "application/pdf"
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def rule(title: str) -> None:
+    print("\n" + "=" * 78 + f"\n  {title}\n" + "=" * 78)
+
+
+async def seed(session) -> tuple[Client, User]:
+    # garment types + POM dictionary (the Stage-2 reference registries)
+    for r in yaml.safe_load(open(_GARMENT_YAML, encoding="utf-8")):
+        session.add(GarmentType(code=r["code"], label=r.get("label"),
+                                required_poms=r.get("required_poms") or [],
+                                area_formula=r.get("area_formula") or {},
+                                default_wastage_pct=r.get("default_wastage_pct")))
+    await session.flush()
+    for r in yaml.safe_load(open(_POM_DICT_YAML, encoding="utf-8")):
+        session.add(PomDictionary(language=r["language"], source_term=r["source_term"],
+                                  pom_code=r["pom_code"], weight=r.get("weight", 1)))
+    # client validation templates (so the heuristic knows beau_geste's signals)
+    for r in load_template_rows():
+        session.add(ClientTemplate(
+            client_code=r["client_code"], doc_kind=r["doc_kind"],
+            display_name=r.get("display_name"), language=r.get("language"),
+            size_system=r.get("size_system"), currency=r.get("currency"),
+            expected_layout=r.get("expected_layout"), spec_type_hint=r.get("spec_type_hint"),
+            accepted_mime=r.get("accepted_mime"), anchors=r.get("anchors") or [],
+            fingerprints=r.get("fingerprints") or [], grid_signals=r.get("grid_signals") or {},
+            thresholds=r.get("thresholds") or {}, is_active=r.get("is_active", True)))
+    client = Client(name="Beau Geste / CRIMIE", country="Japan", code="BG", currency="USD")
+    user = User(id=uuid.uuid4(), name="Demo DM", phone="9000000001",
+                role=UserRole.DIRECT_MANAGER, password_hash="x", is_active=True)
+    session.add_all([client, user])
+    await session.commit()
+    return client, user
+
+
+async def upload(svc: ProcurementService, user, sub_id, kind: str, path: Path,
+                 *, is_order: bool) -> None:
+    data = path.read_bytes()
+    fn = path.name
+    method = svc.upload_order_sheet if is_order else svc.upload_spec_sheet
+    # Pass override on the first call: a scanned PDF the classifier can only call
+    # needs_manual_review is force-accepted in ONE round (no redundant re-run + no
+    # second vision burst). A clean heuristic accept (the spec) ignores the flag.
+    try:
+        res = await method(user, sub_id, data, fn, override_manual_review=True)
+        v = res.get("validation", {})
+        forced = v.get("manual_override") or v.get("forced")
+        print(f"  ✅ {kind}: {'force-accepted (manual override)' if forced else 'ACCEPTED'}"
+              f" — method={v.get('method', 'heuristic')}")
+    except UploadError as exc:
+        # A HARD reject (wrong slot / not-the-kind / virus) is never overridable.
+        print(f"  ❌ {kind}: hard-rejected '{exc.reason.value}' — cannot proceed")
+        raise
+
+
+async def main() -> int:
+    if not ORDER_PDF.exists() or not SPEC_XLSX.exists():
+        print(f"Missing demo files: {ORDER_PDF} / {SPEC_XLSX}")
+        return 2
+    if not settings.gemini_api_key:
+        print("GEMINI_API_KEY is not set — export it before running this demo.")
+        return 2
+
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    reset_storage_cache()
+
+    engine = create_async_engine("sqlite+aiosqlite://",
+                                 connect_args={"check_same_thread": False},
+                                 poolclass=StaticPool)
+    dbmod.async_engine = engine
+    dbmod.AsyncSessionLocal = async_sessionmaker(bind=engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with dbmod.AsyncSessionLocal() as session:
+        rule("1. SEED (garment types, POM dict, client templates, client, DM user)")
+        client, user = await seed(session)
+        print(f"  client={client.name} ({client.code})  gemini_model={settings.vision_model}")
+
+        # Spend ZERO Gemini at the upload step (heuristic gate only; the scanned order is
+        # force-accepted) so the ENTIRE free-tier per-minute budget is reserved for the one
+        # call that matters — the order vision EXTRACTION at generate.
+        svc = ProcurementService(session, classifier=None, vision_classifier=None)
+        rule("2. OPEN SUBMISSION + UPLOAD both sheets (real validation pipeline)")
+        sub = await svc.open_submission(user, client.id)
+        print(f"  submission={sub.id}")
+        await upload(svc, user, sub.id, "ORDER (scanned PDF → Gemini vision)",
+                     ORDER_PDF, is_order=True)
+        await upload(svc, user, sub.id, "SPEC  (xlsx measurement grid)",
+                     SPEC_XLSX, is_order=False)
+
+        status = await svc.get_submission_status(sub.id)
+        print(f"  submission status = {status['status']}")
+
+        if GENERATE_DELAY:
+            print(f"\n  …pausing {GENERATE_DELAY}s so the Gemini per-minute window resets "
+                  f"before the order vision extraction…")
+            await asyncio.sleep(GENERATE_DELAY)
+
+        rule("3. GENERATE BOM from submission (Gemini extracts the order)")
+        gen = await svc.generate_bom_from_submission(user, sub.id)
+        bom = gen["bom"]
+        bom_id = uuid.UUID(bom["id"])
+        order = gen.get("order", {})
+        print(f"  BOM {bom['id']}  status={bom['status']}  revision={bom['revision']}")
+        print(f"  order_qty={order.get('order_qty')}  per_size={order.get('per_size_qty')}")
+        print(f"  order warnings={order.get('warnings')}")
+        print(f"  extraction: POMs={gen['extraction']['poms']} "
+              f"unresolved={len(gen['extraction']['unresolved'])}")
+        print(f"  FOB/garment={bom['garment_fob_price']}  bulk_total={bom['bulk_total']}")
+        print(f"  {len(bom['items'])} line items:")
+        for it in bom["items"]:
+            print(f"    - [{it['category']:>14}] {it['name'][:34]:34} "
+                  f"qpg={it['qty_per_garment']} {it['uom'] or '':>4} "
+                  f"@ {it['unit_price']}  dcm={it['dcm_source']}")
+
+        rule("4. CONFIRM CUTTING → APPROVE → EXPORT PDF")
+        bsvc = BomService(session)
+        await bsvc.confirm_cutting(user, bom_id)
+        print("  cutting confirmed → ready_for_review")
+        await bsvc.approve_bom(user, bom_id)
+        print("  approved (order/style breakdown materialised)")
+        exp = await bsvc.export_bom(user, bom_id)
+        print(f"  exported: status={exp['status']} sha={exp['sha256'][:12]} mime={exp['mime']}")
+
+        # copy the rendered PDF out of object storage to a friendly path
+        src_dir = STORAGE_DIR / "exports" / str(bom_id)
+        pdfs = sorted(src_dir.glob("*"))
+        if not pdfs:
+            print("  ⚠️  no exported file found in storage")
+            return 1
+        dest = OUT_DIR / f"BOM-{bom_id}.pdf"
+        shutil.copyfile(pdfs[-1], dest)
+        rule("DONE")
+        print(f"  📄 BOM PDF written to:\n     {dest}")
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\export_openapi.py
+============================================================
+
+"""Export the OpenAPI spec to a file your frontend can mock against (Prism/MSW).
+
+Run: python -m scripts.export_openapi  ->  openapi.json
+Then your frontend dev runs:  prism mock openapi.json   (a full fake API, instantly)
+"""
+import os, sys, json
+os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
+os.environ.setdefault("SECRET_KEY", "export-only")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from app.main import app
+
+spec = app.openapi()
+with open("openapi.json", "w") as f:
+    json.dump(spec, f, indent=2)
+print(f"Wrote openapi.json with {len(spec['paths'])} paths")
+for p in sorted(spec["paths"]):
+    methods = ",".join(m.upper() for m in spec["paths"][p])
+    print(f"  {methods:12s} {p}")
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\importer_smoke.py
+============================================================
+
+"""READ-ONLY importer test: parse every workbook in ./data with build_preview
+and print the extraction LOG (per-sheet classification, per-client totals,
+warnings). Writes NOTHING to any database.
+
+Run:  .venv\\Scripts\\python.exe -m scripts.importer_smoke
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app.modules.imports.import_engine import build_preview
+
+DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+FILES = ["GARMENT_ORDERPRODUCTION_DETAILS.xlsx", "johnpeter.xlsx", "employees_detail.xlsx"]
+
+
+def main():
+    print("=" * 78)
+    print("IMPORTER READ-ONLY TEST (Excel -> structured preview + log)")
+    print("=" * 78)
+    grand_clients = grand_pieces = grand_warn = 0
+
+    for fname in FILES:
+        path = os.path.join(DATA, fname)
+        print(f"\n### {fname}")
+        if not os.path.exists(path):
+            print("  (not found — skipped)")
+            continue
+        try:
+            preview = build_preview(path)
+            summary = preview.summary()
+        except Exception as e:
+            print(f"  [ERROR] {type(e).__name__}: {e}")
+            continue
+
+        # Per-sheet classification log
+        print(f"  Sheets ({len(summary['sheets'])}):")
+        for s in summary["sheets"]:
+            print(f"    - {s['sheet']:<28} type={s['type']:<11} client={s['client']}")
+
+        # Per-client extraction totals
+        print(f"  Clients ({len(summary['clients'])}):")
+        for key, c in summary["clients"].items():
+            grand_clients += 1
+            grand_pieces += c["pieces_ordered"]
+            grand_warn += len(c["warnings"])
+            print(f"    - {key:<10} order_lines={c['order_lines']:<4} "
+                  f"pieces_ordered={c['pieces_ordered']:<6} "
+                  f"styles={len(c['styles']):<3} prod_cards={c['production_cards']}")
+            for w in c["warnings"][:5]:
+                print(f"         warn: {w}")
+            if len(c["warnings"]) > 5:
+                print(f"         ... (+{len(c['warnings']) - 5} more warnings)")
+        print(f"  total_warnings={summary['total_warnings']}")
+
+    print("\n" + "=" * 78)
+    print(f"GRAND TOTAL: {grand_clients} client-groups, {grand_pieces} pieces ordered, "
+          f"{grand_warn} warnings")
+    print("Extraction + logging works. No DB writes performed.")
+    print("=" * 78)
+
+
+if __name__ == "__main__":
+    main()
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\list_logins.py
+============================================================
+
+"""READ-ONLY: list app_user phones/roles (NO password hashes) to find a login
+to test with. Writes nothing."""
+import asyncio, os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+from app.core.config import settings
+
+
+async def main():
+    engine = create_async_engine(settings.effective_async_url,
+                                 connect_args={"statement_cache_size": 0})
+    async with engine.connect() as conn:
+        rows = (await conn.execute(text(
+            "select role, count(*) from app_user group by role order by role"
+        ))).all()
+        print("Roles:")
+        for r, c in rows:
+            print(f"  {r}: {c}")
+        mgr = (await conn.execute(text(
+            "select name, phone, role::text, must_change_password, is_active "
+            "from app_user where role::text = 'DIRECT_MANAGER' limit 3"
+        ))).all()
+        print("\nDirect managers (phone is the default password if never changed):")
+        for name, phone, role, mcp, active in mgr:
+            print(f"  name={name!r} phone={phone!r} active={active} must_change_password={mcp}")
+    await engine.dispose()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\rag_smoke.py
+============================================================
+
+"""Validate the RAG vector pipeline (sentence-transformers + FAISS + langchain).
+Builds a real FAISS index over a tiny temp workflow doc and runs a query.
+Run:  .venv\\Scripts\\python.exe -m scripts.rag_smoke
+"""
+import os
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import app.modules.intelligence.rag as rag
+
+DOC = """The leather factory workflow has seven stages.
+Cutting cuts the leather panels to the pattern.
+Fusing bonds interlining to the shell panels with heat and pressure.
+Pasting glues the folded edges before stitching.
+Shell stitching assembles the outer body of the garment.
+LA and LS are lining assembly and lining stitching.
+FF is the final finishing stage: trimming, pressing, and packing.
+A delay in Cutting cascades downstream because every later stage is starved of panels.
+"""
+
+
+def main():
+    print("=" * 70)
+    print("RAG PIPELINE SMOKE TEST (embeddings + FAISS)")
+    print("=" * 70)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "Leather_Factory_Workflow.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(DOC)
+
+        rag._VECTORSTORE = None  # reset cache
+        print("Building FAISS index (downloads all-MiniLM-L6-v2 on first run)...")
+        vs = rag.build_index(doc_path=path, embedding_model="all-MiniLM-L6-v2")
+        assert vs is not None, "FAILED: index did not build (deps/model issue)"
+        print("  [PASS] FAISS index built from workflow doc")
+
+        # Point answer_from_docs at our temp index (already cached in _VECTORSTORE).
+        res = rag.answer_from_docs("what happens during the fusing stage?")
+        assert res["ok"], f"FAILED: {res}"
+        assert res.get("passages"), "FAILED: no passages retrieved"
+        top = res["passages"][0]
+        print(f"  [PASS] retrieved {len(res['passages'])} passage(s); "
+              f"top score={top['score']}")
+        print(f"        top passage: {top['text'][:100]!r}")
+        ok = "fus" in top["text"].lower()
+        print(f"  [{'PASS' if ok else 'WARN'}] top passage is about fusing: {ok}")
+
+    print("=" * 70)
+    print("RAG RESULT: pipeline functional (sentence-transformers + FAISS + langchain)")
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    main()
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\seed.py
+============================================================
+
+"""
+================================================================================
+scripts/seed.py — Populate the database from the REAL factory spreadsheets
+================================================================================
+
+PURPOSE
+    A single runnable script that loads everything needed to demo/operate the
+    platform, derived from the actual files in /mnt/project:
+      - employees_detail.xlsx               (24 monthly + 22 piece-rate workers)
+      - GARMENT_ORDERPRODUCTION_DETAILS.xlsx (6 clients: KJ, GGZ, NIPAL, RICANO,
+                                              JP, NIPAL-NEW — orders + production)
+      - johnpeter.xlsx                       (a 7th flat-format client: John Peter)
+
+    What it seeds, in order:
+      1. Operations (CUTTING..FF) and role->operation access rules.
+      2. Client orders + styles + SKUs (via the proven idempotent import engine).
+      3. Employees, with MOCKED phone/email (real files have no contact data).
+      4. Piece-rate Rates from the production cards.
+      5. USER LOGINS for everyone:
+           - 1 managing director (superuser), 1 direct manager, 1 cutting manager,
+             1 stitching manager, 1 viewer, 1 HR
+           - 1 EMPLOYEE login per employee   (linked via employee_id)
+           - 1 CLIENT login per client       (linked via client_id)
+         Password defaults to the user's phone (bcrypt-hashed) and
+         must_change_password=True, so every account is forced to reset on first
+         login.
+
+WHY SYNC
+    Bulk seeding is a one-shot batch job. It uses the SYNC engine/session from
+    core/database.py (the same one Alembic uses) — simpler and perfectly fine
+    off the request path. The live API remains fully async.
+
+USAGE
+    # from the project root, with .env pointing DATABASE_URL at your DB:
+    python -m scripts.seed
+    # or:  python scripts/seed.py
+
+    Idempotent enough to re-run in dev: existing rows are reused, not duplicated.
+
+MOCKED CREDENTIALS (v1)
+    Phones are generated deterministically so logins are predictable in a demo:
+      direct manager   90000000 01
+      cutting manager  90000000 02
+      stitching mgr    90000000 03
+      viewer           90000000 04
+      employees        9100000 0NN   (NN = sequential)
+      clients          9200000 0NN   (NN = sequential)
+    Email = a slugified name @ factory.local. REPLACE with real data before
+    production use; phone-as-password is a known weak default.
+================================================================================
+"""
+import os
+import re
+import sys
+from datetime import date
+
+# Make `import app...` work whether run as a module or a file.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import openpyxl
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.core.database import Base, SessionLocal, engine
+from app.core.enums import UserRole, WageType
+from app.core.security import get_password_hash
+
+# Import models (registers tables on Base.metadata).
+from app.modules.users.models import User
+from app.modules.employees.models import Employee
+from app.modules.clients.models import Client, Style
+from app.modules.production.models import Operation, OperationAccess
+from app.modules.wages.models import Rate
+from app.modules.attendance.models import AttendanceLog, ShiftConfig  # noqa: F401
+from app.core import models as _core_models  # noqa: F401  (cross-cutting tables)
+from app.modules.procurement import models as _procurement  # noqa: F401
+from app.modules.bom import models as _bom  # noqa: F401
+from app.modules.inventory import models as _inv  # noqa: F401
+from app.modules.supplier_po import models as _spo  # noqa: F401
+from app.modules.procurement.seed_templates import seed_client_templates
+from app.modules.bom.seed_stage2 import seed_stage2
+from app.modules.inventory.seed_inventory import seed_inventory
+
+# Import engine (sync) for the spreadsheets.
+from app.modules.imports.import_engine import build_preview
+from app.modules.imports.parse_orders import parse_order_sheet
+from app.modules.imports.load_to_db import (
+    load_preview, _get_or_create_client, _get_or_create_order,
+    _get_or_create_style, _upsert_sku,
+)
+
+# ── Reference data ────────────────────────────────────────────────────────
+GARMENT_FILE = "data/GARMENT_ORDERPRODUCTION_DETAILS.xlsx"
+EMPLOYEES_FILE = "data/employees_detail.xlsx"
+JOHNPETER_FILE = "data/johnpeter.xlsx"
+
+OPS = [("CUTTING", "Cutting", 1), ("FUSING", "Fusing", 2), ("PASTING", "Pasting", 3),
+       ("SHELL", "Shell stitch", 4), ("LA", "Lining attach", 5),
+       ("LS", "Lining stitch", 6), ("FF", "Final finish", 7)]
+
+# Which manager role may log which operation (config, not hardcoded in code).
+ACCESS = {
+    UserRole.CUTTING_MANAGER.value: ["CUTTING"],
+    UserRole.STITCHING_MANAGER.value: ["FUSING", "PASTING", "SHELL", "LA", "LS", "FF"],
+}
+
+# Map each spreadsheet client key to a friendly name + country (best-effort).
+CLIENT_META = {
+    "KJ": ("Khawaja (KJ)", "Pakistan"),
+    "GGZ": ("GGZ SRL", "Italy"),
+    "NIPAL": ("Nipal", "Italy"),
+    "RICANO": ("Ricano", "Spain"),
+    "JP": ("JP Garments", "India"),
+    "NIPAL-NEW": ("Nipal (New)", "Italy"),
+}
+
+DEFAULT_RATE_DATE = date(2026, 1, 1)
+
+
+def _slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", ".", name.strip().lower()).strip(".")
+
+
+# ── Step 1: operations + access ─────────────────────────────────────────────
+def seed_operations(db: Session) -> dict[str, Operation]:
+    ops: dict[str, Operation] = {}
+    for code, label, seq in OPS:
+        o = db.scalar(select(Operation).where(Operation.code == code))
+        if not o:
+            o = Operation(code=code, label=label, sequence=seq)
+            db.add(o); db.flush()
+        ops[code] = o
+    for role, codes in ACCESS.items():
+        for code in codes:
+            exists = db.scalar(select(OperationAccess).where(
+                OperationAccess.role == role,
+                OperationAccess.operation_id == ops[code].id))
+            if not exists:
+                db.add(OperationAccess(role=role, operation_id=ops[code].id))
+    db.commit()
+    return ops
+
+
+# ── Step 2: client orders from both workbooks ───────────────────────────────
+def seed_orders(db: Session) -> None:
+    # Multi-sheet workbook (6 clients) via the auto-detecting import engine.
+    # We keep the raw client keys (KJ, GGZ, NIPAL, RICANO, JP, NIPAL-NEW) as the
+    # stored client names so the importer's get-or-create-by-name stays idempotent
+    # across re-runs. The friendly names live in CLIENT_META for display use.
+    preview = build_preview(GARMENT_FILE)
+    country_map = {k: meta[1] for k, meta in CLIENT_META.items()}
+    load_preview(db, preview, country_map=country_map, replace=True)
+    db.commit()
+
+    # John Peter — a flat single-sheet order (Date|Style|Suede Colour|Article|sizes).
+    wb = openpyxl.load_workbook(JOHNPETER_FILE, data_only=True)
+    lines, _ = parse_order_sheet(wb.active)
+    jp = _get_or_create_client(db, "John Peter", "Italy")
+    order = _get_or_create_order(db, jp, "JOHNPETER-PO")
+    for line in lines:
+        style = _get_or_create_style(db, order, line.style, line.article)
+        for size, qty in line.sizes.items():
+            _upsert_sku(db, order, style, line.color, size, qty)
+    db.commit()
+
+
+# ── Step 3: employees with mocked contact details ───────────────────────────
+def seed_employees(db: Session) -> list[Employee]:
+    """The file has two blocks separated by 'per pieces based salary':
+    above = MONTHLY staff, below = PIECE_RATE workers."""
+    wb = openpyxl.load_workbook(EMPLOYEES_FILE, data_only=True)
+    ws = wb.active
+    piece_rate_mode = False
+    seeded: list[Employee] = []
+    idx = 0
+    for r in range(1, ws.max_row + 1):
+        b = ws.cell(r, 2).value
+        if isinstance(b, str) and "per pieces" in b.lower():
+            piece_rate_mode = True
+            continue
+        name = ws.cell(r, 2).value
+        desig = ws.cell(r, 3).value
+        sno = ws.cell(r, 1).value
+        if not name or not isinstance(sno, (int, float)) or not desig:
+            continue
+        name = str(name).strip()
+        existing = db.scalar(select(Employee).where(Employee.name == name))
+        if existing:
+            seeded.append(existing)
+            continue
+        idx += 1
+        emp = Employee(
+            name=name,
+            designation=str(desig).strip(),
+            wage_type=WageType.PIECE_RATE if piece_rate_mode else WageType.MONTHLY,
+            monthly_salary=None if piece_rate_mode else 0,
+            phone=f"910000{idx:04d}",                 # MOCKED
+            email=f"{_slug(name)}@factory.local",     # MOCKED
+        )
+        db.add(emp); db.flush()
+        seeded.append(emp)
+    db.commit()
+    return seeded
+
+
+# ── Step 4: piece-rate rates from production cards ───────────────────────────
+def seed_rates(db: Session, ops: dict[str, Operation]) -> int:
+    """Read RATE rows from the production cards and attach to matching styles.
+    The import engine already parsed these; we re-read for rate attachment."""
+    preview = build_preview(GARMENT_FILE)
+    # Normalise card op codes (e.g. 'L/A' -> 'LA', 'LINING STICH' -> 'LS').
+    code_norm = {"L/A": "LA", "LINING STICH": "LS", "FF-SAMPLE": "FF",
+                 "FF-SMS": "FF", "LINING STITCH": "LS"}
+    count = 0
+    seen: set = set()        # (style_id, op_id) inserted this run
+    for key, cp in preview.clients.items():
+        for card in cp.production_cards:
+            tprefix = card.title.split("-")[0].strip().upper()
+            ref_style = None
+            for st in db.scalars(select(Style)):
+                if st.name.upper() in card.title.upper() or tprefix in st.name.upper():
+                    ref_style = st
+                    break
+            if not ref_style:
+                continue
+            for raw_code, rate_val in card.rate.items():
+                if not rate_val:
+                    continue
+                code = code_norm.get(raw_code.upper(), raw_code.upper())
+                op = ops.get(code)
+                if not op:
+                    continue
+                pair = (ref_style.id, op.id)
+                if pair in seen:
+                    continue
+                exists = db.scalar(select(Rate).where(
+                    Rate.style_id == ref_style.id, Rate.operation_id == op.id,
+                    Rate.effective_from == DEFAULT_RATE_DATE))
+                if not exists:
+                    db.add(Rate(style_id=ref_style.id, operation_id=op.id,
+                                rate=rate_val, effective_from=DEFAULT_RATE_DATE))
+                    db.flush()      # make visible to the next lookup
+                    count += 1
+                seen.add(pair)
+    db.commit()
+    return count
+
+
+# ── Step 5: user logins for staff, employees, and clients ───────────────────
+def _make_user(db: Session, *, name: str, phone: str, role: UserRole,
+               email: str | None = None, employee_id=None, client_id=None) -> User:
+    # Idempotent on phone OR email. If the user already exists, refresh the
+    # foreign-key links (client/employee IDs change when orders are re-imported
+    # with replace=True) instead of inserting a duplicate.
+    existing = db.scalar(select(User).where(User.phone == phone))
+    if not existing and email:
+        existing = db.scalar(select(User).where(User.email == email))
+    if existing:
+        if employee_id is not None:
+            existing.employee_id = employee_id
+        if client_id is not None:
+            existing.client_id = client_id
+        db.flush()
+        return existing
+    u = User(
+        name=name, phone=phone, email=email, role=role,
+        password_hash=get_password_hash(phone),   # password == phone
+        is_active=True, must_change_password=True,  # force reset on first login
+        employee_id=employee_id, client_id=client_id,
+    )
+    db.add(u); db.flush()
+    return u
+
+
+def seed_users(db: Session, employees: list[Employee]) -> dict[str, int]:
+    stats = {"staff": 0, "employees": 0, "clients": 0}
+
+    # Management / viewer accounts. MANAGING_DIRECTOR is the new superuser / BOM
+    # approver; DIRECT_MANAGER stays as operational lead (still bypasses role gates
+    # during the MD transition — see users/deps.py::SUPERUSER_ROLES).
+    staff = [
+        ("Managing Director", "9000000000", UserRole.MANAGING_DIRECTOR),
+        ("Direct Manager", "9000000001", UserRole.DIRECT_MANAGER),
+        ("Cutting Manager", "9000000002", UserRole.CUTTING_MANAGER),
+        ("Stitching Manager", "9000000003", UserRole.STITCHING_MANAGER),
+        ("Office Viewer", "9000000004", UserRole.VIEWER),
+        ("HR / Accounts", "9000000005", UserRole.HR),
+    ]
+    for nm, ph, role in staff:
+        _make_user(db, name=nm, phone=ph, role=role,
+                   email=f"{_slug(nm)}@factory.local")
+        stats["staff"] += 1
+
+    # One login per employee.
+    for emp in employees:
+        if not emp.phone:
+            continue
+        _make_user(db, name=emp.name, phone=emp.phone, role=UserRole.EMPLOYEE,
+                   email=emp.email, employee_id=emp.id)
+        stats["employees"] += 1
+
+    # One CLIENT login per client (manager-provisioned in real life; pre-seeded here).
+    cidx = 0
+    for client in db.scalars(select(Client).order_by(Client.name)):
+        cidx += 1
+        _make_user(db, name=f"{client.name} (portal)", phone=f"920000{cidx:04d}",
+                   role=UserRole.CLIENT, email=f"{_slug(client.name)}@client.local",
+                   client_id=client.id)
+        stats["clients"] += 1
+
+    db.commit()
+    return stats
+
+
+def main():
+    # Dev safety: ensure tables exist. Production uses Alembic.
+    Base.metadata.create_all(engine)
+    db = SessionLocal()
+    try:
+        ops = seed_operations(db)
+        seed_orders(db)
+        employees = seed_employees(db)
+        n_rates = seed_rates(db, ops)
+        user_stats = seed_users(db, employees)
+        n_templates = seed_client_templates(db)   # Stage-1 validation registry (§4)
+        stage2_stats = seed_stage2(db)             # Stage-2 garment types + POM dict (§3)
+        stage4_stats = seed_inventory(db)          # Stage-4 aliases + uom + inventory master
+
+        n_clients = db.scalar(select(__import__("sqlalchemy").func.count(Client.id)))
+        n_styles = db.scalar(select(__import__("sqlalchemy").func.count(Style.id)))
+        print("─" * 60)
+        print("✅ SEED COMPLETE")
+        print(f"   operations : {len(ops)}")
+        print(f"   clients    : {n_clients}")
+        print(f"   styles     : {n_styles}")
+        print(f"   employees  : {len(employees)}")
+        print(f"   rates      : {n_rates}")
+        print(f"   templates  : {n_templates}")
+        print(f"   stage2     : {stage2_stats}")
+        print(f"   stage4     : {stage4_stats}")
+        print(f"   users      : {user_stats}")
+        print("─" * 60)
+        print("   Login (Swagger Authorize / POST /api/v1/auth/login):")
+        print("     username=9000000000  password=9000000000  (managing director / superuser)")
+        print("     username=9000000001  password=9000000001  (direct manager)")
+        print("   All seeded users must change password on first login.")
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    main()
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\smoke_test.py
+============================================================
+
+"""
+================================================================================
+scripts/smoke_test.py — End-to-end async smoke test (no real DB needed)
+================================================================================
+
+PURPOSE
+    A fast, self-contained sanity check of the whole stack against an in-memory
+    SQLite database: it creates the schema, seeds one direct manager, then drives
+    the live ASGI app to prove auth, RBAC, and the core read endpoints work.
+
+    This is the script to run after any change to confirm nothing is broken,
+    without needing Postgres up.
+
+RUN
+    python -m scripts.smoke_test
+================================================================================
+"""
+import asyncio
+import os
+
+os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
+os.environ.setdefault("SECRET_KEY", "smoke-test")
+
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
+
+import app.core.database as dbmod
+from app.core.database import Base
+from app.core.enums import UserRole
+
+
+async def main():
+    # Import the app FIRST (this binds its routers), then rebind the DB engine
+    # to a shared in-memory SQLite so both the seed and the requests see it.
+    from app.main import app
+
+    engine = create_async_engine("sqlite+aiosqlite://",
+                                 connect_args={"check_same_thread": False},
+                                 poolclass=StaticPool)
+    dbmod.async_engine = engine
+    dbmod.AsyncSessionLocal = async_sessionmaker(bind=engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    # Seed one direct manager via the service.
+    from app.modules.users.service import UserService
+    from app.modules.users import schemas
+    async with dbmod.AsyncSessionLocal() as db:
+        await UserService(db).create_user(schemas.UserCreate(
+            name="Smoke Manager", phone="9000000001", role=UserRole.DIRECT_MANAGER,
+            password="9000000001"))
+
+    checks = []
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get("/health"); checks.append(("health", r.status_code == 200))
+
+        r = await c.post("/api/v1/auth/login",
+                         json={"username": "9000000001", "password": "9000000001"})
+        checks.append(("login", r.status_code == 200))
+        h = {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+        r = await c.get("/api/v1/auth/me", headers=h)
+        checks.append(("me", r.status_code == 200))
+
+        r = await c.get("/api/v1/employees")
+        checks.append(("unauth blocked", r.status_code == 401))
+
+        r = await c.get("/api/v1/analytics/overview", headers=h)
+        checks.append(("analytics", r.status_code == 200))
+
+    await engine.dispose()
+
+    print("─" * 40)
+    ok = True
+    for name, passed in checks:
+        print(f"  {'✅' if passed else '❌'}  {name}")
+        ok = ok and passed
+    print("─" * 40)
+    print("ALL SMOKE CHECKS PASSED" if ok else "SMOKE TEST FAILED")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))
+
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\scripts\test_wages_e2e.py
+============================================================
+
+"""
+================================================================================
+scripts/test_wages_e2e.py — End-to-end verification harness for the WAGES module
+================================================================================
+WHAT THIS IS
+    A standalone async harness that drives the REAL WageService + WageRepository
+    (plus the clients / employees / production services they compose) against a
+    fresh in-memory SQLite database. No Postgres, no Docker, no HTTP — it exercises
+    the exact code paths the /api/v1/wages routes call, one layer below FastAPI.
+
+WHY IT EXISTS
+    tests/test_wages.py is stale: it calls the old set_rate(style_id, op_id, rate,
+    date) arity, reads run.lines (compute_run now returns a summary dict), and calls
+    ProductionService.log_event(), which is commented out at
+    app/modules/production/service.py:216. So the module had no runnable proof it
+    works. This is that proof.
+
+WHAT IT DOES NOT TOUCH
+    Nothing under app/modules/wages/ is imported for mutation — the service is
+    tested as-is. Production rows are inserted directly via the session because the
+    old qty-based log_event entry point is gone; a test harness may write the DB
+    directly, that is not a layering claim about the app.
+
+RUN
+    python -m scripts.test_wages_e2e
+    Exit code 0 = every scenario passed; non-zero = at least one failed.
+
+Each scenario maps to a documented "command"/contract in one wages file. The detail
+string each returns is the actual number observed, so the report quotes real output.
+================================================================================
+"""
+import asyncio
+import os
+import sys
+import traceback
+from contextlib import asynccontextmanager
+from datetime import date
+
+os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
+os.environ.setdefault("SECRET_KEY", "test-secret")
+
+from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
+
+import app.core.database as dbmod
+from app.core.database import Base
+from app.core.enums import RunStatus, WageType
+
+# Import every module's models so Base.metadata is complete (client_order FKs to
+# document, so the procurement/bom/inventory/supplier_po tables must exist too).
+from app.modules.users import models as _u  # noqa: F401
+from app.modules.clients import models as cm  # noqa: F401
+from app.modules.employees import models as em  # noqa: F401
+from app.modules.production import models as pm  # noqa: F401
+from app.modules.wages import models as wm  # noqa: F401
+from app.modules.attendance import models as _a  # noqa: F401
+from app.core import models as _core_models  # noqa: F401
+from app.modules.procurement import models as _pr  # noqa: F401
+from app.modules.bom import models as _bom  # noqa: F401
+from app.modules.inventory import models as _inv  # noqa: F401
+from app.modules.supplier_po import models as _spo  # noqa: F401
+
+from app.modules.wages import proration
+from app.modules.wages import schemas as ws
+from app.modules.wages.service import WageService
+
+
+# ── infrastructure ────────────────────────────────────────────────────────────
+@asynccontextmanager
+async def fresh_session():
+    """A brand-new in-memory SQLite DB with the full schema, per scenario.
+
+    Fresh per scenario so a CLOSED run in one test can't leak into another's
+    overlap check.
+    """
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    dbmod.async_engine = engine
+    dbmod.AsyncSessionLocal = async_sessionmaker(bind=engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session = dbmod.AsyncSessionLocal()
+    try:
+        yield session
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+async def seed(db):
+    """Minimal factory: CARNABY style (152 pieces across 2 SKUs), CUTTING+PASTING
+    operations, one PIECE_RATE cutter and one MONTHLY tailor (salary 18000)."""
+    client = cm.Client(name="Beau Geste")
+    db.add(client)
+    await db.flush()
+    po = cm.ClientOrder(client_id=client.id, order_number="PO-1579")
+    db.add(po)
+    await db.flush()
+    # Style.code MUST be set — every wage code-resolution path filters on it.
+    style = cm.Style(client_order_id=po.id, name="CARNABY", code="CARNABY", article="ART-1")
+    db.add(style)
+    await db.flush()
+    skus = [
+        cm.SKU(style_id=style.id, color_code="57", size="S", qty_ordered=100),
+        cm.SKU(style_id=style.id, color_code="57", size="M", qty_ordered=52),
+    ]
+    db.add_all(skus)
+    await db.flush()
+    ops = {}
+    for code, seq in [("CUTTING", 1), ("PASTING", 3)]:
+        o = pm.Operation(code=code, label=code, sequence=seq)
+        db.add(o)
+        await db.flush()
+        ops[code] = o
+    cutter = em.Employee(name="Cutter1", designation="CUTTER", wage_type=WageType.PIECE_RATE)
+    monthly = em.Employee(
+        name="Monthly1", designation="TAILOR", wage_type=WageType.MONTHLY, monthly_salary=18000
+    )
+    db.add_all([cutter, monthly])
+    await db.commit()
+    return {"style": style, "skus": skus, "ops": ops, "cutter": cutter, "monthly": monthly}
+
+
+async def add_event(db, sku_id, op_id, emp_id, work_date, qty):
+    """Insert a production_event directly (log_event is commented out)."""
+    db.add(
+        pm.ProductionEvent(
+            sku_id=sku_id, operation_id=op_id, employee_id=emp_id,
+            work_date=work_date, qty=qty,
+        )
+    )
+    await db.commit()
+
+
+async def expect_http(coro, code):
+    """Assert an awaited call raises HTTPException with the given status code."""
+    try:
+        await coro
+    except HTTPException as e:
+        assert e.status_code == code, f"expected {code}, got {e.status_code}"
+        return e.status_code
+    raise AssertionError(f"expected HTTPException {code}, none raised")
+
+
+# ── scenarios ─────────────────────────────────────────────────────────────────
+async def s1_proration():
+    """proration.py — full month == salary; consecutive splits tile to salary;
+    Feb pays a full month; inverted window == 0.0."""
+    full = proration.prorate_monthly(18000, date(2026, 4, 1), date(2026, 4, 30))
+    a = proration.prorate_monthly(18000, date(2026, 4, 1), date(2026, 4, 15))
+    b = proration.prorate_monthly(18000, date(2026, 4, 16), date(2026, 4, 30))
+    feb = proration.prorate_monthly(18000, date(2026, 2, 1), date(2026, 2, 28))
+    inv = proration.prorate_monthly(18000, date(2026, 4, 30), date(2026, 4, 1))
+    assert full == 18000, full
+    assert round(a + b, 2) == 18000, (a, b)
+    assert feb == 18000, feb
+    assert inv == 0.0, inv
+    return f"full={full}; split {a}+{b}={round(a + b, 2)}; feb={feb}; inverted={inv}"
+
+
+async def s2_set_rate_and_sheet():
+    """service.set_rate (code-in) + repository.upsert_rate + service.rate_sheet.
+    Lower-case codes must resolve; PASTING stays unpriced; missing_rate_count==1."""
+    async with fresh_session() as db:
+        await seed(db)
+        svc = WageService(db)
+        await svc.set_rate(
+            ws.RateSet(style_code="carnaby", operation_code="cutting", rate=80,
+                       effective_from=date(2026, 3, 1))
+        )
+        sheet = await svc.rate_sheet("CARNABY", date(2026, 3, 15))
+        by = {r["operation_code"]: r["rate"] for r in sheet["operations"]}
+        assert by["CUTTING"] == 80.0, by
+        assert by["PASTING"] is None, by
+        assert sheet["missing_rate_count"] == 1, sheet["missing_rate_count"]
+        return f"CUTTING={by['CUTTING']} read back via code; PASTING unpriced; missing_rate_count={sheet['missing_rate_count']}"
+
+
+async def s3_bulk_and_duplicate():
+    """service.set_rates_bulk saves a whole sheet in one call; the schema validator
+    rejects a duplicate operation_code before any write."""
+    async with fresh_session() as db:
+        await seed(db)
+        svc = WageService(db)
+        res = await svc.set_rates_bulk(
+            ws.RateBulkSet(
+                style_code="CARNABY", effective_from=date(2026, 3, 1),
+                lines=[ws.RateSetLine(operation_code="CUTTING", rate=80),
+                       ws.RateSetLine(operation_code="PASTING", rate=12.5)],
+            )
+        )
+        assert res["saved"] == 2, res
+        rejected = False
+        try:
+            ws.RateBulkSet(
+                style_code="CARNABY", effective_from=date(2026, 3, 1),
+                lines=[ws.RateSetLine(operation_code="CUTTING", rate=80),
+                       ws.RateSetLine(operation_code="cutting", rate=90)],
+            )
+        except Exception:
+            rejected = True
+        assert rejected, "duplicate operation_code was not rejected"
+        return f"bulk saved={res['saved']}; duplicate-op rejected={rejected}"
+
+
+async def s4_effective_dating():
+    """repository.effective_rate — a mid-period rate change prices each day at the
+    rate in force on THAT day (10@80 before, 10@100 after = 1800)."""
+    async with fresh_session() as db:
+        s = await seed(db)
+        svc = WageService(db)
+        await svc.set_rate(ws.RateSet(style_code="CARNABY", operation_code="CUTTING",
+                                      rate=80, effective_from=date(2026, 3, 1)))
+        await svc.set_rate(ws.RateSet(style_code="CARNABY", operation_code="CUTTING",
+                                      rate=100, effective_from=date(2026, 3, 20)))
+        sku, cut, cutter = s["skus"][0], s["ops"]["CUTTING"], s["cutter"]
+        await add_event(db, sku.id, cut.id, cutter.id, date(2026, 3, 10), 10)  # @80
+        await add_event(db, sku.id, cut.id, cutter.id, date(2026, 3, 25), 10)  # @100
+        run = await svc.compute_run(date(2026, 3, 1), date(2026, 3, 31))
+        detail = await svc.get_run_detail(run["id"])
+        # Assert the CUTTER's line specifically — the run total also carries the
+        # monthly tailor's 18000, which this scenario is not about.
+        cutter_amt = next(ln["amount"] for ln in detail["lines"] if ln["employee_name"] == "Cutter1")
+        assert cutter_amt == 10 * 80 + 10 * 100, cutter_amt
+        return f"Cutter1 10@80 + 10@100 = {cutter_amt} (expected 1800); run_total incl. monthly = {run['total_amount']}"
+
+
+async def s5_compute_matches_card():
+    """service.compute_run — piece-rate Cutter1 = 152 x 80 = 12160; monthly tailor
+    paid salary independent of production; summary + frozen detail agree."""
+    async with fresh_session() as db:
+        s = await seed(db)
+        svc = WageService(db)
+        await svc.set_rate(ws.RateSet(style_code="CARNABY", operation_code="CUTTING",
+                                      rate=80, effective_from=date(2026, 3, 1)))
+        cut, cutter = s["ops"]["CUTTING"], s["cutter"]
+        for sku in s["skus"]:
+            await add_event(db, sku.id, cut.id, cutter.id, date(2026, 3, 23), sku.qty_ordered)
+        run = await svc.compute_run(date(2026, 3, 1), date(2026, 3, 31))
+        detail = await svc.get_run_detail(run["id"])
+        amt = {ln["employee_name"]: ln["amount"] for ln in detail["lines"]}
+        pcs = {ln["employee_name"]: ln["pieces"] for ln in detail["lines"]}
+        assert amt["Cutter1"] == 152 * 80, amt
+        assert pcs["Cutter1"] == 152, pcs
+        assert amt["Monthly1"] == 18000, amt
+        assert pcs["Monthly1"] == 0, pcs
+        assert run["total_amount"] == 152 * 80 + 18000, run["total_amount"]
+        return (f"Cutter1={amt['Cutter1']} (152x80), pieces={pcs['Cutter1']}; "
+                f"Monthly1={amt['Monthly1']} pieces={pcs['Monthly1']}; run_total={run['total_amount']}")
+
+
+async def s6_no_double_pay():
+    """THE core guard — a MONTHLY tailor who logs 400 pieces gets exactly ONE
+    monthly line (amount 18000, pieces 0), never a piece-rate line on top."""
+    async with fresh_session() as db:
+        s = await seed(db)
+        svc = WageService(db)
+        await svc.set_rate(ws.RateSet(style_code="CARNABY", operation_code="CUTTING",
+                                      rate=80, effective_from=date(2026, 3, 1)))
+        sku, cut, monthly = s["skus"][0], s["ops"]["CUTTING"], s["monthly"]
+        await add_event(db, sku.id, cut.id, monthly.id, date(2026, 3, 15), 400)
+        run = await svc.compute_run(date(2026, 3, 1), date(2026, 3, 31))
+        detail = await svc.get_run_detail(run["id"])
+        m_lines = [ln for ln in detail["lines"] if ln["employee_name"] == "Monthly1"]
+        assert len(m_lines) == 1, m_lines
+        assert m_lines[0]["wage_type"] == "monthly", m_lines[0]
+        assert m_lines[0]["amount"] == 18000, m_lines[0]
+        assert m_lines[0]["pieces"] == 0, m_lines[0]
+        return (f"Monthly1 logged 400 pcs -> {len(m_lines)} line, "
+                f"wage_type={m_lines[0]['wage_type']}, amount={m_lines[0]['amount']}, pieces={m_lines[0]['pieces']}")
+
+
+async def s7_unrated_surfaces():
+    """service.compute_run — real work on an UNRATED operation is not silently
+    zeroed: it rides out in unrated_operations with codes, not UUIDs."""
+    async with fresh_session() as db:
+        s = await seed(db)
+        svc = WageService(db)
+        await svc.set_rate(ws.RateSet(style_code="CARNABY", operation_code="CUTTING",
+                                      rate=80, effective_from=date(2026, 3, 1)))
+        sku, cut, paste, cutter = s["skus"][0], s["ops"]["CUTTING"], s["ops"]["PASTING"], s["cutter"]
+        await add_event(db, sku.id, cut.id, cutter.id, date(2026, 3, 10), 50)     # paid
+        await add_event(db, sku.id, paste.id, cutter.id, date(2026, 3, 11), 55)   # unrated
+        run = await svc.compute_run(date(2026, 3, 1), date(2026, 3, 31))
+        detail = await svc.get_run_detail(run["id"])
+        # Only the 50 rated CUTTING pieces are paid to Cutter1; the 55 PASTING
+        # pieces price to nothing and must appear in unrated_operations instead.
+        cutter_amt = next(ln["amount"] for ln in detail["lines"] if ln["employee_name"] == "Cutter1")
+        assert cutter_amt == 50 * 80, cutter_amt
+        u = run["unrated_operations"]
+        assert len(u) == 1, u
+        assert u[0]["operation_code"] == "PASTING", u
+        assert u[0]["unpaid_pieces"] == 55, u
+        assert u[0]["style_code"] == "CARNABY", u
+        return (f"Cutter1 paid={cutter_amt} (50x80); unrated {u[0]['style_code']}/"
+                f"{u[0]['operation_code']} unpaid_pieces={u[0]['unpaid_pieces']}; "
+                f"run_total incl. monthly = {run['total_amount']}")
+
+
+async def s8_window_guards():
+    """service._validate_window — inverted window -> 422, future window -> 422,
+    a window overlapping a CLOSED run -> 409 (would pay the same days twice)."""
+    async with fresh_session() as db:
+        await seed(db)
+        svc = WageService(db)
+        inv = await expect_http(svc.compute_run(date(2026, 3, 31), date(2026, 3, 1)), 422)
+        fut = await expect_http(svc.compute_run(date(2030, 1, 1), date(2030, 1, 31)), 422)
+        await svc.compute_run(date(2026, 3, 1), date(2026, 3, 31))  # closes a run
+        ov = await expect_http(svc.compute_run(date(2026, 3, 15), date(2026, 4, 15)), 409)
+        return f"inverted->{inv}; future->{fut}; overlap-closed->{ov}"
+
+
+async def s9_freeze_and_stored_type():
+    """models/service — a CLOSED run re-reads identical from get_run_detail; the
+    wage_type column is a frozen plain string ('piece_rate' / 'monthly')."""
+    async with fresh_session() as db:
+        s = await seed(db)
+        svc = WageService(db)
+        await svc.set_rate(ws.RateSet(style_code="CARNABY", operation_code="CUTTING",
+                                      rate=80, effective_from=date(2026, 3, 1)))
+        cut, cutter = s["ops"]["CUTTING"], s["cutter"]
+        for sku in s["skus"]:
+            await add_event(db, sku.id, cut.id, cutter.id, date(2026, 3, 23), sku.qty_ordered)
+        run = await svc.compute_run(date(2026, 3, 1), date(2026, 3, 31))
+        detail = await svc.get_run_detail(run["id"])
+        assert detail["status"] == RunStatus.CLOSED, detail["status"]
+        assert detail["total_amount"] == run["total_amount"], (detail["total_amount"], run["total_amount"])
+        stored = set((await db.execute(select(wm.WageLine.wage_type))).scalars().all())
+        assert stored == {"piece_rate", "monthly"}, stored
+        return f"status={detail['status'].value}; total re-read={detail['total_amount']}; stored wage_types={sorted(stored)}"
+
+
+async def s10_list_runs():
+    """repository.list_runs — SQL-aggregated summary matches the computed run."""
+    async with fresh_session() as db:
+        s = await seed(db)
+        svc = WageService(db)
+        await svc.set_rate(ws.RateSet(style_code="CARNABY", operation_code="CUTTING",
+                                      rate=80, effective_from=date(2026, 3, 1)))
+        cut, cutter = s["ops"]["CUTTING"], s["cutter"]
+        for sku in s["skus"]:
+            await add_event(db, sku.id, cut.id, cutter.id, date(2026, 3, 23), sku.qty_ordered)
+        run = await svc.compute_run(date(2026, 3, 1), date(2026, 3, 31))
+        runs = await svc.list_runs()
+        assert len(runs) == 1, len(runs)
+        assert runs[0]["total_amount"] == run["total_amount"], (runs[0]["total_amount"], run["total_amount"])
+        assert runs[0]["total_pieces"] == run["total_pieces"], (runs[0]["total_pieces"], run["total_pieces"])
+        assert runs[0]["status"] == RunStatus.CLOSED, runs[0]["status"]
+        return (f"1 run listed; total_amount={runs[0]['total_amount']} matches compute; "
+                f"total_pieces={runs[0]['total_pieces']}")
+
+
+SCENARIOS = [
+    ("S1  proration.prorate_monthly", s1_proration),
+    ("S2  set_rate + rate_sheet (code-in)", s2_set_rate_and_sheet),
+    ("S3  set_rates_bulk + duplicate guard", s3_bulk_and_duplicate),
+    ("S4  effective-dated rate (mid-period change)", s4_effective_dating),
+    ("S5  compute_run piece-rate + monthly", s5_compute_matches_card),
+    ("S6  monthly logger not double-paid (THE guard)", s6_no_double_pay),
+    ("S7  unrated operation surfaces", s7_unrated_surfaces),
+    ("S8  window guards 422/422/409", s8_window_guards),
+    ("S9  freeze + stored wage_type", s9_freeze_and_stored_type),
+    ("S10 list_runs aggregation", s10_list_runs),
+]
+
+
+async def main():
+    print("=" * 78)
+    print("WAGES MODULE — end-to-end harness (in-memory SQLite, real service)")
+    print("=" * 78)
+    results = []
+    for name, fn in SCENARIOS:
+        try:
+            detail = await fn()
+            results.append((name, True, detail or ""))
+            print(f"[PASS] {name}\n       {detail}")
+        except Exception as e:  # noqa: BLE001 — harness reports, never crashes silently
+            results.append((name, False, f"{type(e).__name__}: {e}"))
+            print(f"[FAIL] {name}\n       {type(e).__name__}: {e}")
+            traceback.print_exc()
+    passed = sum(1 for _, ok, _ in results if ok)
+    total = len(results)
+    print("-" * 78)
+    print(f"RESULT: {passed}/{total} scenarios passed")
+    print("=" * 78)
+    return 0 if passed == total else 1
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))
+

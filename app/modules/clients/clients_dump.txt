@@ -1,7 +1,23 @@
-﻿
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\clients\__init__.py
-========================================================================================================================
+﻿============================================================
+PROJECT STRUCTURE
+============================================================
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\clients_dump.txt
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\models.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\repository.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\router.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\schemas.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\service.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\utlis.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\__init__.py
+
+============================================================
+PROJECT FILES
+============================================================
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\__init__.py
+============================================================
+
 """
 clients — the order hierarchy: Client -> ClientOrder -> Style -> SKU.
 
@@ -13,10 +29,10 @@ NAMING: the buyer order is `client_order` (was `purchase_order`); the name
 """
 
 
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\models.py
+============================================================
 
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\clients\models.py
-========================================================================================================================
 """Order hierarchy: Client -> ClientOrder -> Style -> SKU.
 
 NAMING (BOM Procurement Workflow, Stage 0)
@@ -72,7 +88,7 @@ class ClientOrder(Base, UUIDMixin, TimestampMixin):
     supplier PO (procurement module). `order_number` holds 1579 / "Proposta N.2"."""
     __tablename__ = "client_order"
     client_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("client.id"), index=True)
-    order_number: Mapped[str] = mapped_column(String(50), index=True)
+    order_number: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     order_date: Mapped[date | None] = mapped_column(Date)
     delivery_deadline: Mapped[date | None] = mapped_column(Date)
     sea_cutoff_date: Mapped[date | None] = mapped_column(Date)  # last day to make sea freight
@@ -110,6 +126,7 @@ class Style(Base, UUIDMixin, TimestampMixin):
     label: Mapped[str | None] = mapped_column(String(80))
     article: Mapped[str | None] = mapped_column(String(80))
     thickness: Mapped[str | None] = mapped_column(String(40))
+    code: Mapped[str | None] = mapped_column(String(200), unique=True, index=True)
     # BOM workflow additions (straight off the order/spec sheets).
     season: Mapped[str | None] = mapped_column(String(20))         # 2026AW / SS26
     customer_ref: Mapped[str | None] = mapped_column(String(80))   # CR1-02F5-PL02
@@ -179,10 +196,10 @@ class SkuOrderLine(Base, UUIDMixin, TimestampMixin):
     source_row: Mapped[int | None] = mapped_column(Integer)
     sku: Mapped["SKU"] = relationship(back_populates="order_lines")
 
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\repository.py
+============================================================
 
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\clients\repository.py
-========================================================================================================================
 """
 ================================================================================
 modules/clients/repository.py — Async data access for the order hierarchy
@@ -195,12 +212,12 @@ without triggering lazy loads (which are unsafe under async).
 """
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import select ,func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
-from app.modules.clients.utlis import make_sku_code
+from app.modules.clients.utlis import make_sku_code,make_style_code
 
 
 class ClientRepository:
@@ -244,6 +261,20 @@ class ClientRepository:
         res = await self.db.execute(select(SKU).where(SKU.style_id == style_id))
         return list(res.scalars())
 
+    async def create_order(self, *, client_id: uuid.UUID, order_number: str,
+                           order_date=None, delivery_deadline=None,
+                           sea_cutoff_date=None, ship_mode: str = "sea",
+                           currency: str | None = None, agent: str | None = None,
+                           line: str | None = None) -> ClientOrder:
+        co = ClientOrder(
+            client_id=client_id, order_number=order_number, order_date=order_date,
+            delivery_deadline=delivery_deadline, sea_cutoff_date=sea_cutoff_date,
+            ship_mode=ship_mode or "sea", currency=currency, agent=agent, line=line)
+        self.db.add(co)
+        await self.db.commit()
+        await self.db.refresh(co)
+        return co
+    
     async def create_order_with_breakdown(
         self, *, client_id: uuid.UUID, order: dict, style: dict,
         lines: list[dict], per_size: dict,
@@ -263,7 +294,7 @@ class ClientRepository:
             client_order_id=co.id, name=str(style.get("name") or "UNSPECIFIED")[:120],
             customer_ref=style.get("customer_ref"), internal_ref=style.get("internal_ref"),
             season=style.get("season"), unit_price=style.get("unit_price"),
-            currency=style.get("currency"),
+            currency=style.get("currency"), code=make_style_code(co.order_number, str(style.get("name") or "UNSPECIFIED")[:120]),
         )
         self.db.add(st)
         await self.db.flush()
@@ -338,12 +369,104 @@ class ClientRepository:
         )
         return res.scalar_one_or_none()
  
+    async def create_client_with_order(
+        self, *, name: str, country: str | None, order_number: str,
+    ) -> tuple[Client, ClientOrder]:
+        """Client + its first ClientOrder in one transaction. The unique
+        constraint on order_number is the real guard (see IntegrityError catch
+        in the service)."""
+        c = Client(name=name, country=country)
+        self.db.add(c)
+        await self.db.flush()                     # assign c.id
+        co = ClientOrder(client_id=c.id, order_number=order_number)
+        self.db.add(co)
+        await self.db.commit()
+        await self.db.refresh(c)
+        await self.db.refresh(co)
+        return c, co
 
+    async def get_order_by_number(self, order_number: str) -> ClientOrder | None:
+        res = await self.db.execute(
+            select(ClientOrder).where(
+                ClientOrder.order_number == (order_number or "").strip()))
+        return res.scalar_one_or_none()
+    
+    async def get_style_by_code(self, code: str) -> Style | None:
+        res = await self.db.execute(select(Style).where(Style.code == code))
+        return res.scalar_one_or_none()
 
+    async def get_style_summary_by_code(self, code: str) -> dict | None:
+        """Resolve a style code -> ids + display fields, in one query.
 
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\clients\router.py
-========================================================================================================================
+        NOT get_style_by_code() + style.client_order.order_number: client_order is a
+        lazy relationship and touching it on an AsyncSession raises MissingGreenlet.
+        The join has to be explicit.
+        """
+        row = (await self.db.execute(
+            select(Style.id, Style.code, Style.name, ClientOrder.order_number)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .where(Style.code == code)
+        )).first()
+        if not row:
+            return None
+        return {"style_id": row[0], "style_code": row[1],
+                "style_name": row[2], "order_number": row[3]}
+
+    async def get_style_codes(self, style_ids: list[uuid.UUID]) -> dict:
+        """{style_id: {style_code, style_name}} for a batch of ids.
+
+        Used to turn compute_run's unrated-operation warnings into codes the
+        frontend can link on. Raw UUIDs there make the warning unactionable — the
+        manager sees 340 pieces went unpaid with no route to the rate sheet.
+        """
+        if not style_ids:
+            return {}
+        rows = (await self.db.execute(
+            select(Style.id, Style.code, Style.name).where(Style.id.in_(style_ids))
+        )).all()
+        return {r[0]: {"style_code": r[1], "style_name": r[2]} for r in rows}
+
+    async def list_style_options(
+        self, *, order_number: str | None = None, client_id: uuid.UUID | None = None
+    ) -> list[dict]:
+        """Styles as picker options, with SKU counts.
+
+        Filters on order_number, not order_id — the caller is a UI that speaks
+        codes. style_id is returned for the caller's internal joins (wages needs it
+        to count rates) and is stripped before it reaches the response model.
+
+        outerjoin, not join — a style whose SKUs have not been imported yet must
+        still appear, or its rates can never be set.
+        """
+        stmt = (
+            select(
+                Style.id, Style.code, Style.name, Style.article,
+                ClientOrder.order_number,
+                func.count(SKU.id),
+                func.coalesce(func.sum(SKU.qty_ordered), 0),
+            )
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .outerjoin(SKU, SKU.style_id == Style.id)
+            .where(Style.code.is_not(None))
+            .group_by(Style.id, Style.code, Style.name, Style.article,
+                      ClientOrder.order_number)
+        )
+        if order_number:
+            stmt = stmt.where(ClientOrder.order_number == order_number)
+        if client_id:
+            stmt = stmt.where(ClientOrder.client_id == client_id)
+        stmt = stmt.order_by(ClientOrder.order_number, Style.name)
+        return [
+            {"style_id": r[0], "style_code": r[1], "style_name": r[2],
+             "article": r[3], "order_number": r[4],
+             "sku_count": int(r[5]), "qty_ordered": int(r[6])}
+            for r in (await self.db.execute(stmt)).all()
+        ]
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\router.py
+============================================================
+
 """
 ================================================================================
 modules/clients/router.py — HTTP API for clients & their orders (async)
@@ -377,13 +500,20 @@ async def list_clients(
     return await ClientService(db).list_clients()
 
 
-@router.post("", response_model=schemas.ClientRead, status_code=201)
+@router.post("", response_model=schemas.CreatedClientRead, status_code=201)
 async def create_client(
     body: schemas.ClientCreate,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
 ):
-    return await ClientService(db).create_client(body.name, body.country)
+    client, order = await ClientService(db).create_client(
+        body.name, body.country, body.order_number)
+    return schemas.CreatedClientRead(
+        id=client.id, name=client.name, country=client.country,
+        code=client.code, currency=client.currency,
+        default_size_system=client.default_size_system,
+        order_number=order.order_number, order_id=order.id)
+
 
 
 @router.get("/{client_id}/orders", response_model=list[schemas.ClientOrderRead])
@@ -397,11 +527,37 @@ async def client_orders(
         raise HTTPException(403, "Clients may only view their own orders")
     return await ClientService(db).get_client_orders(client_id)
 
+@router.post("/{client_id}/orders", response_model=schemas.ClientOrderRead,
+             status_code=201)
+async def add_order(
+    client_id: uuid.UUID,
+    body: schemas.ClientOrderCreate,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+):
+    """Add another order (new unique order_number) to an existing client."""
+    order = await ClientService(db).add_order(client_id=client_id, **body.model_dump())
+    # Build the response explicitly — a fresh order has no styles, and touching
+    # order.styles here would trigger an async-unsafe lazy load.
+    return schemas.ClientOrderRead(
+        id=order.id, order_number=order.order_number, order_date=order.order_date,
+        delivery_deadline=order.delivery_deadline,
+        sea_cutoff_date=order.sea_cutoff_date, ship_mode=order.ship_mode,
+        currency=order.currency, agent=order.agent, line=order.line, styles=[])
+    
+@router.get("/styles", response_model=list[schemas.StyleOption])
+async def list_styles(
+    order_id: uuid.UUID | None = None,
+    client_id: uuid.UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    return await ClientService(db).list_style_options(order_id=order_id, client_id=client_id)
 
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\schemas.py
+============================================================
 
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\clients\schemas.py
-========================================================================================================================
 """Pydantic schemas — the API contract for the clients module.
 
 These shapes ARE the contract your frontend mocks against.
@@ -414,7 +570,7 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SKURead(BaseModel):
@@ -427,6 +583,18 @@ class SKURead(BaseModel):
     nylon_color: str | None = None
     knit_color: str | None = None
 
+# add near ClientOrderRead
+class ClientOrderCreate(BaseModel):
+    """Add another order to an existing client. Only order_number is required;
+    the rest are optional order-level fields (dates drive freight-risk)."""
+    order_number: str = Field(min_length=1)   # globally unique across ALL clients
+    order_date: date | None = None
+    delivery_deadline: date | None = None
+    sea_cutoff_date: date | None = None
+    ship_mode: str = "sea"                     # "sea" | "air"
+    currency: str | None = None
+    agent: str | None = None
+    line: str | None = None
 
 class StyleRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -466,11 +634,18 @@ class ClientRead(BaseModel):
     code: str | None = None
     currency: str | None = None
     default_size_system: str | None = None
+    
+# add after ClientRead:
+class CreatedClientRead(ClientRead):
+    """POST /clients response — the client plus the order minted for it."""
+    order_number: str
+    order_id: uuid.UUID
 
 
 class ClientCreate(BaseModel):
     name: str
     country: str | None = None
+    order_number: str = Field(min_length=1)   # manager-entered; globally unique
 
 
 class StyleCreate(BaseModel):
@@ -480,12 +655,20 @@ class StyleCreate(BaseModel):
     label: str | None = None
     article: str | None = None
     thickness: str | None = None
+    
+class StyleOption(BaseModel):
+    style_id: uuid.UUID
+    style_name: str
+    article: str | None
+    order_number: str
+    sku_count: int
+    qty_ordered: int
 
 
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\service.py
+============================================================
 
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\clients\service.py
-========================================================================================================================
 """
 ================================================================================
 modules/clients/service.py — Business logic for clients/orders (async)
@@ -502,6 +685,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
 from app.modules.clients.repository import ClientRepository
+from fastapi import HTTPException, status          # add
+from sqlalchemy.exc import IntegrityError
 
 
 def _slug(s: str | None) -> str:
@@ -526,11 +711,17 @@ def sku_label(style_name, color_name, color_code, size) -> str:
     colour = color_name or color_code or "NA"
     return " · ".join(p for p in (style_name or "NA", colour, size or "NA"))
 
+# app/modules/clients/service.py
+from sqlalchemy import select
+from app.modules.clients.models import ClientOrder
 
 class ClientService:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.repo = ClientRepository(db)
+        
+    def get_order_by_number(self, order_number: str) -> ClientOrder | None:
+        return self.repo.get_order_by_number(order_number)
 
     def sku_label(self, style_name: str | None, color_name: str | None,
                   color_code: str | None, size: str | None) -> str:
@@ -539,8 +730,45 @@ class ClientService:
     async def list_clients(self) -> list[Client]:
         return await self.repo.list_clients()
 
-    async def create_client(self, name: str, country: str | None) -> Client:
-        return await self.repo.create_client(name, country)
+    async def add_order(self, *, client_id: uuid.UUID, order_number: str,
+                        order_date=None, delivery_deadline=None,
+                        sea_cutoff_date=None, ship_mode: str = "sea",
+                        currency=None, agent=None, line=None) -> ClientOrder:
+        order_number = (order_number or "").strip()
+        if not order_number:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "order_number is required")
+        if not await self.repo.get_client(client_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
+        if await self.repo.get_order_by_number(order_number):     # friendly pre-check
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                f"Order number '{order_number}' already exists. Choose a unique one.")
+        try:
+            return await self.repo.create_order(
+                client_id=client_id, order_number=order_number, order_date=order_date,
+                delivery_deadline=delivery_deadline, sea_cutoff_date=sea_cutoff_date,
+                ship_mode=ship_mode, currency=currency, agent=agent, line=line)
+        except IntegrityError:                                    # race-safe backstop
+            await self.db.rollback()
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                f"Order number '{order_number}' already exists. Choose a unique one.")
+    
+    async def create_client(self, name: str, country: str | None,
+                            order_number: str) -> tuple[Client, ClientOrder]:
+        order_number = (order_number or "").strip()
+        if not order_number:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "order_number is required")
+        # Friendly pre-check; DB constraint is the hard guarantee (race-safe).
+        if await self.repo.get_order_by_number(order_number):
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                f"Order number '{order_number}' already exists. Choose a unique one.")
+        try:
+            return await self.repo.create_client_with_order(
+                name=name, country=country, order_number=order_number)
+        except IntegrityError:
+            await self.db.rollback()
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                f"Order number '{order_number}' already exists. Choose a unique one.")
 
     async def get_client_orders(self, client_id: uuid.UUID) -> list[ClientOrder]:
         return await self.repo.get_orders_for_client(client_id)
@@ -587,13 +815,23 @@ class ClientService:
             )
         return rows
     
-    async def get_sku_by_code(self, code: str):
-        return await self.repo.get_sku_by_code(code)
+    async def get_style_by_code(self, code: str) -> Style | None:
+        return await self.repo.get_style_by_code(code)
 
+    async def get_style_summary_by_code(self, code: str) -> dict | None:
+        return await self.repo.get_style_summary_by_code(code)
 
-========================================================================================================================
-FILE: D:\hamthan-d\Kaizen AMD\client\2-factor\leather_factory_backend_with_attendance\backend\app\modules\clients\utlis.py
-========================================================================================================================
+    async def get_style_codes(self, style_ids: list[uuid.UUID]) -> dict:
+        return await self.repo.get_style_codes(style_ids)
+
+    async def list_style_options(self, *, order_number=None, client_id=None) -> list[dict]:
+        return await self.repo.list_style_options(
+            order_number=order_number, client_id=client_id)
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\clients\utlis.py
+============================================================
+
 import re
 def _slug(s: str | None) -> str:
     """UPPER, runs of non-alnum -> single '_', trimmed. '' -> 'NA'."""
@@ -617,4 +855,14 @@ def sku_label(style_name, color_name, color_code, size) -> str:
     colour = color_name or color_code or "NA"
     return " · ".join(p for p in (style_name or "NA", colour, size or "NA"))
 
+def make_style_code(order_number: str | None, style_name: str | None) -> str:
+    """Deterministic, readable, one-per-style code.
+    e.g. make_style_code('JP', 'CLERMONT + VEST') -> 'JP-CLERMONT_VEST'
 
+    This is make_sku_code's first two segments, so it is the exact prefix of every
+    SKU code under the style — a manager holding traveler
+    JP-CLERMONT_VEST-DARK_BROWN-46 reads the style code off the front of it.
+
+    Deterministic => idempotent across re-imports, same as make_sku_code.
+    """
+    return "-".join((_slug(order_number), _slug(style_name)))
