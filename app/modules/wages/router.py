@@ -151,6 +151,33 @@ async def compute_run(
     """
     return await WageService(db).compute_run(body.period_start, body.period_end)
 
+# HR, DM, MD only. EMPLOYEE and every other manager role are excluded — a
+# stitching manager has no business reading the factory's labour cost base, and
+# a worker has no business reading anyone's pay but his own.
+_RATE_READERS = require_roles(
+    UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.HR
+)
+_PAYROLL_READERS = _RATE_READERS
+
+
+@router.post("/runs/{run_id}/recompute", response_model=schemas.WageRunDetail)
+async def recompute_run(
+    run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR)),
+):
+    """COMMAND. Discards a run's frozen lines and rebuilds them from current
+    production events and rates, for the SAME window.
+
+    Use when a rate was corrected or a production event was fixed after the run
+    closed. The run keeps its id and window; recompute_count increments and the
+    actor is stamped, so a payslip reprinted afterwards is identifiably a
+    different document from the one paid against.
+
+    HR is deliberately NOT permitted: HR reads payroll, DM/MD authorise changes
+    to it.
+    """
+    return await WageService(db).recompute_run(run_id, user_name=user.name)
 
 @router.get("/runs/{run_id}", response_model=schemas.WageRunDetail)
 async def get_run(

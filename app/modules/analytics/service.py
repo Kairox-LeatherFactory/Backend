@@ -412,3 +412,164 @@ class AnalyticsService:
                         "high" if pct < 0.7 else "watch",
             })
         return risks
+    
+    
+    # ═══════════════════════════════════════════════════ employee rate analytics
+    async def employee_rate_analytics(
+        self, *, start: date, end: date,
+        employee_id: uuid.UUID | None = None,
+        style_code: str | None = None,
+    ) -> dict:
+        """Per-employee earnings analytics: pieces, per-piece rate, and totals,
+        broken down by style and operation.
+
+        LIVE, NOT FROZEN — and that distinction matters.
+            This reads production_event x rate, so it answers 'what is this
+            worker earning RIGHT NOW, mid-period'. It is a management view.
+            It is NOT payroll: payroll is wage_line, frozen at run time, and the
+            two will legitimately disagree the moment a rate is edited
+            mid-period. Never pay from this endpoint; use GET /wages/runs/{id}.
+
+        Rates are resolved per (style, operation, work_date) so a mid-period rate
+        change prices each day's work correctly — identical semantics to
+        compute_run, deliberately, so the two do not drift.
+        """
+        if end < start:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "end is before start")
+
+        from app.modules.wages.models import Rate
+
+        # Daily grain so each day is priced at that day's rate.
+        stmt = (
+            select(
+                ProductionEvent.employee_id,
+                Employee.name,
+                Employee.designation,
+                Employee.wage_type,
+                Style.id,
+                Style.code,
+                Style.name,
+                Operation.id,
+                Operation.code,
+                Operation.label,
+                ProductionEvent.work_date,
+                func.sum(ProductionEvent.qty),
+            )
+            .select_from(ProductionEvent)
+            .join(Employee, Employee.id == ProductionEvent.employee_id)
+            .join(SKU, SKU.id == ProductionEvent.sku_id)
+            .join(Style, Style.id == SKU.style_id)
+            .join(Operation, Operation.id == ProductionEvent.operation_id)
+            .where(ProductionEvent.work_date >= start,
+                   ProductionEvent.work_date <= end)
+            .group_by(
+                ProductionEvent.employee_id, Employee.name, Employee.designation,
+                Employee.wage_type, Style.id, Style.code, Style.name,
+                Operation.id, Operation.code, Operation.label,
+                ProductionEvent.work_date,
+            )
+        )
+        if employee_id:
+            stmt = stmt.where(ProductionEvent.employee_id == employee_id)
+        if style_code:
+            stmt = stmt.where(Style.code == _norm(style_code))
+
+        rows = (await self.db.execute(stmt)).all()
+        if not rows:
+            return {"start": start, "end": end, "employees": [],
+                    "total_pieces": 0, "total_amount": 0.0}
+
+        # Pre-load every rate that could apply, ONE query, then resolve in Python.
+        # The alternative — a scalar subquery per row — is an N-query payroll
+        # report, and this endpoint is the one a manager refreshes all day.
+        pairs = {(r[4], r[7]) for r in rows}
+        rate_rows = (await self.db.execute(
+            select(Rate.style_id, Rate.operation_id, Rate.rate, Rate.effective_from)
+            .where(Rate.style_id.in_({p[0] for p in pairs}),
+                   Rate.operation_id.in_({p[1] for p in pairs}),
+                   Rate.effective_from <= end)
+            .order_by(Rate.effective_from)
+        )).all()
+        rate_hist: dict[tuple, list[tuple[date, float]]] = {}
+        for sid, oid, rate, eff in rate_rows:
+            rate_hist.setdefault((sid, oid), []).append((eff, float(rate)))
+
+        def _rate_on(style_id, op_id, on: date) -> float | None:
+            """Latest rate with effective_from <= on. Mirrors
+            WageRepository.effective_rate exactly."""
+            hist = rate_hist.get((style_id, op_id))
+            if not hist:
+                return None
+            picked = None
+            for eff, val in hist:          # ascending
+                if eff <= on:
+                    picked = val
+                else:
+                    break
+                    
+            return picked
+
+        # (emp_id, style_id, op_id) -> accumulator
+        agg: dict[tuple, dict] = {}
+        emp_meta: dict[uuid.UUID, dict] = {}
+        for (emp_id, emp_name, desig, wage_type, style_id, scode, sname,
+             op_id, ocode, olabel, wdate, qty) in rows:
+            emp_meta.setdefault(emp_id, {
+                "employee_id": str(emp_id), "employee_name": emp_name,
+                "designation": desig,
+                "wage_type": getattr(wage_type, "value", str(wage_type)),
+            })
+            rate = _rate_on(style_id, op_id, wdate)
+            key = (emp_id, style_id, op_id)
+            a = agg.setdefault(key, {
+                "style_code": scode, "style_name": sname,
+                "operation_code": ocode, "operation_label": olabel,
+                "pieces": 0, "amount": 0.0,
+                "rates_applied": set(), "unrated_pieces": 0,
+            })
+            a["pieces"] += int(qty)
+            if rate is None:
+                # Real output that prices to nothing. Surfaced, never silently
+                # treated as zero — that is how a worker opens an empty envelope.
+                a["unrated_pieces"] += int(qty)
+            else:
+                a["amount"] += float(qty) * rate
+                a["rates_applied"].add(round(rate, 2))
+
+        by_emp: dict[uuid.UUID, list[dict]] = {}
+        for (emp_id, _sid, _oid), a in agg.items():
+            rates = sorted(a.pop("rates_applied"))
+            by_emp.setdefault(emp_id, []).append({
+                **a,
+                # Single rate for the period -> show it. Several (a mid-period
+                # reprice) -> null plus the list, because no single number is
+                # the rate this work was paid at.
+                "rate": rates[0] if len(rates) == 1 else None,
+                "rates_applied": rates,
+                "amount": round(a["amount"], 2),
+            })
+
+        employees = []
+        for emp_id, lines in by_emp.items():
+            lines.sort(key=lambda x: (x["style_code"], x["operation_code"]))
+            employees.append({
+                **emp_meta[emp_id],
+                "total_pieces": sum(x["pieces"] for x in lines),
+                "total_amount": round(sum(x["amount"] for x in lines), 2),
+                "unrated_pieces": sum(x["unrated_pieces"] for x in lines),
+                "lines": lines,
+            })
+        employees.sort(key=lambda e: -e["total_amount"])
+
+        return {
+            "start": start,
+            "end": end,
+            "employees": employees,
+            "total_pieces": sum(e["total_pieces"] for e in employees),
+            "total_amount": round(sum(e["total_amount"] for e in employees), 2),
+            "note": (
+                "Live estimate from production events and current rates. "
+                "Payroll of record is GET /wages/runs/{id}."
+            ),
+        }

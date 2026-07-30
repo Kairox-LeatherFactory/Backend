@@ -76,7 +76,8 @@ cards in johnpeter.xlsx, which price per style title. If XXL stitching ever need
 to pay more than S, this table needs a sku_id and uq_rate needs to grow with it.
 """
 import uuid
-from datetime import date
+from datetime import date, datetime
+from sqlalchemy import DateTime
 
 from sqlalchemy import (
     Date, Enum, ForeignKey, Integer, Numeric, String, UniqueConstraint,
@@ -106,21 +107,49 @@ class Rate(Base, UUIDMixin, TimestampMixin):
 
 
 class WageRun(Base, UUIDMixin, TimestampMixin):
-    """One payroll window. period_start/period_end are entered by the manager.
-
-    A CLOSED run is immutable. compute_run refuses any window that intersects an
-    existing CLOSED run — see WageRepository.overlapping_closed_run.
-    """
-
     __tablename__ = "wage_run"
     period_start: Mapped[date] = mapped_column(Date, index=True)
     period_end: Mapped[date] = mapped_column(Date, index=True)
     status: Mapped[RunStatus] = mapped_column(
         Enum(RunStatus, name="run_status"), default=RunStatus.OPEN
     )
+    # ── recompute audit ────────────────────────────────────────────────────
+    # A closed run is still a snapshot; these make it a VERSIONED one. A payslip
+    # printed at recompute_count=0 and one printed at 2 are different documents
+    # and must be distinguishable on paper.
+    recompute_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_recomputed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_recomputed_by: Mapped[str | None] = mapped_column(String(120))
+
     lines: Mapped[list["WageLine"]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
     )
+
+
+class WageLineDetailRow(Base, UUIDMixin):
+    """Per-(employee, style, operation) breakdown behind one WageLine.
+
+    WHY A TABLE AND NOT A RECOMPUTE-ON-READ
+        The whole point of freezing a run is that reading it never re-derives
+        anything. Rebuilding the breakdown from production_event at read time
+        would give a DIFFERENT answer the moment anyone edits a historical event
+        — which is exactly the failure mode wage_line exists to prevent. So the
+        breakdown freezes alongside the lines.
+    """
+    __tablename__ = "wage_line_detail"
+    __table_args__ = (
+        UniqueConstraint("wage_run_id", "employee_id", "style_id", "operation_id",
+                         name="uq_wage_line_detail"),
+    )
+    wage_run_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("wage_run.id", ondelete="CASCADE"), index=True)
+    employee_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("employee.id"), index=True)
+    style_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("style.id"))
+    operation_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("operation.id"))
+    pieces: Mapped[int] = mapped_column(Integer, default=0)
+    rate: Mapped[float] = mapped_column(Numeric(10, 2))     # per-piece rate applied
+    amount: Mapped[float] = mapped_column(Numeric(12, 2))   # pieces * rate
 
 
 class WageLine(Base, UUIDMixin):
@@ -238,14 +267,14 @@ TRANSACTION OWNERSHIP
 ================================================================================
 """
 import uuid
-from datetime import date
+from datetime import date, timezone, datetime
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.enums import RunStatus
-from app.modules.wages.models import Rate, WageLine, WageRun
+from app.modules.wages.models import Rate, WageLine, WageLineDetailRow, WageRun
 
 
 class WageRepository:
@@ -402,33 +431,62 @@ class WageRepository:
         await self.db.flush()
         return r
 
-    # ── runs ────────────────────────────────────────────────────────────────
-    async def overlapping_closed_run(self, start: date, end: date) -> WageRun | None:
+    async def overlapping_closed_run(self, start: date, end: date,
+                                     *, exclude_run_id: uuid.UUID | None = None):
         """Any CLOSED run whose window intersects [start, end].
 
-        Two inclusive ranges overlap iff a.start <= b.end AND a.end >= b.start.
-        This is the guard that makes hand-typed periods safe: without it, running
-        Apr 1-30 and then Apr 15-May 15 pays the same fortnight twice, closes both
-        runs, and nothing in the system ever notices.
+        exclude_run_id lets recompute skip the run it is rebuilding — without it
+        every recompute would 409 against itself.
         """
-        return await self.db.scalar(
-            select(WageRun)
-            .where(
-                WageRun.status == RunStatus.CLOSED,
-                WageRun.period_start <= end,
-                WageRun.period_end >= start,
-            )
-            .limit(1)
+        stmt = select(WageRun).where(
+            WageRun.status == RunStatus.CLOSED,
+            WageRun.period_start <= end,
+            WageRun.period_end >= start,
         )
+        if exclude_run_id:
+            stmt = stmt.where(WageRun.id != exclude_run_id)
+        return await self.db.scalar(stmt.limit(1))
 
-    async def last_closed_run(self) -> WageRun | None:
-        """Most recently ENDING closed run — the reference for gap detection."""
-        return await self.db.scalar(
-            select(WageRun)
-            .where(WageRun.status == RunStatus.CLOSED)
-            .order_by(WageRun.period_end.desc())
-            .limit(1)
-        )
+    async def last_closed_run(self, *, exclude_run_id: uuid.UUID | None = None):
+        stmt = select(WageRun).where(WageRun.status == RunStatus.CLOSED)
+        if exclude_run_id:
+            stmt = stmt.where(WageRun.id != exclude_run_id)
+        return await self.db.scalar(stmt.order_by(WageRun.period_end.desc()).limit(1))
+
+    async def clear_lines(self, run_id: uuid.UUID) -> int:
+        """Delete every frozen line + breakdown row of a run. ONE transaction.
+
+        Bulk DELETE, not ORM cascade: loading 300 WageLine objects to delete them
+        is three round trips and a lot of identity-map churn for an operation
+        whose entire semantic is 'make these rows not exist'.
+        """
+        d1 = await self.db.execute(
+            delete(WageLineDetailRow).where(WageLineDetailRow.wage_run_id == run_id))
+        d2 = await self.db.execute(
+            delete(WageLine).where(WageLine.wage_run_id == run_id))
+        await self.db.commit()
+        return int(d2.rowcount or 0) + int(d1.rowcount or 0)
+    
+    async def persist_breakdown(self, run_id: uuid.UUID, breakdown: dict) -> None:
+        """Freeze the per-(employee, style, operation) rows. Commits once."""
+        rows = [
+            WageLineDetailRow(
+                wage_run_id=run_id, employee_id=emp_id, style_id=style_id,
+                operation_id=op_id, pieces=v["pieces"],
+                rate=round(v["rate"] or 0, 2), amount=round(v["amount"], 2),
+            )
+            for (emp_id, style_id, op_id), v in breakdown.items()
+        ]
+        if not rows:
+            return
+        self.db.add_all(rows)
+        await self.db.commit()
+        
+    async def stamp_recompute(self, run: WageRun, *, by: str) -> None:
+        run.recompute_count = (run.recompute_count or 0) + 1
+        run.last_recomputed_at = datetime.now(timezone.utc)
+        run.last_recomputed_by = by
+        await self.db.commit()
 
     async def create_run(self, period_start: date, period_end: date) -> WageRun:
         """Opens a run. Callers MUST validate the window before calling this —
@@ -499,37 +557,71 @@ class WageRepository:
         ]
 
     async def run_lines_detailed(self, run_id: uuid.UUID) -> list[dict]:
-        """Lines joined to the employee. WageLine has no Employee relationship, so
-        the name is joined explicitly — lazy-loading it would raise MissingGreenlet
-        on the async session."""
-        from app.modules.employees.models import Employee
+        """Lines joined to the employee, each carrying its style/operation
+        breakdown.
 
-        stmt = (
-            select(
-                WageLine.id,
-                WageLine.employee_id,
-                Employee.name,
-                Employee.designation,
-                WageLine.wage_type,
-                WageLine.pieces,
-                WageLine.amount,
-            )
+        TWO queries, not N+1: one for the lines, one for every breakdown row of
+        the run, grouped in Python. A 300-employee run would otherwise issue 301
+        queries to render one payslip screen.
+        """
+        from app.modules.clients.models import Style
+        from app.modules.employees.models import Employee
+        from app.modules.production.models import Operation
+
+        line_stmt = (
+            select(WageLine.id, WageLine.employee_id, Employee.name,
+                   Employee.designation, WageLine.wage_type,
+                   WageLine.pieces, WageLine.amount)
             .join(Employee, Employee.id == WageLine.employee_id)
             .where(WageLine.wage_run_id == run_id)
             .order_by(WageLine.wage_type, Employee.name)
         )
-        return [
-            {
+        detail_stmt = (
+            select(WageLineDetailRow.employee_id, Style.code, Style.name,
+                   Operation.code, Operation.label,
+                   WageLineDetailRow.pieces, WageLineDetailRow.rate,
+                   WageLineDetailRow.amount)
+            .join(Style, Style.id == WageLineDetailRow.style_id)
+            .join(Operation, Operation.id == WageLineDetailRow.operation_id)
+            .where(WageLineDetailRow.wage_run_id == run_id)
+            .order_by(Style.code, Operation.code)
+        )
+
+        details: dict[uuid.UUID, list[dict]] = {}
+        for emp_id, scode, sname, ocode, olabel, pieces, rate, amount in (
+            await self.db.execute(detail_stmt)
+        ).all():
+            details.setdefault(emp_id, []).append({
+                "style_code": scode,
+                "style_name": sname,
+                "operation_code": ocode,
+                "operation_label": olabel,
+                "pieces": int(pieces),
+                "rate": float(rate),
+                "amount": float(amount),
+            })
+
+        out = []
+        for r in (await self.db.execute(line_stmt)).all():
+            emp_id = r[1]
+            rows = details.get(emp_id, [])
+            out.append({
                 "id": r[0],
-                "employee_id": r[1],
+                "employee_id": emp_id,
                 "employee_name": r[2],
                 "designation": r[3],
                 "wage_type": r[4],
                 "pieces": int(r[5]),
                 "amount": float(r[6]),
-            }
-            for r in (await self.db.execute(stmt)).all()
-        ]
+                # Per-piece rate for the line as a whole. Only meaningful when the
+                # employee worked a single style x operation; null otherwise, so
+                # the UI shows the breakdown rows instead of an average that is
+                # true of nothing.
+                "rate": rows[0]["rate"] if len(rows) == 1 else None,
+                "style_codes": sorted({x["style_code"] for x in rows}),
+                "breakdown": rows,
+            })
+        return out
 
 
 ============================================================
@@ -689,6 +781,33 @@ async def compute_run(
     """
     return await WageService(db).compute_run(body.period_start, body.period_end)
 
+# HR, DM, MD only. EMPLOYEE and every other manager role are excluded — a
+# stitching manager has no business reading the factory's labour cost base, and
+# a worker has no business reading anyone's pay but his own.
+_RATE_READERS = require_roles(
+    UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.HR
+)
+_PAYROLL_READERS = _RATE_READERS
+
+
+@router.post("/runs/{run_id}/recompute", response_model=schemas.WageRunDetail)
+async def recompute_run(
+    run_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR)),
+):
+    """COMMAND. Discards a run's frozen lines and rebuilds them from current
+    production events and rates, for the SAME window.
+
+    Use when a rate was corrected or a production event was fixed after the run
+    closed. The run keeps its id and window; recompute_count increments and the
+    actor is stamped, so a payslip reprinted afterwards is identifiably a
+    different document from the one paid against.
+
+    HR is deliberately NOT permitted: HR reads payroll, DM/MD authorise changes
+    to it.
+    """
+    return await WageService(db).recompute_run(run_id, user_name=user.name)
 
 @router.get("/runs/{run_id}", response_model=schemas.WageRunDetail)
 async def get_run(
@@ -727,7 +846,7 @@ TWO RUN SHAPES, DELIBERATELY DIFFERENT.
 ================================================================================
 """
 import uuid
-from datetime import date
+from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -836,6 +955,17 @@ class UnratedOperation(BaseModel):
     unpaid_pieces: int
 
 
+class WageLineBreakdown(BaseModel):
+    """One (style x operation) contribution to an employee's payroll line."""
+    style_code: str
+    style_name: str
+    operation_code: str
+    operation_label: str
+    pieces: int
+    rate: float          # rupees per piece applied to these pieces
+    amount: float
+
+
 class WageLineDetail(BaseModel):
     id: uuid.UUID
     employee_id: uuid.UUID
@@ -844,6 +974,11 @@ class WageLineDetail(BaseModel):
     wage_type: str
     pieces: int
     amount: float
+    # Null when the employee worked more than one style/operation — read
+    # `breakdown` instead of averaging, which would be a number nobody was paid.
+    rate: float | None = None
+    style_codes: list[str] = Field(default_factory=list)
+    breakdown: list[WageLineBreakdown] = Field(default_factory=list)
 
 
 class WageRunSummary(BaseModel):
@@ -856,15 +991,15 @@ class WageRunSummary(BaseModel):
     employee_count: int
     unrated_operations: list[UnratedOperation] = Field(default_factory=list)
     lines: list[WageLineDetail] = Field(default_factory=list)
-    # Days between the last closed run's end and this run's start. Non-zero means a
-    # stretch of work was never covered by any payroll. Informational — hand-typed
-    # periods make gaps possible and nothing else would catch them.
     gap_days: int = 0
+    recomputed: bool = False
+    recompute_count: int = 0
 
 
 class WageRunDetail(WageRunSummary):
     lines: list[WageLineDetail]
-
+    last_recomputed_at: datetime | None = None
+    last_recomputed_by: str | None = None
 
 ============================================================
 FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\wages\service.py
@@ -1137,13 +1272,13 @@ class WageService:
             "saved": saved,
         }
 
-    # ── runs ────────────────────────────────────────────────────────────────
-    async def _validate_window(self, period_start: date, period_end: date) -> int:
+        # ── runs ────────────────────────────────────────────────────────────────
+    async def _validate_window(self, period_start: date, period_end: date,
+                               *, replacing: uuid.UUID | None = None) -> int:
         """Guards for a hand-typed window. Returns gap_days.
 
-        Runs BEFORE create_run, because create_run commits — validating after it
-        would strand an orphaned OPEN row behind every rejected request, which is
-        what the previous version did.
+        `replacing` is the run being recomputed — its own window must not count
+        as an overlap with itself, or recompute would always 409.
         """
         if period_end < period_start:
             raise HTTPException(
@@ -1156,7 +1291,9 @@ class WageService:
                 "cannot run payroll for future dates",
             )
 
-        clash = await self.repo.overlapping_closed_run(period_start, period_end)
+        clash = await self.repo.overlapping_closed_run(
+            period_start, period_end, exclude_run_id=replacing
+        )
         if clash:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
@@ -1165,112 +1302,139 @@ class WageService:
                 f"not intersect — the same pieces would be paid twice.",
             )
 
-        # Gap detection. Not an error: the manager may legitimately skip a stretch.
-        # But hand-typed periods make an accidental gap invisible, so we surface it.
-        last = await self.repo.last_closed_run()
+        last = await self.repo.last_closed_run(exclude_run_id=replacing)
         if last and period_start > last.period_end:
             return max(0, (period_start - last.period_end).days - 1)
         return 0
+    
+    async def recompute_run(self, run_id: uuid.UUID, *, user_name: str) -> dict:
+        """Re-run payroll for an EXISTING run's window, discarding its old lines.
+
+        WHY THIS IS SAFE, AND WHERE IT IS NOT
+            The original design forbade recompute outright: a closed run is a
+            frozen snapshot, and silently rewriting it means last month's payslip
+            no longer matches the cash that left the building.
+
+            That protection is preserved by making recompute EXPLICIT and
+            AUDITED, not by making it impossible:
+              • it targets one named run_id — it cannot happen as a side effect
+              • the run's own window is excluded from the overlap check, so it
+                cannot be used to smuggle in a second payment for a different
+                period
+              • the old lines are DELETED, not added to — the money can never
+                double
+              • recompute_count / last_recomputed_at / last_recomputed_by are
+                stamped on the run, so a payslip reprinted after a recompute is
+                visibly a different document from the one paid against
+              • it is DM/MD only (see router)
+
+            WHAT IT STILL CANNOT PROTECT YOU FROM: cash already disbursed. If the
+            envelopes went out on Friday, recomputing on Monday changes the
+            record, not the payment. That reconciliation is a human process; the
+            audit stamp is what makes it possible at all.
+        """
+        run = await self.repo.get_run(run_id)
+        if not run:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Wage run not found")
+
+        gap_days = await self._validate_window(
+            run.period_start, run.period_end, replacing=run.id
+        )
+        await self.repo.clear_lines(run.id)
+
+        payload = await self._populate_run(
+            run, run.period_start, run.period_end, gap_days=gap_days
+        )
+        await self.repo.stamp_recompute(run, by=user_name)
+        payload["recomputed"] = True
+        payload["recompute_count"] = run.recompute_count
+        return payload
 
     async def compute_run(self, period_start: date, period_end: date) -> dict:
-        """Compute and FREEZE payroll for a hand-entered window.
-
-        Returns a SUMMARY (totals + warnings), not the lines — the lines are what
-        GET /runs/{id} is for. Raises 409 on overlap, 422 on an invalid window.
-        """
+        """Compute and FREEZE payroll for a hand-entered window."""
         gap_days = await self._validate_window(period_start, period_end)
         run = await self.repo.create_run(period_start, period_end)
-
         try:
-            employees = await self.employees.list_all(active_only=True)
-            wage_type_of = {e.id: _as_wage_type(e.wage_type) for e in employees}
-
-            lines: list[WageLine] = []
-            per_emp_amount: dict[uuid.UUID, float] = defaultdict(float)
-            per_emp_pieces: dict[uuid.UUID, int] = defaultdict(int)
-            unrated: dict[tuple, int] = defaultdict(int)
-
-            # ── piece-rate population ───────────────────────────────────────
-            # Rows are grouped per (emp, style, op, work_date) so each day is priced
-            # at the rate effective on THAT day. rate_cache collapses the per-row
-            # lookups: most employees share the same (style, op, work_date), so we
-            # hit the DB once per key rather than once per row.
-            rate_cache: dict[tuple[uuid.UUID, uuid.UUID, date], float | None] = {}
-            rows = await self.production.piece_counts(period_start, period_end)
-            for emp_id, style_id, op_id, work_date, qty in rows:
-                # THE GUARD. A monthly tailor logs production too — his output must
-                # not mint a piece-rate line on top of his salary.
-                if wage_type_of.get(emp_id) is not WageType.PIECE_RATE:
-                    continue
-                key = (style_id, op_id, work_date)
-                if key not in rate_cache:
-                    rate_cache[key] = await self.repo.effective_rate(
-                        style_id, op_id, work_date
-                    )
-                rate = rate_cache[key]
-                if rate is None:
-                    # Real work that priced to zero. Silently skipping it is how a
-                    # worker opens an empty envelope, so it rides out in the summary.
-                    unrated[(style_id, op_id)] += int(qty)
-                    continue
-                per_emp_amount[emp_id] += float(qty) * rate
-                per_emp_pieces[emp_id] += int(qty)
-
-            for emp_id, amount in per_emp_amount.items():
-                lines.append(
-                    WageLine(
-                        wage_run_id=run.id,
-                        employee_id=emp_id,
-                        wage_type=WageType.PIECE_RATE,
-                        pieces=per_emp_pieces[emp_id],
-                        amount=round(amount, 2),
-                    )
-                )
-
-            # ── monthly population ──────────────────────────────────────────
-            # Independent of production. Prorated because a hand-typed window will
-            # routinely straddle month boundaries, and a full salary for a 9-day
-            # window is not a rounding error — it's a payroll incident.
-            for emp in employees:
-                if _as_wage_type(emp.wage_type) is not WageType.MONTHLY:
-                    continue
-                lines.append(
-                    WageLine(
-                        wage_run_id=run.id,
-                        employee_id=emp.id,
-                        wage_type=WageType.MONTHLY,
-                        pieces=0,
-                        amount=prorate_monthly(
-                            float(emp.monthly_salary or 0), period_start, period_end
-                        ),
-                    )
-                )
-
-            await self.repo.add_lines(lines)
-            await self.repo.close_run(run)
-            unrated_out = await self._name_unrated(unrated)
+            payload = await self._populate_run(
+                run, period_start, period_end, gap_days=gap_days
+            )
         except Exception:
-            # create_run already committed. Leaving an OPEN run behind would make the
-            # next overlap check pass (it only looks at CLOSED) while the run list
-            # shows a phantom.
             await self.repo.delete_run(run)
             raise
+        payload["recomputed"] = False
+        payload["recompute_count"] = 0
+        return payload
 
-        employee_lookup = {emp.id: emp for emp in employees}
-        line_payloads = []
-        for ln in lines:
-            emp = employee_lookup.get(ln.employee_id)
-            line_payloads.append(
-                {
-                    "id": ln.id,
-                    "employee_id": ln.employee_id,
-                    "employee_name": emp.name if emp else "Unknown",
-                    "designation": getattr(emp, "designation", None),
-                    "wage_type": str(ln.wage_type),
-                    "pieces": int(ln.pieces),
-                    "amount": round(float(ln.amount), 2),
-                }
-            )
+    async def _populate_run(self, run, period_start: date, period_end: date,
+                            *, gap_days: int) -> dict:
+        """Shared body of compute_run and recompute_run.
+
+        Extracted so recompute cannot drift from compute — two copies of payroll
+        arithmetic is how a factory ends up with two different answers for the
+        same fortnight depending on which button was pressed.
+        """
+        employees = await self.employees.list_all(active_only=True)
+        wage_type_of = {e.id: _as_wage_type(e.wage_type) for e in employees}
+
+        lines: list[WageLine] = []
+        per_emp_amount: dict[uuid.UUID, float] = defaultdict(float)
+        per_emp_pieces: dict[uuid.UUID, int] = defaultdict(int)
+        # NEW: per-employee, per-(style, op) breakdown for the analytics surface.
+        #      {(emp_id, style_id, op_id): {"pieces": n, "amount": x, "rate": r}}
+        breakdown: dict[tuple, dict] = defaultdict(
+            lambda: {"pieces": 0, "amount": 0.0, "rate": None}
+        )
+        unrated: dict[tuple, int] = defaultdict(int)
+
+        rate_cache: dict[tuple[uuid.UUID, uuid.UUID, date], float | None] = {}
+        rows = await self.production.piece_counts(period_start, period_end)
+        for emp_id, style_id, op_id, work_date, qty in rows:
+            if wage_type_of.get(emp_id) is not WageType.PIECE_RATE:
+                continue
+            key = (style_id, op_id, work_date)
+            if key not in rate_cache:
+                rate_cache[key] = await self.repo.effective_rate(style_id, op_id, work_date)
+            rate = rate_cache[key]
+            if rate is None:
+                unrated[(style_id, op_id)] += int(qty)
+                continue
+            amount = float(qty) * rate
+            per_emp_amount[emp_id] += amount
+            per_emp_pieces[emp_id] += int(qty)
+
+            b = breakdown[(emp_id, style_id, op_id)]
+            b["pieces"] += int(qty)
+            b["amount"] += amount
+            # Last rate wins as the DISPLAY rate. If a rate changed mid-period the
+            # line's pieces were priced at several rates; effective_rate is the
+            # authority and `amount` already reflects the split. The display rate
+            # is a label, never an input to the arithmetic.
+            b["rate"] = rate
+
+        for emp_id, amount in per_emp_amount.items():
+            lines.append(WageLine(
+                wage_run_id=run.id, employee_id=emp_id,
+                wage_type=WageType.PIECE_RATE,
+                pieces=per_emp_pieces[emp_id], amount=round(amount, 2),
+            ))
+
+        for emp in employees:
+            if _as_wage_type(emp.wage_type) is not WageType.MONTHLY:
+                continue
+            lines.append(WageLine(
+                wage_run_id=run.id, employee_id=emp.id,
+                wage_type=WageType.MONTHLY, pieces=0,
+                amount=prorate_monthly(
+                    float(emp.monthly_salary or 0), period_start, period_end
+                ),
+            ))
+
+        await self.repo.add_lines(lines)
+        await self.repo.persist_breakdown(run.id, breakdown)   # see repository
+        await self.repo.close_run(run)
+
+        unrated_out = await self._name_unrated(unrated)
+        detail_lines = await self.repo.run_lines_detailed(run.id)
 
         return {
             "id": run.id,
@@ -1281,7 +1445,7 @@ class WageService:
             "total_pieces": sum(int(ln.pieces) for ln in lines),
             "employee_count": len(lines),
             "unrated_operations": unrated_out,
-            "lines": line_payloads,
+            "lines": detail_lines,
             "gap_days": gap_days,
         }
 
@@ -1317,8 +1481,13 @@ class WageService:
         return await self.repo.list_runs(limit, offset)
 
     async def get_run_detail(self, run_id: uuid.UUID) -> dict:
-        """Re-read a frozen run. This is how April payroll is reprinted in June
-        without recomputing it — the whole point of freezing the lines."""
+        """Re-read a frozen run — payslip detail, no recomputation.
+
+        Lines now carry the per-(style, operation) breakdown: style_code,
+        style_name, operation_code, pieces, rate, amount. That is what makes a
+        payslip auditable by the worker holding it: 'CUTTING on JP-CLERMONT_VEST,
+        120 pieces at 12.50 = 1500' rather than a single unexplained total.
+        """
         run = await self.repo.get_run(run_id)
         if not run:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Wage run not found")
@@ -1333,6 +1502,10 @@ class WageService:
             "employee_count": len(lines),
             "unrated_operations": [],
             "gap_days": 0,
+            "recomputed": run.recompute_count > 0,
+            "recompute_count": run.recompute_count,
+            "last_recomputed_at": run.last_recomputed_at,
+            "last_recomputed_by": run.last_recomputed_by,
             "lines": lines,
         }
 

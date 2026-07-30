@@ -40,6 +40,7 @@ class UserRole(str, enum.Enum):
     MANAGING_DIRECTOR = "managing_director"   # superuser / BOM approver (outranks DM)
     DIRECT_MANAGER = "direct_manager"
     CUTTING_MANAGER = "cutting_manager"
+    LINING_MANAGER = "lining_manager"
     STITCHING_MANAGER = "stitching_manager"
     EMPLOYEE = "employee"
     CLIENT = "client"
@@ -116,3 +117,104 @@ class NotificationStatus(str, enum.Enum):
     OPENED = "opened"
     RESPONDED = "responded"
     FAILED = "failed"
+    
+class ProductionStage(str, enum.Enum):
+    CUTTING          = "CUTTING"
+    FUSING           = "FUSING"
+    PASTING          = "PASTING"
+    SHELL_STITCHING  = "SHELL_STITCHING"
+    LINE_ATTACH      = "LINE_ATTACH"
+    LINE_STITCHING   = "LINE_STITCHING"
+    FINAL_FINISH     = "FINAL_FINISH"
+    FINAL_INSPECTION = "FINAL_INSPECTION"   # NEW — after FINAL_FINISH
+
+    @classmethod
+    def ordered(cls) -> list["ProductionStage"]:
+        return [
+            cls.CUTTING, cls.FUSING, cls.PASTING, cls.SHELL_STITCHING,
+            cls.LINE_ATTACH, cls.LINE_STITCHING, cls.FINAL_FINISH,
+            cls.FINAL_INSPECTION,
+        ]
+
+    @classmethod
+    def order_index(cls) -> dict[str, int]:
+        return {s.value: i for i, s in enumerate(cls.ordered())}
+
+    @property
+    def position(self) -> int:
+        return ProductionStage.order_index()[self.value]
+
+    def predecessor(self) -> "ProductionStage | None":
+        seq = ProductionStage.ordered()
+        i = self.position
+        return seq[i - 1] if i > 0 else None
+
+
+# Which manager role may LOG which stage.
+# DM and MD are omitted deliberately — they are handled as bypass roles in the
+# service, so adding a stage never requires remembering to grant them access.
+STAGE_ROLE_ACCESS: dict[ProductionStage, set[UserRole]] = {
+    ProductionStage.CUTTING:          {UserRole.CUTTING_MANAGER},
+    ProductionStage.FUSING:           {UserRole.CUTTING_MANAGER},
+    ProductionStage.PASTING:          {UserRole.STITCHING_MANAGER},
+    ProductionStage.SHELL_STITCHING:  {UserRole.STITCHING_MANAGER},
+    ProductionStage.LINE_ATTACH:      {UserRole.STITCHING_MANAGER},
+    ProductionStage.LINE_STITCHING:   {UserRole.STITCHING_MANAGER},
+    ProductionStage.FINAL_FINISH:     set(),   # DM/MD only
+    ProductionStage.FINAL_INSPECTION: set(),   # DM/MD only
+}
+
+
+class Designation(str, enum.Enum):
+    """Employee skill/designation. ALWAYS UPPERCASE — normalised on write.
+
+    This is what gates 'a cutting employee cannot be logged on pasting'. It is a
+    CONTROLLED VOCABULARY, not free text: the moment it is free text, 'Cutter',
+    'cutter ' and 'CUTTTER' become three different skills and the gate is
+    decorative.
+    """
+    CUTTER            = "CUTTER"
+    FUSER             = "FUSER"
+    PASTER            = "PASTER"
+    SHELL_TAILOR      = "SHELL_TAILOR"
+    LINE_ATTACHER     = "LINE_ATTACHER"
+    LINE_TAILOR       = "LINE_TAILOR"
+    FINISHER          = "FINISHER"
+    INSPECTOR         = "INSPECTOR"
+    TAILOR            = "TAILOR"      # legacy/general — see MULTI_STAGE below
+    HELPER            = "HELPER"
+    SUPERVISOR        = "SUPERVISOR"
+    OTHER             = "OTHER"
+
+    @classmethod
+    def normalise(cls, raw: str | None) -> str | None:
+        """'  shell tailor ' -> 'SHELL_TAILOR'. Unknown values are upper-cased and
+        kept rather than rejected: the seeded data has designations we have not
+        catalogued, and failing a create() on an unrecognised job title would
+        block HR on a Friday afternoon."""
+        import re
+        if raw is None:
+            return None
+        token = re.sub(r"[\s\-/]+", "_", raw.strip()).upper()
+        return token or None
+
+
+# Which designations may work which stage.
+# TAILOR/HELPER/SUPERVISOR are deliberately multi-stage: the source payroll files
+# use 'TAILOR' for people who work several stitching stations.
+STAGE_DESIGNATIONS: dict[ProductionStage, set[str]] = {
+    ProductionStage.CUTTING:          {"CUTTER"},
+    ProductionStage.FUSING:           {"FUSER", "CUTTER"},
+    ProductionStage.PASTING:          {"PASTER"},
+    ProductionStage.SHELL_STITCHING:  {"SHELL_TAILOR", "TAILOR"},
+    ProductionStage.LINE_ATTACH:      {"LINE_ATTACHER", "TAILOR"},
+    ProductionStage.LINE_STITCHING:   {"LINE_TAILOR", "TAILOR"},
+    ProductionStage.FINAL_FINISH:     {"FINISHER"},
+    ProductionStage.FINAL_INSPECTION: {"INSPECTOR", "FINISHER"},
+}
+
+# Designations that may work ANY stage — no skill gate.
+MULTI_STAGE_DESIGNATIONS: frozenset[str] = frozenset({"HELPER", "SUPERVISOR", "OTHER"})
+
+# Import barcode-specific enums LAST to avoid circular imports.
+from app.core.enums_barcode import *  # noqa: E402,F401,F403

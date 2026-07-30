@@ -14,14 +14,14 @@ TRANSACTION OWNERSHIP
 ================================================================================
 """
 import uuid
-from datetime import date
+from datetime import date, timezone, datetime
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.enums import RunStatus
-from app.modules.wages.models import Rate, WageLine, WageRun
+from app.modules.wages.models import Rate, WageLine, WageLineDetailRow, WageRun
 
 
 class WageRepository:
@@ -178,33 +178,62 @@ class WageRepository:
         await self.db.flush()
         return r
 
-    # ── runs ────────────────────────────────────────────────────────────────
-    async def overlapping_closed_run(self, start: date, end: date) -> WageRun | None:
+    async def overlapping_closed_run(self, start: date, end: date,
+                                     *, exclude_run_id: uuid.UUID | None = None):
         """Any CLOSED run whose window intersects [start, end].
 
-        Two inclusive ranges overlap iff a.start <= b.end AND a.end >= b.start.
-        This is the guard that makes hand-typed periods safe: without it, running
-        Apr 1-30 and then Apr 15-May 15 pays the same fortnight twice, closes both
-        runs, and nothing in the system ever notices.
+        exclude_run_id lets recompute skip the run it is rebuilding — without it
+        every recompute would 409 against itself.
         """
-        return await self.db.scalar(
-            select(WageRun)
-            .where(
-                WageRun.status == RunStatus.CLOSED,
-                WageRun.period_start <= end,
-                WageRun.period_end >= start,
-            )
-            .limit(1)
+        stmt = select(WageRun).where(
+            WageRun.status == RunStatus.CLOSED,
+            WageRun.period_start <= end,
+            WageRun.period_end >= start,
         )
+        if exclude_run_id:
+            stmt = stmt.where(WageRun.id != exclude_run_id)
+        return await self.db.scalar(stmt.limit(1))
 
-    async def last_closed_run(self) -> WageRun | None:
-        """Most recently ENDING closed run — the reference for gap detection."""
-        return await self.db.scalar(
-            select(WageRun)
-            .where(WageRun.status == RunStatus.CLOSED)
-            .order_by(WageRun.period_end.desc())
-            .limit(1)
-        )
+    async def last_closed_run(self, *, exclude_run_id: uuid.UUID | None = None):
+        stmt = select(WageRun).where(WageRun.status == RunStatus.CLOSED)
+        if exclude_run_id:
+            stmt = stmt.where(WageRun.id != exclude_run_id)
+        return await self.db.scalar(stmt.order_by(WageRun.period_end.desc()).limit(1))
+
+    async def clear_lines(self, run_id: uuid.UUID) -> int:
+        """Delete every frozen line + breakdown row of a run. ONE transaction.
+
+        Bulk DELETE, not ORM cascade: loading 300 WageLine objects to delete them
+        is three round trips and a lot of identity-map churn for an operation
+        whose entire semantic is 'make these rows not exist'.
+        """
+        d1 = await self.db.execute(
+            delete(WageLineDetailRow).where(WageLineDetailRow.wage_run_id == run_id))
+        d2 = await self.db.execute(
+            delete(WageLine).where(WageLine.wage_run_id == run_id))
+        await self.db.commit()
+        return int(d2.rowcount or 0) + int(d1.rowcount or 0)
+    
+    async def persist_breakdown(self, run_id: uuid.UUID, breakdown: dict) -> None:
+        """Freeze the per-(employee, style, operation) rows. Commits once."""
+        rows = [
+            WageLineDetailRow(
+                wage_run_id=run_id, employee_id=emp_id, style_id=style_id,
+                operation_id=op_id, pieces=v["pieces"],
+                rate=round(v["rate"] or 0, 2), amount=round(v["amount"], 2),
+            )
+            for (emp_id, style_id, op_id), v in breakdown.items()
+        ]
+        if not rows:
+            return
+        self.db.add_all(rows)
+        await self.db.commit()
+        
+    async def stamp_recompute(self, run: WageRun, *, by: str) -> None:
+        run.recompute_count = (run.recompute_count or 0) + 1
+        run.last_recomputed_at = datetime.now(timezone.utc)
+        run.last_recomputed_by = by
+        await self.db.commit()
 
     async def create_run(self, period_start: date, period_end: date) -> WageRun:
         """Opens a run. Callers MUST validate the window before calling this —
@@ -275,34 +304,68 @@ class WageRepository:
         ]
 
     async def run_lines_detailed(self, run_id: uuid.UUID) -> list[dict]:
-        """Lines joined to the employee. WageLine has no Employee relationship, so
-        the name is joined explicitly — lazy-loading it would raise MissingGreenlet
-        on the async session."""
-        from app.modules.employees.models import Employee
+        """Lines joined to the employee, each carrying its style/operation
+        breakdown.
 
-        stmt = (
-            select(
-                WageLine.id,
-                WageLine.employee_id,
-                Employee.name,
-                Employee.designation,
-                WageLine.wage_type,
-                WageLine.pieces,
-                WageLine.amount,
-            )
+        TWO queries, not N+1: one for the lines, one for every breakdown row of
+        the run, grouped in Python. A 300-employee run would otherwise issue 301
+        queries to render one payslip screen.
+        """
+        from app.modules.clients.models import Style
+        from app.modules.employees.models import Employee
+        from app.modules.production.models import Operation
+
+        line_stmt = (
+            select(WageLine.id, WageLine.employee_id, Employee.name,
+                   Employee.designation, WageLine.wage_type,
+                   WageLine.pieces, WageLine.amount)
             .join(Employee, Employee.id == WageLine.employee_id)
             .where(WageLine.wage_run_id == run_id)
             .order_by(WageLine.wage_type, Employee.name)
         )
-        return [
-            {
+        detail_stmt = (
+            select(WageLineDetailRow.employee_id, Style.code, Style.name,
+                   Operation.code, Operation.label,
+                   WageLineDetailRow.pieces, WageLineDetailRow.rate,
+                   WageLineDetailRow.amount)
+            .join(Style, Style.id == WageLineDetailRow.style_id)
+            .join(Operation, Operation.id == WageLineDetailRow.operation_id)
+            .where(WageLineDetailRow.wage_run_id == run_id)
+            .order_by(Style.code, Operation.code)
+        )
+
+        details: dict[uuid.UUID, list[dict]] = {}
+        for emp_id, scode, sname, ocode, olabel, pieces, rate, amount in (
+            await self.db.execute(detail_stmt)
+        ).all():
+            details.setdefault(emp_id, []).append({
+                "style_code": scode,
+                "style_name": sname,
+                "operation_code": ocode,
+                "operation_label": olabel,
+                "pieces": int(pieces),
+                "rate": float(rate),
+                "amount": float(amount),
+            })
+
+        out = []
+        for r in (await self.db.execute(line_stmt)).all():
+            emp_id = r[1]
+            rows = details.get(emp_id, [])
+            out.append({
                 "id": r[0],
-                "employee_id": r[1],
+                "employee_id": emp_id,
                 "employee_name": r[2],
                 "designation": r[3],
                 "wage_type": r[4],
                 "pieces": int(r[5]),
                 "amount": float(r[6]),
-            }
-            for r in (await self.db.execute(stmt)).all()
-        ]
+                # Per-piece rate for the line as a whole. Only meaningful when the
+                # employee worked a single style x operation; null otherwise, so
+                # the UI shows the breakdown rows instead of an average that is
+                # true of nothing.
+                "rate": rows[0]["rate"] if len(rows) == 1 else None,
+                "style_codes": sorted({x["style_code"] for x in rows}),
+                "breakdown": rows,
+            })
+        return out

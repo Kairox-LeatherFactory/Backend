@@ -5,7 +5,7 @@ modules/employees/repository.py — Async data access for employees
 """
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import WageType
@@ -40,3 +40,16 @@ class EmployeeRepository:
         await self.db.flush()
         await self.db.refresh(e)
         return e
+    
+    async def name_exists(self, name: str) -> bool:
+        """Case-insensitive existence check. Matches the DB's functional unique
+        index on lower(name) so app-level and DB-level agree."""
+        found = await self.db.scalar(
+            select(Employee.id).where(func.lower(Employee.name) == name.strip().lower()).limit(1)
+        )
+        return found is not None
+
+    async def save(self, emp: Employee) -> Employee:
+        await self.db.commit()
+        await self.db.refresh(emp)
+        return emp

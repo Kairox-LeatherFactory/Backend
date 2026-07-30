@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.enums import UserRole
 from app.modules.analytics.service import AnalyticsService
-from app.modules.users.deps import get_current_user
+from app.modules.users.deps import get_current_user, require_roles
 from app.modules.users.models import User
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
@@ -69,6 +69,20 @@ async def piece_detail(
     return await AnalyticsService(db).piece_detail(
         piece_code=piece_code, sku_code=sku_code, seq=seq
     )
+    
+@router.get("/employee-rates")
+async def employee_rate_analytics(
+    start: date = Query(...),
+    end: date = Query(...),
+    employee_id: uuid.UUID | None = Query(None),
+    style_code: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(
+        UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.HR)),
+):
+    """Per-employee rate / piece / earnings analytics. Cost data — DM, MD, HR only."""
+    return await AnalyticsService(db).employee_rate_analytics(
+        start=start, end=end, employee_id=employee_id, style_code=style_code)
 
 
 @router.get("/alerts/stage-spread")
@@ -83,3 +97,23 @@ async def freight_risk(
     _: User = Depends(get_current_user),
 ):
     return await AnalyticsService(db).freight_risk(today)
+
+
+
+@router.get("/pieces/{piece_code}/story")
+async def piece_life_story(
+    piece_code: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    return await AnalyticsService(db).piece_life_story(piece_code)
+
+@router.get("/consumption")
+async def consumption(
+    order_id: uuid.UUID | None = Query(None),
+    style_id: uuid.UUID | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    return await AnalyticsService(db).consumption_vs_stock(
+        order_id=order_id, style_id=style_id)

@@ -1,36 +1,28 @@
 """
 ================================================================================
-app/main.py — FastAPI application entry point
+app/main.py — FastAPI application entry point  (CORRECTED + barcode wired)
 ================================================================================
+WHAT CHANGED vs your version (read these — they are real fixes):
 
-RESPONSIBILITIES
-  - Create the FastAPI app instance.
-  - Manage startup/shutdown lifecycle (async): in DEBUG, auto-create tables so a
-    fresh dev machine works without running Alembic first; in production, do
-    nothing destructive (migrations own the schema).
-  - Register every module's router under a versioned /api/v1 prefix.
-  - Configure CORS for the frontend dev servers.
-  - Expose /health and / for liveness checks.
+  1. REMOVED  `from sqlalchemy.event import api`  and every `api.include_router(...)`
+     call. `api` there was a SQLAlchemy internal, not your app — those lines did
+     nothing and would crash. All registration now goes through `app.include_router`.
 
-ARCHITECTURE
-  This is a modular MONOLITH: one deployable app, many internal modules
-  (users, clients, employees, production, wages, analytics, imports). Cross-
-  module calls go through services, so a module can later be lifted into its own
-  service by swapping in-process calls for HTTP — nothing else changes.
+  2. MERGED the two duplicate `lifespan` functions into ONE. Your file defined
+     `lifespan` twice; the second (deps-check only) silently overrode the first,
+     so your notification + PO sweepers never started. Now one lifespan does the
+     deps check AND the sweepers AND table-create.
 
-  All persistence is ASYNC (asyncpg + SQLAlchemy async). The two sync contexts
-  (Alembic migrations and scripts/seed.py) use the separate sync engine in
-  core/database.py.
+  3. block_employees did NOT exist in users/deps.py (your import would crash).
+     It is now defined in users/deps.py (see PASTE_block_employees_into_users_deps.py).
 
-ROUTE MAP (every router lives under /api/v1)
-  /api/v1/auth        login, me, change-password         (self-issued JWT)
-  /api/v1/users       create/list logins                 (direct manager)
-  /api/v1/clients     clients & their orders
-  /api/v1/employees   shop-floor employees
-  /api/v1/production  operations & production events
-  /api/v1/wages       rates & payroll runs
-  /api/v1/analytics   dashboard + freight/bottleneck alerts
-  /api/v1/imports     Excel preview/commit
+  4. ADDED the barcode feature: model imports + router registration for
+     barcode / materials / drawers / attendance-scan.
+
+ROUTER LOCKING (employees may reach ONLY their own attendance):
+  Every write router already 403s an employee via its own require_roles, so the
+  _LOCKED wrapper is belt-and-braces. resolve + scan-check-in stay OPEN so a
+  worker can scan their own card.
 ================================================================================
 """
 import asyncio
@@ -38,7 +30,7 @@ import contextlib
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Response
+from fastapi import Depends, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
@@ -46,41 +38,37 @@ from app.core.database import Base, async_engine
 
 
 def _configure_logging() -> None:
-    """Configure the root logger ONCE so every module's `logging.getLogger(__name__)`
-    surfaces to stdout (captured by Docker / journald). Level is driven by
-    settings.log_level — set LOG_LEVEL=DEBUG in .env to trace each pipeline step.
-    Runs at import time so even startup logs are formatted consistently."""
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
-        force=True,   # override uvicorn's default handler so our format wins
+        force=True,
     )
-    # asyncpg/sqlalchemy chatter stays at WARNING unless we explicitly want it.
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 
 _configure_logging()
 logger = logging.getLogger("app.main")
 
-# Import every module's models so SQLAlchemy's metadata knows all tables.
-from app.modules.users import models as _users          # noqa: F401
-from app.modules.employees import models as _employees  # noqa: F401
-from app.modules.clients import models as _clients      # noqa: F401
-from app.modules.production import models as _production  # noqa: F401
-from app.modules.wages import models as _wages           # noqa: F401
-from app.modules.attendance import models as _attendance           # noqa: F401
-# Cross-cutting tables (document/notification/audit_log) live in core after the
-# procurement monolith was split into procurement (Stage 1) / bom (Stage 2-3) /
-# inventory (Stage 4) / supplier_po (Stage 5). Every module's models MUST be imported
-# so create_all/Alembic register all tables (a missed import makes autogenerate try to
-# DROP the table — the schema-drift trap).
-from app.core import models as _core_models                         # noqa: F401
-from app.modules.procurement import models as _procurement          # noqa: F401  Stage 1
-from app.modules.bom import models as _bom                          # noqa: F401  Stage 2/3
-from app.modules.inventory import models as _inventory              # noqa: F401  Stage 4
-from app.modules.supplier_po import models as _supplier_po          # noqa: F401  Stage 5
+# ──────────────────────────────────────────────────────────
+# Model imports — every module's models MUST be imported so Base.metadata knows
+# all tables (a missed import makes Alembic autogenerate try to DROP the table).
+# ──────────────────────────────────────────────────────────
+from app.modules.users import models as _users              # noqa: F401
+from app.modules.employees import models as _employees      # noqa: F401
+from app.modules.clients import models as _clients          # noqa: F401
+from app.modules.production import models as _production     # noqa: F401
+from app.modules.wages import models as _wages              # noqa: F401
+from app.modules.attendance import models as _attendance    # noqa: F401
+from app.modules.barcode import models as _barcode          # noqa: F401  (barcode + materials + drawer + supplier tables all live here)
+from app.core import models as _core_models                 # noqa: F401
+from app.modules.procurement import models as _procurement  # noqa: F401  Stage 1
+from app.modules.bom import models as _bom                  # noqa: F401  Stage 2/3
+from app.modules.inventory import models as _inventory      # noqa: F401  Stage 4
+from app.modules.supplier_po import models as _supplier_po  # noqa: F401  Stage 5
 
-# Routers
+# ──────────────────────────────────────────────────────────
+# Router imports
+# ──────────────────────────────────────────────────────────
 from app.modules.users.router import auth_router, users_router
 from app.modules.clients.router import router as clients_router
 from app.modules.employees.router import router as employees_router
@@ -95,87 +83,74 @@ from app.modules.bom.router import router as bom_router
 from app.modules.inventory.router import router as inventory_router
 from app.modules.supplier_po.router import router as supplier_po_router
 
+# ── NEW: barcode-feature routers ──────────────────────────────────────────────
+from app.modules.barcode.router import router as barcode_router
+from app.modules.barcode.router import emp_router as barcode_emp_router
+from app.modules.materials.router import router as materials_router
+from app.modules.materials.router import sup_router as suppliers_router
+from app.modules.drawers.router import router as drawers_router
+
+from app.modules.users.deps import block_employees
+
 API_PREFIX = "/api/v1"
+_LOCKED = [Depends(block_employees)]   # employee role blocked; managers pass through
 
 
 # ──────────────────────────────────────────────────────────
-# Lifecycle Management (async)
+# Lifecycle (ONE lifespan — deps check + sweepers + dev table-create)
 # ──────────────────────────────────────────────────────────
 async def _notification_sweeper():
-    """Stage-3 escalation loop (stage-3 spec §2c). Every `notification_sweep_seconds`
-    it sends the auto-email for any in-app BOM-review notice that went unseen past its
-    2-hour deadline. DB-driven + idempotent (repo.due_escalations' NOT-EXISTS guard),
-    so it survives restarts and never double-emails.
-
-    SINGLE-REPLICA ONLY (documented in config): one sweeper per process. At >1 API
-    replica, move to SELECT ... FOR UPDATE SKIP LOCKED or an external worker — the same
-    caveat as the in-process login rate-limiter (CLAUDE.md §6/§13.9)."""
     from app.core.database import AsyncSessionLocal
     from app.modules.bom.notification_service import NotificationService
-
     while True:
         try:
             await asyncio.sleep(settings.notification_sweep_seconds)
             async with AsyncSessionLocal() as db:
                 sent = await NotificationService(db).run_escalations()
                 if sent:
-                    print(f"📧 escalated {sent} unseen BOM-review notification(s) to email")
+                    logger.info("escalated %s unseen BOM-review notification(s)", sent)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:                      # one bad sweep must not kill the loop
-            print(f"⚠️  notification sweeper error: {exc}")
+        except Exception as exc:
+            logger.warning("notification sweeper error: %s", exc)
 
 
 async def _po_escalation_sweeper():
-    """Stage-5 supplier-chase ladder (stage-5 spec §7c). Every `notification_sweep_seconds`
-    it advances one rung (email → WhatsApp → auto-call → exhausted) for any sent PO whose
-    `next_escalation_at` is due and that the supplier has not acknowledged. DB-driven +
-    idempotent (the `acknowledged_at IS NULL` + `current_rung < 3` guards make a second
-    pass a no-op), so it survives restarts and never double-fires.
-
-    SINGLE-REPLICA ONLY (documented in config): one sweeper per process. At >1 API replica,
-    move to SELECT ... FOR UPDATE SKIP LOCKED or an external worker — the same caveat as the
-    BOM-review sweeper above (stage-5 §7c)."""
     from app.core.database import AsyncSessionLocal
     from app.modules.supplier_po.po_service import PoService
-
     while True:
         try:
             await asyncio.sleep(settings.notification_sweep_seconds)
             async with AsyncSessionLocal() as db:
                 advanced = await PoService(db).sweep_escalations()
                 if advanced:
-                    print(f"📞 advanced {advanced} supplier-PO escalation rung(s)")
+                    logger.info("advanced %s supplier-PO escalation rung(s)", advanced)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:                      # one bad sweep must not kill the loop
-            print(f"⚠️  PO escalation sweeper error: {exc}")
+        except Exception as exc:
+            logger.warning("PO escalation sweeper error: %s", exc)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── STARTUP ──
-    print(f"🚀 Starting {settings.app_name}")
-    print(f"📦 Environment: {'DEBUG' if settings.debug else 'PRODUCTION'}")
+    logger.info("Starting %s (%s)", settings.app_name,
+                "DEBUG" if settings.debug else "PRODUCTION")
+
+    # fail loud if extractor deps missing, not at first upload
+    from app.core.deps_check import verify_extractor_deps
+    verify_extractor_deps(strict=True)
+
     if settings.debug:
-        # Dev convenience only — production schema is owned by Alembic.
         async with async_engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        print("✅ Database tables verified")
+        logger.info("Database tables verified (debug create_all)")
 
-    sweeper = None
+    sweeper = po_sweeper = None
     if settings.notification_sweeper_enabled:
         sweeper = asyncio.create_task(_notification_sweeper())
-        print(f"⏰ Notification escalation sweeper started "
-              f"(every {settings.notification_sweep_seconds}s, "
-              f"{settings.bom_review_escalation_hours}h deadline)")
-
-    po_sweeper = None
     if settings.po_escalation_sweeper_enabled:
         po_sweeper = asyncio.create_task(_po_escalation_sweeper())
-        print(f"📦 Supplier-PO escalation sweeper started "
-              f"(every {settings.notification_sweep_seconds}s, "
-              f"{settings.po_escalation_hours}h ladder window)")
 
     yield
 
@@ -186,18 +161,11 @@ async def lifespan(app: FastAPI):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
     await async_engine.dispose()
-    print("🛑 Database connections closed")
-    
-
-@asynccontextmanager
-async def lifespan(app):
-    from app.core.deps_check import verify_extractor_deps
-    verify_extractor_deps(strict=True)      # fail loud, not at first upload
-    yield
+    logger.info("Database connections closed")
 
 
 # ──────────────────────────────────────────────────────────
-# Create FastAPI App
+# App
 # ──────────────────────────────────────────────────────────
 app = FastAPI(
     title=settings.app_name,
@@ -208,45 +176,56 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-
-# ──────────────────────────────────────────────────────────
-# Middleware (CORS)
-# ──────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:8081",     # Expo web
-        "http://localhost:19006",    # Expo web alt
-        "http://localhost:3000",     # React dev
-        "https://frontend-rust-pi-23.vercel.app",                         # tighten to your frontend origin in production
+        "http://localhost:8081",
+        "http://localhost:19006",
+        "http://localhost:3000",
+        "https://frontend-rust-pi-23.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
 # ──────────────────────────────────────────────────────────
-# Router Registration (all under /api/v1)
+# Router registration (ALL under /api/v1)
 # ──────────────────────────────────────────────────────────
+# auth + users are NOT locked (login/change-password must be reachable).
 app.include_router(auth_router, prefix=f"{API_PREFIX}/auth")
 app.include_router(users_router, prefix=f"{API_PREFIX}/users")
-app.include_router(clients_router, prefix=API_PREFIX)
-app.include_router(employees_router, prefix=API_PREFIX)
-app.include_router(production_router, prefix=API_PREFIX)
-app.include_router(wages_router, prefix=API_PREFIX)
-app.include_router(analytics_router, prefix=API_PREFIX)
-app.include_router(imports_router, prefix=API_PREFIX)
-app.include_router(chat_router, prefix=API_PREFIX)
-app.include_router(attendance_router, prefix=API_PREFIX)
-app.include_router(procurement_router, prefix=API_PREFIX)   # Stage 1 intake
-app.include_router(bom_router, prefix=API_PREFIX)           # Stage 2/3 BOM + notifications
-app.include_router(inventory_router, prefix=API_PREFIX)     # Stage 4 inventory
-app.include_router(supplier_po_router, prefix=API_PREFIX)   # Stage 5 supplier PO
+
+# attendance is NOT locked (a worker checks themselves in/out).
+app.include_router(attendance_router, prefix=API_PREFIX)   # NEW: barcode check-in
+
+# barcode resolve/print router is NOT wrapped in _LOCKED because /barcode/resolve
+# must be reachable by a worker scanning their own card; /barcode/print is guarded
+# by require_roles inside the router.
+app.include_router(barcode_router, prefix=API_PREFIX)           # NEW: /barcode/resolve + /print + /spec-less
+
+# everything below is manager-only work — locked.
+app.include_router(clients_router,     prefix=API_PREFIX, dependencies=_LOCKED)
+app.include_router(employees_router,   prefix=API_PREFIX, dependencies=_LOCKED)
+app.include_router(production_router,  prefix=API_PREFIX, dependencies=_LOCKED)
+app.include_router(wages_router,       prefix=API_PREFIX, dependencies=_LOCKED)
+app.include_router(analytics_router,   prefix=API_PREFIX, dependencies=_LOCKED)
+app.include_router(imports_router,     prefix=API_PREFIX, dependencies=_LOCKED)
+app.include_router(chat_router,        prefix=API_PREFIX, dependencies=_LOCKED)
+app.include_router(barcode_emp_router, prefix=API_PREFIX, dependencies=_LOCKED)  # NEW: /employees/{id}/barcode
+app.include_router(materials_router,   prefix=API_PREFIX, dependencies=_LOCKED)  # NEW
+app.include_router(suppliers_router,   prefix=API_PREFIX, dependencies=_LOCKED)  # NEW
+app.include_router(drawers_router,     prefix=API_PREFIX, dependencies=_LOCKED)  # NEW
+
+# Aug-20 stages (BOM/procurement/inventory/supplier_po) — locked.
+app.include_router(procurement_router, prefix=API_PREFIX, dependencies=_LOCKED)
+app.include_router(bom_router,         prefix=API_PREFIX, dependencies=_LOCKED)
+app.include_router(inventory_router,   prefix=API_PREFIX, dependencies=_LOCKED)
+app.include_router(supplier_po_router, prefix=API_PREFIX, dependencies=_LOCKED)
 
 
 # ──────────────────────────────────────────────────────────
-# Health Check
+# Health
 # ──────────────────────────────────────────────────────────
 @app.get("/health", tags=["Health"])
 async def health_check():
@@ -262,8 +241,10 @@ async def favicon():
 async def root():
     return {"message": f"Welcome to {settings.app_name}", "docs": "/docs", "health": "/health"}
 
+
+# config_store warm-up (unchanged)
 try:
-    from app.core.database import SessionLocal      # your SYNC sessionmaker
+    from app.core.database import SessionLocal
     from app.modules.bom import config_store
     with SessionLocal() as s:
         config_store.refresh_from_session(s)

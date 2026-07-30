@@ -154,6 +154,38 @@ class AttendanceService:
         await self._enforce_geofence(body.lat, body.lon)
         return await self._close(employee_id=user.employee_id)
 
+
+    async def barcode_scan(self, *, employee_id: uuid.UUID, actor: User,
+                           direction: str, lat: float | None,
+                           lon: float | None, proxy: bool):
+        """Barcode check in/out. Reuses _open_or_reject / _close.
+
+        A worker (EMPLOYEE role) may only scan their own card — enforced in the
+        router before this is called. Proxy is supervisor/manager only.
+        """
+        emp = await self.employees.get(employee_id)
+        if not emp:
+            raise HTTPException(404, "Employee not found.")
+        # geofence: reuse the same check the manual flow runs (0.0 if lat/lon None)
+        dist = 0.0
+        if lat is not None and lon is not None:
+            dist = await self._enforce_geofence(lat, lon)
+        source = AttendanceSource.PROXY if proxy else AttendanceSource.SELF
+        if direction == "in":
+            log = await self._open_or_reject(
+                employee_id=employee_id, source=source,
+                recorded_by=actor.id, distance_m=dist)
+        else:
+            log = await self._close(employee_id=employee_id)
+        present = await self.is_present_today(employee_id)
+        return {
+            "employee_id": str(employee_id), "employee_name": emp.name,
+            "work_date": log.work_date.isoformat(),
+            "check_in_at": log.check_in_at.isoformat() if log.check_in_at else None,
+            "check_out_at": log.check_out_at.isoformat() if log.check_out_at else None,
+            "is_late": log.is_late, "present_today": present,
+        }
+ 
     # ══════════════════════════════════════════════════════════════════
     # Flow B — Supervisor proxy-marks daily-wage workers
     # ══════════════════════════════════════════════════════════════════

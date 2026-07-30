@@ -18,18 +18,51 @@ Endpoints (all mounted under /api/v1):
 import uuid
 from datetime import date, timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.enums import UserRole
 from app.modules.attendance import schemas
 from app.modules.attendance.service import AttendanceService
+from app.modules.barcode.service import BarcodeService
 from app.modules.users.deps import get_current_user, require_roles
 from app.modules.users.models import User
+from app.modules.attendance.schemas import ScanCheckIn
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
 
+
+
+ 
+@router.post("/scan-check-in")
+async def scan_check_in(
+    body: ScanCheckIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Check in/out by scanning an employee barcode. A worker may scan only their
+    own card; proxy mode is supervisor/manager only (daily-wage workers)."""
+    from app.modules.attendance.service import AttendanceService
+ 
+    employee_id = await BarcodeService(db).resolve_employee_id(body.employee_barcode)
+ 
+    proxy_roles = {UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER,
+                   UserRole.MANAGING_DIRECTOR, UserRole.HR}
+    if user.role == UserRole.EMPLOYEE:
+        if getattr(user, "employee_id", None) != employee_id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN,
+                                "You can only check in with your own barcode.")
+        if body.proxy:
+            raise HTTPException(status.HTTP_403_FORBIDDEN,
+                                "Workers cannot proxy for others.")
+    elif body.proxy and user.role not in proxy_roles:
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "Proxy check-in is limited to supervisors and managers.")
+ 
+    return await AttendanceService(db).barcode_scan(
+        employee_id=employee_id, actor=user, direction=body.direction,
+        lat=body.lat, lon=body.lon, proxy=body.proxy)
 
 @router.post("/check-in", response_model=schemas.AttendanceRead, status_code=201)
 async def check_in(body: schemas.CheckInRequest,
@@ -115,3 +148,32 @@ async def update_config(
     _: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR)),
 ):
     return await AttendanceService(db).update_config(body)
+
+@router.get("/history", response_model=list[schemas.AttendanceRead])
+async def history(
+    start: date, end: date,
+    employee_id: uuid.UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Attendance history. An EMPLOYEE can only ever read their own — the
+    employee_id parameter is ignored for them rather than 403'd, so the same
+    frontend call works for every role."""
+    if user.role is UserRole.EMPLOYEE:
+        if user.employee_id is None:
+            raise HTTPException(400, "This login is not linked to an employee record.")
+        employee_id = user.employee_id
+    elif employee_id is None:
+        raise HTTPException(422, "employee_id is required")
+    return await AttendanceService(db).history(employee_id, start, end)
+
+
+@router.get("/today", response_model=list[schemas.AttendanceRead])
+async def today_roster(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(
+        UserRole.SUPERVISOR, UserRole.HR, UserRole.CUTTING_MANAGER,
+        UserRole.STITCHING_MANAGER)),
+):
+    """Whole-floor roster. Never visible to an EMPLOYEE."""
+    return await AttendanceService(db).today_roster()

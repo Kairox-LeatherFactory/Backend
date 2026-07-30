@@ -49,3 +49,13 @@ class EmployeeCreate(BaseModel):
 class EmployeeCreateRead(EmployeeRead):
     user_created: bool = False
     login_phone: str | None = None
+    employee_barcode: str | None = None
+    
+class EmployeeUpdate(BaseModel):
+    name: str | None = None
+    designation: str | None = None
+    wage_type: WageType | None = None
+    monthly_salary: float | None = None
+    phone: str | None = None
+    email: str | None = None
+    is_active: bool | None = None

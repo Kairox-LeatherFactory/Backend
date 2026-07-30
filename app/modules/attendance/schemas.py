@@ -11,6 +11,12 @@ class GpsPoint(BaseModel):
     lat: float = Field(..., ge=-90, le=90)
     lon: float = Field(..., ge=-180, le=180)
 
+class ScanCheckIn(BaseModel):
+    employee_barcode: str
+    direction: str = Field(pattern="^(in|out)$")
+    lat: float | None = None
+    lon: float | None = None
+    proxy: bool = False
 
 class CheckInRequest(GpsPoint):
     """SELF check-in by the worker themselves (Flow A).
@@ -94,3 +100,4 @@ class ShiftConfigUpdate(BaseModel):
     factory_lat: float | None = None
     factory_lon: float | None = None
     radius_m: int | None = None
+

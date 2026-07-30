@@ -25,7 +25,7 @@ async def list_employees(
     return await EmployeeService(db).list_all(active_only)
 
 
-@router.post("", response_model=schemas.EmployeeRead, status_code=201)
+@router.post("", response_model=schemas.EmployeeCreateRead, status_code=201)
 async def create_employee(
     body: schemas.EmployeeCreate,
     db: AsyncSession = Depends(get_db),

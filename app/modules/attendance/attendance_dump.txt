@@ -1,7 +1,7 @@
 ﻿============================================================
 PROJECT STRUCTURE
 ============================================================
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\attendancet_dump.txt
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\analytics_dump.txt
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\geofence.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\models.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\repository.py
@@ -250,18 +250,51 @@ Endpoints (all mounted under /api/v1):
 import uuid
 from datetime import date, timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.enums import UserRole
 from app.modules.attendance import schemas
 from app.modules.attendance.service import AttendanceService
+from app.modules.barcode.service import BarcodeService
 from app.modules.users.deps import get_current_user, require_roles
 from app.modules.users.models import User
+from app.modules.attendance.schemas import ScanCheckIn
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
 
+
+
+ 
+@router.post("/scan-check-in")
+async def scan_check_in(
+    body: ScanCheckIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Check in/out by scanning an employee barcode. A worker may scan only their
+    own card; proxy mode is supervisor/manager only (daily-wage workers)."""
+    from app.modules.attendance.service import AttendanceService
+ 
+    employee_id = await BarcodeService(db).resolve_employee_id(body.employee_barcode)
+ 
+    proxy_roles = {UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER,
+                   UserRole.MANAGING_DIRECTOR, UserRole.HR}
+    if user.role == UserRole.EMPLOYEE:
+        if getattr(user, "employee_id", None) != employee_id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN,
+                                "You can only check in with your own barcode.")
+        if body.proxy:
+            raise HTTPException(status.HTTP_403_FORBIDDEN,
+                                "Workers cannot proxy for others.")
+    elif body.proxy and user.role not in proxy_roles:
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "Proxy check-in is limited to supervisors and managers.")
+ 
+    return await AttendanceService(db).barcode_scan(
+        employee_id=employee_id, actor=user, direction=body.direction,
+        lat=body.lat, lon=body.lon, proxy=body.proxy)
 
 @router.post("/check-in", response_model=schemas.AttendanceRead, status_code=201)
 async def check_in(body: schemas.CheckInRequest,
@@ -348,6 +381,35 @@ async def update_config(
 ):
     return await AttendanceService(db).update_config(body)
 
+@router.get("/history", response_model=list[schemas.AttendanceRead])
+async def history(
+    start: date, end: date,
+    employee_id: uuid.UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Attendance history. An EMPLOYEE can only ever read their own — the
+    employee_id parameter is ignored for them rather than 403'd, so the same
+    frontend call works for every role."""
+    if user.role is UserRole.EMPLOYEE:
+        if user.employee_id is None:
+            raise HTTPException(400, "This login is not linked to an employee record.")
+        employee_id = user.employee_id
+    elif employee_id is None:
+        raise HTTPException(422, "employee_id is required")
+    return await AttendanceService(db).history(employee_id, start, end)
+
+
+@router.get("/today", response_model=list[schemas.AttendanceRead])
+async def today_roster(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(
+        UserRole.SUPERVISOR, UserRole.HR, UserRole.CUTTING_MANAGER,
+        UserRole.STITCHING_MANAGER)),
+):
+    """Whole-floor roster. Never visible to an EMPLOYEE."""
+    return await AttendanceService(db).today_roster()
+
 
 ============================================================
 FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\attendance\schemas.py
@@ -366,6 +428,12 @@ class GpsPoint(BaseModel):
     lat: float = Field(..., ge=-90, le=90)
     lon: float = Field(..., ge=-180, le=180)
 
+class ScanCheckIn(BaseModel):
+    employee_barcode: str
+    direction: str = Field(pattern="^(in|out)$")
+    lat: float | None = None
+    lon: float | None = None
+    proxy: bool = False
 
 class CheckInRequest(GpsPoint):
     """SELF check-in by the worker themselves (Flow A).
@@ -449,6 +517,7 @@ class ShiftConfigUpdate(BaseModel):
     factory_lat: float | None = None
     factory_lon: float | None = None
     radius_m: int | None = None
+
 
 
 ============================================================
@@ -611,6 +680,38 @@ class AttendanceService:
         await self._enforce_geofence(body.lat, body.lon)
         return await self._close(employee_id=user.employee_id)
 
+
+    async def barcode_scan(self, *, employee_id: uuid.UUID, actor: User,
+                           direction: str, lat: float | None,
+                           lon: float | None, proxy: bool):
+        """Barcode check in/out. Reuses _open_or_reject / _close.
+
+        A worker (EMPLOYEE role) may only scan their own card — enforced in the
+        router before this is called. Proxy is supervisor/manager only.
+        """
+        emp = await self.employees.get(employee_id)
+        if not emp:
+            raise HTTPException(404, "Employee not found.")
+        # geofence: reuse the same check the manual flow runs (0.0 if lat/lon None)
+        dist = 0.0
+        if lat is not None and lon is not None:
+            dist = await self._enforce_geofence(lat, lon)
+        source = AttendanceSource.PROXY if proxy else AttendanceSource.SELF
+        if direction == "in":
+            log = await self._open_or_reject(
+                employee_id=employee_id, source=source,
+                recorded_by=actor.id, distance_m=dist)
+        else:
+            log = await self._close(employee_id=employee_id)
+        present = await self.is_present_today(employee_id)
+        return {
+            "employee_id": str(employee_id), "employee_name": emp.name,
+            "work_date": log.work_date.isoformat(),
+            "check_in_at": log.check_in_at.isoformat() if log.check_in_at else None,
+            "check_out_at": log.check_out_at.isoformat() if log.check_out_at else None,
+            "is_late": log.is_late, "present_today": present,
+        }
+ 
     # ══════════════════════════════════════════════════════════════════
     # Flow B — Supervisor proxy-marks daily-wage workers
     # ══════════════════════════════════════════════════════════════════

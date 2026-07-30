@@ -5,21 +5,29 @@ PER-PIECE MODEL
    of that SKU — e.g. size-M piece 5 of 21. seq runs 1..N within the SKU, so
    `UniqueConstraint(sku_id, seq)` is the authoritative integrity rule.
 2. `code` is the fully-qualified, globally-unique string printed on the traveler
-   card: {ORDER}-{STYLE}-{sku.code}-{seq}  e.g. KJ2451-CLERMONT-57-M-005.
-   It carries the SKU identity AND the piece number through every stage.
-3. Pieces are minted at CUTTING (N Piece rows + N CUTTING events, qty=1). Every
-   later stage logs a qty=1 event against an EXISTING piece, so a downstream
-   stage can never exceed the count cut. sum(qty) == piece count, so wages /
-   progress / freight-risk are unchanged.
+   card. It BECOMES the parent barcode: STYLE-COLOUR-SIZE-seq.
+3. Pieces are minted at BREAKDOWN UPLOAD now (imports/premint.py), not at
+   cutting. Cutting is a scan-and-log stage like every other stage.
 4. REWORK is permissive: a piece may be logged at the same operation more than
-   once (fails QC, goes back, returns). It keeps its seq and code; repeats are
-   surfaced as a metric, never rejected. Hence NO unique(piece_id, operation_id).
+   once. It keeps its seq and code; repeats are surfaced as a metric.
 5. There is NO bundle_ref. The piece IS the tracked unit.
+
+BARCODE-FEATURE ADDITIONS (this build)
+- Piece.needs_lining      — from the breakdown material column; drives the merge
+                            (completeness) gate. Leather-only pieces skip it.
+- Piece.drawer_id         — the drawer this piece is merged to at upload.
+- ProductionEvent.{leather_lot_id, lining_lot_id, consumption_qty}
+                          — captured ONLY at a cut stage; null everywhere else.
+                            The lot link lives on the EVENT (the act of cutting),
+                            never on the Piece — the frozen contract decision.
 """
 import uuid
 from datetime import date
+from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    Boolean, Date, ForeignKey, Integer, Numeric, String, UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -36,7 +44,12 @@ class Operation(Base, UUIDMixin, TimestampMixin):
 
 
 class OperationAccess(Base, UUIDMixin):
-    """Which manager role may log which operation. Config table — edit freely."""
+    """Which manager role may log which operation. Config table — edit freely.
+
+    NOTE: this DB table remains the runtime override the service consults after
+    the STAGE_ROLE_ACCESS enum default (an MD can grant an exception without a
+    deploy). The enum is the default; this table is the escape hatch.
+    """
     __tablename__ = "operation_access"
     __table_args__ = (
         UniqueConstraint("role", "operation_id", name="uq_role_operation"),
@@ -61,15 +74,24 @@ class Piece(Base, UUIDMixin, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("sku_id", "seq", name="uq_piece_sku_seq"),
     )
-    # Globally-unique printed/scannable string, stored normalised (upper/trimmed).
     code: Mapped[str] = mapped_column(String(100), unique=True, index=True)
-    # 1..N within the SKU — the "5th piece of size M". Typed at scan time.
     seq: Mapped[int] = mapped_column(Integer)
     sku_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("sku.id"), index=True)
     current_operation_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("operation.id")
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # ── barcode-feature columns ──────────────────────────────────────────────
+    # Does this piece need a lining at all? Read from the breakdown material
+    # column at upload. Leather-only pieces skip the completeness (merge) gate.
+    needs_lining: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="1")
+    # The drawer this piece is merged to (assigned at upload). One piece = one
+    # drawer; the FK on the piece makes "which drawer holds this piece" a single
+    # indexed read. FK target created by the barcode migration (drawer table).
+    drawer_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("drawer.id"), nullable=True, index=True)
 
 
 class ProductionEvent(Base, UUIDMixin, TimestampMixin):
@@ -80,10 +102,18 @@ class ProductionEvent(Base, UUIDMixin, TimestampMixin):
     employee_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("employee.id"), index=True)
     work_date: Mapped[date] = mapped_column(Date, index=True)
     qty: Mapped[int] = mapped_column(Integer, default=1)     # always 1 for a piece event
-    entered_by: Mapped[str | None] = mapped_column(String(120))  # the manager who keyed it
+    entered_by: Mapped[str | None] = mapped_column(String(120))
     piece_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("piece.id"), index=True
     )
+
+    # ── barcode-feature columns (cut stages only; null elsewhere) ────────────
+    leather_lot_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("material_lot.id"), nullable=True, index=True)
+    lining_lot_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("material_lot.id"), nullable=True, index=True)
+    # dcm for leather, mtrs for lining — the lot's uom disambiguates.
+    consumption_qty: Mapped[Decimal | None] = mapped_column(Numeric(12, 3))
 
     operation: Mapped["Operation"] = relationship()
     piece: Mapped["Piece | None"] = relationship()

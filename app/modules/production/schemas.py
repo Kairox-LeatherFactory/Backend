@@ -130,3 +130,12 @@ class StyleStageProgress(BaseModel):
     style_name: str
     qty_ordered: int
     stages: dict[str, int]    # {"CUTTING": 152, "FUSING": 152, "PASTING": 150, ...}
+    
+class ScanResult(BaseModel):
+    operation: str
+    count_logged: int
+    logged: list[str] = Field(default_factory=list)
+    rework: list[str] = Field(default_factory=list)
+    not_found: list[str] = Field(default_factory=list)
+    sequence_blocked: list[str] = Field(default_factory=list)
+    skill_blocked: list[str] = Field(default_factory=list)
