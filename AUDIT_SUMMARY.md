@@ -1,101 +1,166 @@
-# AUDIT_SUMMARY.md — KairoX ERP pre-deploy audit
+# AUDIT_SUMMARY.md — KairoX ERP Phase 1
 
-**Audited** 2026-07-30 · **Deploy target** 2026-08-02 · **Tree** `55ca2ea` + 24 modified, 8 untracked
+**Audited** 2026-07-31 · **Ship target** 2026-08-02 (2 days) · **Type** delta re-audit
 **Scope** `app/core` + `users, wages, analytics, employees, attendance, drawers, barcode, production, clients, materials, imports`
-**Not audited** `bom, procurement, inventory, supplier_po` — seams reported (F104, F126), imports not followed.
+**Not audited** `bom, procurement, inventory, supplier_po` — seams reported, imports not followed.
 
-Full report with all 132 findings, code excerpts and fix sketches: `docs/audit/kairox-audit.html`
-(published as an artifact). This file is the git-tracked summary.
+Prior audit (2026-07-30) preserved at `docs/audit/AUDIT_SUMMARY-2026-07-30.md` and
+`docs/audit/kairox-audit.html`. Per-pass reports: `docs/audit/pass-01…15`.
+Prior findings re-verified one by one in `docs/audit/delta-register.md`.
 
 ---
 
 ## Verdict
 
-**Do not deploy today.** Three independent, verified reasons:
+**Do not ship on Aug 2 without the six blockers below.** The good news first, because it is real:
 
-1. **The application cannot be imported.** `app/main.py:92` imports `app.modules.attendance.barcode`,
-   which does not exist. `app/modules/imports/router.py:31` imports `load_preview`, commented out at
-   `app/modules/imports/load_to_db.py:83`. `app/modules/barcode/models.py:154` declares a `supplier`
-   table already declared by `supplier_po`.
-2. **The schema cannot be built by Alembic.** `alembic/versions/20260724_01_july28_fixes.py:10` ships
-   the literal placeholder `down_revision = "<CURRENT_HEAD>"`, and `fiber_role_bom_item.py` sets
-   `down_revision = None`, creating a second root. Two roots, two heads. The only working path to a
-   schema today is `create_all()` under `DEBUG=true` (`app/main.py:145-147`).
-3. **Payroll can pay the same fortnight twice.** No `CLOSED` guard on recompute
-   (`app/modules/wages/service.py:329-336`), no `UNIQUE(wage_run_id, employee_id)` on `wage_line`,
-   and a run that crashes mid-population leaves committed money at `status=OPEN`, invisible to the
-   overlap check that filters on `CLOSED` (`repository.py:189`).
+- The application imports cleanly (`python -c "import app.main"` succeeds).
+- Alembic is single-root, single-head, no placeholders (`alembic heads` → `20260731_wage_line_uniq`).
+- `uq_wage_line_run_emp` exists in the model **and** the migration.
+- The `Supplier` table/class collision is gone; the test suite went from 93 failures to **53**
+  (18 in scope), and the stale `full_test.log` no longer reflects reality.
 
-## Findings by module and severity
+The problem is that the Jul-31 edits introduced **four new blockers**, and the security set from
+yesterday is almost entirely untouched. Net blocker count is unchanged at six — and the money path
+is **worse** than it was yesterday:
+
+1. **Piece-rate payroll cannot run at all.** `production/repository.py:213,222` group and order by
+   `Piece.style_id`, a column that does not exist. Every piece-rate wage run raises
+   `AttributeError` before emitting SQL. Reproduced in `tests/test_wages.py`.
+2. **A payroll run 500s *after* committing and closing.** `wages/service.py:572` calls
+   `employees.names_for`, which does not exist, on the routine path where a MONTHLY employee has a
+   null salary — after `add_lines` and `close_run` have already committed.
+3. **The barcode attendance door is 100% broken.** `attendance/router.py:64` reads `body.direction`;
+   the field is not on `ScanCheckIn`. Every scan check-in 500s.
+4. **Three production GETs 500 on every call.** `production/router.py:71,98,110` pass a
+   `client_scope` kwarg the service signatures do not accept.
+5. **Any client login can check in any employee.** `attendance/router.py:59` guards only the
+   `proxy=True` case; with `proxy=False` a CLIENT or VIEWER token writes attendance for anyone.
+   Masked today by #3 — fixing #3 without this makes it live.
+6. **The repository is in an unresolved merge.** `git ls-files -u` shows three index stages for
+   `imports/load_to_db.py` and add/add for `production/router.py`. What was tested is the working
+   tree; what would be committed is undefined.
+
+---
+
+## Findings by module and severity — open as of today
+
+Carried-open from the prior audit, plus new findings raised this run (F139+).
 
 | Module | Blocker | High | Med | Low | Total | Verdict for Aug 2 |
 |---|---:|---:|---:|---:|---:|---|
-| core | 6 | 5 | 20 | 5 | **36** | DO NOT DEPLOY |
-| production | 2 | 5 | 12 | 0 | **19** | DO NOT DEPLOY |
-| wages | 3 | 4 | 6 | 1 | **14** | DO NOT DEPLOY |
-| attendance | 2 | 4 | 5 | 0 | **11** | DO NOT DEPLOY |
-| users | 0 | 0 | 8 | 2 | **10** | DEPLOY |
-| materials | 0 | 2 | 7 | 0 | **9** | DEPLOY WITH NAMED RISK |
-| drawers | 0 | 3 | 5 | 0 | **8** | DEPLOY WITH NAMED RISK |
-| analytics | 1 | 1 | 4 | 0 | **6** | DO NOT DEPLOY |
-| clients | 0 | 2 | 3 | 1 | **6** | DEPLOY WITH NAMED RISK |
-| imports | 0 | 2 | 3 | 0 | **5** | DEPLOY WITH NAMED RISK |
-| barcode | 1 | 0 | 2 | 1 | **4** | DEPLOY WITH NAMED RISK |
-| employees | 0 | 1 | 2 | 1 | **4** | DEPLOY WITH NAMED RISK |
-| **All** | **15** | **29** | **77** | **11** | **132** | |
+| production | 2 | 4 | 11 | 1 | **18** | **DO NOT SHIP** |
+| wages | 1 | 4 | 8 | 1 | **14** | **DO NOT SHIP** |
+| attendance | 2 | 4 | 7 | 0 | **13** | **DO NOT SHIP** |
+| imports | 1 | 2 | 6 | 0 | **9** | **DO NOT SHIP** |
+| core | 0 | 5 | 21 | 3 | **29** | SHIP WITH NAMED RISK |
+| users | 0 | 1 | 8 | 2 | **11** | SHIP WITH NAMED RISK |
+| materials | 0 | 2 | 8 | 0 | **10** | SHIP WITH NAMED RISK |
+| analytics | 0 | 2 | 6 | 0 | **8** | SHIP WITH NAMED RISK |
+| drawers | 0 | 1 | 6 | 0 | **7** | SHIP WITH NAMED RISK |
+| clients | 0 | 1 | 5 | 1 | **7** | SHIP WITH NAMED RISK |
+| barcode | 0 | 0 | 4 | 1 | **5** | SHIP |
+| employees | 0 | 0 | 3 | 1 | **4** | SHIP |
+| **All** | **6** | **26** | **93** | **10** | **135** | |
 
-By deadline tag: **D0 = 28** (blocks Aug 2), **D1 = 55** (fix in window), **D2 = 49** (post-deploy).
+**New this run: 39** (6 blocker, 8 high, 24 med, 1 low). **Carried from prior: 96**
+(73 open, 9 partial, 4 regressed, 10 reclassified). **Closed since yesterday: 38.**
 
-The pass sections contain 139 entries; 7 are cross-references of a finding recorded in an earlier
-pass and are excluded from every count above.
+By deadline: **D0 = 14** (blocks Aug 2), **D1 = 41**, **D2 = 80**.
 
-## Top 10, ranked
+---
 
-| # | Finding | Where |
-|---|---|---|
-| 1 | Application cannot be imported (3 causes) | `main.py:92`, `imports/router.py:31`, `barcode/models.py:154` |
-| 2 | Alembic cannot build the schema — placeholder parent + two roots | `20260724_01_july28_fixes.py:10`, `fiber_role_bom_item.py` |
-| 3 | A closed payroll run can be silently recomputed | `wages/service.py:329-336` |
-| 4 | An interrupted run pays the fortnight twice | `wages/service.py:361`, `repository.py:189` |
-| 5 | Nothing enforces one wage line per employee per run | `wages/models.py:99-105` |
-| 6 | Production JWTs may be signed with the shipped default key | `core/config.py:123` |
-| 7 | A client login can read every other client's orders (6 endpoints) | `analytics/service.py:160,210,295,352,382` |
-| 8 | Any employee can read the whole floor's attendance | `attendance/router.py:128` shadows `:171` |
-| 9 | The geofence is bypassed by omitting GPS from the request | `attendance/service.py:169-172` |
-| 10 | Every production scan 500s against a seeded database | `production/service.py:218-222`, `scripts/seed.py:97-104` |
+## Top 10, ranked by Aug 2 impact
 
-## 3-day burn-down
-
-| When | Work | Findings | Exit test |
+| # | Finding | Where | Tag |
 |---|---|---|---|
-| Jul 31 am | Delete dead imports; rename the colliding table; rebase migrations to one root/head | F00, F104, F59, F60 | `import app.main` succeeds; `alembic upgrade head` runs on an empty DB |
-| Jul 31 pm | Reconcile the stage vocabulary (two `ProductionStage` enums, seeded operation codes) | F01, F02, F58, F61 | A seeded DB accepts a scan at every stage in `leather_chain()` |
-| Aug 1 am | Close the money path: status guard, unique constraint, single transaction | F20, F21, F22, F23 | Recompute on a closed run returns 409; a killed run leaves no committed lines |
-| Aug 1 pm | Close the exposure set: secret key, analytics tenancy, shadowed route, GPS | F32, F33, F34, F35, F49, F37 | CLIENT token 404s on another client's order; EMPLOYEE token 403s on `/attendance/today` |
-| Aug 2 am | Regression sweep: rework double-decrement, negative stock, order materialisation | F03, F14, F116 | A re-posted cut scan does not move `on_hand` twice |
-| Aug 2 pm | Deploy; D1/D2 recorded in a named-risk register | — | Register signed off |
+| 1 | Piece-rate payroll dies at the query layer | `production/repository.py:213,222` | D0 |
+| 2 | A run 500s after committing and closing; cleanup then fails on the FK | `wages/service.py:572`; `wages/models.py:109-111` | D0 |
+| 3 | Repository sitting in an unresolved merge | `git ls-files -u` | D0 |
+| 4 | Barcode attendance check-in always 500s | `attendance/router.py:64` | D0 |
+| 5 | Any client/viewer token can check in any employee | `attendance/router.py:52-61` | D0 |
+| 6 | Three production GETs 500 (and are untenanted once fixed) | `production/router.py:71,98,110` | D0 |
+| 7 | Geofence bypassed by omitting GPS; the row still counts as present | `attendance/service.py:195-207` | D0 |
+| 8 | Unconfigured deploy boots on the shipped JWT key, with `create_all` and leaked tracebacks | `core/config.py:50-51,124,256`; `main.py:144-147,229` | D0 |
+| 9 | One payroll run = four commits; the single-transaction code exists and is dead | `wages/repository.py:252,266,239,270` vs `:382-430` | D0 |
+| 10 | Fresh DB centres the geofence on 0°N 0°E and blocks the whole floor | `attendance/models.py:63-64` | D0 |
 
-Two items are genuinely a day's work rather than an edit: the migration rebase (17 files, two roots,
-a branch) and the analytics tenancy scoping (six endpoints). If either slips, see the scope-cut
-table in the full report — the four things that must never be cut are F20, F21, F22 and F32.
+Items 7, 9 and 10 are the ones most likely to be under-rated. #10 in particular needs no attacker
+and no unusual data — it is what happens on a clean deploy, and it blocks production logging
+factory-wide.
 
-## Method and limits
+---
 
-- Every `.py` file in scope was read in full, plus the 17 Alembic revisions, `scripts/seed.py` and
-  `tests/conftest.py`. Every claim carries a `FILE:LINE` citation.
-- Route tables were built by introspecting each `APIRouter`'s registered dependencies, not by
-  reading decorators — that is the only reason the shadowed route (F35) was found.
-- The boot failures and the missing mixin (F84) were confirmed by executing the import.
-- **The application does not run**, so nothing was verified against a live server. No HTTP
-  reproduction steps appear in the report and none should be inferred.
-- The working tree is uncommitted and moving; line numbers are accurate as of 2026-07-30.
-- No runtime security testing: no fuzzing, no dependency CVE scan, no penetration testing.
+## Two-day burn-down
 
-## Phase status
+| When | Work | Exit test |
+|---|---|---|
+| **Jul 31 pm** | Resolve + stage the merge; delete the eight `*_dump.txt` files | `git ls-files -u` empty; working tree == index |
+| **Aug 1 am** | Blockers 1, 2, 6: `SKU.style_id` in group/order by; hoist `_name_unrated` above `close_run` and use `list_all`; add `client_scope` to the three service signatures | `pytest tests/test_wages.py` green; a piece-rate run completes; the three GETs return 200 |
+| **Aug 1 pm** | Blockers 4, 5, 7: restore `direction` on `ScanCheckIn`; collapse the BOLA guard to one condition; reject GPS-less SELF scans with 422 | CLIENT token 403s on another worker's barcode; a GPS-less scan 422s; a valid scan 201s |
+| **Aug 2 am** | Blockers 8, 9, 10: flip `environment`/`debug` defaults; wire `compute_run` to the `*_nocommit` seam + one commit; geofence fails open with a warning when unconfigured | Boot with no `.env` refuses the default key; a killed run leaves no committed lines; a fresh DB accepts a check-in |
+| **Aug 2 pm** | Regression sweep + deploy; D1/D2 into a signed risk register | Baseline in-scope failures < 18; register signed |
 
-- **Phase 1 (audit): complete.** No application code was modified. `app/`, `alembic/` and `scripts/`
-  are untouched — verifiable with `git status`.
-- **Phase 2 (gate): awaiting approval.**
-- **Phase 3 (tests): not started.** Gated on approval. Tests will go into `tests/` only, extending
-  the seven existing files that cover this ground rather than duplicating them, in the priority the
-  brief sets: money paths → integrity → read paths.
+Two items are a day's work rather than an edit if attempted properly: batching the production log
+path (`pass-10`) and extracting the four gates (`pass-08`). **Neither is on this list** — both are
+D1/D2 with safe Aug 2 fallbacks.
+
+---
+
+## Scope cuts, if the window closes
+
+Cut in this order. The four that must **never** be cut are #1, #2, #3 and #5 above.
+
+| Cut | Fallback for Aug 2 | Cost |
+|---|---|---|
+| Production log batching (`pass-10`) | Ship the one-line `IN (...)` piece fetch only | 40 of ~250 round trips saved; rest deferred |
+| Analytics role gates (`pass-03`) | Leave as-is — CLIENT is correctly scoped, so this is excessive internal access, not a leak | Internal over-exposure for one release |
+| Pagination (`pass-09`) | Default `include_pieces=False` + hard `LIMIT 500` in the three worst queries | Invisible to callers, removes outage risk |
+| Rate limiting (`pass-03`) | Enforce at the load balancer, not in code | Config, not code; record the in-app gap |
+| Drawers repository (`pass-07`) | Leave; current call order is correct | Structural debt only |
+| Gate extraction (`pass-08`) | Test the gates through the service, as today | No behaviour change |
+
+---
+
+## Test baseline
+
+`full_test.log` was stale — it recorded 93 failed / 100 passed against the pre-rename
+`Supplier` collision that no longer exists.
+
+**Actual, today:** 53 failed / 153 passed / 1 xfailed. **In scope only** (excluding the seven
+BOM/procurement/inventory/supplier_po files): **18 failed / 112 passed**.
+
+Three of those 18 failures are test defects, not app defects, and should not be counted against
+the modules:
+
+- `tests/test_attendance_fixes.py.py` — double `.py` extension **aborts collection of the entire
+  suite**; every run needs `--ignore` until renamed.
+- `tests/test_uat_scenarios.py:189` — imports `Supplier` from `barcode.models`, renamed to
+  `MaterialSupplier`.
+- `tests/test_final_modules_fixes.py` — reads a file with the platform default encoding;
+  `UnicodeDecodeError` on Windows.
+
+The rest map to real findings, chiefly the `Piece.style_id` blocker and tests that log production
+without marking attendance first.
+
+---
+
+## Safe to ship Aug 2?
+
+**Per module** — see the table above. In short:
+
+- **SHIP:** `barcode`, `employees`.
+- **SHIP WITH NAMED RISK:** `core`, `analytics`, `materials`, `drawers`, `users`, `clients`.
+- **DO NOT SHIP:** `production`, `wages`, `attendance`, `imports` — each holds at least one
+  blocker that fails on ordinary input, not on an edge case.
+
+**Overall: no, not as it stands.** With the two-day burn-down above completed and verified, yes —
+for **one factory on one replica**, with a signed risk register covering rate limiting, backups,
+logging, pool settings and the single-replica assumptions in `pass-15`.
+
+For the ten-factory target named in the brief, `pass-15` is a pre-scale milestone that must land
+between Aug 2 and Aug 20 — before the second site, not after.
+
+---
+
+*No application code was modified in producing this audit. All fix sketches are proposals.*

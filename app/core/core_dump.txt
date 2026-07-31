@@ -1,44 +1,7 @@
-﻿============================================================
-PROJECT STRUCTURE
-============================================================
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\beat_schedule.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\celery.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\config.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\core_dump.txt
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\database.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\deps_check.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\enums.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\enums_barcode.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\models.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\notifier.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\security.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\storage.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\__init__.py
 
-============================================================
-PROJECT FILES
-============================================================
-
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\__init__.py
-============================================================
-
-"""
-core — infrastructure shared by every module.
-
-    config.py    environment-driven settings (sync + async DB URLs, JWT secret)
-    database.py  the SYNC and ASYNC SQLAlchemy engines + session factories
-    enums.py     centralised enumerations (UserRole, WageType, RunStatus, ShipMode)
-    models.py    reusable mixins (UUID PK, timestamps) + portable GUID type
-    security.py  self-issued JWT auth, password hashing, RBAC dependencies
-
-Nothing here imports from app.modules, keeping the dependency graph acyclic.
-"""
-
-
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\beat_schedule.py
-============================================================
+====================================================================================================
+FILE: beat_schedule.py
+====================================================================================================
 
 # app/core/celery.py (continued) or app/core/beat_schedule.py
 from celery.schedules import crontab
@@ -55,9 +18,10 @@ celery_app.conf.beat_schedule = {
     },
 }
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\celery.py
-============================================================
+
+====================================================================================================
+FILE: celery.py
+====================================================================================================
 
 # app/core/celery.py
 from celery import Celery
@@ -88,9 +52,10 @@ celery_app.autodiscover_tasks([
     # add modules as they gain tasks
 ])
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\config.py
-============================================================
+
+====================================================================================================
+FILE: config.py
+====================================================================================================
 
 """
 ================================================================================
@@ -127,6 +92,7 @@ MIGRATION NOTE (Supabase -> self-issued JWT)
 from functools import lru_cache
 
 from dotenv import load_dotenv
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Export the .env file into the real process environment as well. pydantic-settings
@@ -328,6 +294,44 @@ class Settings(BaseSettings):
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
 
+     # ── F32 / H5: never sign production tokens with a well-known key ──────────
+    # H5: the original guard keyed ONLY on `environment`, which defaults to
+    # "local" (config.py:50) — so DEBUG=false with ENVIRONMENT unset booted on
+    # the shipped key. It also matched one prefix, while .env.example:19 ships
+    # "change-me-to-a-long-random-string", which that prefix does not catch.
+    _INSECURE_SECRET_PREFIXES = ("dev-only", "change-me", "changeme", "secret",
+                                 "test", "please-change")
+    _MIN_SECRET_LEN = 32
+
+    @model_validator(mode="after")
+    def _reject_default_secret_outside_local(self) -> "Settings":
+        """A missing/misconfigured SECRET_KEY must FAIL a non-local boot, not
+        silently sign forgeable JWTs. The dev default survives only when BOTH
+        environment == 'local' AND debug is on — either one alone is not a
+        statement that this is a developer's machine.
+        """
+        env = (self.environment or "").strip().lower()
+        key = (self.secret_key or "").strip()
+        is_local_dev = (env == "local" and bool(self.debug))
+        if is_local_dev:
+            return self
+
+        low = key.lower()
+        if any(low.startswith(p) for p in self._INSECURE_SECRET_PREFIXES):
+            raise RuntimeError(
+                "SECRET_KEY is still a well-known placeholder while "
+                f"ENVIRONMENT={self.environment!r} DEBUG={self.debug!r}. "
+                "Set a real SECRET_KEY. Refusing to boot with a publicly-known "
+                "signing key."
+            )
+        if len(key) < self._MIN_SECRET_LEN:
+            raise RuntimeError(
+                f"SECRET_KEY is {len(key)} chars; a signing key must be at least "
+                f"{self._MIN_SECRET_LEN}. Generate one with "
+                "`python -c \"import secrets;print(secrets.token_urlsafe(48))\"`."
+            )
+        return self
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -338,9 +342,9 @@ def get_settings() -> Settings:
 settings = get_settings()
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\database.py
-============================================================
+====================================================================================================
+FILE: database.py
+====================================================================================================
 
 """
 ================================================================================
@@ -482,9 +486,9 @@ def get_sync_db() -> Generator[Session, None, None]:
         db.close()
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\deps_check.py
-============================================================
+====================================================================================================
+FILE: deps_check.py
+====================================================================================================
 
 import importlib.util
 
@@ -507,9 +511,10 @@ def verify_extractor_deps(*, strict: bool = True) -> list[str]:
         raise RuntimeError("Missing extractor dependencies:\n  " + "\n  ".join(missing))
     return missing
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\enums.py
-============================================================
+
+====================================================================================================
+FILE: enums.py
+====================================================================================================
 
 """
 ================================================================================
@@ -630,111 +635,48 @@ class NotificationStatus(str, enum.Enum):
     OPENED = "opened"
     RESPONDED = "responded"
     FAILED = "failed"
-    
-class ProductionStage(str, enum.Enum):
-    CUTTING          = "CUTTING"
-    FUSING           = "FUSING"
-    PASTING          = "PASTING"
-    SHELL_STITCHING  = "SHELL_STITCHING"
-    LINE_ATTACH      = "LINE_ATTACH"
-    LINE_STITCHING   = "LINE_STITCHING"
-    FINAL_FINISH     = "FINAL_FINISH"
-    FINAL_INSPECTION = "FINAL_INSPECTION"   # NEW — after FINAL_FINISH
-
-    @classmethod
-    def ordered(cls) -> list["ProductionStage"]:
-        return [
-            cls.CUTTING, cls.FUSING, cls.PASTING, cls.SHELL_STITCHING,
-            cls.LINE_ATTACH, cls.LINE_STITCHING, cls.FINAL_FINISH,
-            cls.FINAL_INSPECTION,
-        ]
-
-    @classmethod
-    def order_index(cls) -> dict[str, int]:
-        return {s.value: i for i, s in enumerate(cls.ordered())}
-
-    @property
-    def position(self) -> int:
-        return ProductionStage.order_index()[self.value]
-
-    def predecessor(self) -> "ProductionStage | None":
-        seq = ProductionStage.ordered()
-        i = self.position
-        return seq[i - 1] if i > 0 else None
 
 
-# Which manager role may LOG which stage.
-# DM and MD are omitted deliberately — they are handled as bypass roles in the
-# service, so adding a stage never requires remembering to grant them access.
-STAGE_ROLE_ACCESS: dict[ProductionStage, set[UserRole]] = {
-    ProductionStage.CUTTING:          {UserRole.CUTTING_MANAGER},
-    ProductionStage.FUSING:           {UserRole.CUTTING_MANAGER},
-    ProductionStage.PASTING:          {UserRole.STITCHING_MANAGER},
-    ProductionStage.SHELL_STITCHING:  {UserRole.STITCHING_MANAGER},
-    ProductionStage.LINE_ATTACH:      {UserRole.STITCHING_MANAGER},
-    ProductionStage.LINE_STITCHING:   {UserRole.STITCHING_MANAGER},
-    ProductionStage.FINAL_FINISH:     set(),   # DM/MD only
-    ProductionStage.FINAL_INSPECTION: set(),   # DM/MD only
-}
+# ══════════════════════════════════════════════════════════════════════════
+# PRODUCTION VOCABULARY — single source of truth lives in enums_barcode.py
+# ══════════════════════════════════════════════════════════════════════════
+# F01 FIX: ProductionStage, Designation, STAGE_ROLE_ACCESS, STAGE_DESIGNATIONS
+# and MULTI_STAGE_DESIGNATIONS were previously ALSO defined here and then
+# silently rebound by `from app.core.enums_barcode import *`. That wildcard made
+# a load-bearing domain migration happen by import order. The canonical,
+# post-merge definitions (9 stages incl. the two parallel cut entries and
+# PACKAGE_EXPORT, the LINING_MANAGER gate, and the richer designation set) live
+# in enums_barcode.py. We import them EXPLICITLY here so that a future name
+# collision is an ImportError at load time rather than a silent rebind.
+from app.core.enums_barcode import (  # noqa: E402
+    ProductionStage,
+    ScreenContext,
+    Designation,
+    BarcodeType,
+    BarcodeStatus,
+    MaterialCategory,
+    MaterialSubtype,
+    ReceiptStatus,
+    SupplierOrderStatus,
+    DrawerState,
+    DrawerPart,
+    BarcodeAuditAction,
+    LINING_MANAGER,
+    MERGE_GATE_ENTRY,
+    STAGE_ROLE_ACCESS,
+    SCREEN_TO_STAGE,
+    SCREEN_EXPECTED_ROLE,
+    STAGE_DESIGNATIONS,
+    MULTI_STAGE_DESIGNATIONS,
+    MATERIAL_SPEC,
+    uom_for,
+    resolve_spec,
+)
 
 
-class Designation(str, enum.Enum):
-    """Employee skill/designation. ALWAYS UPPERCASE — normalised on write.
-
-    This is what gates 'a cutting employee cannot be logged on pasting'. It is a
-    CONTROLLED VOCABULARY, not free text: the moment it is free text, 'Cutter',
-    'cutter ' and 'CUTTTER' become three different skills and the gate is
-    decorative.
-    """
-    CUTTER            = "CUTTER"
-    FUSER             = "FUSER"
-    PASTER            = "PASTER"
-    SHELL_TAILOR      = "SHELL_TAILOR"
-    LINE_ATTACHER     = "LINE_ATTACHER"
-    LINE_TAILOR       = "LINE_TAILOR"
-    FINISHER          = "FINISHER"
-    INSPECTOR         = "INSPECTOR"
-    TAILOR            = "TAILOR"      # legacy/general — see MULTI_STAGE below
-    HELPER            = "HELPER"
-    SUPERVISOR        = "SUPERVISOR"
-    OTHER             = "OTHER"
-
-    @classmethod
-    def normalise(cls, raw: str | None) -> str | None:
-        """'  shell tailor ' -> 'SHELL_TAILOR'. Unknown values are upper-cased and
-        kept rather than rejected: the seeded data has designations we have not
-        catalogued, and failing a create() on an unrecognised job title would
-        block HR on a Friday afternoon."""
-        import re
-        if raw is None:
-            return None
-        token = re.sub(r"[\s\-/]+", "_", raw.strip()).upper()
-        return token or None
-
-
-# Which designations may work which stage.
-# TAILOR/HELPER/SUPERVISOR are deliberately multi-stage: the source payroll files
-# use 'TAILOR' for people who work several stitching stations.
-STAGE_DESIGNATIONS: dict[ProductionStage, set[str]] = {
-    ProductionStage.CUTTING:          {"CUTTER"},
-    ProductionStage.FUSING:           {"FUSER", "CUTTER"},
-    ProductionStage.PASTING:          {"PASTER"},
-    ProductionStage.SHELL_STITCHING:  {"SHELL_TAILOR", "TAILOR"},
-    ProductionStage.LINE_ATTACH:      {"LINE_ATTACHER", "TAILOR"},
-    ProductionStage.LINE_STITCHING:   {"LINE_TAILOR", "TAILOR"},
-    ProductionStage.FINAL_FINISH:     {"FINISHER"},
-    ProductionStage.FINAL_INSPECTION: {"INSPECTOR", "FINISHER"},
-}
-
-# Designations that may work ANY stage — no skill gate.
-MULTI_STAGE_DESIGNATIONS: frozenset[str] = frozenset({"HELPER", "SUPERVISOR", "OTHER"})
-
-# Import barcode-specific enums LAST to avoid circular imports.
-from app.core.enums_barcode import *  # noqa: E402,F401,F403
-
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\enums_barcode.py
-============================================================
+====================================================================================================
+FILE: enums_barcode.py
+====================================================================================================
 
 """
 ================================================================================
@@ -1165,6 +1107,7 @@ class DrawerState(str, enum.Enum):
     WAITING = "waiting"
     MERGED = "merged"
     HOLDING_LEATHER = "holding_leather"
+    HOLDING_LINING = "holding_lining"   # F07: lining stored, leather not yet
     HOLDING_BOTH = "holding_both"
     RECEIVED = "received"
     SENDED = "sended"
@@ -1195,9 +1138,10 @@ class BarcodeAuditAction(str, enum.Enum):
 #   the _role() shim above becomes a no-op (the real member is found).
 # ══════════════════════════════════════════════════════════════════════════
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\models.py
-============================================================
+
+====================================================================================================
+FILE: models.py
+====================================================================================================
 
 """
 ================================================================================
@@ -1373,9 +1317,9 @@ class AuditLog(Base, UUIDMixin, TimestampMixin):
     at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\notifier.py
-============================================================
+====================================================================================================
+FILE: notifier.py
+====================================================================================================
 
 """
 ================================================================================
@@ -1538,9 +1482,9 @@ def reset_notifier_cache() -> None:
     _instance = None
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\security.py
-============================================================
+====================================================================================================
+FILE: security.py
+====================================================================================================
 
 """
 ================================================================================
@@ -1693,9 +1637,9 @@ def login_attempts_clear(phone: str) -> None:
     _login_attempts.pop(phone, None)
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\core\storage.py
-============================================================
+====================================================================================================
+FILE: storage.py
+====================================================================================================
 
 """
 ================================================================================
@@ -1978,3 +1922,22 @@ def reset_storage_cache() -> None:
     """Test hook: drop the cached backend so a changed setting / dir takes effect."""
     global _instance
     _instance = None
+
+
+====================================================================================================
+FILE: __init__.py
+====================================================================================================
+
+"""
+core — infrastructure shared by every module.
+
+    config.py    environment-driven settings (sync + async DB URLs, JWT secret)
+    database.py  the SYNC and ASYNC SQLAlchemy engines + session factories
+    enums.py     centralised enumerations (UserRole, WageType, RunStatus, ShipMode)
+    models.py    reusable mixins (UUID PK, timestamps) + portable GUID type
+    security.py  self-issued JWT auth, password hashing, RBAC dependencies
+
+Nothing here imports from app.modules, keeping the dependency graph acyclic.
+"""
+
+

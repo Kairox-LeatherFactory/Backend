@@ -1,0 +1,3675 @@
+
+====================================================================================================
+FILE: enums.py
+====================================================================================================
+
+"""
+modules/supplier_po/enums.py — Stage-5 supplier-PO value-sets (str-Enum + VARCHAR).
+
+Domain-specific to supplier matching, the PO cross-check/approval state machine, open
+tracking, and the escalation ladder. Cross-cutting Notification* vocab lives in
+app/core/enums.py.
+
+ENUM GUIDE (each str-Enum; the model stores `.value` in a VARCHAR column)
+  POStatus                 the PO cross-check + send + escalation state machine.
+  POResponseChannel        email / whatsapp / call — how a contact attempt was made.
+  POResponseStatus         pending/opened/confirmed/no_response/failed (a contact attempt's result).
+  POTrackingEventType      open/click/delivery/bounce/complaint/whatsapp/call (the engagement log).
+  SupplierEmailStatus      unknown/valid/invalid — set by bounce feedback; gates email send.
+  SupplierType             leather/accessory/service — drives PO template + approver routing.
+  ProductionTrackingStatus the §8c production ladder (awaiting_bom → ... → completed).
+"""
+import enum
+
+
+class POStatus(str, enum.Enum):
+    """Lifecycle of a SUPPLIER purchase order (§3b).
+        draft → pending_approval → approved → sent → responded → confirmed
+                       └→ rejected → draft        └→ escalated → confirmed
+    `cancelled` is reachable from any pre-send state."""
+    DRAFT = "draft"
+    PENDING_APPROVAL = "pending_approval"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    SENT = "sent"
+    RESPONDED = "responded"
+    CONFIRMED = "confirmed"
+    ESCALATED = "escalated"
+    CANCELLED = "cancelled"
+
+
+class POResponseChannel(str, enum.Enum):
+    EMAIL = "email"
+    WHATSAPP = "whatsapp"      # §7: the first escalation rung
+    CALL = "call"
+
+
+class POResponseStatus(str, enum.Enum):
+    PENDING = "pending"
+    OPENED = "opened"
+    CONFIRMED = "confirmed"
+    NO_RESPONSE = "no_response"
+    FAILED = "failed"          # a hard bounce / send failure (§5b)
+
+
+class POTrackingEventType(str, enum.Enum):
+    """The unified engagement log on `po_tracking_event` (§6c)."""
+    OPEN = "open"
+    CLICK = "click"
+    DELIVERY = "delivery"
+    BOUNCE = "bounce"
+    COMPLAINT = "complaint"
+    WHATSAPP = "whatsapp"
+    CALL = "call"
+
+
+class SupplierEmailStatus(str, enum.Enum):
+    """`supplier.email_status` — set by §5b bounce feedback."""
+    UNKNOWN = "unknown"
+    VALID = "valid"
+    INVALID = "invalid"
+
+
+class SupplierType(str, enum.Enum):
+    """Curated supplier type; defaults from the dominant history mode. Drives the §2 PO
+    template + the §3 cross-check approver routing."""
+    LEATHER = "leather"
+    ACCESSORY = "accessory"
+    SERVICE = "service"
+
+
+class ProductionTrackingStatus(str, enum.Enum):
+    """The §8c order/style production ladder (one row per style/order)."""
+    AWAITING_BOM = "awaiting_bom"
+    BOM_APPROVED = "bom_approved"
+    INVENTORY_CHECKED = "inventory_checked"
+    PO_RAISED = "po_raised"
+    PO_CONFIRMED = "po_confirmed"
+    MATERIAL_READY = "material_ready"
+    RELEASED_TO_PRODUCTION = "released_to_production"
+    IN_PRODUCTION = "in_production"
+    COMPLETED = "completed"
+
+
+====================================================================================================
+FILE: escalation.py
+====================================================================================================
+
+"""
+================================================================================
+modules/supplier_po/escalation.py — WhatsApp + Voice transport (§7b)
+================================================================================
+
+A thin transport abstraction (mirrors notifier.py's EmailBackend) for the §7
+escalation ladder's two outbound rungs: a WhatsApp message, then an auto-call.
+
+ONE transport (Twilio) for BOTH (§7b): Twilio WhatsApp + Twilio Voice is one vendor +
+one SDK, vs Meta WhatsApp Cloud API (cheaper per message but a second integration +
+template-approval + Business-Manager setup). At factory volume the per-message delta is
+negligible; Meta-direct is the documented cost option if volume grows.
+
+A dev `log`/`noop` driver makes the ladder testable offline (no Twilio account); the
+real `twilio` driver is selected by `settings.escalation_transport` (blank-defaulted
+TWILIO_* keys). Sends are blocking → callers invoke from a threadpool. Outcomes post
+back to the §7 webhooks (`/webhooks/twilio/*`) which stamp the PO acknowledgement.
+
+FUNCTION GUIDE  (mirrors notifier.py: an interface + drivers + a singleton factory)
+  EscalationTransport          the interface: send_whatsapp(to, body) / place_call(to, message),
+                               each returning {ok, sid?, error?} and NEVER raising.
+  LogEscalationTransport       default — prints (observable offline). NoopEscalationTransport — silent.
+  TwilioEscalationTransport    real Twilio WhatsApp + Voice (lazy import; blocking → threadpool).
+  get_escalation_transport() -> EscalationTransport   the configured singleton (defaults to log).
+      CALLED FROM: PoService.sweep_escalations (rung 1 WhatsApp, rung 2 call).
+  reset_escalation_cache()     test hook — drop the cached transport.
+================================================================================
+"""
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+from app.core.config import settings
+
+
+class EscalationTransport(ABC):
+    @abstractmethod
+    def send_whatsapp(self, *, to: str, body: str) -> dict:
+        """Send a WhatsApp message. Returns {ok, sid?, error?}. Never raises."""
+
+    @abstractmethod
+    def place_call(self, *, to: str, message: str) -> dict:
+        """Place an auto-call (TTS reads the PO ref). Returns {ok, sid?, error?}."""
+
+
+class LogEscalationTransport(EscalationTransport):
+    """Default — prints so the ladder is observable in dev/tests with no Twilio."""
+
+    def send_whatsapp(self, *, to: str, body: str) -> dict:
+        print(f"💬 [whatsapp:log] to={to!r}\n{body}")
+        return {"ok": True, "sid": "log-whatsapp"}
+
+    def place_call(self, *, to: str, message: str) -> dict:
+        print(f"📞 [call:log] to={to!r} says: {message!r}")
+        return {"ok": True, "sid": "log-call"}
+
+
+class NoopEscalationTransport(EscalationTransport):
+    def send_whatsapp(self, *, to: str, body: str) -> dict:
+        return {"ok": True, "sid": "noop"}
+
+    def place_call(self, *, to: str, message: str) -> dict:
+        return {"ok": True, "sid": "noop"}
+
+
+class TwilioEscalationTransport(EscalationTransport):
+    """Real Twilio WhatsApp + Voice (lazy import). Blocking — call from a threadpool."""
+
+    def _client(self):
+        from twilio.rest import Client
+        return Client(settings.twilio_account_sid, settings.twilio_auth_token)
+
+    def send_whatsapp(self, *, to: str, body: str) -> dict:
+        if not settings.twilio_account_sid or not settings.twilio_whatsapp_from:
+            return {"ok": False, "error": "twilio_not_configured"}
+        try:
+            dest = to if to.startswith("whatsapp:") else f"whatsapp:{to}"
+            msg = self._client().messages.create(
+                from_=settings.twilio_whatsapp_from, to=dest, body=body)
+            return {"ok": True, "sid": msg.sid}
+        except Exception as exc:
+            print(f"⚠️  Twilio WhatsApp failed to {to!r}: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    def place_call(self, *, to: str, message: str) -> dict:
+        if not settings.twilio_account_sid or not settings.twilio_voice_from:
+            return {"ok": False, "error": "twilio_not_configured"}
+        try:
+            twiml = (f'<Response><Gather numDigits="1"><Say>{message}. '
+                     f'Press 1 to confirm receipt.</Say></Gather></Response>')
+            call = self._client().calls.create(
+                from_=settings.twilio_voice_from, to=to, twiml=twiml)
+            return {"ok": True, "sid": call.sid}
+        except Exception as exc:
+            print(f"⚠️  Twilio call failed to {to!r}: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+
+_TRANSPORTS = {
+    "log": LogEscalationTransport, "noop": NoopEscalationTransport,
+    "twilio": TwilioEscalationTransport,
+}
+
+_instance: EscalationTransport | None = None
+
+
+def get_escalation_transport() -> EscalationTransport:
+    global _instance
+    if _instance is None:
+        cls = _TRANSPORTS.get(settings.escalation_transport.lower(), LogEscalationTransport)
+        _instance = cls()
+    return _instance
+
+
+def reset_escalation_cache() -> None:
+    """Test hook: drop the cached transport so a changed setting takes effect."""
+    global _instance
+    _instance = None
+
+
+====================================================================================================
+FILE: models.py
+====================================================================================================
+
+"""
+================================================================================
+modules/supplier_po/models.py — Stage-5 supplier + purchase-order schema
+================================================================================
+
+Suppliers + the supplier↔article supply-history index (§1d), the supplier PURCHASE
+ORDER and its line items + responses, the open-tracking engagement log (§6c), and the
+production board (§8b). Split out of the former procurement monolith. Cross-module FKs
+(bom, bom_item, client_order, style, document, inventory_item, app_user) are table-name
+strings only; the supplier/supply-history/PO relationships are defined within this module.
+
+TABLE GUIDE (each class is one table; see the per-class docstring for column detail)
+  Supplier               the vendor directory + send target (contact, GSTIN, type, email_status).
+  SupplierSupplyHistory  the §1d matching index — pre-aggregated (supplier, article) ledger evidence.
+  PurchaseOrder          the supplier PO: money + the cross-check/send/escalation state machine.
+  PoItem                 one PO line; keeps the bom_item/inventory_item back-links to the shortfall.
+  PoResponse             one send/contact attempt (email/whatsapp/call) + its result.
+  PoTrackingEvent        the unified engagement log (open/click/bounce/whatsapp/call).
+  ProductionTracking     one row per style/order advancing through the §8c production ladder.
+================================================================================
+"""
+import uuid
+from datetime import date, datetime
+from decimal import Decimal
+
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.core.database import Base
+from app.core.models import GUID, JSON_VARIANT, TimestampMixin, UUIDMixin
+from app.modules.supplier_po.enums import (
+    POResponseStatus,
+    POStatus,
+    ProductionTrackingStatus,
+    SupplierEmailStatus,
+)
+
+
+class Supplier(Base, UUIDMixin, TimestampMixin):
+    """From SUPPLIERS 'Supplier contact info' + the PO-form footers (GSTIN, terms).
+    The article→supplier lookup in Stage 5 resolves here."""
+    __tablename__ = "supplier"
+    name: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    phone: Mapped[str | None] = mapped_column(String(50))
+    email: Mapped[str | None] = mapped_column(String(160))
+    service: Mapped[str | None] = mapped_column(String(160))
+    gstin: Mapped[str | None] = mapped_column(String(20))
+    address: Mapped[str | None] = mapped_column(String(400))
+    currency: Mapped[str | None] = mapped_column(String(3), default="INR")
+    payment_terms_days: Mapped[int | None] = mapped_column(Integer, default=60)
+    lead_time_days: Mapped[int | None] = mapped_column(Integer, default=10)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    email_status: Mapped[str] = mapped_column(
+        String(20), default=SupplierEmailStatus.UNKNOWN.value
+    )
+    supplier_type: Mapped[str | None] = mapped_column(String(20))   # SupplierType value
+    state_code: Mapped[str | None] = mapped_column(String(2))       # GSTIN state code
+    whatsapp_phone: Mapped[str | None] = mapped_column(String(50))
+    purchase_orders: Mapped[list["PurchaseOrder"]] = relationship(back_populates="supplier")
+    supply_history: Mapped[list["SupplierSupplyHistory"]] = relationship(
+        back_populates="supplier", cascade="all, delete-orphan"
+    )
+
+
+class SupplierSupplyHistory(Base, UUIDMixin, TimestampMixin):
+    """The §1d matching index — pre-aggregated (supplier, article) evidence from the
+    provision ledger, normalized with the SAME Stage-4 normalizer."""
+    __tablename__ = "supplier_supply_history"
+    __table_args__ = (
+        UniqueConstraint("supplier_id", "normalized_description",
+                         name="uq_supply_history_supplier_article"),
+    )
+    supplier_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("supplier.id"), index=True
+    )
+    normalized_description: Mapped[str] = mapped_column(String(400), index=True)
+    raw_description: Mapped[str | None] = mapped_column(String(400))
+    mode: Mapped[str | None] = mapped_column(String(20))
+    uom: Mapped[str | None] = mapped_column(String(20))
+    txn_count: Mapped[int] = mapped_column(Integer, default=1)
+    first_purchased_at: Mapped[date | None] = mapped_column(Date)
+    last_purchased_at: Mapped[date | None] = mapped_column(Date)
+    last_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    min_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    max_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    supplier: Mapped["Supplier"] = relationship(back_populates="supply_history")
+
+
+class PurchaseOrder(Base, UUIDMixin, TimestampMixin):
+    """The SUPPLIER purchase order (PAKKAR → supplier), e.g. "PO-07(25-26)". Mirrors the
+    suppler-po-form PDFs: Bill-To supplier, CGST/SGST or IGST, totals, 60-day terms."""
+    __tablename__ = "purchase_order"
+    po_number: Mapped[str | None] = mapped_column(String(40), index=True)   # allocated AT SEND (§2d)
+    supplier_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("supplier.id"), nullable=True, index=True
+    )
+    bom_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("bom.id"), nullable=True, index=True
+    )
+    client_order_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("client_order.id"), nullable=True, index=True
+    )
+    buyer_ref: Mapped[str | None] = mapped_column(String(120))
+    issue_date: Mapped[date | None] = mapped_column(Date)
+    delivery_days: Mapped[int | None] = mapped_column(Integer)
+    payment_terms_days: Mapped[int | None] = mapped_column(Integer, default=60)
+    currency: Mapped[str | None] = mapped_column(String(3), default="INR")
+    subtotal: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    cgst: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    sgst: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    igst: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))      # §2c inter-state
+    gst_mode: Mapped[str | None] = mapped_column(String(10))         # INTRA | INTER
+    round_off: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    total: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    status: Mapped[str] = mapped_column(String(20), default=POStatus.DRAFT.value, index=True)
+    needs_supplier: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    no_contact_channel: Mapped[bool] = mapped_column(Boolean, default=False)
+    match_method: Mapped[str | None] = mapped_column(String(20))
+    candidates: Mapped[dict | None] = mapped_column(JSON_VARIANT)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("app_user.id"), nullable=True
+    )
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("app_user.id"), nullable=True
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejected_by: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("app_user.id"), nullable=True
+    )
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejection_reason: Mapped[str | None] = mapped_column(Text)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pdf_document_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("document.id"), nullable=True
+    )
+    tracking_token: Mapped[str | None] = mapped_column(String(64), index=True)
+    first_opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    first_clicked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    current_rung: Mapped[int] = mapped_column(Integer, default=0)
+    next_escalation_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acknowledged_channel: Mapped[str | None] = mapped_column(String(20))
+    supplier: Mapped["Supplier"] = relationship(back_populates="purchase_orders")
+    items: Mapped[list["PoItem"]] = relationship(
+        back_populates="purchase_order", cascade="all, delete-orphan"
+    )
+    responses: Mapped[list["PoResponse"]] = relationship(
+        back_populates="purchase_order", cascade="all, delete-orphan"
+    )
+
+
+class PoItem(Base, UUIDMixin, TimestampMixin):
+    """The PO-form line grid. Links back to the shortfall line it fulfils."""
+    __tablename__ = "po_item"
+    purchase_order_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("purchase_order.id"), index=True
+    )
+    item_no: Mapped[int | None] = mapped_column(Integer)
+    description: Mapped[str] = mapped_column(String(400))
+    color: Mapped[str | None] = mapped_column(String(80))
+    uom: Mapped[str | None] = mapped_column(String(20))
+    qty: Mapped[Decimal | None] = mapped_column(Numeric(12, 3))
+    unit_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    inventory_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("inventory_item.id"), nullable=True
+    )
+    bom_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("bom_item.id"), nullable=True
+    )
+    purchase_order: Mapped["PurchaseOrder"] = relationship(back_populates="items")
+
+
+class PoResponse(Base, UUIDMixin, TimestampMixin):
+    """The Stage-5 escalation: email → (no response) → WhatsApp → auto-call → record
+    confirmation."""
+    __tablename__ = "po_response"
+    purchase_order_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("purchase_order.id"), index=True
+    )
+    channel: Mapped[str] = mapped_column(String(20))            # POResponseChannel value
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmed_qty: Mapped[Decimal | None] = mapped_column(Numeric(12, 3))
+    status: Mapped[str] = mapped_column(String(20), default=POResponseStatus.PENDING.value)
+    notes: Mapped[str | None] = mapped_column(Text)
+    tracking_token: Mapped[str | None] = mapped_column(String(64), index=True)
+    message_id: Mapped[str | None] = mapped_column(String(200))
+    purchase_order: Mapped["PurchaseOrder"] = relationship(back_populates="responses")
+
+
+class PoTrackingEvent(Base, UUIDMixin, TimestampMixin):
+    """The unified engagement log (§6c): open/click/delivery/bounce/complaint + each
+    WhatsApp/call escalation event. Self-hosted read-state (no third-party SaaS)."""
+    __tablename__ = "po_tracking_event"
+    purchase_order_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("purchase_order.id"), index=True
+    )
+    po_response_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("po_response.id"), nullable=True
+    )
+    tracking_token: Mapped[str | None] = mapped_column(String(64), index=True)
+    event_type: Mapped[str] = mapped_column(String(20))         # POTrackingEventType value
+    channel: Mapped[str | None] = mapped_column(String(20))
+    ip: Mapped[str | None] = mapped_column(String(60))
+    user_agent: Mapped[str | None] = mapped_column(String(400))
+    meta: Mapped[dict | None] = mapped_column(JSON_VARIANT)
+    at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ProductionTracking(Base, UUIDMixin, TimestampMixin):
+    """One row per style/order (§8b) advancing through the §8c status ladder. System-
+    driven on each procurement stage transition + manually nudgeable by DM/Cutting/MD."""
+    __tablename__ = "production_tracking"
+    __table_args__ = (
+        UniqueConstraint("client_order_id", "style_id",
+                         name="uq_production_tracking_order_style"),
+    )
+    client_order_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("client_order.id"), index=True
+    )
+    style_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("style.id"), index=True)
+    bom_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("bom.id"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(30), default=ProductionTrackingStatus.AWAITING_BOM.value, index=True
+    )
+    po_count: Mapped[int] = mapped_column(Integer, default=0)
+    po_confirmed_count: Mapped[int] = mapped_column(Integer, default=0)
+    material_ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("app_user.id"), nullable=True
+    )
+
+
+====================================================================================================
+FILE: po_costing.py
+====================================================================================================
+
+"""
+================================================================================
+modules/supplier_po/po_costing.py — PO line + GST math (§2c)
+================================================================================
+
+PURE, server-side recompute of a PO's money (no DB) — the house rule "all amounts
+server-computed at write time", echoed by the editable-PO recompute (§4).
+
+The real suppler-po-form PDFs show CGST 6% + SGST 6% (12% intra-state, both parties
+in Tamil Nadu) — NOT the 2.5% the stage-0 prose guessed. An out-of-state supplier is
+inter-state → IGST 12% instead of CGST+SGST. The rate + the intra/inter decision are
+CONFIG + per-supplier (the supplier's GSTIN state code vs the buyer's 33…), never
+hard-coded:
+
+    subtotal  = Σ (qty × unit_price)
+    INTRA → cgst = sgst = subtotal × rate/2
+    INTER → igst = subtotal × rate
+    round_off = round(subtotal + tax) − (subtotal + tax)
+    total     = subtotal + tax + round_off
+
+FUNCTION GUIDE  (pure + sync; the analogue of bom/costing.py for POs)
+  _q(v)   [private] quantize to 0.01.
+  line_amount(qty, unit_price) -> Decimal   one PO line's amount.
+  gst_mode(supplier_state_code, buyer_state_code) -> "INTRA" | "INTER"
+      same state → CGST+SGST; different → IGST; unknown → conservative INTRA (TN).
+  compute_totals(items, *, supplier_state_code, buyer_state_code, gst_rate) -> dict
+      Recompute subtotal/cgst/sgst/igst/round_off/total + each line `amount` (positional).
+      CALLED FROM: PoService._recompute (generation + every PO bulk-PATCH edit).
+================================================================================
+"""
+from __future__ import annotations
+
+from decimal import ROUND_HALF_UP, Decimal
+
+_ZERO = Decimal("0")
+_CENTS = Decimal("0.01")
+
+GST_INTRA = "INTRA"
+GST_INTER = "INTER"
+
+
+def _q(v: Decimal) -> Decimal:
+    return v.quantize(_CENTS, rounding=ROUND_HALF_UP)
+
+
+def line_amount(qty, unit_price) -> Decimal:
+    q = Decimal(str(qty)) if qty is not None else _ZERO
+    p = Decimal(str(unit_price)) if unit_price is not None else _ZERO
+    return _q(q * p)
+
+
+def gst_mode(supplier_state_code: str | None, buyer_state_code: str) -> str:
+    """INTRA when supplier + buyer share a state (CGST+SGST); INTER otherwise (IGST).
+    An unknown supplier state is treated conservatively as INTRA (the common TN case,
+    matching the real forms)."""
+    if supplier_state_code and supplier_state_code != buyer_state_code:
+        return GST_INTER
+    return GST_INTRA
+
+
+def compute_totals(items: list[dict], *, supplier_state_code: str | None,
+                   buyer_state_code: str, gst_rate: float) -> dict:
+    """Recompute subtotal / cgst / sgst / igst / round_off / total for a PO.
+    `items` = dicts with `qty` + `unit_price`. Returns the money dict + each line's
+    recomputed `amount` (positional, aligned with `items`)."""
+    rate = Decimal(str(gst_rate)) / Decimal("100")
+    mode = gst_mode(supplier_state_code, buyer_state_code)
+
+    amounts: list[Decimal] = []
+    subtotal = _ZERO
+    for it in items:
+        amt = line_amount(it.get("qty"), it.get("unit_price"))
+        amounts.append(amt)
+        subtotal += amt
+    subtotal = _q(subtotal)
+
+    cgst = sgst = igst = _ZERO
+    if mode == GST_INTER:
+        igst = _q(subtotal * rate)
+    else:
+        half = _q(subtotal * rate / Decimal("2"))
+        cgst = sgst = half
+    tax = cgst + sgst + igst
+    pre_round = subtotal + tax
+    total = pre_round.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    round_off = _q(total - pre_round)
+
+    return {
+        "gst_mode": mode,
+        "subtotal": subtotal,
+        "cgst": cgst, "sgst": sgst, "igst": igst,
+        "round_off": round_off,
+        "total": _q(Decimal(total)),
+        "amounts": amounts,
+    }
+
+
+====================================================================================================
+FILE: po_export.py
+====================================================================================================
+
+"""
+================================================================================
+modules/supplier_po/po_export.py — Stage-5 supplier-PO PDF (§2)
+================================================================================
+
+Renders a supplier PO shaped like the real `suppler-po-form/*.pdf`: a fixed buyer
+block (PAKKAR TANVEER EXPORTS, from config), a Bill-To supplier block, the PO number
++ date + buyer-ref tag, the line grid, the CGST/SGST (or IGST) tax footer, and the
+fixed terms block.
+
+ONE TEMPLATE PER SUPPLIER TYPE (§2a/§2b). All forms share ~90% boilerplate; the ONE
+part that varies by type is the line-grid UOM column header + the default UOM. That
+variation is config (`config/po_templates.yaml` → `template_cfg`), so onboarding a new
+supplier type is a registry row + (optionally) a child HTML template — NO code branch.
+The per-type HTML files in `templates/po/` mirror this renderer for a Jinja/WeasyPrint
+path; this module is the offline-safe Python renderer the service calls.
+
+ENGINE PRECEDENCE mirrors the Stage-3 BOM export: WeasyPrint → ReportLab → raw HTML,
+so export always yields a durable artifact. Blocking → callers invoke from a threadpool.
+
+FUNCTION GUIDE  (mirrors bom/export.py; cfg = the per-supplier-type template config)
+  DEFAULT_TEMPLATE_CFG   the accessory fallback when a supplier_type has no registry row.
+  _fmt(v) [private] money formatting.
+  _line_rows_html(view, uom_header) [private] the line-grid <tr> rows.
+  _build_html(view, meta, cfg) [private] the full PO HTML: buyer block + Bill-To + grid +
+      CGST/SGST-or-IGST footer + terms. The ONE per-type variation is the UOM header (cfg).
+  _reportlab_pdf(view, meta, cfg) [private] the pure-Python fallback render.
+  render_po_pdf(view, meta, template_cfg?) -> (bytes, mime, ext)
+      THE ENTRY POINT. WeasyPrint → ReportLab → raw HTML. CALLED FROM: PoService.send_po
+      (in a threadpool); the bytes are sha256-deduped into a Document(kind=supplier_po_pdf).
+================================================================================
+"""
+from __future__ import annotations
+
+from html import escape
+
+# Sensible default if a supplier_type has no registry row (the §2b fallback).
+DEFAULT_TEMPLATE_CFG = {
+    "template_name": "accessory", "uom_header": "UOM", "default_uom": "NOS",
+}
+
+
+def _fmt(v, dash: str = "-") -> str:
+    return dash if v is None else (f"{v:,.2f}" if isinstance(v, (int, float)) else str(v))
+
+
+def _line_rows_html(view: dict, uom_header: str) -> str:
+    rows = []
+    for i in view.get("items", []):
+        rows.append(
+            "<tr>"
+            f"<td class='n'>{escape(str(i.get('item_no') or ''))}</td>"
+            f"<td>{escape(str(i.get('description') or ''))}</td>"
+            f"<td>{escape(str(i.get('color') or ''))}</td>"
+            f"<td>{escape(str(i.get('uom') or ''))}</td>"
+            f"<td class='n'>{_fmt(i.get('qty'))}</td>"
+            f"<td class='n'>{_fmt(i.get('unit_price'))}</td>"
+            f"<td class='n'>{_fmt(i.get('amount'))}</td>"
+            "</tr>"
+        )
+    return "".join(rows)
+
+
+def _build_html(view: dict, meta: dict, cfg: dict) -> str:
+    cur = view.get("currency") or "INR"
+    sup = view.get("supplier") or {}
+    buyer = meta.get("buyer") or {}
+    uom_header = cfg.get("uom_header", "UOM")
+    gst_mode = view.get("gst_mode") or "INTRA"
+    if gst_mode == "INTER":
+        tax_rows = (f"<tr><td colspan='6'>IGST</td><td class='n'>{cur} {_fmt(view.get('igst'))}</td></tr>")
+    else:
+        tax_rows = (
+            f"<tr><td colspan='6'>CGST</td><td class='n'>{cur} {_fmt(view.get('cgst'))}</td></tr>"
+            f"<tr><td colspan='6'>SGST</td><td class='n'>{cur} {_fmt(view.get('sgst'))}</td></tr>"
+        )
+    return f"""<!doctype html><html><head><meta charset="utf-8"><style>
+      body {{ font-family: Helvetica, Arial, sans-serif; font-size: 11px; color:#111; }}
+      h1 {{ font-size: 16px; margin: 0 0 2px; }}
+      .blk {{ margin-bottom:8px; }}
+      .blk b {{ display:inline-block; min-width:80px; }}
+      .cols {{ display:flex; justify-content:space-between; }}
+      table {{ width:100%; border-collapse: collapse; margin-top:6px; }}
+      th, td {{ border:1px solid #999; padding:4px 6px; text-align:left; }}
+      th {{ background:#eee; }}
+      td.n, th.n {{ text-align:right; }}
+      tfoot td {{ font-weight:bold; }}
+      .terms {{ margin-top:12px; font-size:10px; color:#444; }}
+    </style></head><body>
+      <h1>PURCHASE ORDER</h1>
+      <div class="cols">
+        <div class="blk">
+          <div><b>{escape(str(buyer.get('name') or ''))}</b></div>
+          <div>{escape(str(buyer.get('address') or ''))}</div>
+          <div>GSTIN: {escape(str(buyer.get('gstin') or ''))}</div>
+          <div>{escape(str(buyer.get('email') or ''))} {escape(str(buyer.get('phone') or ''))}</div>
+        </div>
+        <div class="blk">
+          <div><b>P/O #</b> {escape(str(view.get('po_number') or 'DRAFT'))}</div>
+          <div><b>Date</b> {escape(str(view.get('issue_date') or meta.get('generated_at') or '-'))}</div>
+          <div><b>Ref</b> {escape(str(view.get('buyer_ref') or '-'))}</div>
+        </div>
+      </div>
+      <div class="blk">
+        <b>Bill To:</b> {escape(str(sup.get('name') or '-'))}
+        &nbsp; {escape(str(sup.get('address') or ''))}
+        &nbsp; GSTIN: {escape(str(sup.get('gstin') or '-'))}
+        &nbsp; {escape(str(sup.get('email') or sup.get('phone') or ''))}
+      </div>
+      <table>
+        <thead><tr>
+          <th class="n">#</th><th>Description</th><th>Colour</th>
+          <th>{escape(uom_header)}</th><th class="n">Qty</th>
+          <th class="n">Rate</th><th class="n">Amount</th>
+        </tr></thead>
+        <tbody>{_line_rows_html(view, uom_header)}</tbody>
+        <tfoot>
+          <tr><td colspan="6">Invoice Subtotal</td>
+              <td class="n">{cur} {_fmt(view.get('subtotal'))}</td></tr>
+          {tax_rows}
+          <tr><td colspan="6">Round Off</td>
+              <td class="n">{cur} {_fmt(view.get('round_off'))}</td></tr>
+          <tr><td colspan="6">TOTAL</td>
+              <td class="n">{cur} {_fmt(view.get('total'))}</td></tr>
+        </tfoot>
+      </table>
+      <div class="terms">
+        Please send 2 copies of your invoice. Delivery: {view.get('delivery_days') or '-'} days.
+        Payment terms: {view.get('payment_terms_days') or '-'} days. For {escape(str(buyer.get('name') or ''))}.
+      </div>
+    </body></html>"""
+
+
+def _reportlab_pdf(view: dict, meta: dict, cfg: dict) -> bytes:
+    from io import BytesIO
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, title="Purchase Order")
+    styles = getSampleStyleSheet()
+    cur = view.get("currency") or "INR"
+    sup = view.get("supplier") or {}
+    buyer = meta.get("buyer") or {}
+    flow = [
+        Paragraph("Purchase Order", styles["Title"]),
+        Paragraph(f"{buyer.get('name') or ''} — GSTIN {buyer.get('gstin') or ''}", styles["Normal"]),
+        Paragraph(f"P/O #: {view.get('po_number') or 'DRAFT'} &nbsp; "
+                  f"Date: {view.get('issue_date') or meta.get('generated_at') or '-'} &nbsp; "
+                  f"Ref: {view.get('buyer_ref') or '-'}", styles["Normal"]),
+        Paragraph(f"Bill To: {sup.get('name') or '-'} &nbsp; GSTIN: {sup.get('gstin') or '-'}",
+                  styles["Normal"]),
+        Spacer(1, 8),
+    ]
+    header = ["#", "Description", "Colour", cfg.get("uom_header", "UOM"),
+              "Qty", "Rate", "Amount"]
+    data = [header]
+    for i in view.get("items", []):
+        data.append([
+            i.get("item_no") or "", i.get("description") or "", i.get("color") or "",
+            i.get("uom") or "", _fmt(i.get("qty")), _fmt(i.get("unit_price")),
+            _fmt(i.get("amount")),
+        ])
+    data.append(["", "", "", "", "", "Subtotal", _fmt(view.get("subtotal"))])
+    if (view.get("gst_mode") or "INTRA") == "INTER":
+        data.append(["", "", "", "", "", "IGST", _fmt(view.get("igst"))])
+    else:
+        data.append(["", "", "", "", "", "CGST", _fmt(view.get("cgst"))])
+        data.append(["", "", "", "", "", "SGST", _fmt(view.get("sgst"))])
+    data.append(["", "", "", "", "", "TOTAL", _fmt(view.get("total"))])
+    table = Table(data, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+    ]))
+    flow.append(table)
+    flow.append(Spacer(1, 10))
+    flow.append(Paragraph(
+        f"Delivery {view.get('delivery_days') or '-'} days · payment "
+        f"{view.get('payment_terms_days') or '-'} days · send 2 invoice copies.",
+        styles["Italic"],
+    ))
+    doc.build(flow)
+    return buf.getvalue()
+
+
+def render_po_pdf(view: dict, meta: dict, template_cfg: dict | None = None) -> tuple[bytes, str, str]:
+    """Render the PO. Returns (bytes, mime, ext). WeasyPrint → ReportLab → raw HTML."""
+    cfg = template_cfg or DEFAULT_TEMPLATE_CFG
+    html = _build_html(view, meta, cfg)
+    try:
+        from weasyprint import HTML
+        return HTML(string=html).write_pdf(), "application/pdf", ".pdf"
+    except Exception:
+        pass
+    try:
+        return _reportlab_pdf(view, meta, cfg), "application/pdf", ".pdf"
+    except Exception:
+        pass
+    return html.encode("utf-8"), "text/html", ".html"
+
+
+====================================================================================================
+FILE: po_service.py
+====================================================================================================
+
+"""
+================================================================================
+modules/supplier_po/po_service.py — Stage-5 supplier-PO orchestration (PoService)
+================================================================================
+
+The business brain of Stage 5. Consumes the Stage-4 shortfall lines and drives a
+supplier PO through its whole life:
+
+  - GENERATE (§1/§2): match each shortfall to a supplier (deterministic ledger →
+    alias → category → fuzzy → unresolved), GROUP by supplier into ONE PO per vendor
+    (unresolved lines → a held `needs_supplier` draft), compute GST (config-driven
+    CGST+SGST intra / IGST inter), each `po_item` keeping its bom_item/inventory_item
+    back-link.
+  - EDIT (§4): the SAME bulk-PATCH + optimistic `revision` contract as the BOM —
+    server recompute, 409 stale_revision / 409 po_locked once sent.
+  - CROSS-CHECK (§3): submit → approve/reject, material-type-routed (leather → Cutting
+    Manager; accessory/service → MD/DM/HR; MD superuser), with the Stage-3 in-app→email
+    notification.
+  - SEND (§5): allocate the FY PO number, render + store the PDF, email via the Notifier
+    (pixel + wrapped links + the PDF attached), start the escalation clock; the no-email /
+    bounce branch short-circuits to the WhatsApp rung.
+  - TRACK (§6) + ESCALATE (§7): self-hosted open pixel/click, the email → WhatsApp →
+    auto-call ladder on the DB-idempotent sweeper, stopped the instant the supplier
+    acknowledges by ANY channel.
+
+LAYERING. Reads only procurement-owned tables; order/style identity resolves via
+clients.service, recipients via users.service (permitted service→service calls). Blocking
+render/send run in a threadpool.
+
+FUNCTION / METHOD GUIDE  (router → PoService; sweeper → sweep_escalations)
+  module helpers: _financial_year(d) (Apr–Mar FY string for PO numbers);
+                  _po_template_cfg(supplier_type) (registry → template cfg).
+  PoService(db)  session + SupplierPoRepository.
+  cross-module DTO reads: _bom_dto / _latest_check / _alias_pairs (via the owning services).
+  generate_for_bom(user, bom_id) -> dict
+      THE GENERATOR. Reads the latest inventory check, takes the shortfall lines, matches
+      each to a supplier (SupplierService.match_line), GROUPS by supplier into one PO each
+      (unresolved → a held needs_supplier draft), builds po_items with back-links, recomputes
+      GST, audits PO_GENERATE. → POST /boms/{id}/supplier-pos.
+  _new_item(no, payload) -> PoItem   [static] build one PO line.
+  get_po(id) / list_pos(*, filters) -> dict   read endpoints.
+  edit_po(user, po_id, base_revision, item_edits, po_edits, add_items, remove_item_ids) -> dict
+      The §4 editable contract: bulk edit + optimistic revision CAS (409 stale/locked); a
+      supplier change re-routes the approver + resets approval; recompute; audit PO_EDIT.
+  submit_po / approve_po / reject_po / cancel_po
+      The §3 cross-check state machine. submit → pending_approval (notifies the routed
+      approvers); approve/reject enforce _assert_router_role (leather→Cutting; accessory→MD/DM/HR;
+      MD superuser); each audits.
+  send_po(user, po_id) -> dict
+      The §5 send: allocate the FY po_number, render+store the PDF (threadpool, sha-deduped),
+      route by contact (email → _send_email; else short-circuit to the WhatsApp rung), set
+      next_escalation_at, audit PO_SEND, advance the board to PO_RAISED.
+  _send_email(...)   [private] build the HTML+text (inject tracking pixel/links), send via
+      the Notifier, write the PoResponse + Notification rows.
+  record_open / record_click / record_ses_event   §6 tracking webhooks (a hard bounce
+      flags the email invalid + short-circuits escalation).
+  acknowledge_po / acknowledge_by_token / _acknowledge   §7d STOP: any-channel ack →
+      acknowledged_at, status=confirmed, ladder halts, board → PO_CONFIRMED.
+  sweep_escalations() -> int
+      The §7 ladder, one rung per due PO per sweep (idempotent): rung0→WhatsApp, 1→auto-call,
+      2→exhausted in-app notice. CALLED FROM: the main.py lifespan sweeper.
+  Helpers [private]: _load (404), _recompute (po_costing.compute_totals), _po_type,
+      _assert_router_role, _notify_approvers, _identity (clients.service), _buyer_ref/_block,
+      _supplier_block, _snap (audit diff), _audit, _on_po_raised/_confirmed (board side-effects).
+================================================================================
+"""
+from __future__ import annotations
+
+import hashlib
+import uuid
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
+
+from fastapi import HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
+
+from app.core.config import settings
+from app.core.enums import UserRole
+from app.modules.supplier_po import po_costing, presenters as present, po_tracking
+from app.core.enums import (
+    DocumentKind,
+    NotificationChannel,
+    NotificationStatus,
+    NotificationType,
+)
+from app.modules.inventory.enums import InventoryLineStatus
+from app.modules.supplier_po.enums import (
+    POResponseChannel,
+    POResponseStatus,
+    POStatus,
+    POTrackingEventType,
+    SupplierEmailStatus,
+    SupplierType,
+)
+from app.modules.supplier_po.escalation import get_escalation_transport
+from app.modules.inventory.inventory_match import Alias
+from app.modules.inventory.inventory_normalize import normalize_key
+from app.core.models import AuditLog, Document, Notification
+from app.modules.supplier_po.models import (
+    PoItem,
+    PoResponse,
+    PoTrackingEvent,
+    PurchaseOrder,
+)
+from app.core.notifier import get_notifier
+from app.modules.supplier_po.po_export import DEFAULT_TEMPLATE_CFG, render_po_pdf
+from app.modules.supplier_po.repository import SupplierPoRepository
+from app.core.storage import get_storage
+
+# Cross-check approver routing (§3a). MD is superuser → may approve any PO.
+_LEATHER_APPROVERS = {UserRole.CUTTING_MANAGER, UserRole.MANAGING_DIRECTOR}
+_ACCESSORY_APPROVERS = {UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER, UserRole.HR}
+# Statuses past which every edit path is frozen (§4 lock semantics).
+_SENT_STATES = {POStatus.SENT.value, POStatus.RESPONDED.value,
+                POStatus.CONFIRMED.value, POStatus.ESCALATED.value}
+_ZERO = Decimal("0")
+
+
+def _financial_year(d: date) -> str:
+    """FY runs Apr–Mar (matching the provision sheet's APRIL-2025 months). 2025-04 → 25-26."""
+    yy = d.year % 100
+    return f"{yy:02d}-{(yy + 1) % 100:02d}" if d.month >= 4 else f"{(yy - 1) % 100:02d}-{yy:02d}"
+
+
+def _po_template_cfg(supplier_type: str | None) -> dict:
+    """The §2b registry → template cfg. Read from the seeded `po_templates.yaml` via the
+    registry module; a missing type falls back to the accessory default."""
+    from app.modules.supplier_po.po_templates import template_cfg_for
+    return template_cfg_for(supplier_type) or DEFAULT_TEMPLATE_CFG
+
+
+class PoService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+        self.repo = SupplierPoRepository(db)
+
+    async def _bom_dto(self, bom_id):
+        from app.modules.bom.service import BomService
+        return await BomService(self.db).get_bom_dto(bom_id)
+
+    async def _latest_check(self, bom_id):
+        from app.modules.inventory.service import InventoryService
+        return await InventoryService(self.db).get_latest_check_dto(bom_id)
+
+    async def _alias_pairs(self):
+        from app.modules.inventory.service import InventoryService
+        return await InventoryService(self.db).get_alias_pairs()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Generate (§1/§2) — shortfall lines → grouped supplier POs
+    # ══════════════════════════════════════════════════════════════════════
+    async def generate_for_bom(self, user, bom_id: uuid.UUID) -> dict:
+        from app.modules.supplier_po.supplier_service import SupplierService
+
+        bom = await self._bom_dto(bom_id)
+        if bom is None:
+            raise HTTPException(404, "BOM not found.")
+        check = await self._latest_check(bom_id)
+        if check is None:
+            raise HTTPException(409, detail={
+                "error": "no_inventory_check",
+                "message": "Run the inventory check before generating supplier POs."})
+        existing = [p for p in await self.repo.pos_for_bom(bom_id)
+                    if p.status != POStatus.CANCELLED.value]
+        if existing:
+            return {"bom_id": str(bom_id), "already_generated": True,
+                    "purchase_orders": [present.po_view(await self.repo.get_po(p.id))
+                                        for p in existing]}
+
+        shortfalls = [ln for ln in check.lines
+                      if ln.status != InventoryLineStatus.SUFFICIENT.value
+                      and (ln.shortfall_qty or _ZERO) > _ZERO]
+        if not shortfalls:
+            return {"bom_id": str(bom_id), "purchase_orders": [],
+                    "message": "No shortfall lines — nothing to order."}
+
+        items_by_id = {i.id: i for i in bom.items}
+        aliases = [Alias(bom_term=normalize_key(a.bom_term),
+                         inventory_key=normalize_key(a.inventory_key))
+                   for a in await self._alias_pairs()]
+        identity = await self._identity(bom)
+        today = datetime.now(timezone.utc).date()
+        supplier_svc = SupplierService(self.db)
+
+        groups: dict[uuid.UUID, list[dict]] = {}
+        group_meta: dict[uuid.UUID, dict] = {}
+        unresolved: list[dict] = []
+
+        for ln in shortfalls:
+            item = items_by_id.get(ln.bom_item_id)
+            if item is None:
+                continue
+            mr = await supplier_svc.match_line(
+                name=item.name, color=item.material_color, category=item.category,
+                aliases=aliases, today=today)
+            shortlist = [{
+                "supplier_id": str(s.supplier_id), "supplier_name": s.supplier_name,
+                "score": s.score, "txn_count": s.txn_count, "has_contact": s.has_contact,
+                "last_rate": float(s.last_rate) if s.last_rate else None,
+                "last_purchased_at": s.last_purchased_at.isoformat() if s.last_purchased_at else None,
+            } for s in mr.ranked]
+            default_rate = (mr.ranked[0].last_rate if mr.ranked and mr.ranked[0].last_rate
+                            else item.unit_price)
+            default_uom = (mr.ranked[0].uom if mr.ranked and mr.ranked[0].uom else item.uom)
+            payload = {
+                "description": item.name, "color": item.material_color,
+                "uom": default_uom, "qty": ln.shortfall_qty,
+                "unit_price": default_rate, "bom_item_id": item.id,
+                "inventory_item_id": ln.inventory_item_id,
+                "candidates": {"method": mr.method, "ranked": shortlist,
+                               "suggestion": mr.suggestion, "ambiguous": mr.ambiguous},
+            }
+            if mr.chosen_supplier_id is not None:
+                sid = mr.chosen_supplier_id
+                groups.setdefault(sid, []).append(payload)
+                group_meta[sid] = {"method": mr.method, "ranked": shortlist}
+            else:
+                unresolved.append(payload)
+
+        created: list[PurchaseOrder] = []
+        for sid, lines in groups.items():
+            supplier = await self.repo.get_supplier(sid)
+            po = PurchaseOrder(
+                supplier_id=sid, bom_id=bom_id,
+                client_order_id=bom.client_order_id,
+                buyer_ref=self._buyer_ref(identity), status=POStatus.DRAFT.value,
+                currency="INR", delivery_days=settings.po_default_delivery_days,
+                payment_terms_days=(getattr(supplier, "payment_terms_days", None)
+                                    or settings.po_default_payment_terms_days),
+                revision=1, created_by=getattr(user, "id", None),
+                match_method=group_meta[sid]["method"],
+                candidates={"ranked": group_meta[sid]["ranked"]},
+                needs_supplier=False,
+                no_contact_channel=not bool(getattr(supplier, "email", None)
+                                            or getattr(supplier, "phone", None)),
+            )
+            po.items = [self._new_item(n, l) for n, l in enumerate(lines, start=1)]
+            self._recompute(po, getattr(supplier, "state_code", None))
+            self.db.add(po)
+            created.append(po)
+
+        for payload in unresolved:
+            po = PurchaseOrder(
+                supplier_id=None, bom_id=bom_id, client_order_id=bom.client_order_id,
+                buyer_ref=self._buyer_ref(identity), status=POStatus.DRAFT.value,
+                currency="INR", delivery_days=settings.po_default_delivery_days,
+                payment_terms_days=settings.po_default_payment_terms_days, revision=1,
+                created_by=getattr(user, "id", None), match_method=None,
+                candidates=payload["candidates"], needs_supplier=True,
+                no_contact_channel=False,
+            )
+            po.items = [self._new_item(1, payload)]
+            self._recompute(po, None)
+            self.db.add(po)
+            created.append(po)
+
+        await self.db.flush()
+        self.db.add(AuditLog(
+            actor_user_id=getattr(user, "id", None), action="PO_GENERATE",
+            entity_type="bom", entity_id=bom_id, at=datetime.now(timezone.utc),
+            after={"purchase_orders": len(created),
+                   "resolved": len(groups), "needs_supplier": len(unresolved)},
+        ))
+        await self.db.commit()
+        views = [present.po_view(await self.repo.get_po(p.id)) for p in created]
+        return {"bom_id": str(bom_id), "purchase_orders": views,
+                "resolved": len(groups), "needs_supplier": len(unresolved)}
+
+    @staticmethod
+    def _new_item(no: int, payload: dict) -> PoItem:
+        return PoItem(
+            item_no=no, description=payload["description"], color=payload.get("color"),
+            uom=payload.get("uom"),
+            qty=Decimal(str(payload["qty"])) if payload.get("qty") is not None else _ZERO,
+            unit_price=(Decimal(str(payload["unit_price"]))
+                        if payload.get("unit_price") is not None else _ZERO),
+            bom_item_id=payload.get("bom_item_id"),
+            inventory_item_id=payload.get("inventory_item_id"),
+        )
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Reads
+    # ══════════════════════════════════════════════════════════════════════
+    async def get_po(self, po_id: uuid.UUID) -> dict:
+        po = await self._load(po_id)
+        return present.po_view(po)
+
+    async def list_pos(self, *, status=None, needs_supplier=None, bom_id=None,
+                       supplier_id=None) -> dict:
+        rows = await self.repo.list_pos(status=status, needs_supplier=needs_supplier,
+                                        bom_id=bom_id, supplier_id=supplier_id)
+        return present.po_list_block(rows)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Editable contract (§4) — bulk PATCH + optimistic revision lock
+    # ══════════════════════════════════════════════════════════════════════
+    _ITEM_FIELDS = {"description", "color", "uom", "qty", "unit_price"}
+    _PO_FIELDS = {"supplier_id", "buyer_ref", "delivery_days", "payment_terms_days"}
+
+    async def edit_po(self, user, po_id: uuid.UUID, base_revision: int,
+                      item_edits: list[dict], po_edits: dict | None,
+                      add_items: list[dict] | None, remove_item_ids: list[str] | None) -> dict:
+        po = await self._load(po_id)
+        if po.status in _SENT_STATES:
+            raise HTTPException(409, detail={"error": "po_locked",
+                                             "message": "A sent PO is frozen — cancel + re-issue."})
+        if po.revision != base_revision:
+            raise HTTPException(409, detail={"error": "stale_revision",
+                                             "current_revision": po.revision})
+        before = self._snap(po)
+        by_id = {str(i.id): i for i in po.items}
+        supplier_changed = False
+
+        for e in item_edits or []:
+            item = by_id.get(str(e.get("po_item_id")))
+            if item is None:
+                raise HTTPException(422, detail={"error": "unknown_po_item",
+                                                 "po_item_id": e.get("po_item_id")})
+            field_ = e.get("field")
+            if field_ not in self._ITEM_FIELDS:
+                raise HTTPException(422, detail={"error": "unsupported_field", "field": field_})
+            value = e.get("value")
+            if field_ in ("qty", "unit_price"):
+                try:
+                    value = Decimal(str(value))
+                except (InvalidOperation, TypeError, ValueError):
+                    raise HTTPException(422, detail={"error": "invalid_value", "field": field_})
+            setattr(item, field_, value)
+
+        for rid in remove_item_ids or []:
+            item = by_id.get(str(rid))
+            if item is not None:
+                po.items.remove(item)
+
+        for a in add_items or []:
+            po.items.append(self._new_item(len(po.items) + 1, {
+                "description": a.get("description") or "", "color": a.get("color"),
+                "uom": a.get("uom"), "qty": a.get("qty"), "unit_price": a.get("unit_price"),
+                "bom_item_id": a.get("bom_item_id"), "inventory_item_id": a.get("inventory_item_id"),
+            }))
+
+        for f in (po_edits or {}):
+            if f not in self._PO_FIELDS:
+                raise HTTPException(422, detail={"error": "unsupported_field", "field": f})
+            if f == "supplier_id":
+                new_sid = po_edits[f]
+                if new_sid:
+                    sup = await self.repo.get_supplier(uuid.UUID(str(new_sid)))
+                    if sup is None or not sup.is_active:
+                        raise HTTPException(422, detail={"error": "unknown_supplier"})
+                    po.supplier_id = sup.id
+                    po.needs_supplier = False
+                    po.no_contact_channel = not bool(sup.email or sup.phone)
+                    po.match_method = "manual"
+                    supplier_changed = True
+            else:
+                setattr(po, f, po_edits[f])
+
+        # a supplier change re-routes the §3 approver class and resets any approval (§4)
+        if supplier_changed and po.status != POStatus.DRAFT.value:
+            po.status = POStatus.DRAFT.value
+            po.approved_by = po.approved_at = None
+
+        supplier = await self.repo.get_supplier(po.supplier_id) if po.supplier_id else None
+        self._recompute(po, getattr(supplier, "state_code", None))
+
+        if await self.repo.claim_po_revision(po_id, base_revision) == 0:
+            await self.repo.rollback()
+            fresh = await self.repo.get_po(po_id)
+            raise HTTPException(409, detail={"error": "stale_revision",
+                                             "current_revision": fresh.revision if fresh else None})
+        await self.db.commit()
+        po = await self._load(po_id)
+        await self._audit(user, "PO_EDIT", po.id, before=before, after=self._snap(po))
+        await self.db.commit()
+        return {"revision": po.revision, "recomputed": present.po_view(po)}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Cross-check state machine (§3)
+    # ══════════════════════════════════════════════════════════════════════
+    async def submit_po(self, user, po_id: uuid.UUID) -> dict:
+        po = await self._load(po_id)
+        if po.status not in (POStatus.DRAFT.value, POStatus.REJECTED.value):
+            raise HTTPException(409, detail={"error": "not_submittable",
+                                             "current_status": po.status})
+        if po.needs_supplier or po.supplier_id is None:
+            raise HTTPException(409, detail={"error": "needs_supplier",
+                                             "message": "Assign a supplier before submitting."})
+        if not po.items:
+            raise HTTPException(409, detail={"error": "empty_po"})
+        po.status = POStatus.PENDING_APPROVAL.value
+        await self.db.commit()
+        notes = await self._notify_approvers(po)
+        await self._audit(user, "PO_SUBMIT_FOR_APPROVAL", po.id,
+                          after={"status": po.status, "notifications": notes})
+        await self.db.commit()
+        return {"po_id": str(po.id), "status": po.status, "notifications_created": notes}
+
+    async def approve_po(self, user, po_id: uuid.UUID) -> dict:
+        po = await self._load(po_id)
+        if po.status != POStatus.PENDING_APPROVAL.value:
+            raise HTTPException(409, detail={"error": "not_pending_approval",
+                                             "current_status": po.status})
+        await self._assert_router_role(user, po)
+        po.status = POStatus.APPROVED.value
+        po.approved_by = getattr(user, "id", None)
+        po.approved_at = datetime.now(timezone.utc)
+        await self._audit(user, "PO_APPROVE", po.id,
+                          after={"status": po.status,
+                                 "approved_at": po.approved_at.isoformat()})
+        await self.db.commit()
+        return {"po_id": str(po.id), "status": po.status}
+
+    async def reject_po(self, user, po_id: uuid.UUID, reason: str) -> dict:
+        if not reason or not reason.strip():
+            raise HTTPException(422, detail={"error": "reason_required"})
+        po = await self._load(po_id)
+        if po.status != POStatus.PENDING_APPROVAL.value:
+            raise HTTPException(409, detail={"error": "not_pending_approval",
+                                             "current_status": po.status})
+        await self._assert_router_role(user, po)
+        po.status = POStatus.REJECTED.value
+        po.rejected_by = getattr(user, "id", None)
+        po.rejected_at = datetime.now(timezone.utc)
+        po.rejection_reason = reason.strip()
+        await self._audit(user, "PO_REJECT", po.id,
+                          after={"status": po.status, "rejection_reason": po.rejection_reason})
+        await self.db.commit()
+        return {"po_id": str(po.id), "status": po.status,
+                "rejection_reason": po.rejection_reason}
+
+    async def cancel_po(self, user, po_id: uuid.UUID) -> dict:
+        po = await self._load(po_id)
+        if po.status in _SENT_STATES:
+            raise HTTPException(409, detail={"error": "po_locked",
+                                             "message": "A sent PO cannot be cancelled in place."})
+        po.status = POStatus.CANCELLED.value
+        await self._audit(user, "PO_CANCEL", po.id, after={"status": po.status})
+        await self.db.commit()
+        return {"po_id": str(po.id), "status": po.status}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Send (§5) — number, render, email, start the escalation clock
+    # ══════════════════════════════════════════════════════════════════════
+    async def send_po(self, user, po_id: uuid.UUID) -> dict:
+        po = await self._load(po_id)
+        if po.status != POStatus.APPROVED.value:
+            raise HTTPException(409, detail={"error": "not_approved",
+                                             "current_status": po.status})
+        supplier = await self.repo.get_supplier(po.supplier_id)
+        now = datetime.now(timezone.utc)
+        today = now.date()
+        if not po.po_number:
+            po.po_number = await self.repo.next_po_number(_financial_year(today))
+        po.issue_date = today
+        po.tracking_token = po_tracking.new_token()
+
+        # render + store the PDF (idempotent on sha256, mirrors the BOM export)
+        view = present.po_view(po)
+        view["supplier"] = self._supplier_block(supplier)
+        meta = {"buyer": self._buyer_block(), "generated_at": today.isoformat()}
+        cfg = _po_template_cfg(getattr(supplier, "supplier_type", None))
+        pdf_bytes, mime, ext = await run_in_threadpool(render_po_pdf, view, meta, cfg)
+        sha = hashlib.sha256(pdf_bytes).hexdigest()
+        doc = await self.repo.get_document_by_sha(sha)
+        if doc is None:
+            try:
+                url = get_storage().put(f"pos/{po.id}/{sha}{ext}", pdf_bytes)
+            except Exception:
+                url = None
+            doc = await self.repo.add_document(Document(
+                kind=DocumentKind.SUPPLIER_PO_PDF.value, filename=f"{po.po_number}{ext}",
+                mime=mime, storage_url=url, sha256=sha, size_bytes=len(pdf_bytes),
+                uploaded_by=getattr(user, "id", None)))
+        po.pdf_document_id = doc.id
+
+        # contact routing (§5b): real email → send; else short-circuit to WhatsApp rung
+        email_ok = bool(supplier.email) and supplier.email_status != SupplierEmailStatus.INVALID.value
+        sent_channel = None
+        if email_ok:
+            await self._send_email(po, supplier, pdf_bytes, mime, now)
+            sent_channel = "email"
+            po.current_rung = 0
+        elif supplier.phone or supplier.whatsapp_phone:
+            po.no_contact_channel = False
+            po.current_rung = 0     # the sweeper's first rung will WhatsApp them
+        else:
+            po.no_contact_channel = True
+
+        po.status = POStatus.SENT.value
+        po.sent_at = now
+        po.next_escalation_at = now + timedelta(hours=settings.po_escalation_hours)
+        await self._audit(user, "PO_SEND", po.id,
+                          after={"po_number": po.po_number, "channel": sent_channel,
+                                 "pdf_document_id": str(doc.id),
+                                 "no_contact_channel": po.no_contact_channel})
+        await self.db.commit()
+        # advance the production board (§8): first PO sent → PO_RAISED
+        await self._on_po_raised(po)
+        return {"po_id": str(po.id), "po_number": po.po_number, "status": po.status,
+                "channel": sent_channel, "no_contact_channel": po.no_contact_channel,
+                "pdf_document_id": str(doc.id)}
+
+    async def _send_email(self, po, supplier, pdf_bytes, mime, now) -> None:
+        base = settings.po_tracking_base_url
+        link = f"{settings.frontend_base_url}/pos/{po.id}"
+        html = (f"<html><body><p>Dear {supplier.name},</p>"
+                f"<p>Please find attached our purchase order <b>{po.po_number}</b> "
+                f"(ref {po.buyer_ref or '-'}). Kindly confirm receipt and delivery.</p>"
+                f'<p><a href="{link}">View / confirm this PO</a></p>'
+                f"<p>Delivery {po.delivery_days} days · payment {po.payment_terms_days} days.</p>"
+                f"<p>Regards,<br>{settings.po_buyer_name}</p></body></html>")
+        html = po_tracking.inject_tracking(html, base, po.tracking_token, settings.secret_key)
+        text = (f"Dear {supplier.name},\nPlease find attached PO {po.po_number} "
+                f"(ref {po.buyer_ref or '-'}). Kindly confirm receipt.\n"
+                f"View/confirm: {link}\nRegards, {settings.po_buyer_name}")
+        ext = ".pdf" if mime == "application/pdf" else ".html"
+        attachments = [{"filename": f"{po.po_number}{ext}", "content": pdf_bytes, "mime": mime}]
+        ok = await run_in_threadpool(
+            get_notifier().send, to=supplier.email,
+            subject=f"Purchase Order {po.po_number} — {settings.po_buyer_name}",
+            body=text, html=html, attachments=attachments)
+        resp = PoResponse(
+            purchase_order_id=po.id, channel=POResponseChannel.EMAIL.value,
+            sent_at=now, status=(POResponseStatus.PENDING.value if ok
+                                 else POResponseStatus.FAILED.value),
+            tracking_token=po.tracking_token)
+        self.db.add(resp)
+        self.db.add(Notification(
+            supplier_id=supplier.id, channel=NotificationChannel.EMAIL.value,
+            type=NotificationType.PO_DISPATCH.value,
+            subject=f"PO {po.po_number} dispatched", body=text,
+            entity_type="purchase_order", entity_id=po.id,
+            status=(NotificationStatus.SENT.value if ok else NotificationStatus.FAILED.value),
+            sent_at=now if ok else None))
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Open tracking (§6) + acknowledgement (§7d)
+    # ══════════════════════════════════════════════════════════════════════
+    async def record_open(self, token: str, *, ip=None, user_agent=None) -> bool:
+        po = await self.repo.get_po_by_token(token)
+        if po is None:
+            return False
+        now = datetime.now(timezone.utc)
+        if po.first_opened_at is None:
+            po.first_opened_at = now
+        resp = await self.repo.latest_response(po.id)
+        if resp is not None and resp.status == POResponseStatus.PENDING.value:
+            resp.status = POResponseStatus.OPENED.value
+            resp.responded_at = now
+        self.db.add(PoTrackingEvent(
+            purchase_order_id=po.id, po_response_id=resp.id if resp else None,
+            tracking_token=token, event_type=POTrackingEventType.OPEN.value,
+            channel="email", ip=ip, user_agent=user_agent, at=now))
+        await self.db.commit()
+        return True
+
+    async def record_click(self, token: str, *, ip=None, user_agent=None) -> bool:
+        po = await self.repo.get_po_by_token(token)
+        if po is None:
+            return False
+        now = datetime.now(timezone.utc)
+        if po.first_clicked_at is None:
+            po.first_clicked_at = now
+        if po.first_opened_at is None:
+            po.first_opened_at = now
+        self.db.add(PoTrackingEvent(
+            purchase_order_id=po.id, tracking_token=token,
+            event_type=POTrackingEventType.CLICK.value, channel="email",
+            ip=ip, user_agent=user_agent, at=now))
+        await self.db.commit()
+        return True
+
+    async def record_ses_event(self, *, token: str | None, event_type: str,
+                               meta: dict | None = None) -> bool:
+        """SES → SNS webhook (§5b): a hard bounce flags the email invalid, fails the
+        response, and short-circuits the PO to the WhatsApp rung (don't burn 5h on a
+        dead address). Complaint suppresses further email."""
+        po = await self.repo.get_po_by_token(token) if token else None
+        if po is None:
+            return False
+        now = datetime.now(timezone.utc)
+        et = (event_type or "").lower()
+        self.db.add(PoTrackingEvent(
+            purchase_order_id=po.id, tracking_token=token, event_type=et,
+            channel="email", meta=meta, at=now))
+        if et in (POTrackingEventType.BOUNCE.value, POTrackingEventType.COMPLAINT.value):
+            supplier = await self.repo.get_supplier(po.supplier_id) if po.supplier_id else None
+            if supplier is not None:
+                supplier.email_status = SupplierEmailStatus.INVALID.value
+            resp = await self.repo.latest_response(po.id)
+            if resp is not None:
+                resp.status = POResponseStatus.FAILED.value
+            if po.acknowledged_at is None and po.status in (POStatus.SENT.value,
+                                                            POStatus.ESCALATED.value):
+                po.next_escalation_at = now      # escalate on the next sweep, now
+        await self.db.commit()
+        return True
+
+    async def acknowledge_po(self, user, po_id: uuid.UUID, *, channel: str,
+                             confirmed_qty=None, notes=None) -> dict:
+        po = await self._load(po_id)
+        return await self._acknowledge(po, channel=channel, confirmed_qty=confirmed_qty,
+                                       notes=notes, actor=user)
+
+    async def acknowledge_by_token(self, token: str, *, channel: str,
+                                   confirmed_qty=None, notes=None) -> bool:
+        po = await self.repo.get_po_by_token(token)
+        if po is None:
+            return False
+        await self._acknowledge(po, channel=channel, confirmed_qty=confirmed_qty,
+                                notes=notes, actor=None)
+        return True
+
+    async def _acknowledge(self, po, *, channel, confirmed_qty, notes, actor) -> dict:
+        """Stop the ladder the instant the supplier acknowledges by ANY channel (§7d)."""
+        if po.acknowledged_at is not None:
+            return present.po_view(po)
+        now = datetime.now(timezone.utc)
+        po.acknowledged_at = now
+        po.acknowledged_channel = channel
+        po.status = POStatus.CONFIRMED.value
+        po.next_escalation_at = None
+        resp = await self.repo.latest_response(po.id)
+        if resp is None or resp.channel != channel:
+            resp = PoResponse(purchase_order_id=po.id, channel=channel)
+            self.db.add(resp)
+        resp.status = POResponseStatus.CONFIRMED.value
+        resp.responded_at = now
+        if confirmed_qty is not None:
+            try:
+                resp.confirmed_qty = Decimal(str(confirmed_qty))
+            except (InvalidOperation, TypeError, ValueError):
+                pass
+        if notes:
+            resp.notes = notes
+        self.db.add(PoTrackingEvent(
+            purchase_order_id=po.id, tracking_token=po.tracking_token,
+            event_type=channel if channel in ("whatsapp", "call") else "click",
+            channel=channel, at=now))
+        await self._audit(actor, "PO_ACKNOWLEDGE", po.id,
+                          after={"channel": channel, "acknowledged_at": now.isoformat()})
+        await self.db.commit()
+        await self._on_po_confirmed(po)
+        return present.po_view(await self._load(po.id))
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Escalation ladder (§7) — driven by the lifespan sweeper
+    # ══════════════════════════════════════════════════════════════════════
+    async def sweep_escalations(self) -> int:
+        """One rung per due PO per sweep (idempotent — the `acknowledged_at IS NULL` +
+        `current_rung < 3` guards make a second pass a no-op). Returns rungs advanced."""
+        now = datetime.now(timezone.utc)
+        due = await self.repo.due_po_escalations(now)
+        if not due:
+            return 0
+        transport = get_escalation_transport()
+        advanced = 0
+        for po in due:
+            supplier = po.supplier
+            rung = po.current_rung
+            next_at = now + timedelta(hours=settings.po_escalation_hours)
+            if rung == 0:
+                # RUNG 1 — WhatsApp
+                to = (getattr(supplier, "whatsapp_phone", None)
+                      or getattr(supplier, "phone", None))
+                body = (f"Reminder: PO {po.po_number} from {settings.po_buyer_name} "
+                        f"awaits your confirmation. Please reply to confirm.")
+                if to:
+                    res = await run_in_threadpool(transport.send_whatsapp, to=to, body=body)
+                else:
+                    res = {"ok": False, "error": "no_whatsapp"}
+                self.db.add(PoResponse(
+                    purchase_order_id=po.id, channel=POResponseChannel.WHATSAPP.value,
+                    sent_at=now, status=POResponseStatus.PENDING.value,
+                    notes=res.get("error")))
+                self.db.add(PoTrackingEvent(
+                    purchase_order_id=po.id, event_type=POTrackingEventType.WHATSAPP.value,
+                    channel="whatsapp", meta=res, at=now))
+                po.status = POStatus.ESCALATED.value
+                po.current_rung = 1
+                po.next_escalation_at = next_at
+            elif rung == 1:
+                # RUNG 2 — auto-call
+                to = getattr(supplier, "phone", None)
+                msg = f"Purchase order {po.po_number} from {settings.po_buyer_name}"
+                if to:
+                    res = await run_in_threadpool(transport.place_call, to=to, message=msg)
+                else:
+                    res = {"ok": False, "error": "no_phone"}
+                self.db.add(PoResponse(
+                    purchase_order_id=po.id, channel=POResponseChannel.CALL.value,
+                    sent_at=now, status=POResponseStatus.PENDING.value,
+                    notes=res.get("error")))
+                self.db.add(PoTrackingEvent(
+                    purchase_order_id=po.id, event_type=POTrackingEventType.CALL.value,
+                    channel="call", meta=res, at=now))
+                po.current_rung = 2
+                po.next_escalation_at = next_at
+            else:
+                # RUNG 3 — exhausted, hand to the buyer
+                self.db.add(Notification(
+                    channel=NotificationChannel.IN_APP.value,
+                    type=NotificationType.PO_ESCALATION_EXHAUSTED.value,
+                    subject=f"PO {po.po_number} — no supplier response",
+                    body=f"PO {po.po_number} got no response after email, WhatsApp and a call. "
+                         f"Please follow up manually.",
+                    entity_type="purchase_order", entity_id=po.id,
+                    status=NotificationStatus.PENDING.value))
+                po.current_rung = 3
+                po.next_escalation_at = None
+            advanced += 1
+        await self.db.commit()
+        return advanced
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Helpers
+    # ══════════════════════════════════════════════════════════════════════
+    async def _load(self, po_id: uuid.UUID) -> PurchaseOrder:
+        po = await self.repo.get_po(po_id)
+        if po is None:
+            raise HTTPException(404, "Purchase order not found.")
+        return po
+
+    def _recompute(self, po: PurchaseOrder, supplier_state_code: str | None) -> None:
+        items = [{"qty": i.qty, "unit_price": i.unit_price} for i in po.items]
+        totals = po_costing.compute_totals(
+            items, supplier_state_code=supplier_state_code,
+            buyer_state_code=settings.po_buyer_state_code, gst_rate=settings.po_gst_rate)
+        for item, amt in zip(po.items, totals["amounts"]):
+            item.amount = amt
+        po.subtotal = totals["subtotal"]
+        po.cgst = totals["cgst"]
+        po.sgst = totals["sgst"]
+        po.igst = totals["igst"]
+        po.gst_mode = totals["gst_mode"]
+        po.round_off = totals["round_off"]
+        po.total = totals["total"]
+
+    def _po_type(self, supplier) -> str:
+        st = getattr(supplier, "supplier_type", None)
+        return st or SupplierType.ACCESSORY.value
+
+    async def _assert_router_role(self, user, po) -> None:
+        role = getattr(user, "role", None)
+        if role == UserRole.MANAGING_DIRECTOR:        # superuser approves anything
+            return
+        supplier = await self.repo.get_supplier(po.supplier_id) if po.supplier_id else None
+        allowed = (_LEATHER_APPROVERS if self._po_type(supplier) == SupplierType.LEATHER.value
+                   else _ACCESSORY_APPROVERS)
+        if role not in allowed:
+            raise HTTPException(403, detail={
+                "error": "wrong_approver",
+                "message": f"This PO routes to {sorted(r.value for r in allowed)}."})
+
+    async def _notify_approvers(self, po) -> int:
+        from app.modules.users.service import UserService
+
+        supplier = await self.repo.get_supplier(po.supplier_id) if po.supplier_id else None
+        roles = (list(_LEATHER_APPROVERS) if self._po_type(supplier) == SupplierType.LEATHER.value
+                 else list(_ACCESSORY_APPROVERS))
+        recipients = await UserService(self.db).list_by_roles(roles)
+        if not recipients:
+            return 0
+        now = datetime.now(timezone.utc)
+        deadline = now + timedelta(hours=settings.bom_review_escalation_hours)
+        link = f"{settings.frontend_base_url}/pos/{po.id}"
+        seen: set = set()
+        n = 0
+        for u in recipients:
+            if u.id in seen:
+                continue
+            seen.add(u.id)
+            self.db.add(Notification(
+                recipient_user_id=u.id, channel=NotificationChannel.IN_APP.value,
+                type=NotificationType.PO_AWAITING_APPROVAL.value,
+                subject=f"PO {po.po_number or 'draft'} awaiting cross-check",
+                body=f"A supplier PO is awaiting your cross-check approval. {link}",
+                entity_type="purchase_order", entity_id=po.id,
+                status=NotificationStatus.PENDING.value, scheduled_for=deadline))
+            n += 1
+        await self.db.commit()
+        return n
+
+    async def _identity(self, bom):
+        from app.modules.clients.service import ClientService
+        cs = ClientService(self.db)
+        order = await cs.get_order(bom.client_order_id) if bom.client_order_id else None
+        style = await cs.get_style(bom.style_id) if bom.style_id else None
+        return {"order": order, "style": style}
+
+    @staticmethod
+    def _buyer_ref(identity) -> str | None:
+        style = identity.get("style")
+        order = identity.get("order")
+        ref = getattr(style, "customer_ref", None) or getattr(order, "order_number", None)
+        return f"#{ref}" if ref else None
+
+    def _buyer_block(self) -> dict:
+        return {"name": settings.po_buyer_name, "address": settings.po_buyer_address,
+                "gstin": settings.po_buyer_gstin, "email": settings.po_buyer_email,
+                "phone": settings.po_buyer_phone}
+
+    @staticmethod
+    def _supplier_block(s) -> dict:
+        return {"name": getattr(s, "name", None), "address": getattr(s, "address", None),
+                "gstin": getattr(s, "gstin", None), "email": getattr(s, "email", None),
+                "phone": getattr(s, "phone", None)}
+
+    @staticmethod
+    def _snap(po: PurchaseOrder) -> dict:
+        return {"revision": po.revision, "status": po.status,
+                "supplier_id": str(po.supplier_id) if po.supplier_id else None,
+                "subtotal": str(po.subtotal), "total": str(po.total),
+                "items": [{"id": str(i.id), "description": i.description,
+                           "qty": str(i.qty), "unit_price": str(i.unit_price),
+                           "amount": str(i.amount)} for i in po.items]}
+
+    async def _audit(self, user, action, entity_id, *, before=None, after=None) -> None:
+        self.db.add(AuditLog(
+            actor_user_id=getattr(user, "id", None), action=action,
+            entity_type="purchase_order", entity_id=entity_id, before=before, after=after,
+            at=datetime.now(timezone.utc)))
+
+    async def _on_po_raised(self, po) -> None:
+        try:
+            from app.modules.supplier_po.production_tracking_service import (
+                ProductionTrackingService,
+            )
+            await ProductionTrackingService(self.db).on_po_raised(po.bom_id)
+        except Exception:
+            pass
+
+    async def _on_po_confirmed(self, po) -> None:
+        try:
+            from app.modules.supplier_po.production_tracking_service import (
+                ProductionTrackingService,
+            )
+            await ProductionTrackingService(self.db).on_po_confirmed(po.bom_id)
+        except Exception:
+            pass
+
+
+====================================================================================================
+FILE: po_templates.py
+====================================================================================================
+
+"""
+================================================================================
+modules/supplier_po/po_templates.py — PO template registry (§2b)
+================================================================================
+
+"One PO template per supplier type" (§2): the differences between a leather, an
+accessory/material, and a service/job-work PO are tiny — the line-grid UOM column
+header + the default UOM — so they live as CONFIG (`config/po_templates.yaml`), read
+here once and cached. Onboarding a new supplier type is a YAML row + (optionally) a
+child HTML template in `templates/po/` — NO code branch, the same promote-by-config
+posture as every prior stage.
+
+This is the PURE, sync registry loader (no DB). Templates that are persisted into a
+`po_template` table instead are an equivalent option (§10); the YAML is the shipped
+default.
+
+FUNCTION GUIDE
+  _BUILTIN   the shipped fallback map (leather/accessory/service) so the renderer works
+             before the YAML is seeded.
+  _load() -> {supplier_type: cfg}   [private, cached] merge the YAML over _BUILTIN.
+  template_cfg_for(supplier_type) -> dict | None
+      The template cfg (uom_header/default_uom/...) for a type, or None to let the caller
+      default. CALLED FROM: PoService._po_template_cfg (at send time).
+  reset_cache()   test hook — drop the cached registry.
+================================================================================
+"""
+from __future__ import annotations
+
+import os
+
+import yaml
+
+_CONFIG = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
+    "config", "po_templates.yaml",
+)
+
+# Shipped fallback so the renderer works even before the YAML is seeded.
+_BUILTIN = {
+    "leather": {"template_name": "leather", "uom_header": "DCM/SQF", "default_uom": "DCM"},
+    "accessory": {"template_name": "accessory", "uom_header": "UOM", "default_uom": "NOS"},
+    "service": {"template_name": "service", "uom_header": "UOM", "default_uom": "NOS"},
+}
+
+_cache: dict[str, dict] | None = None
+
+
+def _load() -> dict[str, dict]:
+    global _cache
+    if _cache is not None:
+        return _cache
+    out = dict(_BUILTIN)
+    try:
+        with open(_CONFIG, encoding="utf-8") as fh:
+            rows = yaml.safe_load(fh) or []
+        for r in rows:
+            st = (r.get("supplier_type") or "").lower()
+            if st:
+                out[st] = {
+                    "template_name": r.get("template_name", st),
+                    "uom_header": r.get("uom_header", "UOM"),
+                    "default_uom": r.get("default_uom", "NOS"),
+                    "gst_mode": r.get("gst_mode"),
+                }
+    except FileNotFoundError:
+        pass
+    _cache = out
+    return out
+
+
+def template_cfg_for(supplier_type: str | None) -> dict | None:
+    """The template cfg for a supplier type, or None to let the caller default."""
+    if not supplier_type:
+        return None
+    return _load().get(supplier_type.lower())
+
+
+def reset_cache() -> None:
+    global _cache
+    _cache = None
+
+
+====================================================================================================
+FILE: po_tracking.py
+====================================================================================================
+
+"""
+================================================================================
+modules/supplier_po/po_tracking.py — self-hosted open tracking (§6)
+================================================================================
+
+PURE helpers for the self-hosted pixel + link-wrap (§6a recommends self-hosted over
+Mailtrack/HubSpot/Streak/Yesware — app-owned read-state, no per-seat lock-in, no
+third party sees supplier data). No DB; the service persists the events.
+
+  - `new_token()`          a per-send opaque token embedded in the pixel + links.
+  - `PIXEL_GIF`            a 1×1 transparent GIF (the open-pixel response body).
+  - `pixel_url` / `wrap`   build the tracked URLs injected into the email HTML at send.
+  - `sign` / `verify`      HMAC over the wrapped target so the redirect can't be turned
+                           into an open redirect.
+  - `inject_tracking`      rewrite an HTML body: append the pixel + wrap its links.
+
+HONEST CAVEAT (§6b, documented): image-proxy/prefetch makes an OPEN probabilistic (a
+false positive from a proxy prefetch, a false negative when images are off). A CLICK is
+the reliable read signal; the ladder (§7) treats open as the soft trigger and reserves
+the strong action for no-read-at-all, and any acknowledgement is the authoritative stop —
+so a missed pixel only ever over-escalates by one cheap rung, never under-delivers.
+
+FUNCTION GUIDE  (pure + sync; no DB — the service persists the resulting events)
+  PIXEL_GIF        the 1×1 transparent GIF bytes (the open-pixel response body). → the /t/o route.
+  new_token() -> str            a per-send opaque token. CALLED FROM: PoService.send_po.
+  sign(target, secret) / verify(target, sig, secret)   HMAC tag (anti open-redirect).
+  pixel_url(base, token) -> str        the open-pixel URL.
+  wrap(base, token, target, secret) -> str   a click-tracking redirect URL.
+  inject_tracking(html, base, token, secret) -> str
+      Rewrite every link + append the pixel into the email HTML. CALLED FROM: PoService._send_email.
+  unwrap_target(u) -> str       URL-decode a wrapped target (used by the /t/c redirect route).
+================================================================================
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import re
+import secrets
+from urllib.parse import quote, unquote
+
+# 1×1 transparent GIF — the open-pixel body.
+PIXEL_GIF: bytes = base64.b64decode(
+    "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+)
+
+
+def new_token() -> str:
+    """A URL-safe per-send token (the pixel/link correlation key)."""
+    return secrets.token_urlsafe(24)
+
+
+def sign(target: str, secret: str) -> str:
+    """Short HMAC tag over a wrapped redirect target (anti open-redirect)."""
+    mac = hmac.new(secret.encode(), target.encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac[:12]).decode().rstrip("=")
+
+
+def verify(target: str, sig: str, secret: str) -> bool:
+    return hmac.compare_digest(sign(target, secret), sig or "")
+
+
+def pixel_url(base: str, token: str) -> str:
+    return f"{base.rstrip('/')}/t/o/{token}.gif"
+
+
+def wrap(base: str, token: str, target: str, secret: str) -> str:
+    """Rewrite a link to the click-tracking redirect endpoint (records a `click` then
+    302s to the signed target — a stronger 'read' signal than an open)."""
+    return (f"{base.rstrip('/')}/t/c/{token}"
+            f"?u={quote(target, safe='')}&s={sign(target, secret)}")
+
+
+_HREF_RE = re.compile(r'href="([^"]+)"', re.IGNORECASE)
+
+
+def inject_tracking(html: str, base: str, token: str, secret: str) -> str:
+    """Wrap every http(s) link in the body + append the open pixel (§5c)."""
+    def _sub(m: re.Match) -> str:
+        url = m.group(1)
+        if url.lower().startswith(("http://", "https://")):
+            return f'href="{wrap(base, token, url, secret)}"'
+        return m.group(0)
+
+    wrapped = _HREF_RE.sub(_sub, html)
+    pixel = f'<img src="{pixel_url(base, token)}" width="1" height="1" alt="" style="display:none">'
+    if "</body>" in wrapped.lower():
+        return re.sub(r"</body>", pixel + "</body>", wrapped, count=1, flags=re.IGNORECASE)
+    return wrapped + pixel
+
+
+def unwrap_target(u: str) -> str:
+    return unquote(u or "")
+
+
+====================================================================================================
+FILE: presenters.py
+====================================================================================================
+
+"""
+================================================================================
+modules/supplier_po/presenters.py — Stage-5 response shapes (§1–§9)
+================================================================================
+
+PURE serialization (ORM rows → the JSON the FE renders). Split out of the services
+so they stay focused on orchestration. No DB, no business rules.
+
+FUNCTION GUIDE  (pure + sync; called by PoService / SupplierService / ProductionTrackingService)
+  _f(v) / _iso(dt)   [private] None-safe float / ISO-timestamp.
+  supplier_block(s, *, history?, open_pos?) -> dict   one supplier (+ optional history + open POs).
+  po_item_block(i) -> dict      one PO line (keeps the bom_item/inventory_item back-links).
+  po_view(po, *, include_supplier=True) -> dict   the full PO envelope (money + status + tracking
+      + escalation + items + supplier). Used by every PO endpoint + the editable recompute echo.
+  po_list_block(pos) -> dict    {purchase_orders, count}. → list_pos.
+  tracking_view(t, *, order?, style?, client_name?) -> dict   one production_tracking row. → board.
+================================================================================
+"""
+from __future__ import annotations
+
+
+def _f(v):
+    return float(v) if v is not None else None
+
+
+def _iso(dt):
+    return dt.isoformat() if dt else None
+
+
+# ── supplier (§9) ─────────────────────────────────────────────────────────────
+def supplier_block(s, *, history=None, open_pos=None) -> dict:
+    out = {
+        "id": str(s.id), "name": s.name, "phone": s.phone, "email": s.email,
+        "service": s.service, "gstin": s.gstin, "address": s.address,
+        "currency": s.currency, "payment_terms_days": s.payment_terms_days,
+        "lead_time_days": s.lead_time_days, "is_active": s.is_active,
+        "email_status": s.email_status, "supplier_type": s.supplier_type,
+        "state_code": s.state_code, "whatsapp_phone": s.whatsapp_phone,
+        "has_contact": bool(s.email or s.phone),
+    }
+    if history is not None:
+        out["supply_history"] = [{
+            "normalized_description": h.normalized_description,
+            "raw_description": h.raw_description, "mode": h.mode, "uom": h.uom,
+            "txn_count": h.txn_count, "last_purchased_at": _iso(h.last_purchased_at),
+            "last_rate": _f(h.last_rate), "min_rate": _f(h.min_rate),
+            "max_rate": _f(h.max_rate),
+        } for h in history]
+    if open_pos is not None:
+        out["open_pos"] = [{"id": str(p.id), "po_number": p.po_number,
+                            "status": p.status, "total": _f(p.total)} for p in open_pos]
+    return out
+
+
+# ── purchase order (§1–§7) ────────────────────────────────────────────────────
+def po_item_block(i) -> dict:
+    return {
+        "id": str(i.id), "item_no": i.item_no, "description": i.description,
+        "color": i.color, "uom": i.uom, "qty": _f(i.qty),
+        "unit_price": _f(i.unit_price), "amount": _f(i.amount),
+        "inventory_item_id": str(i.inventory_item_id) if i.inventory_item_id else None,
+        "bom_item_id": str(i.bom_item_id) if i.bom_item_id else None,
+    }
+
+
+def po_view(po, *, include_supplier=True) -> dict:
+    sup = getattr(po, "supplier", None)
+    out = {
+        "id": str(po.id), "po_number": po.po_number, "status": po.status,
+        "revision": po.revision,
+        "supplier_id": str(po.supplier_id) if po.supplier_id else None,
+        "bom_id": str(po.bom_id) if po.bom_id else None,
+        "client_order_id": str(po.client_order_id) if po.client_order_id else None,
+        "buyer_ref": po.buyer_ref, "issue_date": str(po.issue_date) if po.issue_date else None,
+        "delivery_days": po.delivery_days, "payment_terms_days": po.payment_terms_days,
+        "currency": po.currency, "gst_mode": po.gst_mode,
+        "subtotal": _f(po.subtotal), "cgst": _f(po.cgst), "sgst": _f(po.sgst),
+        "igst": _f(po.igst), "round_off": _f(po.round_off), "total": _f(po.total),
+        "needs_supplier": po.needs_supplier, "no_contact_channel": po.no_contact_channel,
+        "match_method": po.match_method, "candidates": po.candidates,
+        "approved_at": _iso(po.approved_at), "rejected_at": _iso(po.rejected_at),
+        "rejection_reason": po.rejection_reason, "sent_at": _iso(po.sent_at),
+        "pdf_document_id": str(po.pdf_document_id) if po.pdf_document_id else None,
+        "first_opened_at": _iso(po.first_opened_at),
+        "first_clicked_at": _iso(po.first_clicked_at),
+        "current_rung": po.current_rung, "next_escalation_at": _iso(po.next_escalation_at),
+        "acknowledged_at": _iso(po.acknowledged_at),
+        "acknowledged_channel": po.acknowledged_channel,
+        "items": [po_item_block(i) for i in getattr(po, "items", [])],
+    }
+    if include_supplier and sup is not None:
+        out["supplier"] = {"id": str(sup.id), "name": sup.name, "email": sup.email,
+                           "phone": sup.phone, "gstin": sup.gstin, "address": sup.address,
+                           "supplier_type": sup.supplier_type, "email_status": sup.email_status}
+    return out
+
+
+def po_list_block(pos: list) -> dict:
+    return {"purchase_orders": [po_view(p) for p in pos], "count": len(pos)}
+
+
+# ── production tracking (§8) ──────────────────────────────────────────────────
+def tracking_view(t, *, order=None, style=None, client_name=None) -> dict:
+    return {
+        "id": str(t.id),
+        "client_order_id": str(t.client_order_id),
+        "order_number": getattr(order, "order_number", None),
+        "client_name": client_name,
+        "style_id": str(t.style_id), "style_name": getattr(style, "name", None),
+        "bom_id": str(t.bom_id) if t.bom_id else None,
+        "status": t.status, "po_count": t.po_count,
+        "po_confirmed_count": t.po_confirmed_count,
+        "material_ready_at": _iso(t.material_ready_at),
+        "released_at": _iso(t.released_at),
+    }
+
+
+====================================================================================================
+FILE: production_tracking_service.py
+====================================================================================================
+
+"""
+================================================================================
+modules/supplier_po/production_tracking_service.py — Stage-5 §8 production board
+================================================================================
+
+One `production_tracking` row per style/order advancing through the §8c status ladder.
+System-driven on each procurement stage transition (service→service side-effects from
+bom_service / inventory_service / po_service) + manually nudgeable by DM/Cutting/MD.
+
+LAYERING. Owns only `production_tracking` (procurement). Style/order/client identity the
+board groups by resolves through clients.service (CLAUDE.md §3.2). The order's POs are
+read through the procurement repository (same module).
+
+FUNCTION / METHOD GUIDE
+  _LADDER / _RANK   the §8c status order + an index for "advance only forward" checks.
+  ProductionTrackingService(db)   session + SupplierPoRepository.
+  ensure_for_bom(bom_id) -> ProductionTracking | None   get-or-create the tracker for a BOM's style/order.
+  _advance(t, target, *, actor?, force?)   [private] move forward (never back unless force),
+      stamp material_ready_at/released_at, audit PRODUCTION_TRACKING_UPDATE.
+  System edges (service→service side-effects, each commits):
+    on_bom_approved(bom_id)        → BOM_APPROVED        (called by BomService.approve_bom)
+    on_inventory_checked(bom_id)   → INVENTORY_CHECKED   (called by InventoryService.run_check)
+    on_po_raised(bom_id)           → PO_RAISED           (called by PoService.send_po)
+    on_po_confirmed(bom_id)        → PO_CONFIRMED → MATERIAL_READY when ALL POs confirmed
+                                                          (called by PoService._acknowledge)
+  transition(user, tracking_id, target) -> dict
+      The MANUAL nudge (DM/MD/Cutting) — may move forward or correct a stuck status (force);
+      the human go/no-go for RELEASED_TO_PRODUCTION. → the board transition endpoint.
+  board(*, client_id?, order_id?) -> dict   the grouped client→order→style board read.
+================================================================================
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+
+from fastapi import HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.enums import UserRole
+from app.modules.supplier_po import presenters as present
+from app.modules.supplier_po.enums import POStatus, ProductionTrackingStatus
+from app.core.models import AuditLog
+from app.modules.supplier_po.models import ProductionTracking
+from app.modules.supplier_po.repository import SupplierPoRepository
+
+# The §8c ladder order (an index makes "advance only forward" comparisons cheap).
+_LADDER = [
+    ProductionTrackingStatus.AWAITING_BOM.value,
+    ProductionTrackingStatus.BOM_APPROVED.value,
+    ProductionTrackingStatus.INVENTORY_CHECKED.value,
+    ProductionTrackingStatus.PO_RAISED.value,
+    ProductionTrackingStatus.PO_CONFIRMED.value,
+    ProductionTrackingStatus.MATERIAL_READY.value,
+    ProductionTrackingStatus.RELEASED_TO_PRODUCTION.value,
+    ProductionTrackingStatus.IN_PRODUCTION.value,
+    ProductionTrackingStatus.COMPLETED.value,
+]
+_RANK = {s: i for i, s in enumerate(_LADDER)}
+# Manual transitions and who may drive them (§8c). System edges are unrestricted (the
+# calling service already gated the action).
+_MANUAL_ROLES = {UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER, UserRole.CUTTING_MANAGER}
+
+
+class ProductionTrackingService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+        self.repo = SupplierPoRepository(db)
+
+    async def _bom_dto(self, bom_id):
+        from app.modules.bom.service import BomService
+        return await BomService(self.db).get_bom_dto(bom_id)
+
+    async def ensure_for_bom(self, bom_id: uuid.UUID) -> ProductionTracking | None:
+        """Get-or-create the tracker for a BOM's style/order."""
+        bom = await self._bom_dto(bom_id)
+        if bom is None or bom.client_order_id is None or bom.style_id is None:
+            return None
+        t = await self.repo.get_production_tracking(bom.client_order_id, bom.style_id)
+        if t is None:
+            t = ProductionTracking(client_order_id=bom.client_order_id, style_id=bom.style_id,
+                                   bom_id=bom_id,
+                                   status=ProductionTrackingStatus.AWAITING_BOM.value)
+            self.db.add(t)
+            await self.db.flush()
+        elif t.bom_id is None:
+            t.bom_id = bom_id
+        return t
+
+    async def _advance(self, t: ProductionTracking, target: str, *, actor=None,
+                       force: bool = False) -> None:
+        """Move a tracker forward to `target` (never backward unless `force`). System
+        edges set actor=None; manual edges audit the actor + before/after."""
+        if t is None:
+            return
+        if not force and _RANK.get(target, 0) <= _RANK.get(t.status, 0):
+            return
+        before = t.status
+        t.status = target
+        now = datetime.now(timezone.utc)
+        if target == ProductionTrackingStatus.MATERIAL_READY.value and t.material_ready_at is None:
+            t.material_ready_at = now
+        if target == ProductionTrackingStatus.RELEASED_TO_PRODUCTION.value and t.released_at is None:
+            t.released_at = now
+        t.updated_by = getattr(actor, "id", None)
+        self.db.add(AuditLog(
+            actor_user_id=getattr(actor, "id", None), action="PRODUCTION_TRACKING_UPDATE",
+            entity_type="production_tracking", entity_id=t.id,
+            before={"status": before}, after={"status": target}, at=now))
+
+    # ── system-driven edges (called by the procurement services) ─────────────
+    async def on_po_raised(self, bom_id: uuid.UUID) -> None:
+        t = await self.ensure_for_bom(bom_id)
+        pos = await self.repo.pos_for_bom(bom_id)
+        active = [p for p in pos if p.status != POStatus.CANCELLED.value]
+        t.po_count = len(active)
+        await self._advance(t, ProductionTrackingStatus.PO_RAISED.value)
+        await self.db.commit()
+
+    async def on_po_confirmed(self, bom_id: uuid.UUID) -> None:
+        t = await self.ensure_for_bom(bom_id)
+        pos = await self.repo.pos_for_bom(bom_id)
+        active = [p for p in pos if p.status != POStatus.CANCELLED.value]
+        confirmed = [p for p in active if p.status == POStatus.CONFIRMED.value]
+        t.po_count = len(active)
+        t.po_confirmed_count = len(confirmed)
+        if active and len(confirmed) == len(active):
+            await self._advance(t, ProductionTrackingStatus.PO_CONFIRMED.value)
+            # all shortfalls confirmed → MATERIAL_READY emits the Stage-6 MD alert (owned
+            # by Stage 6; here we advance the board + stamp the trigger time).
+            await self._advance(t, ProductionTrackingStatus.MATERIAL_READY.value)
+        await self.db.commit()
+
+    async def on_bom_approved(self, bom_id: uuid.UUID) -> None:
+        t = await self.ensure_for_bom(bom_id)
+        await self._advance(t, ProductionTrackingStatus.BOM_APPROVED.value)
+        await self.db.commit()
+
+    async def on_inventory_checked(self, bom_id: uuid.UUID) -> None:
+        t = await self.ensure_for_bom(bom_id)
+        await self._advance(t, ProductionTrackingStatus.INVENTORY_CHECKED.value)
+        await self.db.commit()
+
+    # ── manual transition (DM/MD/Cutting) ────────────────────────────────────
+    async def transition(self, user, tracking_id: uuid.UUID, target: str) -> dict:
+        if getattr(user, "role", None) not in _MANUAL_ROLES \
+                and getattr(user, "role", None) != UserRole.MANAGING_DIRECTOR:
+            raise HTTPException(403, "Only DM/MD/Cutting may transition the board.")
+        if target not in _RANK:
+            raise HTTPException(422, detail={"error": "unknown_status", "status": target})
+        t = await self.repo.get_production_tracking_by_id(tracking_id)
+        if t is None:
+            raise HTTPException(404, "Tracker not found.")
+        # a manual nudge may move forward OR correct a stuck status (force) — the human
+        # go/no-go for RELEASED_TO_PRODUCTION especially (§8c).
+        await self._advance(t, target, actor=user, force=True)
+        await self.db.commit()
+        return {"id": str(t.id), "status": t.status}
+
+    # ── board read (§8b) ──────────────────────────────────────────────────────
+    async def board(self, *, client_id=None, order_id=None) -> dict:
+        from app.modules.clients.service import ClientService
+        cs = ClientService(self.db)
+        client_names = {c.id: c.name for c in await cs.list_clients()}
+        rows = await self.repo.list_production_tracking()
+        out = []
+        for t in rows:
+            if order_id is not None and t.client_order_id != order_id:
+                continue
+            order = await cs.get_order(t.client_order_id)
+            cid = getattr(order, "client_id", None)
+            if client_id is not None and cid != client_id:
+                continue
+            style = await cs.get_style(t.style_id)
+            out.append(present.tracking_view(t, order=order, style=style,
+                                             client_name=client_names.get(cid)))
+        return {"trackers": out, "count": len(out)}
+
+
+====================================================================================================
+FILE: repository.py
+====================================================================================================
+
+"""
+================================================================================
+modules/supplier_po/repository.py — Stage-5 supplier-PO data access
+================================================================================
+
+The only place that talks to the DB for supplier_po-owned tables (supplier,
+supplier_supply_history, purchase_order, po_item, po_response, po_tracking_event,
+production_tracking) plus the cross-cutting core `document` write path for the PO PDF.
+BOM + inventory data (shortfall lines, aliases) flow through those modules' services.
+
+FUNCTION GUIDE  (all async; called by PoService / SupplierService / ProductionTrackingService)
+  commit/rollback   session plumbing.
+  document (core; supplier_po owns the PO-PDF write path):
+    get_document_by_sha(sha) / add_document(doc)   dedupe + persist the rendered PO PDF.
+  supplier:
+    get_supplier(id) (history eager) / get_supplier_by_name(name) / list_suppliers(filters)
+    all_active_suppliers() / supplier_open_pos(id).
+  supplier_supply_history (the §1d index):
+    clear_supply_history()                            wholesale rebuild on re-import.
+    supply_history_for_supplier(id)                   one supplier's history.
+    fetch_supply_history_candidates(*, like_terms, modes?)   the set-based matcher pull (joined to supplier).
+  purchase_order:
+    get_po(id) (items/responses/supplier eager) / get_po_by_token(token) / list_pos(filters) / pos_for_bom(id).
+    claim_po_revision(po_id, base_revision) -> rowcount   the optimistic-lock CAS (0 ⇒ 409).
+    next_po_number(fy) -> "PO-NN(FY)"                 the FY monotonic counter (allocated at send).
+    get_po_response(id) / latest_response(po_id)      the PO's contact attempts.
+    add_tracking_event(ev)                            append an engagement event.
+    due_po_escalations(now) -> [PurchaseOrder]        sent/escalated, unacked, rung<3, due — read by the sweeper.
+  production_tracking (§8):
+    get_production_tracking(order, style) / get_production_tracking_by_id(id) / list_production_tracking().
+================================================================================
+"""
+from __future__ import annotations
+
+from sqlalchemy import delete, or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.core.models import Document
+from app.modules.supplier_po.enums import POStatus
+from app.modules.supplier_po.models import (
+    ProductionTracking,
+    PoResponse,
+    PoTrackingEvent,
+    PurchaseOrder,
+    Supplier,
+    SupplierSupplyHistory,
+)
+
+
+class SupplierPoRepository:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def commit(self) -> None:
+        await self.db.commit()
+
+    async def rollback(self) -> None:
+        await self.db.rollback()
+
+    # ── document (core table; supplier_po owns the PO-PDF write path) ────────
+    async def get_document_by_sha(self, sha256: str) -> Document | None:
+        res = await self.db.execute(select(Document).where(Document.sha256 == sha256))
+        return res.scalar_one_or_none()
+
+    async def add_document(self, doc: Document) -> Document:
+        self.db.add(doc)
+        await self.db.commit()
+        await self.db.refresh(doc)
+        return doc
+
+    # ── supplier ──────────────────────────────────────────────────────────────
+    async def get_supplier(self, supplier_id) -> Supplier | None:
+        res = await self.db.execute(
+            select(Supplier).where(Supplier.id == supplier_id)
+            .options(selectinload(Supplier.supply_history)))
+        return res.scalar_one_or_none()
+
+    async def get_supplier_by_name(self, name: str) -> Supplier | None:
+        res = await self.db.execute(select(Supplier).where(Supplier.name == name))
+        return res.scalars().first()
+
+    async def list_suppliers(self, *, search=None, service=None, active=None,
+                             limit=100, offset=0) -> list[Supplier]:
+        stmt = select(Supplier)
+        if active is not None:
+            stmt = stmt.where(Supplier.is_active.is_(active))
+        if search:
+            like = f"%{search}%"
+            stmt = stmt.where(or_(Supplier.name.ilike(like), Supplier.service.ilike(like)))
+        if service:
+            stmt = stmt.where(Supplier.service.ilike(f"%{service}%"))
+        stmt = stmt.order_by(Supplier.name).limit(limit).offset(offset)
+        res = await self.db.execute(stmt)
+        return list(res.scalars())
+
+    async def all_active_suppliers(self) -> list[Supplier]:
+        res = await self.db.execute(select(Supplier).where(Supplier.is_active.is_(True)))
+        return list(res.scalars())
+
+    async def supplier_open_pos(self, supplier_id) -> list[PurchaseOrder]:
+        res = await self.db.execute(
+            select(PurchaseOrder).where(
+                PurchaseOrder.supplier_id == supplier_id,
+                PurchaseOrder.status.notin_(
+                    [POStatus.CANCELLED.value, POStatus.CONFIRMED.value]),
+            ))
+        return list(res.scalars())
+
+    # ── supplier_supply_history (the §1d matching index) ─────────────────────
+    async def clear_supply_history(self) -> int:
+        res = await self.db.execute(delete(SupplierSupplyHistory))
+        return res.rowcount or 0
+
+    async def supply_history_for_supplier(self, supplier_id):
+        res = await self.db.execute(
+            select(SupplierSupplyHistory).where(
+                SupplierSupplyHistory.supplier_id == supplier_id)
+            .order_by(SupplierSupplyHistory.last_purchased_at.desc()))
+        return list(res.scalars())
+
+    async def fetch_supply_history_candidates(self, *, like_terms, modes=None, limit=600):
+        conds = []
+        for t in like_terms:
+            if t:
+                conds.append(SupplierSupplyHistory.normalized_description.like(f"%{t}%"))
+        if modes:
+            conds.append(SupplierSupplyHistory.mode.in_(list(modes)))
+        if not conds:
+            return []
+        stmt = (select(SupplierSupplyHistory, Supplier)
+                .join(Supplier, Supplier.id == SupplierSupplyHistory.supplier_id)
+                .where(Supplier.is_active.is_(True), or_(*conds)).limit(limit))
+        res = await self.db.execute(stmt)
+        return [(h, s) for (h, s) in res.all()]
+
+    # ── purchase_order ────────────────────────────────────────────────────────
+    async def get_po(self, po_id) -> PurchaseOrder | None:
+        res = await self.db.execute(
+            select(PurchaseOrder).where(PurchaseOrder.id == po_id).options(
+                selectinload(PurchaseOrder.items),
+                selectinload(PurchaseOrder.responses),
+                selectinload(PurchaseOrder.supplier)))
+        return res.scalar_one_or_none()
+
+    async def get_po_by_token(self, token: str) -> PurchaseOrder | None:
+        res = await self.db.execute(
+            select(PurchaseOrder).where(PurchaseOrder.tracking_token == token)
+            .options(selectinload(PurchaseOrder.responses)))
+        return res.scalars().first()
+
+    async def list_pos(self, *, status=None, needs_supplier=None, bom_id=None,
+                       supplier_id=None, limit=200, offset=0):
+        stmt = select(PurchaseOrder).options(
+            selectinload(PurchaseOrder.items), selectinload(PurchaseOrder.supplier))
+        if status is not None:
+            stmt = stmt.where(PurchaseOrder.status == status)
+        if needs_supplier is not None:
+            stmt = stmt.where(PurchaseOrder.needs_supplier.is_(needs_supplier))
+        if bom_id is not None:
+            stmt = stmt.where(PurchaseOrder.bom_id == bom_id)
+        if supplier_id is not None:
+            stmt = stmt.where(PurchaseOrder.supplier_id == supplier_id)
+        stmt = stmt.order_by(PurchaseOrder.created_at.desc()).limit(limit).offset(offset)
+        res = await self.db.execute(stmt)
+        return list(res.scalars())
+
+    async def pos_for_bom(self, bom_id):
+        res = await self.db.execute(
+            select(PurchaseOrder).where(PurchaseOrder.bom_id == bom_id)
+            .options(selectinload(PurchaseOrder.items)))
+        return list(res.scalars())
+
+    async def claim_po_revision(self, po_id, base_revision: int) -> int:
+        res = await self.db.execute(
+            update(PurchaseOrder)
+            .where(PurchaseOrder.id == po_id, PurchaseOrder.revision == base_revision)
+            .values(revision=base_revision + 1))
+        return res.rowcount
+
+    async def next_po_number(self, fy: str) -> str:
+        res = await self.db.execute(
+            select(PurchaseOrder.po_number).where(PurchaseOrder.po_number.like(f"%({fy})")))
+        max_n = 0
+        for (num,) in res.all():
+            if not num:
+                continue
+            head = num.split("(")[0].replace("PO-", "").strip()
+            if head.isdigit():
+                max_n = max(max_n, int(head))
+        return f"PO-{max_n + 1:02d}({fy})"
+
+    async def get_po_response(self, response_id) -> PoResponse | None:
+        res = await self.db.execute(
+            select(PoResponse).where(PoResponse.id == response_id))
+        return res.scalar_one_or_none()
+
+    async def latest_response(self, po_id) -> PoResponse | None:
+        res = await self.db.execute(
+            select(PoResponse).where(PoResponse.purchase_order_id == po_id)
+            .order_by(PoResponse.created_at.desc()))
+        return res.scalars().first()
+
+    async def add_tracking_event(self, ev: PoTrackingEvent) -> None:
+        self.db.add(ev)
+
+    async def due_po_escalations(self, now) -> list[PurchaseOrder]:
+        res = await self.db.execute(
+            select(PurchaseOrder).where(
+                PurchaseOrder.status.in_([POStatus.SENT.value, POStatus.ESCALATED.value]),
+                PurchaseOrder.acknowledged_at.is_(None),
+                PurchaseOrder.current_rung < 3,
+                PurchaseOrder.next_escalation_at.isnot(None),
+                PurchaseOrder.next_escalation_at <= now,
+            ).options(selectinload(PurchaseOrder.supplier),
+                      selectinload(PurchaseOrder.items)))
+        return list(res.scalars())
+
+    # ── production_tracking (§8) ──────────────────────────────────────────────
+    async def get_production_tracking(self, client_order_id, style_id):
+        res = await self.db.execute(
+            select(ProductionTracking).where(
+                ProductionTracking.client_order_id == client_order_id,
+                ProductionTracking.style_id == style_id))
+        return res.scalar_one_or_none()
+
+    async def get_production_tracking_by_id(self, tracking_id):
+        res = await self.db.execute(
+            select(ProductionTracking).where(ProductionTracking.id == tracking_id))
+        return res.scalar_one_or_none()
+
+    async def list_production_tracking(self):
+        res = await self.db.execute(
+            select(ProductionTracking).order_by(ProductionTracking.created_at.desc()))
+        return list(res.scalars())
+
+
+====================================================================================================
+FILE: router.py
+====================================================================================================
+
+"""
+================================================================================
+modules/supplier_po/router.py — Stage-5 supplier-PO API
+================================================================================
+
+Endpoints (under /api/v1/procurement, preserving the module-prefix convention):
+
+  Suppliers (§9):  POST /suppliers/import/{preview,commit}; GET /suppliers[/{id}];
+                   POST /suppliers; PATCH /suppliers/{id}; DELETE /suppliers/{id};
+                   POST /suppliers/{id}/reactivate
+  POs (§1–§7):     POST /boms/{id}/generate-pos; GET /pos[/{id}]; PATCH /pos/{id}/items;
+                   POST /pos/{id}/{submit,approve,reject,send,cancel,acknowledge}
+  Tracking (§6):   GET /t/o/{token}.gif (open pixel); GET /t/c/{token} (click redirect)
+  Webhooks (§5/§7):POST /webhooks/ses; /webhooks/twilio/{whatsapp,voice}
+  Board (§8):      GET /production-tracking; POST /production-tracking/{id}/transition
+
+The tracking + webhook routes are intentionally UNAUTHENTICATED (a supplier's mail
+client / Twilio / SNS call them); they carry an opaque per-send token, not a session.
+This module is the resume point for the in-progress Stage-5 build.
+
+LAYERING: thin HTTP shell → PoService / SupplierService / ProductionTrackingService.
+Role gates: _DMMD (mutating PO/supplier), _MD (soft-delete/reactivate supplier), _VIEW
+(reads), _APPROVERS (cross-check candidates; the service enforces the exact routing),
+_BOARD (manual board transitions). The /t/* + /webhooks/* routes have NO auth dependency.
+
+FUNCTION GUIDE  (path → handler → service call)
+  _read_capped(file)            stream the upload, abort past MAX_UPLOAD_MB (413).
+  Suppliers (§9):
+    POST /suppliers/import/preview|commit → SupplierService.preview / .commit
+    GET  /suppliers[/{id}]                → list_suppliers / get_supplier
+    POST /suppliers                       → create_supplier            [DM/MD]
+    PATCH/suppliers/{id}                  → update_supplier            [DM/MD]
+    DELETE /suppliers/{id}                → deactivate_supplier        [MD]
+    POST /suppliers/{id}/reactivate       → reactivate_supplier        [MD]
+  POs (§1–§7):
+    POST /boms/{id}/generate-pos          → PoService.generate_for_bom
+    GET  /pos[/{id}]                      → list_pos / get_po
+    PATCH/pos/{id}/items                  → edit_po (bulk + revision lock)
+    POST /pos/{id}/submit|approve|reject|send|cancel|acknowledge → the state machine
+  Tracking (§6, no auth):
+    GET  /t/o/{token}.gif                 → record_open  (returns the 1×1 pixel)
+    GET  /t/c/{token}                     → record_click (verifies sig, 302 → target)
+  Webhooks (§5b/§7, no auth):
+    POST /webhooks/ses                    → record_ses_event (bounce/complaint/delivery)
+    POST /webhooks/twilio/whatsapp|voice  → acknowledge_by_token (supplier reply / press-1)
+  Board (§8):
+    GET  /production-tracking             → ProductionTrackingService.board
+    POST /production-tracking/{id}/transition → .transition  [DM/MD/Cutting]
+================================================================================
+"""
+from __future__ import annotations
+
+import uuid
+
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import RedirectResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.core.database import get_db
+from app.core.enums import UserRole
+from app.modules.supplier_po import po_tracking
+from app.modules.supplier_po.po_service import PoService
+from app.modules.supplier_po.production_tracking_service import ProductionTrackingService
+from app.modules.supplier_po.schemas import (
+    PoAcknowledgeRequest,
+    PoBulkPatch,
+    PoRejectRequest,
+    ProductionTransitionRequest,
+    SupplierCreate,
+    SupplierUpdate,
+)
+from app.modules.supplier_po.supplier_service import SupplierService
+from app.modules.users.deps import require_roles
+from app.modules.users.models import User
+
+router = APIRouter(prefix="/procurement", tags=["Procurement — Stage 5 supplier PO"])
+
+_DMMD = require_roles(UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR)
+_MD = require_roles(UserRole.MANAGING_DIRECTOR)
+_VIEW = require_roles(UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.VIEWER)
+# Cross-check approvers — the service enforces the leather→Cutting / accessory→MD/DM/HR
+# routing; the router just admits the candidate roles.
+_APPROVERS = require_roles(UserRole.CUTTING_MANAGER, UserRole.MANAGING_DIRECTOR,
+                           UserRole.DIRECT_MANAGER, UserRole.HR)
+_BOARD = require_roles(UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER,
+                       UserRole.CUTTING_MANAGER)
+
+
+async def _read_capped(file: UploadFile) -> bytes:
+    cap = settings.max_upload_mb * 1024 * 1024
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > cap:
+            raise HTTPException(413, f"File exceeds the {settings.max_upload_mb} MB limit.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+# ── suppliers (§9) ────────────────────────────────────────────────────────────
+@router.post("/suppliers/import/preview")
+async def suppliers_import_preview(file: UploadFile = File(...),
+                                   db: AsyncSession = Depends(get_db), user: User = Depends(_DMMD)):
+    return await SupplierService(db).preview(await _read_capped(file))
+
+
+@router.post("/suppliers/import/commit")
+async def suppliers_import_commit(file: UploadFile = File(...),
+                                  db: AsyncSession = Depends(get_db), user: User = Depends(_DMMD)):
+    return await SupplierService(db).commit(user, await _read_capped(file))
+
+
+@router.get("/suppliers")
+async def list_suppliers(q: str | None = None, service: str | None = None,
+                         active: bool | None = None, limit: int = 100, offset: int = 0,
+                         db: AsyncSession = Depends(get_db), user: User = Depends(_VIEW)):
+    return await SupplierService(db).list_suppliers(
+        search=q, service=service, active=active, limit=limit, offset=offset)
+
+
+@router.get("/suppliers/{supplier_id}")
+async def get_supplier(supplier_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                       user: User = Depends(_VIEW)):
+    return await SupplierService(db).get_supplier(supplier_id)
+
+
+@router.post("/suppliers", status_code=201)
+async def create_supplier(body: SupplierCreate, db: AsyncSession = Depends(get_db),
+                          user: User = Depends(_DMMD)):
+    return await SupplierService(db).create_supplier(user, body.model_dump(exclude_none=True))
+
+
+@router.patch("/suppliers/{supplier_id}")
+async def update_supplier(supplier_id: uuid.UUID, body: SupplierUpdate,
+                          db: AsyncSession = Depends(get_db), user: User = Depends(_DMMD)):
+    return await SupplierService(db).update_supplier(
+        user, supplier_id, body.model_dump(exclude_none=True))
+
+
+@router.delete("/suppliers/{supplier_id}")
+async def deactivate_supplier(supplier_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                              user: User = Depends(_MD)):
+    return await SupplierService(db).deactivate_supplier(user, supplier_id)
+
+
+@router.post("/suppliers/{supplier_id}/reactivate")
+async def reactivate_supplier(supplier_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                              user: User = Depends(_MD)):
+    return await SupplierService(db).reactivate_supplier(user, supplier_id)
+
+
+# ── purchase orders (§1–§7) ───────────────────────────────────────────────────
+@router.post("/boms/{bom_id}/generate-pos")
+async def generate_pos(bom_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                       user: User = Depends(_DMMD)):
+    return await PoService(db).generate_for_bom(user, bom_id)
+
+
+@router.get("/pos")
+async def list_pos(status: str | None = None, needs_supplier: bool | None = None,
+                   bom_id: uuid.UUID | None = None, supplier_id: uuid.UUID | None = None,
+                   db: AsyncSession = Depends(get_db), user: User = Depends(_VIEW)):
+    return await PoService(db).list_pos(status=status, needs_supplier=needs_supplier,
+                                        bom_id=bom_id, supplier_id=supplier_id)
+
+
+@router.get("/pos/{po_id}")
+async def get_po(po_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                 user: User = Depends(_VIEW)):
+    return await PoService(db).get_po(po_id)
+
+
+@router.patch("/pos/{po_id}/items")
+async def patch_po_items(po_id: uuid.UUID, body: PoBulkPatch,
+                         db: AsyncSession = Depends(get_db), user: User = Depends(_DMMD)):
+    return await PoService(db).edit_po(
+        user, po_id, body.base_revision,
+        item_edits=[e.model_dump() for e in body.item_edits],
+        po_edits=body.po_edits,
+        add_items=[a.model_dump() for a in body.add_items],
+        remove_item_ids=[str(r) for r in body.remove_item_ids])
+
+
+@router.post("/pos/{po_id}/submit")
+async def submit_po(po_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                    user: User = Depends(_DMMD)):
+    return await PoService(db).submit_po(user, po_id)
+
+
+@router.post("/pos/{po_id}/approve")
+async def approve_po(po_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                     user: User = Depends(_APPROVERS)):
+    return await PoService(db).approve_po(user, po_id)
+
+
+@router.post("/pos/{po_id}/reject")
+async def reject_po(po_id: uuid.UUID, body: PoRejectRequest,
+                    db: AsyncSession = Depends(get_db), user: User = Depends(_APPROVERS)):
+    return await PoService(db).reject_po(user, po_id, body.reason)
+
+
+@router.post("/pos/{po_id}/send")
+async def send_po(po_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                  user: User = Depends(_DMMD)):
+    return await PoService(db).send_po(user, po_id)
+
+
+@router.post("/pos/{po_id}/cancel")
+async def cancel_po(po_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                    user: User = Depends(_DMMD)):
+    return await PoService(db).cancel_po(user, po_id)
+
+
+@router.post("/pos/{po_id}/acknowledge")
+async def acknowledge_po(po_id: uuid.UUID, body: PoAcknowledgeRequest,
+                         db: AsyncSession = Depends(get_db), user: User = Depends(_DMMD)):
+    return await PoService(db).acknowledge_po(
+        user, po_id, channel=body.channel, confirmed_qty=body.confirmed_qty, notes=body.notes)
+
+
+# ── open tracking (§6) — unauthenticated, token-bearing ──────────────────────
+@router.get("/t/o/{token}.gif")
+async def tracking_pixel(token: str, request: Request, db: AsyncSession = Depends(get_db)):
+    await PoService(db).record_open(
+        token, ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"))
+    return Response(content=po_tracking.PIXEL_GIF, media_type="image/gif")
+
+
+@router.get("/t/c/{token}")
+async def tracking_click(token: str, u: str = "", s: str = "", request: Request = None,
+                         db: AsyncSession = Depends(get_db)):
+    target = po_tracking.unwrap_target(u)
+    if not target or not po_tracking.verify(target, s, settings.secret_key):
+        raise HTTPException(400, "Invalid tracking link.")
+    await PoService(db).record_click(
+        token, ip=request.client.host if request and request.client else None,
+        user_agent=request.headers.get("user-agent") if request else None)
+    return RedirectResponse(url=target, status_code=302)
+
+
+# ── webhooks (§5b/§7) — unauthenticated, provider-signed (verification TODO) ──
+@router.post("/webhooks/ses")
+async def ses_webhook(payload: dict, db: AsyncSession = Depends(get_db)):
+    token = payload.get("tracking_token") or (payload.get("mail") or {}).get("tracking_token")
+    event = payload.get("eventType") or payload.get("notificationType") or payload.get("type")
+    await PoService(db).record_ses_event(token=token, event_type=event or "delivery", meta=payload)
+    return {"ok": True}
+
+
+@router.post("/webhooks/twilio/whatsapp")
+async def twilio_whatsapp_webhook(payload: dict, db: AsyncSession = Depends(get_db)):
+    token = payload.get("tracking_token")
+    if token:
+        await PoService(db).acknowledge_by_token(token, channel="whatsapp",
+                                                 notes=payload.get("Body"))
+    return {"ok": True}
+
+
+@router.post("/webhooks/twilio/voice")
+async def twilio_voice_webhook(payload: dict, db: AsyncSession = Depends(get_db)):
+    token = payload.get("tracking_token")
+    if token and str(payload.get("Digits")) == "1":
+        await PoService(db).acknowledge_by_token(token, channel="call")
+    return {"ok": True}
+
+
+# ── production board (§8) ─────────────────────────────────────────────────────
+@router.get("/production-tracking")
+async def production_board(client_id: uuid.UUID | None = None,
+                           order_id: uuid.UUID | None = None,
+                           db: AsyncSession = Depends(get_db), user: User = Depends(_VIEW)):
+    return await ProductionTrackingService(db).board(client_id=client_id, order_id=order_id)
+
+
+@router.post("/production-tracking/{tracking_id}/transition")
+async def production_transition(tracking_id: uuid.UUID, body: ProductionTransitionRequest,
+                                db: AsyncSession = Depends(get_db), user: User = Depends(_BOARD)):
+    return await ProductionTrackingService(db).transition(user, tracking_id, body.status)
+
+
+====================================================================================================
+FILE: schemas.py
+====================================================================================================
+
+"""
+modules/supplier_po/schemas.py — Stage-5 supplier-PO API contracts (§1–§9).
+Only request bodies are typed; rich response shapes are assembled by the services.
+
+SCHEMA GUIDE (Pydantic request bodies; FastAPI validates at the router boundary)
+  SupplierCreate / SupplierUpdate   POST/PATCH /suppliers bodies → create/update_supplier.
+  PoItemEdit / PoAddItem            building blocks of the PO bulk patch.
+  PoBulkPatch                       PATCH /pos/{id}/items body → edit_po.
+  PoRejectRequest                   POST /pos/{id}/reject body {reason} → reject_po.
+  PoAcknowledgeRequest              POST /pos/{id}/acknowledge body → acknowledge_po.
+  ProductionTransitionRequest       POST /production-tracking/{id}/transition {status} → transition.
+"""
+from __future__ import annotations
+
+import uuid
+
+from pydantic import BaseModel, Field
+
+
+class SupplierCreate(BaseModel):
+    """POST /suppliers — the §1c 'no match → add new vendor' path (§9b)."""
+    name: str = Field(..., min_length=1)
+    phone: str | None = None
+    email: str | None = None
+    service: str | None = None
+    gstin: str | None = None
+    address: str | None = None
+    currency: str | None = None
+    payment_terms_days: int | None = None
+    lead_time_days: int | None = None
+    supplier_type: str | None = None
+    whatsapp_phone: str | None = None
+
+
+class SupplierUpdate(BaseModel):
+    """PATCH /suppliers/{id} — add a missing email/phone, fix GSTIN, set type (§9b)."""
+    name: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    service: str | None = None
+    gstin: str | None = None
+    address: str | None = None
+    currency: str | None = None
+    payment_terms_days: int | None = None
+    lead_time_days: int | None = None
+    supplier_type: str | None = None
+    whatsapp_phone: str | None = None
+
+
+class PoItemEdit(BaseModel):
+    """One changed PO-line cell. `field` ∈ {description, color, uom, qty, unit_price}."""
+    po_item_id: uuid.UUID
+    field: str
+    value: object
+
+
+class PoAddItem(BaseModel):
+    description: str
+    color: str | None = None
+    uom: str | None = None
+    qty: float | None = None
+    unit_price: float | None = None
+    bom_item_id: uuid.UUID | None = None
+    inventory_item_id: uuid.UUID | None = None
+
+
+class PoBulkPatch(BaseModel):
+    """PATCH /pos/{id}/items — the SAME bulk-edit + optimistic `revision` contract as
+    the BOM (§4). 409 stale_revision on a stale base; 409 po_locked once sent."""
+    base_revision: int = Field(..., ge=1)
+    item_edits: list[PoItemEdit] = Field(default_factory=list)
+    po_edits: dict | None = None
+    add_items: list[PoAddItem] = Field(default_factory=list)
+    remove_item_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class PoRejectRequest(BaseModel):
+    reason: str = Field(..., min_length=1)
+
+
+class PoAcknowledgeRequest(BaseModel):
+    """Manual acknowledgement (§7d) — DM/MD marks a PO confirmed. `channel` records how."""
+    channel: str = Field(default="manual")
+    confirmed_qty: float | None = None
+    notes: str | None = None
+
+
+class ProductionTransitionRequest(BaseModel):
+    """Manual board transition (§8c) — e.g. RELEASED_TO_PRODUCTION (the human go/no-go)."""
+    status: str = Field(..., min_length=1)
+
+
+====================================================================================================
+FILE: supplier_import.py
+====================================================================================================
+
+"""
+================================================================================
+modules/supplier_po/supplier_import.py — supplier workbook importer (§9a/§1d)
+================================================================================
+
+PURE parse of `SUPPLIERS_updated (2).xlsx` → a normalized preview (no DB, no I/O
+beyond the uploaded bytes). The service runs it in a threadpool (openpyxl is
+blocking) for `POST /suppliers/import/preview` (dry-run) and `.../commit` (the
+upsert) — the same two-step idempotent design as the Stage-4 inventory importer.
+
+The workbook has TWO sheets that tell two stories (§0):
+  - `Supplier contact info` (1,433 × COMPANY NAME·PHONE·EMAIL·SERVICE) — the sparse
+    contact directory feeding `supplier` (the SEND target). Only ~65 phones, ~45
+    emails are real; the rest are "NULL"/blank/free-text.
+  - `Suppliers provision` (1,524 txns) — the purchase LEDGER, the real
+    article→supplier evidence, aggregated here into `supplier_supply_history`
+    (§1d): per (supplier, normalized_description) the mode, txn_count, recency, and
+    the rate band — the matcher's index.
+
+Output is deterministic + idempotent: the same bytes always yield the same rows, so
+committing twice produces identical `supplier` + `supplier_supply_history` rows.
+
+FUNCTION GUIDE  (pure + sync; SupplierService threadpools parse_suppliers)
+  Dataclasses: SupplierRow (one vendor to upsert), SupplyHistoryRow (one aggregated
+    (supplier, article) row), SupplierPreview (rows + counts + warnings).
+  _to_decimal / _to_date / _header_index   [private] cell coercion + header→index map.
+  _parse_contacts(ws) -> ({norm_name: SupplierRow}, count)   the sparse contact directory.
+  _parse_provision(ws) -> (accumulator keyed (name, desc), count)   the purchase ledger,
+      aggregated per (supplier, article): modes, txn_count, recency, rate band.
+  parse_suppliers(data) -> SupplierPreview
+      THE ENTRY POINT. Parse both sheets, UNION the vendors (a ledger-only vendor still
+      becomes a supplier), build the supply-history rows. CALLED FROM: SupplierService.preview/commit.
+================================================================================
+"""
+from __future__ import annotations
+
+import io
+from collections import Counter
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
+
+import openpyxl
+
+from app.modules.inventory.inventory_normalize import canonical_uom, normalize_key
+from app.modules.supplier_po.supplier_normalize import (
+    clean,
+    clean_email,
+    clean_phone,
+    normalize_supplier_name,
+)
+
+_CONTACT_SHEET = "Supplier contact info"
+_PROVISION_SHEET = "Suppliers provision"
+
+
+@dataclass
+class SupplierRow:
+    """One vendor ready to upsert into `supplier` (keyed on `normalized_name`)."""
+    name: str                 # representative raw name (kept for display)
+    normalized_name: str
+    phone: str | None = None
+    email: str | None = None
+    service: str | None = None
+
+
+@dataclass
+class SupplyHistoryRow:
+    """One aggregated (supplier, article) row for `supplier_supply_history` (§1d)."""
+    supplier_normalized_name: str
+    supplier_name: str
+    normalized_description: str
+    raw_description: str
+    mode: str | None
+    uom: str | None
+    txn_count: int
+    first_purchased_at: date | None
+    last_purchased_at: date | None
+    last_rate: Decimal | None
+    min_rate: Decimal | None
+    max_rate: Decimal | None
+
+
+@dataclass
+class SupplierPreview:
+    suppliers: list[SupplierRow] = field(default_factory=list)
+    history: list[SupplyHistoryRow] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    contact_rows: int = 0
+    provision_rows: int = 0
+
+    @property
+    def suppliers_with_phone(self) -> int:
+        return sum(1 for s in self.suppliers if s.phone)
+
+    @property
+    def suppliers_with_email(self) -> int:
+        return sum(1 for s in self.suppliers if s.email)
+
+
+def _to_decimal(value) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return value if isinstance(value, Decimal) else Decimal(str(value).strip())
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def _to_date(value) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return None
+
+
+def _header_index(header: tuple, names: dict[str, str]) -> dict[str, int]:
+    """Map canonical field → column index by (trimmed, upper) header label."""
+    idx: dict[str, int] = {}
+    for i, cell in enumerate(header or ()):
+        key = (clean(cell) or "").upper()
+        if key in names:
+            idx[names[key]] = i
+    return idx
+
+
+def _parse_contacts(ws) -> tuple[dict[str, SupplierRow], int]:
+    """`Supplier contact info` → {normalized_name: SupplierRow}. Last non-blank cell
+    wins on a duplicate name (sheet-order-stable)."""
+    rows = ws.iter_rows(values_only=True)
+    header = next(rows, None)
+    cols = _header_index(header, {
+        "COMPANY NAME": "name", "PHONE": "phone", "EMAIL": "email", "SERVICE": "service",
+    })
+    name_i = cols.get("name", 0)
+    out: dict[str, SupplierRow] = {}
+    count = 0
+    for row in rows:
+        if not row:
+            continue
+        raw_name = clean(row[name_i] if len(row) > name_i else None)
+        if not raw_name:
+            continue
+        count += 1
+        norm = normalize_supplier_name(raw_name)
+        if not norm:
+            continue
+        phone = clean_phone(row[cols["phone"]]) if "phone" in cols and len(row) > cols["phone"] else None
+        email = clean_email(row[cols["email"]]) if "email" in cols and len(row) > cols["email"] else None
+        service = clean(row[cols["service"]]) if "service" in cols and len(row) > cols["service"] else None
+        existing = out.get(norm)
+        if existing is None:
+            out[norm] = SupplierRow(name=raw_name, normalized_name=norm,
+                                    phone=phone, email=email, service=service)
+        else:   # contact fill-if-present (never blank a known value with a later gap)
+            existing.phone = existing.phone or phone
+            existing.email = existing.email or email
+            existing.service = existing.service or service
+    return out, count
+
+
+def _parse_provision(ws) -> tuple[dict[tuple, dict], int]:
+    """`Suppliers provision` → accumulator keyed (normalized_name, normalized_desc)."""
+    rows = ws.iter_rows(values_only=True)
+    header = next(rows, None)
+    cols = _header_index(header, {
+        "DATE": "date", "MODE": "mode", "COMPANY NAME": "name",
+        "DESCRIPTION": "desc", "NOM": "uom", "RATE": "rate",
+    })
+    name_i = cols.get("name")
+    desc_i = cols.get("desc")
+    if name_i is None or desc_i is None:
+        return {}, 0
+    acc: dict[tuple, dict] = {}
+    count = 0
+    for row in rows:
+        if not row or len(row) <= max(name_i, desc_i):
+            continue
+        raw_name = clean(row[name_i])
+        raw_desc = clean(row[desc_i])
+        if not raw_name or not raw_desc:
+            continue
+        norm_name = normalize_supplier_name(raw_name)
+        norm_desc = normalize_key(raw_desc)
+        if not norm_name or not norm_desc:
+            continue
+        count += 1
+        key = (norm_name, norm_desc)
+        dt = _to_date(row[cols["date"]]) if "date" in cols and len(row) > cols["date"] else None
+        mode = clean(row[cols["mode"]]).upper() if "mode" in cols and len(row) > cols["mode"] and clean(row[cols["mode"]]) else None
+        uom = canonical_uom(row[cols["uom"]]) if "uom" in cols and len(row) > cols["uom"] else None
+        rate = _to_decimal(row[cols["rate"]]) if "rate" in cols and len(row) > cols["rate"] else None
+
+        b = acc.get(key)
+        if b is None:
+            b = {"supplier_name": raw_name, "raw_description": raw_desc,
+                 "modes": Counter(), "uom": None, "txn_count": 0,
+                 "first": None, "last": None, "last_rate": None,
+                 "min_rate": None, "max_rate": None}
+            acc[key] = b
+        b["txn_count"] += 1
+        if mode:
+            b["modes"][mode] += 1
+        if uom and not b["uom"]:
+            b["uom"] = uom
+        if dt is not None:
+            b["first"] = dt if b["first"] is None else min(b["first"], dt)
+            if b["last"] is None or dt >= b["last"]:
+                b["last"] = dt
+                if rate is not None:
+                    b["last_rate"] = rate
+        if rate is not None and rate > 0:
+            b["min_rate"] = rate if b["min_rate"] is None else min(b["min_rate"], rate)
+            b["max_rate"] = rate if b["max_rate"] is None else max(b["max_rate"], rate)
+            if b["last_rate"] is None:
+                b["last_rate"] = rate
+    return acc, count
+
+
+def parse_suppliers(data: bytes) -> SupplierPreview:
+    """Parse + normalize + aggregate the supplier workbook into a SupplierPreview.
+    Suppliers = the union of the contact directory and every vendor named in the
+    provision ledger (so a ledger-only vendor is still a get-or-createable supplier)."""
+    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    preview = SupplierPreview()
+
+    contact_ws = wb[_CONTACT_SHEET] if _CONTACT_SHEET in wb.sheetnames else None
+    provision_ws = wb[_PROVISION_SHEET] if _PROVISION_SHEET in wb.sheetnames else None
+
+    suppliers: dict[str, SupplierRow] = {}
+    if contact_ws is not None:
+        suppliers, preview.contact_rows = _parse_contacts(contact_ws)
+    else:
+        preview.warnings.append(f"sheet '{_CONTACT_SHEET}' not found — no contact data")
+
+    acc: dict[tuple, dict] = {}
+    if provision_ws is not None:
+        acc, preview.provision_rows = _parse_provision(provision_ws)
+    else:
+        preview.warnings.append(f"sheet '{_PROVISION_SHEET}' not found — no supply history")
+
+    # union: ensure every provision vendor has a supplier row (ledger-only vendors)
+    for (norm_name, _desc), b in acc.items():
+        if norm_name not in suppliers:
+            suppliers[norm_name] = SupplierRow(name=b["supplier_name"],
+                                               normalized_name=norm_name)
+
+    preview.suppliers = sorted(suppliers.values(), key=lambda s: s.normalized_name)
+    for (norm_name, norm_desc), b in acc.items():
+        mode = b["modes"].most_common(1)[0][0] if b["modes"] else None
+        preview.history.append(SupplyHistoryRow(
+            supplier_normalized_name=norm_name,
+            supplier_name=suppliers[norm_name].name,
+            normalized_description=norm_desc, raw_description=b["raw_description"],
+            mode=mode, uom=b["uom"], txn_count=b["txn_count"],
+            first_purchased_at=b["first"], last_purchased_at=b["last"],
+            last_rate=b["last_rate"], min_rate=b["min_rate"], max_rate=b["max_rate"],
+        ))
+    preview.history.sort(key=lambda h: (h.supplier_normalized_name, h.normalized_description))
+
+    if preview.suppliers and preview.suppliers_with_email == 0:
+        preview.warnings.append("no usable email on any supplier — sends will route to "
+                                "WhatsApp/call or be held no_contact_channel (§5b)")
+    return preview
+
+
+====================================================================================================
+FILE: supplier_match.py
+====================================================================================================
+
+"""
+================================================================================
+modules/supplier_po/supplier_match.py — shortfall line → supplier (§1)
+================================================================================
+
+PURE matching + ranking (no DB): given a shortfall line's normalized key + colour
++ category bucket and a pool of CANDIDATE `supplier_supply_history` rows (fetched
+set-based by the repository — never the whole ledger), resolve the supplier
+deterministically-first (§1b), never a silent guess:
+
+    (1) exact historical supply  → method=ledger   (BOM tokens ⊆ a buy's article)
+    (2) alias rewrite, re-try (1) → method=alias    (SHEEP GLASS → SHEEP NAPPA)
+    (3) category / MODE fallback  → method=category  (ranked lower, a guess)
+    (4) advisory fuzzy candidate  → suggestion only, NEVER auto-bound
+    (5) nothing confident         → unresolved (caller holds a needs_supplier PO)
+
+Ranking (§1c): recency · frequency · contactability − rate. Ties / category-only
+hits / low confidence → `ambiguous=True` (do not auto-select — surface the
+shortlist, the buyer picks). Contactability is a ranking TERM, not a hard filter:
+a frequent contactless vendor still surfaces (top, even) but the PO is flagged
+`no_contact_channel` downstream (§5/§7).
+
+FUNCTION GUIDE  (pure + sync; called by SupplierService.match_line per shortfall line)
+  Dataclasses: HistoryCandidate (a supply-history row + contactability),
+               SupplierScore (a ranked supplier), MatchResult (method/ranked/chosen/ambiguous/suggestion).
+  _color_ok / _recency / _jaccard   [private] colour gate, recency decay (~half/year), token overlap.
+  _rank(matched, today) -> [SupplierScore]
+      Aggregate matching history per supplier (most-recent buy wins), score each
+      (recency·freq·contactable − rate), sort best-first.
+  _decide(ranked, method, *, weak) -> MatchResult
+      Auto-select the top supplier UNLESS it's a weak category hit or a near-tie → hold ambiguous.
+  match_shortfall(bom_key, color, category_mode, candidates, aliases, *, today) -> MatchResult
+      THE ENTRY POINT. Ordered: (1) exact ledger → (2) alias → (3) category/MODE (weak) →
+      (4) fuzzy suggestion → (5) unresolved. CALLED FROM: SupplierService.match_line.
+================================================================================
+"""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from datetime import date
+from decimal import Decimal
+
+from app.modules.inventory.inventory_match import Alias
+from app.modules.inventory.inventory_normalize import tokens
+
+# Score weights (§1c). Tunable; recency dominates, contactability is a strong term,
+# rate is a tie-break only.
+_W_RECENCY = 1.0
+_W_FREQUENCY = 0.6
+_W_CONTACTABLE = 0.8
+_W_RATE = 0.3
+# Two top suppliers whose scores fall within this band are "too close to call" → do
+# not auto-select (§1c ambiguity fallback).
+_TIE_BAND = 0.12
+# Advisory fuzzy floor (token Jaccard) — mirrors the Stage-4 inventory matcher.
+_SUGGEST_FLOOR = 0.34
+
+
+@dataclass
+class HistoryCandidate:
+    """A duck-typed `supplier_supply_history` row + its supplier's contactability —
+    the unit the matcher ranks. `has_contact` = the supplier has an email or phone."""
+    supplier_id: object
+    supplier_name: str
+    normalized_description: str
+    mode: str | None
+    txn_count: int
+    last_purchased_at: date | None
+    last_rate: Decimal | None
+    uom: str | None
+    has_contact: bool
+
+
+@dataclass
+class SupplierScore:
+    supplier_id: object
+    supplier_name: str
+    score: float
+    txn_count: int
+    last_purchased_at: date | None
+    last_rate: Decimal | None
+    uom: str | None
+    has_contact: bool
+    mode: str | None
+    matched_description: str
+
+
+@dataclass
+class MatchResult:
+    method: str | None = None                 # ledger | alias | category | None
+    ranked: list[SupplierScore] = field(default_factory=list)
+    chosen_supplier_id: object = None         # None when unresolved / ambiguous
+    ambiguous: bool = False                   # True → hold needs_supplier, buyer picks
+    suggestion: dict | None = None            # advisory fuzzy, never auto-applied
+
+
+def _color_ok(color: str | None, desc: str) -> bool:
+    if not color:
+        return True
+    return color.upper() in tokens(desc)
+
+
+def _recency(d: date | None, today: date) -> float:
+    """1.0 for a buy today, decaying ~half each year — bounded [0, 1]."""
+    if d is None:
+        return 0.2
+    days = max((today - d).days, 0)
+    return 1.0 / (1.0 + days / 365.0)
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _rank(matched: list[HistoryCandidate], today: date) -> list[SupplierScore]:
+    """Aggregate matching history rows per supplier (best/most-recent buy wins) and
+    score each supplier (§1c). Returns the shortlist, highest score first."""
+    best_by_supplier: dict[object, HistoryCandidate] = {}
+    txn_by_supplier: dict[object, int] = {}
+    for c in matched:
+        txn_by_supplier[c.supplier_id] = txn_by_supplier.get(c.supplier_id, 0) + c.txn_count
+        cur = best_by_supplier.get(c.supplier_id)
+        if cur is None or (c.last_purchased_at or date.min) > (cur.last_purchased_at or date.min):
+            best_by_supplier[c.supplier_id] = c
+    rates = [float(c.last_rate) for c in best_by_supplier.values() if c.last_rate]
+    max_rate = max(rates) if rates else 0.0
+
+    out: list[SupplierScore] = []
+    for sid, c in best_by_supplier.items():
+        txns = txn_by_supplier[sid]
+        rate_term = (float(c.last_rate) / max_rate) if (c.last_rate and max_rate) else 0.0
+        score = (_W_RECENCY * _recency(c.last_purchased_at, today)
+                 + _W_FREQUENCY * math.log1p(txns)
+                 + _W_CONTACTABLE * (1.0 if c.has_contact else 0.0)
+                 - _W_RATE * rate_term)
+        out.append(SupplierScore(
+            supplier_id=sid, supplier_name=c.supplier_name, score=round(score, 4),
+            txn_count=txns, last_purchased_at=c.last_purchased_at, last_rate=c.last_rate,
+            uom=c.uom, has_contact=c.has_contact, mode=c.mode,
+            matched_description=c.normalized_description,
+        ))
+    out.sort(key=lambda s: s.score, reverse=True)
+    return out
+
+
+def _decide(ranked: list[SupplierScore], method: str, *, weak: bool) -> MatchResult:
+    """Auto-select the top supplier unless it's a weak (category) hit or a near-tie
+    with the runner-up (§1c) — then hold ambiguous for the buyer."""
+    if not ranked:
+        return MatchResult(method=None)
+    ambiguous = weak
+    if len(ranked) >= 2 and (ranked[0].score - ranked[1].score) < _TIE_BAND:
+        ambiguous = True
+    chosen = None if ambiguous else ranked[0].supplier_id
+    return MatchResult(method=method, ranked=ranked, chosen_supplier_id=chosen,
+                       ambiguous=ambiguous)
+
+
+def match_shortfall(bom_key: str, color: str | None, category_mode: str | None,
+                    candidates: list[HistoryCandidate], aliases: list[Alias],
+                    *, today: date) -> MatchResult:
+    """Resolve one shortfall line to a supplier (§1b). `category_mode` is the line's
+    MODE bucket (LEATHER/MATERIALS/SERVICE) for the §1b(3) fallback."""
+    bom_tokens = tokens(bom_key)
+
+    # (1) exact historical supply: every BOM token present in a buy's article (colour-aware)
+    if bom_tokens:
+        ledger = [c for c in candidates
+                  if bom_tokens <= tokens(c.normalized_description)
+                  and _color_ok(color, c.normalized_description)]
+        if ledger:
+            return _decide(_rank(ledger, today), "ledger", weak=False)
+
+    # (2) alias rewrite then re-try (1)
+    for al in aliases:
+        al_terms = tokens(al.bom_term)
+        if al_terms and al_terms <= bom_tokens:
+            target = tokens(al.inventory_key)
+            hits = [c for c in candidates
+                    if target <= tokens(c.normalized_description)
+                    and _color_ok(color, c.normalized_description)]
+            if hits:
+                return _decide(_rank(hits, today), "alias", weak=False)
+
+    # (3) category / MODE fallback — ranked lower, always a guess (ambiguous)
+    if category_mode:
+        cat = [c for c in candidates if (c.mode or "").upper() == category_mode.upper()]
+        if cat:
+            return _decide(_rank(cat, today), "category", weak=True)
+
+    # (4) advisory fuzzy candidate — surfaced, never auto-bound
+    best, best_score = None, 0.0
+    for c in candidates:
+        s = _jaccard(bom_tokens, tokens(c.normalized_description))
+        if s > best_score:
+            best, best_score = c, s
+    if best is not None and best_score >= _SUGGEST_FLOOR:
+        return MatchResult(method=None, suggestion={
+            "supplier_id": str(best.supplier_id), "supplier_name": best.supplier_name,
+            "matched_description": best.normalized_description, "score": round(best_score, 2)})
+
+    # (5) genuinely unresolved
+    return MatchResult(method=None)
+
+
+====================================================================================================
+FILE: supplier_normalize.py
+====================================================================================================
+
+"""
+================================================================================
+modules/supplier_po/supplier_normalize.py — supplier text normalization (§1/§9)
+================================================================================
+
+PURE helpers, no DB, no I/O — the single place the messy
+`SUPPLIERS_updated (2).xlsx` cells are cleaned, so the IMPORTER (§9a) and the
+MATCHER (§1) treat a supplier name, a contact field, and a provision article
+IDENTICALLY.
+
+The two sheets are dirty in specific ways the importer must survive:
+  - the contact sheet's PHONE column carries the literal string "NULL", free-text
+    like "Audit maintenance", and blanks — only ~65 of 1,433 rows are a real phone;
+  - EMAIL is blank for ~97% of rows;
+  - SERVICE is noisy 49-distinct free text;
+  - the provision DESCRIPTION is the trustworthy article evidence (normalized with
+    the SAME Stage-4 `normalize_key` so a BOM term and a historical buy collapse to
+    one comparable key).
+
+FUNCTION GUIDE  (all pure + sync; shared by supplier_import + supplier_service/matcher)
+  normalize_key (re-exported from inventory) — the article key, identical to Stage 4.
+  clean(value) -> str | None            trimmed, null-ish ("NULL"/"-"/blank) → None.
+  normalize_supplier_name(name) -> str  the dedupe key (M.V.P.N.K ≡ M V P N K).
+  clean_phone(value) -> str | None      pull a real 7+ digit phone out of the messy cell.
+  clean_email(value) -> str | None      a syntactically valid email or None.
+  state_code_from_gstin(gstin) -> str | None   first 2 GSTIN digits (33=TN) → the GST decision.
+  mode_for_bom_category(category) -> str | None  BOM category → provision MODE bucket (matcher fallback).
+  supplier_type_for_mode(mode) -> str | None     dominant history mode → curated SupplierType.
+  CALLED FROM: supplier_import (cleaning every cell) + supplier_service (matching + type/state defaults).
+================================================================================
+"""
+from __future__ import annotations
+
+import re
+
+# Re-use the Stage-4 normalizer verbatim so the supply-history key equals the key the
+# Stage-4 matcher computes on BOM lines + inventory rows (§1a "the same normalized_key").
+from app.modules.inventory.inventory_normalize import normalize_key  # noqa: F401
+
+# Cells that mean "no value" in the real workbook (case-insensitive).
+_NULLISH = {"", "null", "none", "n/a", "na", "-", "nil"}
+
+# The provision MODE → the §1b category bucket the BOM line.category maps onto.
+#   MAIN/SUB material  → LEATHER
+#   lining/thread/accessory/packaging → MATERIALS
+#   manufacturing/service → SERVICE/JOB WORK
+_BOM_CATEGORY_TO_MODE = {
+    "main_material": "LEATHER",
+    "sub_material": "LEATHER",
+    "lining": "MATERIALS",
+    "interlining": "MATERIALS",
+    "thread": "MATERIALS",
+    "accessory": "MATERIALS",
+    "packaging": "MATERIALS",
+    "manufacturing": "SERVICE",
+    "fob_charge": "SERVICE",
+}
+
+# A supplier MODE → the curated SupplierType (the §2 template + §3 approver routing).
+_MODE_TO_TYPE = {
+    "LEATHER": "leather",
+    "MATERIALS": "accessory",
+    "SERVICE": "service",
+    "JOB WORK": "service",
+}
+
+
+def clean(value) -> str | None:
+    """Trimmed, whitespace-collapsed string, or None for a blank / null-ish cell."""
+    if value is None:
+        return None
+    s = re.sub(r"\s+", " ", str(value).strip())
+    if s.lower() in _NULLISH:
+        return None
+    return s or None
+
+
+def normalize_supplier_name(name) -> str:
+    """The dedupe key for a supplier (§9c): uppercase, punctuation → space, collapsed.
+    Get-or-create + the importer upsert both key on this so "M.V.P.N.K" and "M V P N K"
+    are one vendor."""
+    s = clean(name) or ""
+    s = re.sub(r"[^A-Za-z0-9]+", " ", s.upper())
+    return re.sub(r"\s+", " ", s).strip()
+
+
+_PHONE_RE = re.compile(r"[+()\d][\d\s\-()]{6,}")
+
+
+def clean_phone(value) -> str | None:
+    """Extract a usable phone from the messy PHONE cell, else None. The column carries
+    "NULL", free-text job notes ("Audit maintenance"), and real numbers; keep only a
+    cell that actually contains a 7+ digit run."""
+    s = clean(value)
+    if not s:
+        return None
+    digits = re.sub(r"\D", "", s)
+    if len(digits) < 7:
+        return None
+    m = _PHONE_RE.search(s)
+    return (m.group(0).strip() if m else s)[:50]
+
+
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
+def clean_email(value) -> str | None:
+    """Return a syntactically valid email or None (most rows are blank)."""
+    s = clean(value)
+    if not s:
+        return None
+    m = _EMAIL_RE.search(s)
+    return m.group(0).lower() if m else None
+
+
+def state_code_from_gstin(gstin) -> str | None:
+    """The first two digits of a GSTIN are the state code (33 = Tamil Nadu). Drives the
+    §2c intra/inter-state GST decision."""
+    s = clean(gstin)
+    if not s or len(s) < 2 or not s[:2].isdigit():
+        return None
+    return s[:2]
+
+
+def mode_for_bom_category(category: str | None) -> str | None:
+    """Map a BOM line category to the provision MODE bucket (§1b category fallback)."""
+    if not category:
+        return None
+    return _BOM_CATEGORY_TO_MODE.get(category.lower())
+
+
+def supplier_type_for_mode(mode: str | None) -> str | None:
+    """The curated SupplierType defaulting from a supplier's dominant history mode."""
+    if not mode:
+        return None
+    return _MODE_TO_TYPE.get(mode.strip().upper())
+
+
+====================================================================================================
+FILE: supplier_service.py
+====================================================================================================
+
+"""
+================================================================================
+modules/supplier_po/supplier_service.py — Stage-5 supplier import, CRUD, matching
+================================================================================
+
+Owns the supplier side of Stage 5:
+  - the idempotent importer (§9a): preview (dry-run) + commit (upsert `supplier` keyed
+    on name; rebuild `supplier_supply_history` from the provision ledger; absent rows
+    soft-deactivate, never hard-delete), mirroring the Stage-4 inventory sync;
+  - supplier CRUD (§9b/§9c): list/get/add/edit/soft-delete/reactivate, each audited;
+  - the article→supplier matcher (§1): deterministic ledger → alias → category → advisory
+    fuzzy → unresolved, with recency/frequency/contactability ranking (supplier_match.py).
+
+LAYERING. Reads only procurement-owned tables. Blocking openpyxl work runs in a
+threadpool (house async rule).
+
+FUNCTION / METHOD GUIDE  (router → SupplierService; * = called by PoService)
+  SupplierService(db)  session + SupplierPoRepository.
+  preview(data) -> dict        dry-run parse of the supplier .xlsx. → POST /suppliers/import/preview.
+  commit(user, data) -> dict   upsert suppliers (sheet-wins-if-present), REBUILD supply history,
+      soft-deactivate absent rows, audit SUPPLIER_IMPORT. Idempotent. → .../commit.
+  _preview_block(prev) -> dict [static] the importer summary (counts/warnings/sample history).
+  list_suppliers / get_supplier   read endpoints (get includes history + open POs).
+  create_supplier / update_supplier / deactivate_supplier / reactivate_supplier
+      §9 CRUD — soft-delete only; each writes a SUPPLIER_* audit row. Editing a contact onto
+      a contactless vendor unblocks §5 send.
+  match_line(*, name, color, category, aliases, today?) -> MatchResult  *
+      Resolve ONE shortfall line to a supplier: build the line key, fetch a small candidate
+      pool set-based, run supplier_match.match_shortfall. CALLED FROM: PoService.generate_for_bom.
+  _snap(s) [static] audit diff;  _audit(...) write one AuditLog row.
+================================================================================
+"""
+from __future__ import annotations
+
+import uuid
+from collections import Counter
+from datetime import date, datetime, timezone
+
+from fastapi import HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
+
+from app.modules.supplier_po import presenters as present
+from app.modules.supplier_po.enums import SupplierEmailStatus
+from app.modules.inventory.inventory_match import Alias
+from app.modules.inventory.inventory_normalize import bom_line_key, normalize_key, tokens
+from app.core.models import AuditLog
+from app.modules.supplier_po.models import Supplier, SupplierSupplyHistory
+from app.modules.supplier_po.repository import SupplierPoRepository
+from app.modules.supplier_po.supplier_import import parse_suppliers
+from app.modules.supplier_po.supplier_match import (
+    HistoryCandidate,
+    MatchResult,
+    match_shortfall,
+)
+from app.modules.supplier_po.supplier_normalize import (
+    mode_for_bom_category,
+    state_code_from_gstin,
+    supplier_type_for_mode,
+)
+
+
+class SupplierService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+        self.repo = SupplierPoRepository(db)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Import (§9a) — preview + commit
+    # ══════════════════════════════════════════════════════════════════════
+    async def preview(self, data: bytes) -> dict:
+        prev = await run_in_threadpool(parse_suppliers, data)
+        return self._preview_block(prev)
+
+    async def commit(self, user, data: bytes) -> dict:
+        prev = await run_in_threadpool(parse_suppliers, data)
+
+        # dominant history mode per supplier → supplier_type default (§10)
+        modes_by_supplier: dict[str, Counter] = {}
+        for h in prev.history:
+            modes_by_supplier.setdefault(h.supplier_normalized_name, Counter())
+            if h.mode:
+                modes_by_supplier[h.supplier_normalized_name][h.mode] += h.txn_count
+
+        # 1. upsert suppliers (sheet-wins-if-present, else keep) + map name→id
+        id_by_norm: dict[str, uuid.UUID] = {}
+        upserted = 0
+        for s in prev.suppliers:
+            existing = await self.repo.get_supplier_by_name(s.name)
+            counter = modes_by_supplier.get(s.normalized_name)
+            dominant = counter.most_common(1)[0][0] if counter else None
+            stype = supplier_type_for_mode(dominant)
+            if existing is None:
+                existing = Supplier(
+                    name=s.name, phone=s.phone, email=s.email, service=s.service,
+                    supplier_type=stype,
+                    email_status=(SupplierEmailStatus.UNKNOWN.value if s.email
+                                  else SupplierEmailStatus.UNKNOWN.value),
+                    is_active=True,
+                )
+                self.db.add(existing)
+                await self.db.flush()
+            else:
+                existing.phone = existing.phone or s.phone        # never blank a known value
+                existing.email = existing.email or s.email
+                existing.service = existing.service or s.service
+                existing.supplier_type = existing.supplier_type or stype
+                existing.state_code = existing.state_code or state_code_from_gstin(existing.gstin)
+                existing.is_active = True
+            id_by_norm[s.normalized_name] = existing.id
+            upserted += 1
+
+        # 2. rebuild supply history wholesale (§1d 'refreshed on re-import')
+        await self.repo.clear_supply_history()
+        for h in prev.history:
+            sid = id_by_norm.get(h.supplier_normalized_name)
+            if sid is None:
+                continue
+            self.db.add(SupplierSupplyHistory(
+                supplier_id=sid, normalized_description=h.normalized_description,
+                raw_description=h.raw_description, mode=h.mode, uom=h.uom,
+                txn_count=h.txn_count, first_purchased_at=h.first_purchased_at,
+                last_purchased_at=h.last_purchased_at, last_rate=h.last_rate,
+                min_rate=h.min_rate, max_rate=h.max_rate,
+            ))
+
+        # 3. soft-deactivate suppliers absent from this import (never hard-delete §9c)
+        keep_ids = set(id_by_norm.values())
+        deactivated = 0
+        for sup in await self.repo.all_active_suppliers():
+            if sup.id not in keep_ids:
+                sup.is_active = False
+                deactivated += 1
+
+        self.db.add(AuditLog(
+            actor_user_id=getattr(user, "id", None), action="SUPPLIER_IMPORT",
+            entity_type="supplier", at=datetime.now(timezone.utc),
+            after={"suppliers": upserted, "history_rows": len(prev.history),
+                   "deactivated": deactivated},
+        ))
+        await self.db.commit()
+        return {**self._preview_block(prev), "committed": upserted,
+                "history_rows": len(prev.history), "deactivated": deactivated}
+
+    @staticmethod
+    def _preview_block(prev) -> dict:
+        return {
+            "contact_rows": prev.contact_rows,
+            "provision_rows": prev.provision_rows,
+            "suppliers": len(prev.suppliers),
+            "suppliers_with_phone": prev.suppliers_with_phone,
+            "suppliers_with_email": prev.suppliers_with_email,
+            "history_rows": len(prev.history),
+            "warnings": prev.warnings,
+            "sample_history": [{
+                "supplier": h.supplier_name,
+                "article": h.normalized_description, "mode": h.mode,
+                "txn_count": h.txn_count, "last_rate": float(h.last_rate) if h.last_rate else None,
+            } for h in prev.history[:25]],
+        }
+
+    # ══════════════════════════════════════════════════════════════════════
+    # CRUD (§9b/§9c)
+    # ══════════════════════════════════════════════════════════════════════
+    async def list_suppliers(self, *, search=None, service=None, active=None,
+                             limit=100, offset=0) -> dict:
+        rows = await self.repo.list_suppliers(search=search, service=service,
+                                              active=active, limit=limit, offset=offset)
+        return {"suppliers": [present.supplier_block(s) for s in rows], "count": len(rows)}
+
+    async def get_supplier(self, supplier_id: uuid.UUID) -> dict:
+        s = await self.repo.get_supplier(supplier_id)
+        if s is None:
+            raise HTTPException(404, "Supplier not found.")
+        history = await self.repo.supply_history_for_supplier(supplier_id)
+        open_pos = await self.repo.supplier_open_pos(supplier_id)
+        return present.supplier_block(s, history=history, open_pos=open_pos)
+
+    async def create_supplier(self, user, data: dict) -> dict:
+        name = (data.get("name") or "").strip()
+        if not name:
+            raise HTTPException(422, detail={"error": "name_required"})
+        if await self.repo.get_supplier_by_name(name):
+            raise HTTPException(409, detail={"error": "duplicate_name", "name": name})
+        s = Supplier(
+            name=name, phone=data.get("phone"), email=data.get("email"),
+            service=data.get("service"), gstin=data.get("gstin"),
+            address=data.get("address"),
+            currency=data.get("currency") or "INR",
+            payment_terms_days=data.get("payment_terms_days") or 60,
+            lead_time_days=data.get("lead_time_days") or 10,
+            supplier_type=data.get("supplier_type"),
+            whatsapp_phone=data.get("whatsapp_phone") or data.get("phone"),
+            state_code=state_code_from_gstin(data.get("gstin")),
+            email_status=(SupplierEmailStatus.VALID.value if data.get("email")
+                          else SupplierEmailStatus.UNKNOWN.value),
+            is_active=True,
+        )
+        self.db.add(s)
+        await self.db.flush()
+        await self._audit(user, "SUPPLIER_CREATE", s.id, after=self._snap(s))
+        await self.db.commit()
+        return await self.get_supplier(s.id)
+
+    async def update_supplier(self, user, supplier_id: uuid.UUID, data: dict) -> dict:
+        s = await self.repo.get_supplier(supplier_id)
+        if s is None:
+            raise HTTPException(404, "Supplier not found.")
+        before = self._snap(s)
+        for f in ("name", "phone", "email", "service", "gstin", "address", "currency",
+                  "payment_terms_days", "lead_time_days", "supplier_type", "whatsapp_phone"):
+            if f in data and data[f] is not None:
+                setattr(s, f, data[f])
+        if "gstin" in data and data["gstin"]:
+            s.state_code = state_code_from_gstin(data["gstin"])
+        # editing a contact onto a previously contactless matched vendor clears the
+        # block + (for a fresh email) resets the bounce flag so §5 send is unblocked (§9c).
+        if data.get("email"):
+            s.email_status = SupplierEmailStatus.VALID.value
+        await self._audit(user, "SUPPLIER_EDIT", s.id, before=before, after=self._snap(s))
+        await self.db.commit()
+        return await self.get_supplier(s.id)
+
+    async def deactivate_supplier(self, user, supplier_id: uuid.UUID) -> dict:
+        s = await self.repo.get_supplier(supplier_id)
+        if s is None:
+            raise HTTPException(404, "Supplier not found.")
+        before = self._snap(s)
+        s.is_active = False
+        await self._audit(user, "SUPPLIER_DEACTIVATE", s.id, before=before, after=self._snap(s))
+        await self.db.commit()
+        return {"id": str(s.id), "is_active": s.is_active}
+
+    async def reactivate_supplier(self, user, supplier_id: uuid.UUID) -> dict:
+        s = await self.repo.get_supplier(supplier_id)
+        if s is None:
+            raise HTTPException(404, "Supplier not found.")
+        s.is_active = True
+        await self._audit(user, "SUPPLIER_REACTIVATE", s.id, after=self._snap(s))
+        await self.db.commit()
+        return {"id": str(s.id), "is_active": s.is_active}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Matching (§1) — used by po_service when generating POs
+    # ══════════════════════════════════════════════════════════════════════
+    async def match_line(self, *, name: str | None, color: str | None,
+                         category: str | None, aliases: list[Alias],
+                         today: date | None = None) -> MatchResult:
+        """Resolve one shortfall line to a supplier (§1b/§1c). Builds the line key the
+        same way Stage 4 does, fetches the small candidate pool set-based, and runs the
+        deterministic-first matcher + ranking."""
+        today = today or datetime.now(timezone.utc).date()
+        bom_key = bom_line_key(name, color)
+        line_tokens = tokens(bom_key)
+
+        like_terms: set[str] = set()
+        if line_tokens:
+            like_terms.add(max(line_tokens, key=len))
+        for al in aliases:
+            if tokens(al.bom_term) and tokens(al.bom_term) <= line_tokens:
+                like_terms.add(al.inventory_key)
+        category_mode = mode_for_bom_category(category)
+        modes = {category_mode} if category_mode else None
+
+        rows = await self.repo.fetch_supply_history_candidates(
+            like_terms=like_terms, modes=modes)
+        candidates = [
+            HistoryCandidate(
+                supplier_id=s.id, supplier_name=s.name,
+                normalized_description=h.normalized_description, mode=h.mode,
+                txn_count=h.txn_count, last_purchased_at=h.last_purchased_at,
+                last_rate=h.last_rate, uom=h.uom,
+                has_contact=bool(s.email or s.phone),
+            )
+            for (h, s) in rows
+        ]
+        return match_shortfall(bom_key, color, category_mode, candidates, aliases, today=today)
+
+    # ── helpers ────────────────────────────────────────────────────────────
+    @staticmethod
+    def _snap(s: Supplier) -> dict:
+        return {"name": s.name, "phone": s.phone, "email": s.email, "service": s.service,
+                "gstin": s.gstin, "is_active": s.is_active, "email_status": s.email_status,
+                "supplier_type": s.supplier_type}
+
+    async def _audit(self, user, action, entity_id, *, before=None, after=None) -> None:
+        self.db.add(AuditLog(
+            actor_user_id=getattr(user, "id", None), action=action,
+            entity_type="supplier", entity_id=entity_id, before=before, after=after,
+            at=datetime.now(timezone.utc),
+        ))
+
+
+====================================================================================================
+FILE: __init__.py
+====================================================================================================
+
+"""supplier_po — Stage-5 supplier PO, matching, escalation, production board."""
+
+

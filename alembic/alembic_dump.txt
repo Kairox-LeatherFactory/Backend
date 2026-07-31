@@ -2,7 +2,6 @@
 PROJECT STRUCTURE
 ============================================================
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\ alembic_dump.txt
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\alembic_dump.txt
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\env.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\script.py.mako
@@ -20,6 +19,7 @@ C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\202
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260717_1100_drop_daily_rate.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260724_01_july28_fixes.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260730_barcode.py
+C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260731_wage_line_uniq.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\fiber_role_bom_item.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\material_table_added.py
 C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\migration_add_pattern_tables.py
@@ -1882,13 +1882,21 @@ def upgrade() -> None:
     # app_user.role is Enum(UserRole, name="user_role") — a native PG type — so
     # the new member must be added to the DB type, not just the Python enum.
     # No-op on SQLite (tests), where there is no native enum type.
+    # F63: ALTER TYPE ... ADD VALUE cannot run inside a transaction that then
+    # uses the new value, and PostgreSQL best practice is to commit the enum
+    # addition on its own. autocommit_block() takes us out of Alembic's
+    # migration transaction for this one idempotent statement. It is safe to
+    # commit early because ADD VALUE IF NOT EXISTS is re-runnable.
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
-        op.execute("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'lining_manager'")
+        with op.get_context().autocommit_block():
+            op.execute("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'lining_manager'")
 
-    # ── supplier (referenced by material_lot + supplier_order) ──────────────
+    # ── material_supplier (referenced by material_lot + supplier_order) ──────
+    # F104: named material_supplier (NOT supplier) to avoid colliding with the
+    # supplier_po module's own `supplier` table in one MetaData registry.
     op.create_table(
-        "supplier",
+        "material_supplier",
         sa.Column("id", GUID(), primary_key=True),
         sa.Column("name", sa.String(200), nullable=False),
         sa.Column("articles", sa.String(600)),
@@ -1897,7 +1905,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
-    op.create_index("ix_supplier_name", "supplier", ["name"])
+    op.create_index("ix_material_supplier_name", "material_supplier", ["name"])
 
     # ── material_lot ────────────────────────────────────────────────────────
     op.create_table(
@@ -1911,7 +1919,7 @@ def upgrade() -> None:
         sa.Column("size", sa.String(40)),
         sa.Column("uom", sa.String(20), nullable=False),
         sa.Column("on_hand", sa.Numeric(14, 3), nullable=False, server_default="0"),
-        sa.Column("supplier_id", GUID(), sa.ForeignKey("supplier.id"), nullable=True),
+        sa.Column("supplier_id", GUID(), sa.ForeignKey("material_supplier.id"), nullable=True),
         sa.Column("attributes", sa.JSON()),
         sa.Column("is_active", sa.Boolean, nullable=False, server_default=sa.true()),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
@@ -1946,7 +1954,7 @@ def upgrade() -> None:
         sa.Column("qty", sa.Numeric(14, 3), nullable=False),
         sa.Column("uom", sa.String(20), nullable=False),
         sa.Column("status", sa.String(15), nullable=False, server_default="ordered"),
-        sa.Column("supplier_id", GUID(), sa.ForeignKey("supplier.id"), nullable=True),
+        sa.Column("supplier_id", GUID(), sa.ForeignKey("material_supplier.id"), nullable=True),
         sa.Column("ordered_by", GUID(), sa.ForeignKey("app_user.id"), nullable=True),
         sa.Column("arrived_at", sa.DateTime(timezone=True)),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
@@ -2047,7 +2055,46 @@ def downgrade() -> None:
     op.drop_table("supplier_order")
     op.drop_table("material_reservation")
     op.drop_table("material_lot")
-    op.drop_table("supplier")
+    op.drop_table("material_supplier")
+
+============================================================
+FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\20260731_wage_line_uniq.py
+============================================================
+
+"""B5: one wage line per employee per run.
+
+Revision ID: 20260731_wage_line_uniq
+Revises: 20260730_barcode
+"""
+import sqlalchemy as sa
+from alembic import op
+
+revision = "20260731_wage_line_uniq"
+down_revision = "20260730_barcode"      # verify with `alembic heads`
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    # Collapse any pre-existing duplicates first, keeping the largest line —
+    # a duplicate here means someone was already paid twice; the survivor is
+    # the one that matches the payslip that was printed.
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        op.execute("""
+            DELETE FROM wage_line a
+            USING wage_line b
+            WHERE a.wage_run_id = b.wage_run_id
+              AND a.employee_id = b.employee_id
+              AND (a.amount < b.amount
+                   OR (a.amount = b.amount AND a.id < b.id))
+        """)
+    op.create_unique_constraint(
+        "uq_wage_line_run_emp", "wage_line", ["wage_run_id", "employee_id"])
+
+
+def downgrade() -> None:
+    op.drop_constraint("uq_wage_line_run_emp", "wage_line", type_="unique")
 
 ============================================================
 FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versions\fiber_role_bom_item.py
@@ -2055,16 +2102,12 @@ FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\alembic\versio
 
 """add attribution axis to bom_item + workflow columns to fabric_role
 
-Revision ID: add_attribution_axis
-Revises: <SET_TO_CURRENT_HEAD>          # TODO: `alembic heads` — set before running.
+Revision ID: fiber_role_bom_item
+Revises: add_material_rate
 Create Date: 2026-07-09
 
-NOTE (per your standing preference, Alembic is applied last): this migration is
-additive and safe to batch with the config-to-DB work. BEFORE running ANY new
-migration, resolve the two-root problem first — migration b7d4f1a9c2e0 has
-down_revision=None, creating a second root; `alembic upgrade head` will fail
-with "multiple heads" until that is chained. Set `down_revision` below to the
-real current head once the roots are merged.
+The revision chain is now a single linear root→head line (verified with
+`alembic history` / `alembic heads`). This migration is additive.
 
 Two SEPARATE axes on bom_item (do not conflate):
   dcm_source / dcm_confidence         -> yield axis (already present; unchanged)
@@ -2076,7 +2119,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID as GUID
 
 revision = "fiber_role_bom_item"
-down_revision = "add_material_rate"          # TODO: set to current head (see note above)
+down_revision = "add_material_rate"
 branch_labels = None
 depends_on = None
 

@@ -1,27 +1,14 @@
-﻿============================================================
-PROJECT STRUCTURE
-============================================================
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\barcode\barcode_dump.txt
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\barcode\init.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\barcode\models.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\barcode\repository.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\barcode\router.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\barcode\schemas.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\barcode\service.py
 
-============================================================
-PROJECT FILES
-============================================================
-
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\barcode\init.py
-============================================================
+====================================================================================================
+FILE: init.py
+====================================================================================================
 
 """barcode-feature module."""
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\barcode\models.py
-============================================================
+
+====================================================================================================
+FILE: models.py
+====================================================================================================
 
 """
 ================================================================================
@@ -138,7 +125,7 @@ class MaterialLot(Base, UUIDMixin, TimestampMixin):
     uom: Mapped[str] = mapped_column(String(20))
     on_hand: Mapped[Decimal] = mapped_column(Numeric(14, 3), default=0)
     supplier_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("supplier.id"), nullable=True, index=True)
+        GUID(), ForeignKey("material_supplier.id"), nullable=True, index=True)
     attributes: Mapped[dict | None] = mapped_column(JSON_VARIANT)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -176,11 +163,18 @@ class MaterialReceipt(Base, UUIDMixin, TimestampMixin):
         GUID(), ForeignKey("app_user.id"), nullable=True)
 
 
-class Supplier(Base, UUIDMixin, TimestampMixin):
+class MaterialSupplier(Base, UUIDMixin, TimestampMixin):
     """A material supplier. Minimal for v1 — the article→supplier suggestion reads
     `articles` (a comma list) as a simple lookup, NOT the AI procurement
-    classifier (that is separate August-20 scope)."""
-    __tablename__ = "supplier"
+    classifier (that is separate August-20 scope).
+
+    F104: table is `material_supplier` (NOT `supplier`) to avoid colliding with
+    the richer `supplier` table owned by the out-of-scope supplier_po module in
+    the same MetaData registry. See F126 — whether these two supplier concepts
+    should be unified is an Aug-20 procurement-scope decision, deliberately left
+    distinct here.
+    """
+    __tablename__ = "material_supplier"
     name: Mapped[str] = mapped_column(String(200), index=True)
     articles: Mapped[str | None] = mapped_column(String(600))   # "SUEDE-A32,NAP-11"
     contact: Mapped[str | None] = mapped_column(String(200))
@@ -197,14 +191,15 @@ class SupplierOrder(Base, UUIDMixin, TimestampMixin):
     uom: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(15), default="ordered", index=True)
     supplier_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("supplier.id"), nullable=True, index=True)
+        GUID(), ForeignKey("material_supplier.id"), nullable=True, index=True)
     ordered_by: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("app_user.id"), nullable=True)
     arrived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\barcode\repository.py
-============================================================
+
+====================================================================================================
+FILE: repository.py
+====================================================================================================
 
 """
 ================================================================================
@@ -259,17 +254,28 @@ class BarcodeRepository:
 
     # ── code minting ─────────────────────────────────────────────────────────
     async def _next_code(self, prefix: str, width: int = 6) -> str:
-        """PREFIX + zero-padded (max existing counter for this prefix) + 1."""
+        """PREFIX + zero-padded (max existing counter for this prefix) + 1.
+
+        F79/F99: previously this SELECTed every barcode with this prefix and took
+        the max in Python — O(all barcodes) transferred per mint, quadratic across
+        an import that mints hundreds of codes. Since the zero-padded numeric tail
+        is fixed-width, lexicographic order == numeric order, so ORDER BY code DESC
+        LIMIT 1 gives the highest existing code while transferring ONE row. This is
+        dialect-agnostic (works identically on SQLite and Postgres); a dedicated
+        integer sequence column would be the fully clean long-term form.
+        """
         like = f"{prefix}-%"
-        rows = await self.db.execute(
-            select(BarcodeRegistry.code).where(BarcodeRegistry.code.like(like))
+        top = await self.db.scalar(
+            select(BarcodeRegistry.code)
+            .where(BarcodeRegistry.code.like(like))
+            .order_by(BarcodeRegistry.code.desc())
+            .limit(1)
         )
         mx = 0
-        plen = len(prefix) + 1
-        for (c,) in rows.all():
-            tail = c[plen:]
+        if top:
+            tail = top[len(prefix) + 1:]
             if tail.isdigit():
-                mx = max(mx, int(tail))
+                mx = int(tail)
         return f"{prefix}-{mx + 1:0{width}d}"
 
     # ── registration (all *_nocommit; the SERVICE owns the transaction) ──────
@@ -329,9 +335,10 @@ class BarcodeRepository:
     async def commit(self) -> None:
         await self.db.commit()
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\barcode\router.py
-============================================================
+
+====================================================================================================
+FILE: router.py
+====================================================================================================
 
 """
 ================================================================================
@@ -402,9 +409,10 @@ async def employee_barcode_action(
         return await svc.reissue_employee_barcode(employee_id, actor_id=user.id)
     return await svc.deactivate_employee_barcode(employee_id, actor_id=user.id)
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\barcode\schemas.py
-============================================================
+
+====================================================================================================
+FILE: schemas.py
+====================================================================================================
 
 """modules/barcode/schemas.py — API contract for the barcode registry."""
 import uuid
@@ -459,9 +467,10 @@ class BarcodeActionResult(BaseModel):
     active: bool
     history_preserved: bool
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\barcode\service.py
-============================================================
+
+====================================================================================================
+FILE: service.py
+====================================================================================================
 
 """
 ================================================================================
@@ -500,17 +509,33 @@ class BarcodeService:
         self.repo = BarcodeRepository(db)
 
     # ── resolve ──────────────────────────────────────────────────────────────
+    async def _get_active_or_410(self, code: str):
+        """Shared lookup: 404 if unknown, 410 if the barcode is retired — for ANY
+        barcode type, not just employee (F18). Retirement is a lifecycle state on
+        the registry; a retired piece/lot/drawer label must not silently resolve.
+        Returns the row on success."""
+        row = await self.repo.get_by_code(code)
+        if not row:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown barcode '{code}'.")
+        if row.status == BarcodeStatus.RETIRED.value:
+            raise HTTPException(
+                status.HTTP_410_GONE,
+                "This barcode was deactivated. The underlying record and history "
+                "are intact; issue a new label to scan again.",
+            )
+        return row
+
     async def resolve(self, code: str) -> dict:
         row = await self.repo.get_by_code(code)
         if not row:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown barcode '{code}'.")
 
-        if row.type == BarcodeType.EMPLOYEE.value and row.status == BarcodeStatus.RETIRED.value:
-            # 410 Gone — the label was deactivated. Identity + history intact.
+        # F18: retirement applies to every barcode type, not only EMPLOYEE.
+        if row.status == BarcodeStatus.RETIRED.value:
             raise HTTPException(
                 status.HTTP_410_GONE,
-                "This employee barcode was deactivated. The worker's record and "
-                "history are intact; issue a new card to scan again.",
+                "This barcode was deactivated. The underlying record and history "
+                "are intact; issue a new label to scan again.",
             )
 
         out = {
@@ -532,33 +557,30 @@ class BarcodeService:
     async def resolve_piece_id(self, code: str) -> uuid.UUID:
         """resolve() narrowed to 'give me the piece id or 404'. Used by /production/log
         when the target came in as a piece barcode."""
-        row = await self.repo.get_by_code(code)
-        if not row or row.type != BarcodeType.PIECE.value or not row.piece_id:
+        row = await self._get_active_or_410(code)   # F18: 410 on retired
+        if row.type != BarcodeType.PIECE.value or not row.piece_id:
             raise HTTPException(status.HTTP_404_NOT_FOUND,
                                 f"'{code}' is not a known piece barcode.")
         return row.piece_id
 
     async def resolve_employee_id(self, code: str) -> uuid.UUID:
         """resolve() narrowed to 'give me the (active) employee id'. 410 on retired."""
-        row = await self.repo.get_by_code(code)
-        if not row or row.type != BarcodeType.EMPLOYEE.value or not row.employee_id:
+        row = await self._get_active_or_410(code)   # F18
+        if row.type != BarcodeType.EMPLOYEE.value or not row.employee_id:
             raise HTTPException(status.HTTP_404_NOT_FOUND,
                                 f"'{code}' is not a known employee barcode.")
-        if row.status == BarcodeStatus.RETIRED.value:
-            raise HTTPException(status.HTTP_410_GONE,
-                                "This employee barcode was deactivated.")
         return row.employee_id
 
     async def resolve_lot_id(self, code: str) -> uuid.UUID:
-        row = await self.repo.get_by_code(code)
-        if not row or not row.material_lot_id:
+        row = await self._get_active_or_410(code)   # F18
+        if not row.material_lot_id:
             raise HTTPException(status.HTTP_404_NOT_FOUND,
                                 f"'{code}' is not a known material-lot barcode.")
         return row.material_lot_id
 
     async def resolve_drawer_id(self, code: str) -> uuid.UUID:
-        row = await self.repo.get_by_code(code)
-        if not row or row.type != BarcodeType.DRAWER.value or not row.drawer_id:
+        row = await self._get_active_or_410(code)   # F18
+        if row.type != BarcodeType.DRAWER.value or not row.drawer_id:
             raise HTTPException(status.HTTP_404_NOT_FOUND,
                                 f"'{code}' is not a known drawer barcode.")
         return row.drawer_id
@@ -735,3 +757,5 @@ class BarcodeService:
                 "known": r is not None,
             })
         return {"labels": labels}
+
+

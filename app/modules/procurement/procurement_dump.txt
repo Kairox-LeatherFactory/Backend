@@ -1,69 +1,7 @@
-﻿============================================================
-PROJECT STRUCTURE
-============================================================
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\classifier.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\enums.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\errors.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\models.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\pipeline.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\presenters.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\procurement_dump.txt
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\registry.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\repository.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\router.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\scanning.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\schemas.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\seed_templates.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\service.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\sniffing.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\validator.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\__init__.py
 
-============================================================
-PROJECT FILES
-============================================================
-
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\__init__.py
-============================================================
-
-"""
-procurement — Stage 1 intake (the BOM Procurement Workflow front door).
-
-Owns the upload & validation surface: the `submission` upload-batch (the pairing
-surrogate that becomes the client_order link in Stage 2) and the per-client × doc-kind
-validation registry `client_template`, plus the scan → sniff → validate → store
-pipeline (classifier, sniffing, scanning, validator, registry, presenters, errors,
-seed_templates).
-
-────────────────────────────────────────────────────────────────────────────────
-MODULE SPLIT — the former monolith is now FOUR stage modules + a shared core
-────────────────────────────────────────────────────────────────────────────────
-The BOM Procurement Workflow was split out of one `procurement` package into focused,
-independently-ownable modules so each stage has its own router → service → repository →
-models stack:
-
-    procurement   Stage 1   upload & validation intake (this module)
-    bom           Stage 2/3 BOM generation + approval/lock + in-app notifications
-    inventory     Stage 4   inventory master + per-BOM stock checks + reservations
-    supplier_po   Stage 5   suppliers, the supplier PO, matching, escalation, board
-
-Cross-cutting tables that EVERY stage writes — `document`, `notification`, `audit_log`
-— plus the pluggable email/storage backends live in `app/core` (FK-by-string only, so
-core imports nothing from app.modules). Cross-module data flows through the owning
-module's SERVICE returning plain DTOs, never another module's repository/models.
-
-IMPORT DIRECTION (acyclic except the deliberate lazy bom↔inventory service pair):
-    procurement → core, clients.service, bom.service (Stage-1 → Stage-2 generate trigger, lazy)
-    bom         → core, clients.service, inventory.service   (never imports procurement)
-    inventory   → core, bom.service, clients.service
-    supplier_po → core, bom.service, inventory.service, clients.service, users.service
-"""
-
-
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\classifier.py
-============================================================
+====================================================================================================
+FILE: classifier.py
+====================================================================================================
 
 """
 ================================================================================
@@ -383,9 +321,9 @@ def build_vision_classifier() -> VisionClassifier | None:
     return _classify
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\enums.py
-============================================================
+====================================================================================================
+FILE: enums.py
+====================================================================================================
 
 """
 ================================================================================
@@ -482,9 +420,9 @@ class RejectReason(str, enum.Enum):
     #   `Document.sha256` is globally unique so the bytes can't be re-stored here.
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\errors.py
-============================================================
+====================================================================================================
+FILE: errors.py
+====================================================================================================
 
 """
 ================================================================================
@@ -539,9 +477,9 @@ class UploadError(Exception):
         return STATUS_FOR_REASON.get(self.reason.value, 422)
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\models.py
-============================================================
+====================================================================================================
+FILE: models.py
+====================================================================================================
 
 """
 ================================================================================
@@ -643,9 +581,9 @@ class ClientTemplate(Base, UUIDMixin, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\pipeline.py
-============================================================
+====================================================================================================
+FILE: pipeline.py
+====================================================================================================
 
 """
 ================================================================================
@@ -795,9 +733,9 @@ def process_upload(
     )
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\presenters.py
-============================================================
+====================================================================================================
+FILE: presenters.py
+====================================================================================================
 
 """
 ================================================================================
@@ -1056,9 +994,9 @@ def enrich_gate_error(exc: UploadError, sub, filename, data, kind, sha) -> Uploa
     return exc
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\registry.py
-============================================================
+====================================================================================================
+FILE: registry.py
+====================================================================================================
 
 """
 ================================================================================
@@ -1244,9 +1182,9 @@ def detect_spec_type(feats: DocFeatures) -> str:
     )
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\repository.py
-============================================================
+====================================================================================================
+FILE: repository.py
+====================================================================================================
 
 """
 ================================================================================
@@ -1358,9 +1296,9 @@ class ProcurementRepository:
         return list(res.scalars().all())
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\router.py
-============================================================
+====================================================================================================
+FILE: router.py
+====================================================================================================
 
 """
 ================================================================================
@@ -1549,9 +1487,10 @@ async def document_report(
 ):
     return await ProcurementService(db).get_document_report(submission_id, document_id)
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\scanning.py
-============================================================
+
+====================================================================================================
+FILE: scanning.py
+====================================================================================================
 
 """
 ================================================================================
@@ -1681,9 +1620,9 @@ def scan_bytes(data: bytes, *, scanner: Scanner | None = None) -> tuple[ScanStat
     return ScanStatus.CLEAN, None
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\schemas.py
-============================================================
+====================================================================================================
+FILE: schemas.py
+====================================================================================================
 
 """
 ================================================================================
@@ -1736,9 +1675,9 @@ class SubmissionSummary(BaseModel):
     blocking: list[str]
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\seed_templates.py
-============================================================
+====================================================================================================
+FILE: seed_templates.py
+====================================================================================================
 
 """
 ================================================================================
@@ -1817,9 +1756,9 @@ def seed_client_templates(db: Session, path: str | None = None) -> int:
     return count
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\service.py
-============================================================
+====================================================================================================
+FILE: service.py
+====================================================================================================
 
 """
 ================================================================================
@@ -2331,9 +2270,10 @@ def _to_profile(t) -> ProfileView:
         grid_signals=t.grid_signals or {}, thresholds=t.thresholds or {},
     )
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\sniffing.py
-============================================================
+
+====================================================================================================
+FILE: sniffing.py
+====================================================================================================
 
 """
 ================================================================================
@@ -2718,9 +2658,10 @@ def _extract_csv(data: bytes, feats: DocFeatures) -> None:
     feats.numeric_ratio = (numeric / total) if total else 0.0
     feats.text_blob = "\n".join(cells)
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\procurement\validator.py
-============================================================
+
+====================================================================================================
+FILE: validator.py
+====================================================================================================
 
 """
 ================================================================================
@@ -3189,4 +3130,43 @@ def _interpret_result(
             "to accept it. A human must confirm the document type."
         ),
     )
+
+
+====================================================================================================
+FILE: __init__.py
+====================================================================================================
+
+"""
+procurement — Stage 1 intake (the BOM Procurement Workflow front door).
+
+Owns the upload & validation surface: the `submission` upload-batch (the pairing
+surrogate that becomes the client_order link in Stage 2) and the per-client × doc-kind
+validation registry `client_template`, plus the scan → sniff → validate → store
+pipeline (classifier, sniffing, scanning, validator, registry, presenters, errors,
+seed_templates).
+
+────────────────────────────────────────────────────────────────────────────────
+MODULE SPLIT — the former monolith is now FOUR stage modules + a shared core
+────────────────────────────────────────────────────────────────────────────────
+The BOM Procurement Workflow was split out of one `procurement` package into focused,
+independently-ownable modules so each stage has its own router → service → repository →
+models stack:
+
+    procurement   Stage 1   upload & validation intake (this module)
+    bom           Stage 2/3 BOM generation + approval/lock + in-app notifications
+    inventory     Stage 4   inventory master + per-BOM stock checks + reservations
+    supplier_po   Stage 5   suppliers, the supplier PO, matching, escalation, board
+
+Cross-cutting tables that EVERY stage writes — `document`, `notification`, `audit_log`
+— plus the pluggable email/storage backends live in `app/core` (FK-by-string only, so
+core imports nothing from app.modules). Cross-module data flows through the owning
+module's SERVICE returning plain DTOs, never another module's repository/models.
+
+IMPORT DIRECTION (acyclic except the deliberate lazy bom↔inventory service pair):
+    procurement → core, clients.service, bom.service (Stage-1 → Stage-2 generate trigger, lazy)
+    bom         → core, clients.service, inventory.service   (never imports procurement)
+    inventory   → core, bom.service, clients.service
+    supplier_po → core, bom.service, inventory.service, clients.service, users.service
+"""
+
 

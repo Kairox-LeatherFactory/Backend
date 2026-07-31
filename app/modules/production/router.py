@@ -108,7 +108,6 @@ async def list_pieces(
     """Every piece of one SKU with its current stage and eligibility."""
     return await ProductionService(db).list_pieces_for_sku(
         sku_id=sku_id, operation_id=operation_id, client_scope=scope)
-    return await ProductionService(db).style_progress(style_id)
 
 @router.post("/log", response_model=LogResult, status_code=201)
 async def log_batch(

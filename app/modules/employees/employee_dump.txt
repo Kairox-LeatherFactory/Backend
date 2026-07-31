@@ -1,34 +1,7 @@
-﻿============================================================
-PROJECT STRUCTURE
-============================================================
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\employee_dump.txt
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\models.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\repository.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\router.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\schemas.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\service.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\__init__.py
 
-============================================================
-PROJECT FILES
-============================================================
-
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\__init__.py
-============================================================
-
-"""
-employees — shop-floor workers.
-
-Distinct from logins: an Employee is a payroll/production identity; a User is a
-credential. wage_type (monthly vs piece_rate) is a property of the PERSON, set
-explicitly, NOT inferred from designation.
-"""
-
-
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\models.py
-============================================================
+====================================================================================================
+FILE: models.py
+====================================================================================================
 
 """
 ================================================================================
@@ -77,9 +50,9 @@ class Employee(Base, UUIDMixin, TimestampMixin):
 __all__ = ["Employee", "WageType"]
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\repository.py
-============================================================
+====================================================================================================
+FILE: repository.py
+====================================================================================================
 
 """
 ================================================================================
@@ -138,9 +111,9 @@ class EmployeeRepository:
         return emp
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\router.py
-============================================================
+====================================================================================================
+FILE: router.py
+====================================================================================================
 
 """
 ================================================================================
@@ -149,6 +122,8 @@ modules/employees/router.py — Employee HTTP API (async)
 """
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette import status
+from fastapi import HTTPException
 
 from app.core.database import get_db
 from app.core.enums import UserRole
@@ -160,13 +135,26 @@ from app.modules.users.models import User
 router = APIRouter(prefix="/employees", tags=["Employees"])
 
 
-@router.get("", response_model=list[schemas.EmployeeRead])
+@router.get("")
 async def list_employees(
     active_only: bool = True,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
-    return await EmployeeService(db).list_all(active_only)
+    """F37: salary is returned ONLY to HR / DM / MD.
+
+    H3: the roster itself is internal. EmployeeRead still carries phone and
+    email (schemas.py:27-28), so redacting salary alone was not enough — a
+    CLIENT token was receiving staff PII."""
+    if user.role in {UserRole.CLIENT, UserRole.VIEWER}:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "The employee roster is internal.")
+    rows = await EmployeeService(db).list_all(active_only)
+    pay_roles = {UserRole.HR, UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR}
+    if user.role in pay_roles:
+        return [schemas.EmployeeReadWithPay.model_validate(r) for r in rows]
+    return [schemas.EmployeeRead.model_validate(r) for r in rows]
 
 
 @router.post("", response_model=schemas.EmployeeCreateRead, status_code=201)
@@ -177,9 +165,10 @@ async def create_employee(
 ):
     return await EmployeeService(db).create(body)
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\schemas.py
-============================================================
+
+====================================================================================================
+FILE: schemas.py
+====================================================================================================
 
 """
 ================================================================================
@@ -198,15 +187,22 @@ from app.core.enums import WageType
 
 
 class EmployeeRead(BaseModel):
+    """Roster view WITHOUT pay. Safe for any internal reader. F37: monthly_salary
+    is NOT here — it was previously exposed to every non-employee role including
+    CLIENT and VIEWER."""
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     name: str
     designation: str | None
     wage_type: WageType
-    monthly_salary: float | None
     is_active: bool
     phone: str | None = None
     email: str | None = None
+
+
+class EmployeeReadWithPay(EmployeeRead):
+    """Roster view WITH pay. Returned only to HR / DM / MD (F37)."""
+    monthly_salary: float | None = None
 
 
 class EmployeeCreate(BaseModel):
@@ -243,9 +239,10 @@ class EmployeeUpdate(BaseModel):
     email: str | None = None
     is_active: bool | None = None
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\employees\service.py
-============================================================
+
+====================================================================================================
+FILE: service.py
+====================================================================================================
 
 """
 ================================================================================
@@ -384,8 +381,20 @@ class EmployeeService:
             data["name"] = await self._unique_name(data["name"])
         if "wage_type" in data:
             data["wage_type"] = WageType(data["wage_type"])
+        # F47: enumerate the writable fields explicitly. Even though no PATCH route
+        # currently reaches this method (F89), the mass-setattr would become a live
+        # privilege/payroll write the moment one is added (EmployeeUpdate carries
+        # is_active and monthly_salary). Only these fields may be set here.
+        _ALLOWED = {"name", "designation", "wage_type", "monthly_salary",
+                    "phone", "email", "is_active"}
+        rejected = set(data) - _ALLOWED
+        if rejected:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Fields not updatable here: {', '.join(sorted(rejected))}.")
         for k, v in data.items():
-            setattr(emp, k, v)
+            if k in _ALLOWED:
+                setattr(emp, k, v)
         await self.repo.save(emp)
         return emp
 
@@ -395,3 +404,18 @@ class EmployeeService:
 
     async def monthly_employees(self) -> list[Employee]:
         return await self.repo.list_by_wage_type(WageType.MONTHLY)
+
+
+====================================================================================================
+FILE: __init__.py
+====================================================================================================
+
+"""
+employees — shop-floor workers.
+
+Distinct from logins: an Employee is a payroll/production identity; a User is a
+credential. wage_type (monthly vs piece_rate) is a property of the PERSON, set
+explicitly, NOT inferred from designation.
+"""
+
+

@@ -1,47 +1,7 @@
-﻿============================================================
-PROJECT STRUCTURE
-============================================================
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\attribution.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\bom_dump.txt
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\checks.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\config_store.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\costing.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\dcm.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\dxf_pattern.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\enums.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\excel_content.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\export.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\extraction.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\extraction_schemas.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\fabric_roles.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\models.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\notification_service.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\pattern.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\pdf_content.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\repository.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\router.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\schemas.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\seed_stage2.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\service.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\tasks.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\testing.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\units.py
-C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\__init__.py
 
-============================================================
-PROJECT FILES
-============================================================
-
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\__init__.py
-============================================================
-
-"""bom — Stage-2/3 BOM generation + approval."""
-
-
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\attribution.py
-============================================================
+====================================================================================================
+FILE: attribution.py
+====================================================================================================
 
 """
 ================================================================================
@@ -298,9 +258,10 @@ def procurement_gate(*, attribution_status: str | None,
         return "projected"
     return "excluded"
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\checks.py
-============================================================
+
+====================================================================================================
+FILE: checks.py
+====================================================================================================
 
 """
 ================================================================================
@@ -480,9 +441,9 @@ def has_blocking_error(flags: list[dict]) -> bool:
     return any(f["severity"] == "error" and not f["ok"] for f in flags)
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\config_store.py
-============================================================
+====================================================================================================
+FILE: config_store.py
+====================================================================================================
 
 """
 ================================================================================
@@ -726,9 +687,10 @@ def refresh_from_session(db) -> Snapshot:
     set_snapshot(snap)
     return snap
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\costing.py
-============================================================
+
+====================================================================================================
+FILE: costing.py
+====================================================================================================
 
 """
 ================================================================================
@@ -830,9 +792,9 @@ def recompute_bom(lines: list[dict], order_qty) -> dict:
     }
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\dcm.py
-============================================================
+====================================================================================================
+FILE: dcm.py
+====================================================================================================
 
 """
 modules/bom/dcm.py â€” DCM resolution math (Stage 2 Â§2, the spine)
@@ -954,9 +916,10 @@ def fabric_lexicon() -> dict:
     from app.modules.bom import config_store
     return config_store.get_fabric_lexicon()
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\dxf_pattern.py
-============================================================
+
+====================================================================================================
+FILE: dxf_pattern.py
+====================================================================================================
 
 # -----------------------------------------------------------------------------
 # LLM CLIENT INITIALIZATION
@@ -1291,9 +1254,10 @@ def implied_yield(pattern: ParsedPattern, size, confirmed_dcm_sf: float,
         return None
     return round(confirmed_dcm_sf / net_qty, 3)
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\enums.py
-============================================================
+
+====================================================================================================
+FILE: enums.py
+====================================================================================================
 
 """
 modules/bom/enums.py â€” Stage-2/3 BOM value-sets (str-Enum + VARCHAR columns).
@@ -1351,9 +1315,10 @@ class ExtractionSource(str, enum.Enum):
     GROQ = "groq"
     MANUAL = "manual"
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\excel_content.py
-============================================================
+
+====================================================================================================
+FILE: excel_content.py
+====================================================================================================
 
 """
 ================================================================================
@@ -1649,9 +1614,10 @@ def xlsx_to_llm_input(data: bytes) -> tuple[str, list[bytes]]:
         except Exception:                                      # noqa: BLE001
             pass
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\export.py
-============================================================
+
+====================================================================================================
+FILE: export.py
+====================================================================================================
 
 """
 ================================================================================
@@ -1832,9 +1798,9 @@ def render_bom_pdf(view: dict, meta: dict) -> tuple[bytes, str, str]:
     return html.encode("utf-8"), "text/html", ".html"     # last resort
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\extraction.py
-============================================================
+====================================================================================================
+FILE: extraction.py
+====================================================================================================
 
 """
 ================================================================================
@@ -2605,9 +2571,10 @@ def extract_order_doc(data: bytes, filename: str,
             colors=[], warnings=["style_from_header_not_lines"])]
     return doc
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\extraction_schemas.py
-============================================================
+
+====================================================================================================
+FILE: extraction_schemas.py
+====================================================================================================
 
 # extraction_schemas.py
 """
@@ -3098,9 +3065,10 @@ class ExtractedOrderDoc(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     extracted_by: str = "manual"
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\fabric_roles.py
-============================================================
+
+====================================================================================================
+FILE: fabric_roles.py
+====================================================================================================
 
 """fabric_roles.py â€” map a DXF FABRIC string to a BOM role + category + leather flag.
 [Stage 2 in ARCHITECTURE_AND_DATAFLOW.md â€” attribute_fabrics: which fabrics are leather.]
@@ -3234,9 +3202,10 @@ def attribute_fabrics(parsed_fabrics: list[str],
             mapping[fab] = role
     return mapping, unknown
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\models.py
-============================================================
+
+====================================================================================================
+FILE: models.py
+====================================================================================================
 
 """
 ================================================================================
@@ -3834,9 +3803,10 @@ class MaterialRate(Base, UUIDMixin, TimestampMixin):
     supplier: Mapped[str | None] = mapped_column(String(160))
     is_current: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\notification_service.py
-============================================================
+
+====================================================================================================
+FILE: notification_service.py
+====================================================================================================
 
 """
 ================================================================================
@@ -4196,9 +4166,9 @@ class NotificationService:
         }
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\pattern.py
-============================================================
+====================================================================================================
+FILE: pattern.py
+====================================================================================================
 
 """pattern.py — the DXF source (Source 1c) for the DcmResolver.
 [Stages 4/5/7 in ARCHITECTURE_AND_DATAFLOW.md — dcm_for_category, graded_dxf, learn_yield.]
@@ -4345,9 +4315,9 @@ def effective_dxf_yields(seed_yields: dict,
     return out
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\pdf_content.py
-============================================================
+====================================================================================================
+FILE: pdf_content.py
+====================================================================================================
 
 """
 ================================================================================
@@ -4487,9 +4457,10 @@ def pdf_to_llm_input(data: bytes) -> tuple[str, str] | tuple[str, list[bytes]]:
         # density said "not scanned" but text came back empty (edge) -> fall to images.
     return ("images", pdf_render_pages(data))
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\repository.py
-============================================================
+
+====================================================================================================
+FILE: repository.py
+====================================================================================================
 
 """
 ================================================================================
@@ -5043,9 +5014,10 @@ class BomRepository:
         await self.db.commit()
         return row
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\router.py
-============================================================
+
+====================================================================================================
+FILE: router.py
+====================================================================================================
 
 """
 ================================================================================
@@ -5337,9 +5309,10 @@ async def generate_style_bom(
     return StyleBomAccepted(order_style_id=order_style_id, status="queued",
                             task_id=task.id)
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\schemas.py
-============================================================
+
+====================================================================================================
+FILE: schemas.py
+====================================================================================================
 
 """
 modules/bom/schemas.py — Stage-2/3 BOM API contracts (the editable-BOM bulk-PATCH
@@ -5495,9 +5468,9 @@ class StyleBomAccepted(BaseModel):
     task_id: str | None = None
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\seed_stage2.py
-============================================================
+====================================================================================================
+FILE: seed_stage2.py
+====================================================================================================
 
 """
 ================================================================================
@@ -5706,9 +5679,9 @@ def seed_bom_checks(db, path: str | None = None) -> int:
     return count
 
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\service.py
-============================================================
+====================================================================================================
+FILE: service.py
+====================================================================================================
 
 # service.py
 """
@@ -7562,9 +7535,10 @@ class BomService:
                 "attribution_status": item.attribution_status, "dcm_source": item.dcm_source,
                 "qty_per_garment": float(item.qty_per_garment or 0), "regenerated": regenerated}
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\tasks.py
-============================================================
+
+====================================================================================================
+FILE: tasks.py
+====================================================================================================
 
 # tasks.py
 """
@@ -7788,9 +7762,10 @@ def parse_pattern_dxf(self, *, user_id=None, style_signature=None, client_id=Non
     _run_async(_push_realtime(f"pattern:{style_signature}", "pattern_ready", result))
     return result
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\testing.py
-============================================================
+
+====================================================================================================
+FILE: testing.py
+====================================================================================================
 
 
 
@@ -7846,9 +7821,10 @@ print(result)
 import app.core.config
 print(app.core.config.settings.virus_scan_enabled)
 
-============================================================
-FILE: C:\Users\head user\Desktop\Hamthan\Clinets\2-Factor\Backend\app\modules\bom\units.py
-============================================================
+
+====================================================================================================
+FILE: units.py
+====================================================================================================
 
 from decimal import Decimal
 
@@ -7869,3 +7845,12 @@ def normalize_price(unit_price, price_uom, qty_uom):
     if pf is None or qf is None:
         return Decimal(str(unit_price))                # unknown/non-area: no conversion
     return Decimal(str(unit_price)) / pf * qf          # $/price_uom -> $/dm² -> $/qty_uom
+
+
+====================================================================================================
+FILE: __init__.py
+====================================================================================================
+
+"""bom — Stage-2/3 BOM generation + approval."""
+
+

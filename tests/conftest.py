@@ -35,17 +35,34 @@ from sqlalchemy.pool import StaticPool
 
 # Import Base + every model module so metadata is complete before create_all.
 from app.core.database import Base
-import app.modules.clients.models          # noqa: F401
-import app.modules.employees.models        # noqa: F401
+import app.core.models                      # noqa: F401  Document / Notification / AuditLog
+import app.modules.clients.models           # noqa: F401
+import app.modules.employees.models         # noqa: F401
+import app.modules.users.models             # noqa: F401
 import app.modules.production.models        # noqa: F401
 import app.modules.barcode.models           # noqa: F401  (drawer/material/supplier too)
 import app.modules.attendance.models        # noqa: F401
 import app.modules.wages.models             # noqa: F401
 
+# ── OUT-OF-SCOPE imports, required only to build the schema ──────────────────
+# AUDIT F145 (docs/audit/pass-05-data-integrity.md): app/core/models.py:113-115
+# declares document.submission_id -> submission.id, and :141-143 -> supplier.id.
+# Those tables live in `procurement` / `supplier_po`, which are OUT of the audit
+# scope. Without them Base.metadata.create_all raises:
+#     NoReferencedTableError: Foreign key associated with column
+#     'document.submission_id' could not find table 'submission'
+# So the Phase-1 schema cannot be built alone. These imports are the workaround,
+# NOT the fix — the fix is use_alter=True on those two FKs (see the finding).
+# Nothing in tests/ exercises these modules; they are metadata only.
+import app.modules.procurement.models       # noqa: F401
+import app.modules.supplier_po.models       # noqa: F401
+import app.modules.bom.models               # noqa: F401
+import app.modules.inventory.models         # noqa: F401
+
 from app.core.enums import (
     BarcodeStatus, BarcodeType, DrawerState, ProductionStage, UserRole, WageType,
 )
-from app.modules.barcode.models import BarcodeRegistry, Drawer, MaterialLot, Supplier
+from app.modules.barcode.models import BarcodeRegistry, Drawer, MaterialLot, MaterialSupplier
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
 from app.modules.employees.models import Employee
 from app.modules.production.models import Operation, OperationAccess, Piece
@@ -122,8 +139,30 @@ async def order_tree(db):
 
 
 # ── employees with designations + barcodes ───────────────────────────────────
+async def _mark_present(db, employee_id):
+    """Write today's attendance row so the production presence gate passes.
+
+    `ProductionService._assert_present` (app/modules/production/service.py:176-182)
+    refuses to log output for an employee with no attendance row *today*. That is
+    correct behaviour, so a worker fixture that is about to be used on the floor
+    has to be clocked in — otherwise every production test 400s.
+
+    work_date comes from `AttendanceService._local_today()` (service.py:103-108),
+    the factory-local day, NOT `date.today()`. Using the service's own helper is
+    what keeps this row findable by `is_present_today` (service.py:332-335).
+    """
+    from datetime import datetime, timezone
+    from app.modules.attendance.models import AttendanceLog, AttendanceSource
+    from app.modules.attendance.service import AttendanceService
+
+    work_date = await AttendanceService(db)._local_today()
+    db.add(AttendanceLog(
+        employee_id=employee_id, work_date=work_date,
+        check_in_at=datetime.now(timezone.utc), source=AttendanceSource.SELF))
+
+
 async def _make_employee(db, name, designation, wage_type=WageType.PIECE_RATE,
-                         monthly_salary=0):
+                         monthly_salary=0, present=True):
     emp = Employee(name=name, designation=designation, wage_type=wage_type,
                    monthly_salary=monthly_salary, is_active=True)
     db.add(emp)
@@ -132,10 +171,27 @@ async def _make_employee(db, name, designation, wage_type=WageType.PIECE_RATE,
         code=f"EMP-{str(emp.id)[:6].upper()}", type=BarcodeType.EMPLOYEE.value,
         status=BarcodeStatus.ACTIVE.value, employee_id=emp.id, caption=name)
     db.add(bc)
+    if present:
+        await _mark_present(db, emp.id)
     await db.commit()
     await db.refresh(emp)
     await db.refresh(bc)
     return emp, bc
+
+
+@pytest_asyncio.fixture
+async def mark_present(db):
+    """Factory for tests that create their own employees: `await mark_present(id)`."""
+    async def _f(employee_id):
+        await _mark_present(db, employee_id)
+        await db.commit()
+    return _f
+
+
+@pytest_asyncio.fixture
+async def absent_worker(db):
+    """A worker who has NOT clocked in — for asserting the presence gate fires."""
+    return await _make_employee(db, "ABSENTEE", "CUTTER", present=False)
 
 
 @pytest_asyncio.fixture
