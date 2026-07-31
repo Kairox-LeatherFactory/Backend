@@ -33,6 +33,7 @@ MIGRATION NOTE (Supabase -> self-issued JWT)
 from functools import lru_cache
 
 from dotenv import load_dotenv
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Export the .env file into the real process environment as well. pydantic-settings
@@ -233,6 +234,44 @@ class Settings(BaseSettings):
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
+
+     # ── F32 / H5: never sign production tokens with a well-known key ──────────
+    # H5: the original guard keyed ONLY on `environment`, which defaults to
+    # "local" (config.py:50) — so DEBUG=false with ENVIRONMENT unset booted on
+    # the shipped key. It also matched one prefix, while .env.example:19 ships
+    # "change-me-to-a-long-random-string", which that prefix does not catch.
+    _INSECURE_SECRET_PREFIXES = ("dev-only", "change-me", "changeme", "secret",
+                                 "test", "please-change")
+    _MIN_SECRET_LEN = 32
+
+    @model_validator(mode="after")
+    def _reject_default_secret_outside_local(self) -> "Settings":
+        """A missing/misconfigured SECRET_KEY must FAIL a non-local boot, not
+        silently sign forgeable JWTs. The dev default survives only when BOTH
+        environment == 'local' AND debug is on — either one alone is not a
+        statement that this is a developer's machine.
+        """
+        env = (self.environment or "").strip().lower()
+        key = (self.secret_key or "").strip()
+        is_local_dev = (env == "local" and bool(self.debug))
+        if is_local_dev:
+            return self
+
+        low = key.lower()
+        if any(low.startswith(p) for p in self._INSECURE_SECRET_PREFIXES):
+            raise RuntimeError(
+                "SECRET_KEY is still a well-known placeholder while "
+                f"ENVIRONMENT={self.environment!r} DEBUG={self.debug!r}. "
+                "Set a real SECRET_KEY. Refusing to boot with a publicly-known "
+                "signing key."
+            )
+        if len(key) < self._MIN_SECRET_LEN:
+            raise RuntimeError(
+                f"SECRET_KEY is {len(key)} chars; a signing key must be at least "
+                f"{self._MIN_SECRET_LEN}. Generate one with "
+                "`python -c \"import secrets;print(secrets.token_urlsafe(48))\"`."
+            )
+        return self
 
 
 @lru_cache

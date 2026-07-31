@@ -15,15 +15,22 @@ from app.core.enums import WageType
 
 
 class EmployeeRead(BaseModel):
+    """Roster view WITHOUT pay. Safe for any internal reader. F37: monthly_salary
+    is NOT here — it was previously exposed to every non-employee role including
+    CLIENT and VIEWER."""
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     name: str
     designation: str | None
     wage_type: WageType
-    monthly_salary: float | None
     is_active: bool
     phone: str | None = None
     email: str | None = None
+
+
+class EmployeeReadWithPay(EmployeeRead):
+    """Roster view WITH pay. Returned only to HR / DM / MD (F37)."""
+    monthly_salary: float | None = None
 
 
 class EmployeeCreate(BaseModel):

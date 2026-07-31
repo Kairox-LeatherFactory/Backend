@@ -38,6 +38,14 @@ class DrawerService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
+    async def repo_commit(self) -> None:
+        """Single commit seam for this module (F71). The drawers module has no
+        repository yet (F105 — D2), so this method localises the one place the
+        session is committed. Callers that COMPOSE drawer mutations into a larger
+        unit of work should use the *_nocommit variants instead and own the
+        boundary (production already does this via release_nocommit)."""
+        await self.db.commit()
+
     # ── lookups ──────────────────────────────────────────────────────────────
     async def get(self, drawer_id: uuid.UUID) -> Drawer | None:
         return await self.db.get(Drawer, drawer_id)
@@ -69,6 +77,16 @@ class DrawerService:
                 f"{piece.code} is not merged to drawer {drawer.code}. "
                 "Scan the drawer the upload assigned to this piece.")
 
+        # F08: a part scan is only valid while the drawer is still accumulating.
+        # A drawer already RECEIVED or SENDED must not be dragged backwards by a
+        # new scan — that would silently revoke a merge gate production may have
+        # already passed.
+        if drawer.state in (DrawerState.RECEIVED.value, DrawerState.SENDED.value):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Drawer {drawer.code} is already {drawer.state} and cannot accept "
+                "another part scan. Its pieces have been released for the next stage.")
+
         if part is DrawerPart.LEATHER:
             drawer.leather_in = True
         else:
@@ -76,10 +94,18 @@ class DrawerService:
 
         needs_lining = bool(getattr(piece, "needs_lining", True))
         complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
-        drawer.state = (DrawerState.HOLDING_BOTH.value if complete
-                        else DrawerState.HOLDING_LEATHER.value)
+        # F07: name what is ACTUALLY in the drawer. A lining-first scan must not
+        # report HOLDING_LEATHER.
+        if complete:
+            drawer.state = DrawerState.HOLDING_BOTH.value
+        elif drawer.leather_in:
+            drawer.state = DrawerState.HOLDING_LEATHER.value
+        elif drawer.lining_in:
+            drawer.state = DrawerState.HOLDING_LINING.value
+        else:
+            drawer.state = DrawerState.WAITING.value
 
-        await self.db.commit()
+        await self.repo_commit()   # F71: commit via a single seam (see below)
         await self.db.refresh(drawer)
 
         awaiting = []
@@ -104,6 +130,14 @@ class DrawerService:
         t = transition.upper()
 
         if t == "RECEIVED":
+            # F09: RECEIVED must validate the source state too — a drawer already
+            # SENDED must not move back to RECEIVED (the machine is a forward
+            # cycle; the SENDED branch already guards its direction).
+            if drawer.state == DrawerState.SENDED.value:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    f"Drawer {drawer.code} is already SENDED — cannot move back to "
+                    "RECEIVED.")
             complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
             if not complete:
                 missing = "lining" if needs_lining and not drawer.lining_in else "leather"
@@ -128,7 +162,7 @@ class DrawerService:
 
         await self._audit(actor_id, action, drawer.id,
                           {"piece": piece.code if piece else None, "state": drawer.state})
-        await self.db.commit()
+        await self.repo_commit()
         await self.db.refresh(drawer)
         return {
             "drawer_code": drawer.code,
@@ -151,6 +185,13 @@ class DrawerService:
             drawer.lining_in = False
             drawer.received_at = None
             drawer.sended_at = None
+        # F11: clear BOTH sides of the piece↔drawer link. Previously only
+        # drawer.current_piece_id was nulled, so after release the piece still
+        # pointed at a drawer that no longer claimed it — the barcode payload and
+        # the piece life-story disagreed permanently.
+        piece = await self.db.get(Piece, piece_id)
+        if piece is not None and getattr(piece, "drawer_id", None) is not None:
+            piece.drawer_id = None
 
     async def _audit(self, actor_id, action, entity_id, after: dict) -> None:
         from app.core.models import AuditLog

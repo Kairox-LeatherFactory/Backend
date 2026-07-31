@@ -62,7 +62,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import Base, SessionLocal, engine
-from app.core.enums import UserRole, WageType
+from app.core.enums import (
+    UserRole, WageType, ProductionStage, STAGE_ROLE_ACCESS, LINING_MANAGER,
+)
 from app.core.security import get_password_hash
 
 # Import models (registers tables on Base.metadata).
@@ -85,7 +87,7 @@ from app.modules.inventory.seed_inventory import seed_inventory
 from app.modules.imports.import_engine import build_preview
 from app.modules.imports.parse_orders import parse_order_sheet
 from app.modules.imports.load_to_db import (
-    load_preview, _get_or_create_client, _get_or_create_order,
+    load_preview_into_order, _get_or_create_client, _get_or_create_order,
     _get_or_create_style, _upsert_sku,
 )
 
@@ -94,15 +96,44 @@ GARMENT_FILE = "data/GARMENT_ORDERPRODUCTION_DETAILS.xlsx"
 EMPLOYEES_FILE = "data/employees_detail.xlsx"
 JOHNPETER_FILE = "data/johnpeter.xlsx"
 
-OPS = [("CUTTING", "Cutting", 1), ("FUSING", "Fusing", 2), ("PASTING", "Pasting", 3),
-       ("SHELL", "Shell stitch", 4), ("LA", "Lining attach", 5),
-       ("LS", "Lining stitch", 6), ("FF", "Final finish", 7)]
+# ── Operations & access, DERIVED FROM THE ENUM (F02/F58) ────────────────────
+# The seed operation codes MUST equal the ProductionStage vocabulary the runtime
+# uses, or every /production/log scan 500s (F02). We therefore GENERATE OPS from
+# the enum rather than hand-listing codes that drift. The two parallel cut
+# entries (LEATHER_CUTTING, LINING_CUTTING) plus the linear leather chain give
+# the full operation set; LINING_CUTTING is inserted right after LEATHER_CUTTING.
+def _seed_operations_spec() -> list[tuple[str, str, int]]:
+    """[(code, label, sequence)] for every ProductionStage, enum-derived."""
+    chain = ProductionStage.leather_chain()          # includes LEATHER_CUTTING first
+    # Insert LINING_CUTTING right after LEATHER_CUTTING (parallel cut entry).
+    ordered: list[ProductionStage] = []
+    for st in chain:
+        ordered.append(st)
+        if st is ProductionStage.LEATHER_CUTTING:
+            ordered.append(ProductionStage.LINING_CUTTING)
+    spec = []
+    for i, st in enumerate(ordered, start=1):
+        label = st.value.replace("_", " ").title()
+        spec.append((st.value, label, i))
+    return spec
 
-# Which manager role may log which operation (config, not hardcoded in code).
-ACCESS = {
-    UserRole.CUTTING_MANAGER.value: ["CUTTING"],
-    UserRole.STITCHING_MANAGER.value: ["FUSING", "PASTING", "SHELL", "LA", "LS", "FF"],
-}
+
+OPS = _seed_operations_spec()
+
+# Which manager role may log which operation — DERIVED from STAGE_ROLE_ACCESS so
+# a role that owns a stage (incl. LINING_MANAGER, F58) always gets seeded access
+# and can never silently be omitted. DM/MD bypass in the service, so they are not
+# listed here by design.
+def _seed_access_spec() -> dict[str, list[str]]:
+    access: dict[str, list[str]] = {}
+    for stage, roles in STAGE_ROLE_ACCESS.items():
+        for role in roles:
+            rv = getattr(role, "value", role)
+            access.setdefault(rv, []).append(stage.value)
+    return access
+
+
+ACCESS = _seed_access_spec()
 
 # Map each spreadsheet client key to a friendly name + country (best-effort).
 CLIENT_META = {
@@ -149,7 +180,7 @@ def seed_orders(db: Session) -> None:
     # across re-runs. The friendly names live in CLIENT_META for display use.
     preview = build_preview(GARMENT_FILE)
     country_map = {k: meta[1] for k, meta in CLIENT_META.items()}
-    load_preview(db, preview, country_map=country_map, replace=True)
+    load_preview_into_order(db, preview, country_map=country_map, replace=True)
     db.commit()
 
     # John Peter — a flat single-sheet order (Date|Style|Suede Colour|Article|sizes).
@@ -208,9 +239,26 @@ def seed_rates(db: Session, ops: dict[str, Operation]) -> int:
     """Read RATE rows from the production cards and attach to matching styles.
     The import engine already parsed these; we re-read for rate attachment."""
     preview = build_preview(GARMENT_FILE)
-    # Normalise card op codes (e.g. 'L/A' -> 'LA', 'LINING STICH' -> 'LS').
-    code_norm = {"L/A": "LA", "LINING STICH": "LS", "FF-SAMPLE": "FF",
-                 "FF-SMS": "FF", "LINING STITCH": "LS"}
+    # Normalise card op codes from the source spreadsheets to the canonical
+    # ProductionStage vocabulary (F02). The sheets use legacy labels; the runtime
+    # (and now the seeded `ops`) key on the enum values.
+    code_norm = {
+        "CUTTING": "LEATHER_CUTTING",
+        "LEATHER CUTTING": "LEATHER_CUTTING",
+        "LINING CUTTING": "LINING_CUTTING",
+        "FUSING": "FUSING",
+        "PASTING": "PASTING",
+        "SHELL": "SHELL_STITCHING",
+        "SHELL STITCH": "SHELL_STITCHING",
+        "L/A": "LINE_STITCHING",          # lining attach folds into line stitching
+        "LA": "LINE_STITCHING",
+        "LINING STICH": "LINE_STITCHING",
+        "LINING STITCH": "LINE_STITCHING",
+        "LS": "LINE_STITCHING",
+        "FF": "FINAL_FINISH",
+        "FF-SAMPLE": "FINAL_FINISH",
+        "FF-SMS": "FINAL_FINISH",
+    }
     count = 0
     seen: set = set()        # (style_id, op_id) inserted this run
     for key, cp in preview.clients.items():

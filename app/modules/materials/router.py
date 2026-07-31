@@ -25,7 +25,7 @@ from app.modules.users.deps import require_roles
 from app.modules.users.models import User
 
 router = APIRouter(prefix="/materials", tags=["Materials"])
-sup_router = APIRouter(prefix="/suppliers", tags=["Suppliers"])
+sup_router = APIRouter(prefix="/suppliers", tags=["MaterialSuppliers"])
 
 _LOT_WRITERS = require_roles(
     UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.CUTTING_MANAGER)

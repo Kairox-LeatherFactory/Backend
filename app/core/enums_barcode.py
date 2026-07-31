@@ -427,6 +427,7 @@ class DrawerState(str, enum.Enum):
     WAITING = "waiting"
     MERGED = "merged"
     HOLDING_LEATHER = "holding_leather"
+    HOLDING_LINING = "holding_lining"   # F07: lining stored, leather not yet
     HOLDING_BOTH = "holding_both"
     RECEIVED = "received"
     SENDED = "sended"

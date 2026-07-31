@@ -24,11 +24,15 @@ WHY THIS MATTERS FOR PRODUCTION
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+logger = logging.getLogger(__name__)
+
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import UserRole, WageType
@@ -113,7 +117,17 @@ class AttendanceService:
         """
         tz = self._tz(cfg)
         local_in = self._as_utc(check_in).astimezone(tz)
-        h, m = (int(x) for x in cfg.shift_start.split(":"))
+        # F109: a malformed shift_start already stored in the DB (from before the
+        # schema validation was added) must not crash EVERY check-in. Parse
+        # defensively and fall back to a safe default rather than raising.
+        try:
+            h, m = (int(x) for x in cfg.shift_start.split(":"))
+            if not (0 <= h <= 23 and 0 <= m <= 59):
+                raise ValueError(cfg.shift_start)
+        except (ValueError, AttributeError):
+            logger.warning("invalid shift_start %r in config; defaulting to 09:00",
+                           getattr(cfg, "shift_start", None))
+            h, m = 9, 0
         shift_start_today = local_in.replace(hour=h, minute=m, second=0, microsecond=0)
         grace = timedelta(minutes=cfg.late_grace_minutes)
         is_late = local_in > (shift_start_today + grace)
@@ -157,7 +171,7 @@ class AttendanceService:
 
     async def barcode_scan(self, *, employee_id: uuid.UUID, actor: User,
                            direction: str, lat: float | None,
-                           lon: float | None, proxy: bool):
+                           lon: float | None, proxy: bool, reason: str | None = None):
         """Barcode check in/out. Reuses _open_or_reject / _close.
 
         A worker (EMPLOYEE role) may only scan their own card — enforced in the
@@ -166,10 +180,31 @@ class AttendanceService:
         emp = await self.employees.get(employee_id)
         if not emp:
             raise HTTPException(404, "Employee not found.")
-        # geofence: reuse the same check the manual flow runs (0.0 if lat/lon None)
-        dist = 0.0
+        # F34 / H6: a MISSING GPS fix must NOT be recorded as distance_m = 0.0,
+        # which is indistinguishable from "standing at the gate". When
+        # coordinates are present we enforce the fence as normal.
+        #
+        # H6: when they are absent we no longer just wave the scan through.
+        # Indoor/metal-roof floors can genuinely lack a fix, so this is not a
+        # hard fail — but "omit two JSON keys and attendance is unverifiable
+        # from anywhere" is a bypass, and the resulting row satisfies
+        # is_present_today(), which unlocks production logging. So an
+        # unverified scan is allowed only as a SUPERVISED exception: it must
+        # carry a reason, and PROXY scans (a supervisor standing on the floor)
+        # must always carry coordinates.
         if lat is not None and lon is not None:
             dist = await self._enforce_geofence(lat, lon)
+        else:
+            if proxy:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    "A proxy scan must include the supervisor's GPS position.")
+            if not (reason or "").strip():
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    "Location unavailable — send `reason` to record an "
+                    "unverified check-in for supervisor review.")
+            dist = None
         source = AttendanceSource.PROXY if proxy else AttendanceSource.SELF
         if direction == "in":
             log = await self._open_or_reject(
@@ -184,16 +219,18 @@ class AttendanceService:
             "check_in_at": log.check_in_at.isoformat() if log.check_in_at else None,
             "check_out_at": log.check_out_at.isoformat() if log.check_out_at else None,
             "is_late": log.is_late, "present_today": present,
+            "location_unverified": dist is None,
         }
- 
+
     # ══════════════════════════════════════════════════════════════════
     # Flow B — Supervisor proxy-marks daily-wage workers
     # ══════════════════════════════════════════════════════════════════
     async def proxy_mark_present(self, supervisor: User,
                                 body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
         # Permission: SUPERVISOR (and DIRECT_MANAGER as superuser) only.
-        if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER , UserRole.HR, UserRole.MANAGING_DIRECTOR):
-            raise HTTPException(403, "Only a supervisor may proxy-mark attendance.")
+        # F50: authorization is decided once, in the router (now includes
+        # SUPERVISOR). No duplicate role check here — two gates that disagree is
+        # exactly what locked supervisors out of a flow built for them.
         dist = await self._enforce_geofence(body.lat, body.lon)
 
         out: list[AttendanceLog] = []
@@ -217,8 +254,7 @@ class AttendanceService:
 
     async def proxy_check_out(self, supervisor: User,
                               body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
-        if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR):
-            raise HTTPException(403, "Only a supervisor may proxy check-out.")
+        # F50: role decided in the router.
         await self._enforce_geofence(body.lat, body.lon)
         out = []
         for emp_id in body.employee_ids:
@@ -230,8 +266,12 @@ class AttendanceService:
     # ══════════════════════════════════════════════════════════════════
     async def add_daily_worker(self, supervisor: User,
                                body: schemas.AddDailyWorkerRequest) -> Employee:
-        if supervisor.role not in (UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER):
-            raise HTTPException(403, "Only a supervisor may add daily workers.")
+        # F51: onboarding creates a LOGIN, so this stays DM/HR/MD (aligned with
+        # the router). SUPERVISOR is deliberately NOT permitted to create users.
+        if supervisor.role not in (
+            UserRole.DIRECT_MANAGER, UserRole.HR, UserRole.MANAGING_DIRECTOR):
+            raise HTTPException(
+                403, "Only a manager or HR may onboard a daily worker.")
         from app.modules.employees.schemas import EmployeeCreate
 
         emp_create = EmployeeCreate(
@@ -261,13 +301,25 @@ class AttendanceService:
             check_in_at=now, source=source, recorded_by_user_id=recorded_by,
             is_late=is_late, is_short=False, is_overtime=False, distance_m=distance_m,
         )
-        return await self.repo.add(log)
+        # F69: uq_att_emp_day makes this a read-then-insert race — two concurrent
+        # check-ins (a double-tap, or self racing a proxy) both see no existing
+        # row and the second insert would raise an unhandled IntegrityError (500).
+        # The constraint is correct; we make the loser the idempotent no-op the
+        # comment above already promises: roll back and return the row that won.
+        try:
+            return await self.repo.add(log)
+        except IntegrityError:
+            await self.db.rollback()
+            existing = await self.repo.find(employee_id, today)
+            if existing:
+                return existing
+            raise
 
     async def _close(self, *, employee_id: uuid.UUID) -> AttendanceLog:
         today = await self._local_today()
         log = await self.repo.find(employee_id, today)
         if not log:
-            raise HTTPException(400, "No open check-in to close for today.")
+            raise HTTPException(404, "No check-in recorded today — scan in first.")
         log.check_out_at = self._now()
         cfg = await self._config()
         log.is_late, log.is_short, log.is_overtime = self._flags(cfg, log.check_in_at, log.check_out_at)

@@ -24,14 +24,28 @@ from pydantic import BaseModel, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.enums import ScreenContext
+from app.core.enums import ScreenContext , UserRole
 from app.modules.barcode.service import BarcodeService
 from app.modules.production.service import ProductionService
-from app.modules.users.deps import get_current_user
+from app.modules.users.deps import get_current_user, require_roles
 from app.modules.users.models import User
+from app.modules.production.schemas import LogRequest, LogResult, Consumption
 
 router = APIRouter(prefix="/production", tags=["Production"])
 
+# ── B9: tenancy, mirroring analytics/router.py:23-32 ────────────────────────
+def client_scope(user: User = Depends(get_current_user)) -> uuid.UUID | None:
+    """The client_id a request must be scoped to: the caller's own for a CLIENT
+    login, None for staff (who legitimately read across clients). A cross-tenant
+    id must resolve to 404 — existence itself is information."""
+    return user.client_id if user.role == UserRole.CLIENT else None
+
+# Raw event feed + piece-level reads are floor/office data, never customer data.
+_FLOOR_READERS = require_roles(
+    UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER, UserRole.HR,
+    UserRole.SUPERVISOR, UserRole.CUTTING_MANAGER, UserRole.LINING_MANAGER,
+    UserRole.STITCHING_MANAGER,
+)
 
 # ══════════════════════════════════════════════════════════════════════════
 # READ endpoints (carried over from the pre-barcode router — unchanged behaviour)
@@ -39,7 +53,7 @@ router = APIRouter(prefix="/production", tags=["Production"])
 @router.get("/operations")
 async def list_operations(
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(_FLOOR_READERS),
 ):
     """The configured production operations (the pipeline steps)."""
     return await ProductionService(db).list_operations()
@@ -50,10 +64,11 @@ async def list_sku_options(
     order_id: uuid.UUID | None = Query(None),
     style_id: uuid.UUID | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    scope: uuid.UUID | None = Depends(client_scope),
 ):
     """Friendly SKU picker for the log screens (code + style · colour · size)."""
-    return await ProductionService(db).list_sku_options(order_id=order_id, style_id=style_id)
+    return await ProductionService(db).list_sku_options(
+        order_id=order_id, style_id=style_id, client_scope=scope)
 
 
 @router.get("/events")
@@ -63,9 +78,12 @@ async def list_events(
     start: date | None = Query(None),
     end: date | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(_FLOOR_READERS),
 ):
-    """Raw production events, filterable by sku / employee / date window."""
+    """Raw production events, filterable by sku / employee / date window.
+
+    B9: floor/office staff only. This feed names the employee who worked each
+    piece; a CLIENT or VIEWER token has no business in it."""
     return await ProductionService(db).list_events(
         sku_id=sku_id, employee_id=employee_id, start=start, end=end)
 
@@ -74,62 +92,23 @@ async def list_events(
 async def style_progress(
     style_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    scope: uuid.UUID | None = Depends(client_scope),
 ):
     """Per-stage completed counts for a style (the live progress card)."""
+    return await ProductionService(db).style_progress(style_id, client_scope=scope)
+
+
+@router.get("/skus/{sku_id}/pieces")
+async def list_pieces(
+    sku_id: uuid.UUID,
+    operation_id: uuid.UUID | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    scope: uuid.UUID | None = Depends(client_scope),
+):
+    """Every piece of one SKU with its current stage and eligibility."""
+    return await ProductionService(db).list_pieces_for_sku(
+        sku_id=sku_id, operation_id=operation_id, client_scope=scope)
     return await ProductionService(db).style_progress(style_id)
-
-
-# ── request/response ─────────────────────────────────────────────────────────
-class Actor(BaseModel):
-    employee_barcode: str | None = None
-    employee_id: uuid.UUID | None = None
-
-    @model_validator(mode="after")
-    def _one(self):
-        if not self.employee_barcode and not self.employee_id:
-            raise ValueError("Provide employee_barcode or employee_id.")
-        return self
-
-
-class Targets(BaseModel):
-    piece_barcodes: list[str] | None = None
-    sku_id: uuid.UUID | None = None
-    piece_seqs: list[int] | None = None
-
-    @model_validator(mode="after")
-    def _one(self):
-        if not self.piece_barcodes and not (self.sku_id and self.piece_seqs):
-            raise ValueError("Provide piece_barcodes OR (sku_id + piece_seqs).")
-        return self
-
-
-class Consumption(BaseModel):
-    leather_lot_id: uuid.UUID | None = None
-    lining_lot_id: uuid.UUID | None = None
-    dcm: float | None = None
-
-
-class LogRequest(BaseModel):
-    screen_context: str = "PIPELINE"       # LEATHER_CUT | LINING_CUT | PIPELINE
-    actor: Actor
-    targets: Targets
-    work_date: date
-    consumption: Consumption | None = None
-
-
-class LogResult(BaseModel):
-    stage: str | None
-    count_logged: int
-    logged: list[str]
-    rework: list[str]
-    not_found: list[str]
-    sequence_blocked: list[str]
-    skill_blocked: list[str]
-    merge_blocked: list[str]
-    screen_role_warning: str | None = None
-    consumption_recorded: dict | None = None
-
 
 @router.post("/log", response_model=LogResult, status_code=201)
 async def log_batch(
@@ -186,18 +165,6 @@ async def log_batch(
         leather_lot_id=cons.leather_lot_id, lining_lot_id=cons.lining_lot_id,
         consumption_qty=cons.dcm)
 
-
-@router.get("/skus/{sku_id}/pieces")
-async def sku_pieces(
-    sku_id: uuid.UUID,
-    operation_id: uuid.UUID | None = Query(None),
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
-    """The manual-door checklist: every piece of a SKU with done/eligible flags
-    for the selected operation, so the UI greys out out-of-sequence pieces."""
-    return await ProductionService(db).list_pieces_for_sku(
-        sku_id=sku_id, operation_id=operation_id)
 
 
 # ── deprecated shims (one release) ───────────────────────────────────────────

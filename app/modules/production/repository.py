@@ -210,7 +210,16 @@ class ProductionRepository:
             .where(ProductionEvent.work_date >= start, ProductionEvent.work_date <= end)
             .group_by(
                 ProductionEvent.employee_id,
-                SKU.style_id,
+                Piece.style_id,
+                ProductionEvent.operation_id,
+                ProductionEvent.work_date,
+            )
+            # H11: deterministic ordering. Wage aggregation folds these rows in
+            # arrival order, so an unordered result made the stored display rate
+            # depend on the query plan.
+            .order_by(
+                ProductionEvent.employee_id,
+                Piece.style_id,
                 ProductionEvent.operation_id,
                 ProductionEvent.work_date,
             )

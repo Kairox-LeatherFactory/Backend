@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.barcode.models import (
-    MaterialLot, MaterialReceipt, MaterialReservation, Supplier, SupplierOrder,
+    MaterialLot, MaterialReceipt, MaterialReservation, MaterialSupplier, SupplierOrder,
 )
 
 
@@ -85,20 +85,20 @@ class MaterialRepository:
         return Decimal(str(val or 0))
 
     # ── suppliers ────────────────────────────────────────────────────────────
-    async def suggest_supplier(self, article: str) -> Supplier | None:
+    async def suggest_supplier(self, article: str) -> MaterialSupplier | None:
         """Simple article→supplier lookup (v1). NOT the AI classifier."""
         if not article:
             return None
         res = await self.db.execute(
-            select(Supplier).where(
-                Supplier.is_active.is_(True),
-                Supplier.articles.ilike(f"%{article}%"))
+            select(MaterialSupplier).where(
+                MaterialSupplier.is_active.is_(True),
+                MaterialSupplier.articles.ilike(f"%{article}%"))
             .limit(1)
         )
         return res.scalar_one_or_none()
 
-    async def get_supplier(self, supplier_id: uuid.UUID) -> Supplier | None:
-        return await self.db.get(Supplier, supplier_id)
+    async def get_supplier(self, supplier_id: uuid.UUID) -> MaterialSupplier | None:
+        return await self.db.get(MaterialSupplier, supplier_id)
 
     # ── supplier orders ──────────────────────────────────────────────────────
     def add_order_nocommit(self, **kw) -> SupplierOrder:

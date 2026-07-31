@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.enums import ShipMode
+from app.modules.analytics.barcode_ext import BarcodeAnalyticsMixin
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
 from app.modules.clients.service import sku_label
 from app.modules.employees.models import Employee
@@ -34,7 +35,7 @@ def _norm(code: str | None) -> str:
     return (code or "").strip().upper()
 
 
-class AnalyticsService:
+class AnalyticsService(BarcodeAnalyticsMixin):
     def __init__(self, db: AsyncSession):
         self.db = db
 
@@ -154,14 +155,20 @@ class AnalyticsService:
         }
 
     # ================================================================ LEVEL 1
-    async def order_tree(self, order_id: uuid.UUID) -> dict:
+    async def order_tree(self, order_id: uuid.UUID,
+                         *, client_scope: uuid.UUID | None = None) -> dict:
         """Order landing view: the order + its styles, each summarised by piece
         count and how those pieces are distributed across current stages."""
-        head = (await self.db.execute(
+        stmt = (
             select(ClientOrder.order_number, Client.name, Client.id, ClientOrder.id)
             .join(Client, Client.id == ClientOrder.client_id)
             .where(ClientOrder.id == order_id)
-        )).first()
+        )
+        # F33: a CLIENT caller may only read their own order. Add the predicate so
+        # a substituted competitor id resolves to 404, not their data.
+        if client_scope is not None:
+            stmt = stmt.where(ClientOrder.client_id == client_scope)
+        head = (await self.db.execute(stmt)).first()
         if not head:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
         order_number, client_name, _cid, _oid = head
@@ -205,14 +212,18 @@ class AnalyticsService:
         }
 
     # ================================================================ LEVEL 2
-    async def style_detail(self, style_id: uuid.UUID) -> dict:
+    async def style_detail(self, style_id: uuid.UUID,
+                           *, client_scope: uuid.UUID | None = None) -> dict:
         """One style with all its pieces, each carrying its full stage history."""
-        head = (await self.db.execute(
+        stmt = (
             select(Style.name, Style.article, ClientOrder.order_number, Client.name)
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .join(Client, Client.id == ClientOrder.client_id)
             .where(Style.id == style_id)
-        )).first()
+        )
+        if client_scope is not None:      # F33
+            stmt = stmt.where(ClientOrder.client_id == client_scope)
+        head = (await self.db.execute(stmt)).first()
         if not head:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Style not found")
         style_name, article, order_number, client_name = head
@@ -279,7 +290,8 @@ class AnalyticsService:
     # ================================================================ LEVEL 3
     async def piece_detail(self, *, piece_code: str | None = None,
                            sku_code: str | None = None,
-                           seq: int | None = None) -> dict:
+                           seq: int | None = None,
+                           client_scope: uuid.UUID | None = None) -> dict:
         """One piece by piece_code OR (sku_code + seq): header + stage history."""
         q = (
             select(Piece.id, Piece.code, Piece.seq,
@@ -299,6 +311,8 @@ class AnalyticsService:
         else:
             raise HTTPException(status.HTTP_400_BAD_REQUEST,
                                 "Provide piece_code or (sku_code + seq).")
+        if client_scope is not None:      # F33
+            q = q.where(ClientOrder.client_id == client_scope)
         row = (await self.db.execute(q)).first()
         if not row:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Piece not found")
@@ -345,11 +359,18 @@ class AnalyticsService:
         }
 
     # =============================================================== dashboards
-    async def stage_spread_alerts(self) -> list[dict]:
-        """Bottlenecks: where a downstream stage lags CUTTING. Under per-piece the
-        gap is true WIP-in-flight (cut but not yet reached stage X)."""
+    async def stage_spread_alerts(self,
+                                  *, client_scope: uuid.UUID | None = None) -> list[dict]:
+        """Bottlenecks: where a downstream stage lags the leather cut. Under
+        per-piece the gap is true WIP-in-flight (cut but not yet reached stage X)."""
+        from app.core.enums import ProductionStage
+        cut_code = ProductionStage.LEATHER_CUTTING.value   # F02: not "CUTTING"
         alerts: list[dict] = []
-        styles = (await self.db.execute(select(Style))).scalars().all()
+        sstmt = select(Style)
+        if client_scope is not None:      # F33: only this client's styles
+            sstmt = (sstmt.join(ClientOrder, ClientOrder.id == Style.client_order_id)
+                     .where(ClientOrder.client_id == client_scope))
+        styles = (await self.db.execute(sstmt)).scalars().all()
         for style in styles:
             rows = (await self.db.execute(
                 select(Operation.code, func.coalesce(func.sum(ProductionEvent.qty), 0))
@@ -362,9 +383,9 @@ class AnalyticsService:
             totals = dict(rows)
             if not totals:
                 continue
-            first = totals.get("CUTTING", 0)
+            first = totals.get(cut_code, 0)
             for code, qty in totals.items():
-                if code == "CUTTING":
+                if code == cut_code:
                     continue
                 gap = first - int(qty)
                 if first > 0 and gap > 0 and gap / first > 0.5:
@@ -375,11 +396,15 @@ class AnalyticsService:
                     })
         return alerts
 
-    async def freight_risk(self, today: date | None = None) -> list[dict]:
+    async def freight_risk(self, today: date | None = None,
+                           *, client_scope: uuid.UUID | None = None) -> list[dict]:
         today = today or date.today()
         warn_from = settings.sea_cutoff_warning_days
         risks: list[dict] = []
-        orders = (await self.db.execute(select(ClientOrder))).scalars().all()
+        ostmt = select(ClientOrder)
+        if client_scope is not None:      # F33
+            ostmt = ostmt.where(ClientOrder.client_id == client_scope)
+        orders = (await self.db.execute(ostmt)).scalars().all()
         last_seq = await self.db.scalar(select(func.max(Operation.sequence)))
         for order in orders:
             if not order.sea_cutoff_date or order.ship_mode == ShipMode.AIR.value:

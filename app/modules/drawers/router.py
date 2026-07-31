@@ -29,8 +29,16 @@ router = APIRouter(prefix="/drawers", tags=["Drawers"])
 async def store_scan(
     body: schemas.StoreScanRequest,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_roles(
+        UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER,
+        UserRole.CUTTING_MANAGER, UserRole.LINING_MANAGER,
+        UserRole.STITCHING_MANAGER, UserRole.SUPERVISOR)),
 ):
+    """Record a leather or lining part arriving in its drawer. Scan the drawer
+    first (the merge map is the authority), then the piece.
+
+    H2: floor staff only. This write feeds the merge gate that releases a piece
+    into line-stitching — CLIENT and VIEWER tokens must not reach it."""
     """Record a leather or lining part arriving in its drawer. Scan the drawer
     first (the merge map is the authority), then the piece."""
     barcodes = BarcodeService(db)

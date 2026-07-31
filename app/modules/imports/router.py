@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import os
 import tempfile
+import zipfile
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.config import settings
 from app.core.database import SessionLocal, get_db
 from app.modules.clients.service import ClientService
-from app.modules.imports.load_to_db import load_preview, load_preview_into_order
+from app.modules.imports.load_to_db import load_preview_into_order
 from app.modules.imports.import_engine import build_preview
 from app.modules.users.deps import require_roles
 from app.modules.users.models import User
@@ -39,11 +41,41 @@ router = APIRouter(prefix="/imports", tags=["Imports"])
 
 
 def _save_upload(file: UploadFile) -> str:
-    if not file.filename.lower().endswith((".xlsx", ".xlsm")):
+    # F118: filename is optional in the multipart spec — guard before .lower().
+    fname = (file.filename or "").lower()
+    if not fname.endswith((".xlsx", ".xlsm")):
         raise HTTPException(400, "Please upload an .xlsx file")
+
+    # F38: stream the body with a hard cap instead of an unbounded .read() that
+    # pulls the whole upload into memory. The cap comes from settings.
+    max_bytes = settings.max_upload_mb * 1024 * 1024
     fd, path = tempfile.mkstemp(suffix=".xlsx")
+    written = 0
     with os.fdopen(fd, "wb") as f:
-        f.write(file.file.read())
+        while True:
+            chunk = file.file.read(1024 * 1024)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > max_bytes:
+                f.close()
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                raise HTTPException(
+                    413, f"File exceeds the {settings.max_upload_mb} MB limit.")
+            f.write(chunk)
+
+    # F45: validate the CONTAINER, not just the extension. An .xlsx is a zip;
+    # anything renamed to .xlsx that is not a valid zip is rejected before it
+    # reaches openpyxl (guards against a decompression bomb / mislabelled file).
+    if not zipfile.is_zipfile(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise HTTPException(400, "File is not a valid .xlsx workbook.")
     return path
 
 async def _require_order(db: AsyncSession, order_number: str):
@@ -66,17 +98,6 @@ def _do_commit_into_order(path: str, order_number: str) -> dict:
 
 def _do_preview(path: str) -> dict:
     return build_preview(path).summary()
-
-
-def _do_commit(path: str) -> dict:
-    preview = build_preview(path)
-    summary = preview.summary()
-    db = SessionLocal()
-    try:
-        stats = load_preview(db, preview)
-    finally:
-        db.close()
-    return {"summary": summary, "written": stats}
 
 
 @router.post("/preview")

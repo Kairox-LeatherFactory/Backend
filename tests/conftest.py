@@ -249,3 +249,55 @@ def today():
 @pytest.fixture
 def last_week():
     return date.today() - timedelta(days=7)
+
+
+# ==============================================================================
+# COMPATIBILITY FIXTURES (added for the audit-fix regression suites)
+# ------------------------------------------------------------------------------
+# The regression test files added during the fix pass (test_wages_money_path.py,
+# test_materials_fixes.py, test_production_fixes.py, test_attendance_fixes.py,
+# etc.) refer to `db_session` and `seed_min`. Rather than rename every test or
+# disturb the fixtures above, these two thin fixtures bridge the naming. They are
+# purely additive — no existing fixture or test is affected.
+# ==============================================================================
+
+@pytest_asyncio.fixture
+async def db_session(db) -> AsyncSession:
+    """Alias for `db`. The audit-fix suites were written against `db_session`;
+    the original harness names the session `db`. Same object, both names work."""
+    return db
+
+
+@pytest_asyncio.fixture
+async def seed_min(db, operations):
+    """Minimal seed used by a couple of structural regression tests (F05, F34).
+
+    Guarantees the canonical operation vocabulary exists (via `operations`) plus
+    a single client→order→style→sku and one active employee, so a test that needs
+    'a database that resembles production' has one. Returns a dict of handles.
+
+    Deliberately small: the tests that request it are structural (they assert a
+    fix is present) and only need the fixture to resolve, not a full factory.
+    """
+    client = Client(name="Seed Client", country="IT")
+    db.add(client)
+    await db.flush()
+    order = ClientOrder(client_id=client.id, order_number="SEED-PO")
+    db.add(order)
+    await db.flush()
+    style = Style(client_order_id=order.id, name="SEEDSTYLE", article="SS1")
+    db.add(style)
+    await db.flush()
+    sku = SKU(style_id=style.id, color_code="BLK", color_name="BLACK",
+              size="M", qty_ordered=1, code="SEED-PO-SEEDSTYLE-BLK-M")
+    db.add(sku)
+    emp = Employee(name="SEEDWORKER", designation="CUTTER",
+                   wage_type=WageType.PIECE_RATE, monthly_salary=0, is_active=True)
+    db.add(emp)
+    await db.commit()
+    for obj in (client, order, style, sku, emp):
+        await db.refresh(obj)
+    return {
+        "client": client, "order": order, "style": style, "sku": sku,
+        "employee": emp, "operations": operations,
+    }

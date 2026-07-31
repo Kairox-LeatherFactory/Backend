@@ -35,17 +35,33 @@ class BarcodeService:
         self.repo = BarcodeRepository(db)
 
     # ── resolve ──────────────────────────────────────────────────────────────
+    async def _get_active_or_410(self, code: str):
+        """Shared lookup: 404 if unknown, 410 if the barcode is retired — for ANY
+        barcode type, not just employee (F18). Retirement is a lifecycle state on
+        the registry; a retired piece/lot/drawer label must not silently resolve.
+        Returns the row on success."""
+        row = await self.repo.get_by_code(code)
+        if not row:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown barcode '{code}'.")
+        if row.status == BarcodeStatus.RETIRED.value:
+            raise HTTPException(
+                status.HTTP_410_GONE,
+                "This barcode was deactivated. The underlying record and history "
+                "are intact; issue a new label to scan again.",
+            )
+        return row
+
     async def resolve(self, code: str) -> dict:
         row = await self.repo.get_by_code(code)
         if not row:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown barcode '{code}'.")
 
-        if row.type == BarcodeType.EMPLOYEE.value and row.status == BarcodeStatus.RETIRED.value:
-            # 410 Gone — the label was deactivated. Identity + history intact.
+        # F18: retirement applies to every barcode type, not only EMPLOYEE.
+        if row.status == BarcodeStatus.RETIRED.value:
             raise HTTPException(
                 status.HTTP_410_GONE,
-                "This employee barcode was deactivated. The worker's record and "
-                "history are intact; issue a new card to scan again.",
+                "This barcode was deactivated. The underlying record and history "
+                "are intact; issue a new label to scan again.",
             )
 
         out = {
@@ -67,33 +83,30 @@ class BarcodeService:
     async def resolve_piece_id(self, code: str) -> uuid.UUID:
         """resolve() narrowed to 'give me the piece id or 404'. Used by /production/log
         when the target came in as a piece barcode."""
-        row = await self.repo.get_by_code(code)
-        if not row or row.type != BarcodeType.PIECE.value or not row.piece_id:
+        row = await self._get_active_or_410(code)   # F18: 410 on retired
+        if row.type != BarcodeType.PIECE.value or not row.piece_id:
             raise HTTPException(status.HTTP_404_NOT_FOUND,
                                 f"'{code}' is not a known piece barcode.")
         return row.piece_id
 
     async def resolve_employee_id(self, code: str) -> uuid.UUID:
         """resolve() narrowed to 'give me the (active) employee id'. 410 on retired."""
-        row = await self.repo.get_by_code(code)
-        if not row or row.type != BarcodeType.EMPLOYEE.value or not row.employee_id:
+        row = await self._get_active_or_410(code)   # F18
+        if row.type != BarcodeType.EMPLOYEE.value or not row.employee_id:
             raise HTTPException(status.HTTP_404_NOT_FOUND,
                                 f"'{code}' is not a known employee barcode.")
-        if row.status == BarcodeStatus.RETIRED.value:
-            raise HTTPException(status.HTTP_410_GONE,
-                                "This employee barcode was deactivated.")
         return row.employee_id
 
     async def resolve_lot_id(self, code: str) -> uuid.UUID:
-        row = await self.repo.get_by_code(code)
-        if not row or not row.material_lot_id:
+        row = await self._get_active_or_410(code)   # F18
+        if not row.material_lot_id:
             raise HTTPException(status.HTTP_404_NOT_FOUND,
                                 f"'{code}' is not a known material-lot barcode.")
         return row.material_lot_id
 
     async def resolve_drawer_id(self, code: str) -> uuid.UUID:
-        row = await self.repo.get_by_code(code)
-        if not row or row.type != BarcodeType.DRAWER.value or not row.drawer_id:
+        row = await self._get_active_or_410(code)   # F18
+        if row.type != BarcodeType.DRAWER.value or not row.drawer_id:
             raise HTTPException(status.HTTP_404_NOT_FOUND,
                                 f"'{code}' is not a known drawer barcode.")
         return row.drawer_id

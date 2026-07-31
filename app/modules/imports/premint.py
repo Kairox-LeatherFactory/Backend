@@ -55,15 +55,23 @@ from app.modules.production.models import Piece
 
 
 def _sku_needs_lining(sku: SKU) -> bool:
-    """Best-effort lining detection from the SKU's parsed dimensions.
+    """Lining detection from the SKU's parsed dimensions.
 
-    A knit or nylon lining colour on the SKU means the garment has a lining. With
-    no signal we default True (safe: the gate waits, a DM can clear it)."""
-    knit = getattr(sku, "knit_color", None)
-    nylon = getattr(sku, "nylon_color", None)
-    if knit or nylon:
-        return True
-    return True   # conservative default; refine when the material column is mapped
+    H9: this used to `return True` on BOTH branches, so every piece was minted
+    needing a lining. needs_lining drives the merge gate's completeness rule
+    (drawers/service.py:141-146), so a leather-only garment could never reach
+    RECEIVED — its drawer waited forever for a lining nobody would cut, and
+    line-stitching stayed blocked for the whole order.
+
+    Defaulting to True is not the conservative choice for a gate that BLOCKS.
+    We now require positive evidence: a lining colour on the SKU means lined;
+    no signal means not lined, and a DM who knows better can correct the piece.
+    """
+    for attr in ("knit_color", "nylon_color", "lining_color", "lining_type"):
+        val = getattr(sku, attr, None)
+        if val and str(val).strip().upper() not in {"", "NA", "N/A", "NONE", "-"}:
+            return True
+    return False
 
 
 def _next_drawer_seq(db: Session) -> int:

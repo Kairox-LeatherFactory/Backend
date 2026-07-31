@@ -94,9 +94,18 @@ class WageLine(Base, UUIDMixin):
     wage_type is a SNAPSHOT of the employee's type at run time, not a foreign key
     to it: moving a worker from piece-rate to monthly next year must not rewrite
     what last year's payslip says he was.
+
+    B5: ONE LINE PER EMPLOYEE PER RUN is an invariant, so it lives in the
+    database, not in a docstring. PIECE_RATE and MONTHLY are mutually exclusive
+    branches of _populate_run; without this constraint a partial re-run, a retry,
+    or two concurrent computes can each add a second line for the same worker and
+    the run total silently doubles.
     """
 
     __tablename__ = "wage_line"
+    __table_args__ = (
+        UniqueConstraint("wage_run_id", "employee_id", name="uq_wage_line_run_emp"),
+    )
     wage_run_id: Mapped[uuid.UUID] = mapped_column(
         GUID(), ForeignKey("wage_run.id"), index=True
     )

@@ -62,7 +62,7 @@ async def scan_check_in(
  
     return await AttendanceService(db).barcode_scan(
         employee_id=employee_id, actor=user, direction=body.direction,
-        lat=body.lat, lon=body.lon, proxy=body.proxy)
+        lat=body.lat, lon=body.lon, proxy=body.proxy, reason=body.reason)
 
 @router.post("/check-in", response_model=schemas.AttendanceRead, status_code=201)
 async def check_in(body: schemas.CheckInRequest,
@@ -81,16 +81,18 @@ async def check_out(body: schemas.CheckOutRequest,
 @router.post("/proxy/check-in", response_model=list[schemas.AttendanceRead], status_code=201)
 async def proxy_check_in(body: schemas.ProxyMarkRequest,
                         db: AsyncSession = Depends(get_db),
-                        user: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR))):
-    """Spec Flow B. require_roles isn't used here because the SERVICE enforces
-    SUPERVISOR/DIRECT_MANAGER and also validates the worker is daily-wage."""
+                        user: User = Depends(require_roles(UserRole.SUPERVISOR,UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR))):
+    """Spec Flow B. F50: SUPERVISOR is the PRIMARY actor here (daily-wage workers
+    carry no phone, so the supervisor marks them present) and must not be locked
+    out by the router. The router is now the single authorization decision — the
+    service no longer re-checks the role."""
     return await AttendanceService(db).proxy_mark_present(user, body)
 
 
 @router.post("/proxy/check-out", response_model=list[schemas.AttendanceRead])
 async def proxy_check_out(body: schemas.ProxyMarkRequest,
                         db: AsyncSession = Depends(get_db),
-                        user: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR))):
+                        user: User = Depends(require_roles(UserRole.SUPERVISOR,UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR))):
     return await AttendanceService(db).proxy_check_out(user, body)
 
 
@@ -98,6 +100,9 @@ async def proxy_check_out(body: schemas.ProxyMarkRequest,
 async def add_daily_worker(body: schemas.AddDailyWorkerRequest,
                         db: AsyncSession = Depends(get_db),
                         user: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR))):
+    """F51: onboarding a daily worker CREATES a login, so this stays at DM/HR/MD
+    (NOT widened to SUPERVISOR — granting user-creation to the shop floor is a
+    deliberate decision, not a bug fix). The service gate is aligned to match."""
     emp = await AttendanceService(db).add_daily_worker(user, body)
     return {"id": str(emp.id), "name": emp.name, "wage_type": emp.wage_type.value}
 
@@ -125,20 +130,24 @@ async def my_status(
     return await AttendanceService(db).my_status(user)
 
 
-@router.get("/today", response_model=list[schemas.AttendanceRead])
-async def today_roster(
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
-    return await AttendanceService(db).today_roster()
-
-
-@router.get("/config", response_model=schemas.ShiftConfigRead)
+@router.get("/config")
 async def get_config(
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
-    return await AttendanceService(db).get_config()
+    """F44: the geofence geometry (factory_lat/lon/radius) is returned ONLY to
+    HR/managers/superusers. Everyone else gets shift times without the fence, so
+    a client/employee login cannot read the coordinates needed to forge an
+    in-fence check-in."""
+    cfg = await AttendanceService(db).get_config()
+    privileged = {
+        UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.HR,
+        UserRole.SUPERVISOR, UserRole.CUTTING_MANAGER, UserRole.STITCHING_MANAGER,
+        UserRole.LINING_MANAGER,
+    }
+    if user.role in privileged:
+        return schemas.ShiftConfigRead.model_validate(cfg)
+    return schemas.ShiftConfigPublicRead.model_validate(cfg)
 
 
 @router.patch("/config", response_model=schemas.ShiftConfigRead)
@@ -158,11 +167,19 @@ async def history(
 ):
     """Attendance history. An EMPLOYEE can only ever read their own — the
     employee_id parameter is ignored for them rather than 403'd, so the same
-    frontend call works for every role."""
+    frontend call works for every role. F36: only HR/managers/superusers may
+    read ANOTHER employee's history; CLIENT and VIEWER cannot reach it."""
     if user.role is UserRole.EMPLOYEE:
         if user.employee_id is None:
             raise HTTPException(400, "This login is not linked to an employee record.")
         employee_id = user.employee_id
+    elif user.role not in (
+        UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.HR,
+        UserRole.SUPERVISOR, UserRole.CUTTING_MANAGER, UserRole.STITCHING_MANAGER,
+        UserRole.LINING_MANAGER,
+    ):
+        # CLIENT, VIEWER, or any future role: no access to workers' attendance.
+        raise HTTPException(403, "Not permitted to read attendance history.")
     elif employee_id is None:
         raise HTTPException(422, "employee_id is required")
     return await AttendanceService(db).history(employee_id, start, end)
@@ -173,7 +190,7 @@ async def today_roster(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_roles(
         UserRole.SUPERVISOR, UserRole.HR, UserRole.CUTTING_MANAGER,
-        UserRole.STITCHING_MANAGER)),
+        UserRole.STITCHING_MANAGER, UserRole.LINING_MANAGER)),
 ):
     """Whole-floor roster. Never visible to an EMPLOYEE."""
     return await AttendanceService(db).today_roster()

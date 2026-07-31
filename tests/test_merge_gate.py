@@ -12,9 +12,11 @@ RECEIVED; the drawer recycles on package/export.
 import datetime
 
 import pytest
+from fastapi import HTTPException
 
 from app.core.enums import DrawerPart, DrawerState, ScreenContext, UserRole
 from app.modules.drawers.service import DrawerService
+from app.modules.production.models import ProductionEvent
 from app.modules.production.service import ProductionService
 
 
@@ -82,6 +84,39 @@ async def test_store_scan_and_full_merge_then_line_stitch(db, operations, pieces
         work_date=datetime.date.today(), screen=ScreenContext.PIPELINE)
     assert res["count_logged"] == 1
     assert not res["merge_blocked"]
+
+
+@pytest.mark.asyncio
+async def test_role_gate_checks_every_distinct_stage_in_batch(db, operations, pieces,
+                                                               cutter, cutting_mgr):
+    piece1, _ = pieces[0]
+    piece2, _ = pieces[1]
+
+    # piece1: no history -> next stage is LEATHER_CUTTING
+    # piece2: already completed LEATHER_CUTTING -> next stage is FUSING
+    op = operations["LEATHER_CUTTING"]
+    db.add(ProductionEvent(
+        sku_id=piece2.sku_id,
+        operation_id=op.id,
+        employee_id=cutter[0].id,
+        work_date=datetime.date.today(),
+        qty=1,
+        entered_by="test",
+        piece_id=piece2.id,
+    ))
+    await db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        await ProductionService(db).log_batch(
+            user=cutting_mgr,
+            employee_id=cutter[0].id,
+            piece_ids=[piece1.id, piece2.id],
+            work_date=datetime.date(2099, 1, 1),
+            screen=ScreenContext.PIPELINE,
+        )
+
+    assert exc.value.status_code == 403
+    assert "may not log" in str(exc.value.detail).lower()
 
 
 @pytest.mark.asyncio

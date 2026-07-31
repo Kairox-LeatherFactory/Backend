@@ -36,13 +36,21 @@ def upgrade() -> None:
     # app_user.role is Enum(UserRole, name="user_role") — a native PG type — so
     # the new member must be added to the DB type, not just the Python enum.
     # No-op on SQLite (tests), where there is no native enum type.
+    # F63: ALTER TYPE ... ADD VALUE cannot run inside a transaction that then
+    # uses the new value, and PostgreSQL best practice is to commit the enum
+    # addition on its own. autocommit_block() takes us out of Alembic's
+    # migration transaction for this one idempotent statement. It is safe to
+    # commit early because ADD VALUE IF NOT EXISTS is re-runnable.
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
-        op.execute("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'lining_manager'")
+        with op.get_context().autocommit_block():
+            op.execute("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'lining_manager'")
 
-    # ── supplier (referenced by material_lot + supplier_order) ──────────────
+    # ── material_supplier (referenced by material_lot + supplier_order) ──────
+    # F104: named material_supplier (NOT supplier) to avoid colliding with the
+    # supplier_po module's own `supplier` table in one MetaData registry.
     op.create_table(
-        "supplier",
+        "material_supplier",
         sa.Column("id", GUID(), primary_key=True),
         sa.Column("name", sa.String(200), nullable=False),
         sa.Column("articles", sa.String(600)),
@@ -51,7 +59,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
-    op.create_index("ix_supplier_name", "supplier", ["name"])
+    op.create_index("ix_material_supplier_name", "material_supplier", ["name"])
 
     # ── material_lot ────────────────────────────────────────────────────────
     op.create_table(
@@ -65,7 +73,7 @@ def upgrade() -> None:
         sa.Column("size", sa.String(40)),
         sa.Column("uom", sa.String(20), nullable=False),
         sa.Column("on_hand", sa.Numeric(14, 3), nullable=False, server_default="0"),
-        sa.Column("supplier_id", GUID(), sa.ForeignKey("supplier.id"), nullable=True),
+        sa.Column("supplier_id", GUID(), sa.ForeignKey("material_supplier.id"), nullable=True),
         sa.Column("attributes", sa.JSON()),
         sa.Column("is_active", sa.Boolean, nullable=False, server_default=sa.true()),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
@@ -100,7 +108,7 @@ def upgrade() -> None:
         sa.Column("qty", sa.Numeric(14, 3), nullable=False),
         sa.Column("uom", sa.String(20), nullable=False),
         sa.Column("status", sa.String(15), nullable=False, server_default="ordered"),
-        sa.Column("supplier_id", GUID(), sa.ForeignKey("supplier.id"), nullable=True),
+        sa.Column("supplier_id", GUID(), sa.ForeignKey("material_supplier.id"), nullable=True),
         sa.Column("ordered_by", GUID(), sa.ForeignKey("app_user.id"), nullable=True),
         sa.Column("arrived_at", sa.DateTime(timezone=True)),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
@@ -201,4 +209,4 @@ def downgrade() -> None:
     op.drop_table("supplier_order")
     op.drop_table("material_reservation")
     op.drop_table("material_lot")
-    op.drop_table("supplier")
+    op.drop_table("material_supplier")

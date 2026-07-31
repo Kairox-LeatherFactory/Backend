@@ -9,7 +9,7 @@ projections of the User model.
 """
 import uuid
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.enums import UserRole
 
@@ -63,4 +63,7 @@ class ClientUserCreate(BaseModel):
 
 class PasswordChange(BaseModel):
     current_password: str
-    new_password: str
+    # F43: a minimum length so the forced-change flow can't replace a guessable
+    # password with a weaker one. (Equality-with-phone is additionally checked in
+    # the service, which has the user's phone on hand.)
+    new_password: str = Field(..., min_length=8)

@@ -37,6 +37,19 @@ from app.modules.users.repository import UserRepository
 from app.modules.users import schemas
 
 
+# F41: a fixed dummy hash to compare against on the unknown-user path so the
+# bcrypt cost is paid whether or not the user exists. Computed once, lazily, to
+# avoid doing bcrypt work at import time.
+_DUMMY_HASH_CACHE: str | None = None
+
+
+def _dummy_hash() -> str:
+    global _DUMMY_HASH_CACHE
+    if _DUMMY_HASH_CACHE is None:
+        _DUMMY_HASH_CACHE = get_password_hash("timing-equalizer-not-a-real-password")
+    return _DUMMY_HASH_CACHE
+
+
 class UserService:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -46,6 +59,10 @@ class UserService:
     async def authenticate(self, username: str, password: str) -> User | None:
         user = await self.repo.get_by_username(username)
         if not user or not user.is_active:
+            # F41: burn the same bcrypt time on the unknown-user path so "no such
+            # user" and "wrong password" take about equally long — otherwise the
+            # timing difference enumerates the roster (phone numbers are PII).
+            verify_password(password, _dummy_hash())
             return None
         if not verify_password(password, user.password_hash):
             return None
@@ -68,7 +85,30 @@ class UserService:
         )
 
     # ── User management (direct manager) ─────────────────────────────────────
-    async def create_user(self, body: schemas.UserCreate) -> User:
+    # B8: who may GRANT which role. A caller can only ever create a login at or
+    # below their own authority — otherwise HR, whose job is employee admin,
+    # can mint a managing_director (a superuser that bypasses every
+    # require_roles check, see users/deps.py:69) and then log into it.
+    _GRANTABLE: dict[UserRole, set[UserRole]] = {
+        UserRole.MANAGING_DIRECTOR: set(UserRole),          # MD grants anything
+        UserRole.DIRECT_MANAGER: {
+            UserRole.HR, UserRole.SUPERVISOR, UserRole.CUTTING_MANAGER,
+            UserRole.LINING_MANAGER, UserRole.STITCHING_MANAGER,
+            UserRole.EMPLOYEE, UserRole.CLIENT, UserRole.VIEWER,
+        },
+        UserRole.HR: {UserRole.EMPLOYEE, UserRole.SUPERVISOR, UserRole.VIEWER},
+    }
+
+    async def create_user(self, body: schemas.UserCreate,
+                          *, actor: User | None = None) -> User:
+        if actor is not None:
+            allowed = self._GRANTABLE.get(actor.role, set())
+            if body.role not in allowed:
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    f"Role '{actor.role.value}' may not create a "
+                    f"'{body.role.value}' login. Permitted: "
+                    f"{', '.join(sorted(r.value for r in allowed)) or '—'}.")
         if await self.repo.get_by_username(body.phone):
             raise HTTPException(status.HTTP_409_CONFLICT, "Phone already registered")
         if body.email and await self.repo.get_by_email(body.email):
@@ -79,7 +119,6 @@ class UserService:
             password_hash=get_password_hash(raw), employee_id=body.employee_id,
             must_change_password=body.password is None,
         )
-
     async def create_client_user(self, body: schemas.ClientUserCreate) -> User:
         if await self.repo.get_by_username(body.phone):
             raise HTTPException(status.HTTP_409_CONFLICT, "Phone already registered")
@@ -93,6 +132,12 @@ class UserService:
     async def change_password(self, user: User, current: str, new: str) -> None:
         if not verify_password(current, user.password_hash):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is wrong")
+        # F43: don't let the forced-change rotation swap the seeded phone-password
+        # for the phone number again.
+        if new.strip() == (user.phone or "").strip():
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "New password must not be your phone number.")
         user.password_hash = get_password_hash(new)
         user.must_change_password = False
         await self.repo.save(user)

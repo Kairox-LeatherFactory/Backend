@@ -31,7 +31,8 @@ import uuid
 class BarcodeAnalyticsMixin:
     """Mixed into AnalyticsService. Uses only self.db."""
 
-    async def piece_life_story(self, piece_code: str) -> dict:
+    async def piece_life_story(self, piece_code: str,
+                               *, client_scope: uuid.UUID | None = None) -> dict:
         """F1 — the garment's whole life: every stage, who did it, when, entered
         by, rework flag, leather consumption at cutting, current stage + wait."""
         from fastapi import HTTPException, status
@@ -43,14 +44,17 @@ class BarcodeAnalyticsMixin:
         from app.modules.production.models import Operation, Piece, ProductionEvent
 
         code = (piece_code or "").strip().upper()
-        head = (await self.db.execute(
+        stmt = (
             select(Piece, SKU, Style, ClientOrder.order_number, Client.name)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .join(Client, Client.id == ClientOrder.client_id)
             .where(func.upper(Piece.code) == code)
-        )).first()
+        )
+        if client_scope is not None:      # F33
+            stmt = stmt.where(ClientOrder.client_id == client_scope)
+        head = (await self.db.execute(stmt)).first()
         if not head:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown piece '{piece_code}'.")
         piece, sku, style, order_number, client = head
@@ -99,17 +103,20 @@ class BarcodeAnalyticsMixin:
     def _awaiting_text(current, drawer_state, needs_lining):
         if drawer_state == "holding_leather" and needs_lining:
             return "in drawer, awaiting lining"
+        if drawer_state == "holding_lining":     # F07: lining stored, leather not yet
+            return "in drawer, awaiting leather"
         if drawer_state in ("merged", "waiting"):
             return "awaiting storage"
         if current == "FINAL_INSPECTION":
             return "awaiting inspection sign-off"
         return None
 
-    async def consumption_vs_stock(self, *, order_id=None, style_id=None) -> dict:
+    async def consumption_vs_stock(self, *, order_id=None, style_id=None,
+                                   client_scope: uuid.UUID | None = None) -> dict:
         """F4 — leather consumed (summed from cut events) per style + total."""
         from sqlalchemy import func, select
 
-        from app.modules.clients.models import SKU, Style
+        from app.modules.clients.models import SKU, ClientOrder, Style
         from app.modules.production.models import Operation, Piece, ProductionEvent
 
         stmt = (
@@ -128,6 +135,9 @@ class BarcodeAnalyticsMixin:
             stmt = stmt.where(Style.id == style_id)
         if order_id:
             stmt = stmt.where(Style.client_order_id == order_id)
+        if client_scope is not None:      # F33: only this client's styles
+            stmt = (stmt.join(ClientOrder, ClientOrder.id == Style.client_order_id)
+                    .where(ClientOrder.client_id == client_scope))
 
         rows = (await self.db.execute(stmt)).all()
         styles = [{

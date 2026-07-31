@@ -74,16 +74,24 @@ async def list_users(
 async def create_user(
     body: schemas.UserCreate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR)),
+    actor: User = Depends(require_roles(
+        UserRole.DIRECT_MANAGER, UserRole.HR, UserRole.MANAGING_DIRECTOR)),
 ):
-    return await UserService(db).create_user(body)
+    """B8: the role gate admits DM/HR/MD, but WHICH role may be granted is
+    decided in the service against the caller's own authority."""
+    return await UserService(db).create_user(body, actor=actor)
 
 
 @users_router.post("/clients", response_model=schemas.UserRead, status_code=201)
 async def create_client_user(
     body: schemas.ClientUserCreate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR)),
+    _: User = Depends(require_roles(
+        UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR)),
 ):
-    """Direct manager provisions a client's login so they can track their orders."""
+    """Direct manager provisions a client's login so they can track their orders.
+
+    B8: HR removed. Binding a login to a client_id grants cross-tenant read
+    access to that client's orders — that is a commercial decision, not an
+    employee-admin one."""
     return await UserService(db).create_client_user(body)

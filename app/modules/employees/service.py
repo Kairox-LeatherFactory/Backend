@@ -135,8 +135,20 @@ class EmployeeService:
             data["name"] = await self._unique_name(data["name"])
         if "wage_type" in data:
             data["wage_type"] = WageType(data["wage_type"])
+        # F47: enumerate the writable fields explicitly. Even though no PATCH route
+        # currently reaches this method (F89), the mass-setattr would become a live
+        # privilege/payroll write the moment one is added (EmployeeUpdate carries
+        # is_active and monthly_salary). Only these fields may be set here.
+        _ALLOWED = {"name", "designation", "wage_type", "monthly_salary",
+                    "phone", "email", "is_active"}
+        rejected = set(data) - _ALLOWED
+        if rejected:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Fields not updatable here: {', '.join(sorted(rejected))}.")
         for k, v in data.items():
-            setattr(emp, k, v)
+            if k in _ALLOWED:
+                setattr(emp, k, v)
         await self.repo.save(emp)
         return emp
 

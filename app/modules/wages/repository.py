@@ -180,21 +180,30 @@ class WageRepository:
 
     async def overlapping_closed_run(self, start: date, end: date,
                                      *, exclude_run_id: uuid.UUID | None = None):
-        """Any CLOSED run whose window intersects [start, end].
+        """Any run — CLOSED **or OPEN** — whose window intersects [start, end].
 
-        exclude_run_id lets recompute skip the run it is rebuilding — without it
-        every recompute would 409 against itself.
+        B7: this used to filter status == CLOSED. create_run() commits the run as
+        OPEN before a single line is written, and add_lines() commits separately,
+        so a run that died mid-population left committed money sitting in an OPEN
+        run that this guard could not see. The same fortnight could then be run
+        again with no 409, and with no UNIQUE(wage_run_id, employee_id) (B5) to
+        catch it downstream. An OPEN run in the window is either in progress or
+        wreckage; either way a second run over the same days must not start.
+
+        Name kept for call-site compatibility (service._validate_window).
         """
         stmt = select(WageRun).where(
-            WageRun.status == RunStatus.CLOSED,
             WageRun.period_start <= end,
             WageRun.period_end >= start,
         )
         if exclude_run_id:
             stmt = stmt.where(WageRun.id != exclude_run_id)
-        return await self.db.scalar(stmt.limit(1))
+        return await self.db.scalar(
+            stmt.order_by(WageRun.status.desc()).limit(1))
 
     async def last_closed_run(self, *, exclude_run_id: uuid.UUID | None = None):
+        """Latest CLOSED run — genuinely CLOSED-only: this feeds the gap_days
+        calculation, which must measure from the last run that actually paid."""
         stmt = select(WageRun).where(WageRun.status == RunStatus.CLOSED)
         if exclude_run_id:
             stmt = stmt.where(WageRun.id != exclude_run_id)
@@ -369,3 +378,53 @@ class WageRepository:
                 "breakdown": rows,
             })
         return out
+    
+    # ── H8: one run, one transaction ─────────────────────────────────────────
+    # The committing variants above stay for now so existing callers keep
+    # working. New payroll paths use these and let the SERVICE commit once, so a
+    # run is never durable in a half-built state (which is what makes B6 and B7
+    # possible in the first place).
+
+    async def create_run_nocommit(self, period_start: date,
+                                  period_end: date) -> WageRun:
+        run = WageRun(period_start=period_start, period_end=period_end)
+        self.db.add(run)
+        await self.db.flush()          # assigns run.id, stays in-transaction
+        return run
+    
+    async def add_lines_nocommit(self, lines: list[WageLine]) -> None:
+        self.db.add_all(lines)
+        await self.db.flush()
+
+    async def persist_breakdown_nocommit(self, run_id: uuid.UUID,
+                                         breakdown: dict) -> None:
+        rows = [
+            WageLineDetailRow(
+                wage_run_id=run_id, employee_id=emp_id, style_id=style_id,
+                operation_id=op_id, pieces=v["pieces"],
+                rate=round(v["rate"] or 0, 2), amount=round(v["amount"], 2),
+            )
+            for (emp_id, style_id, op_id), v in breakdown.items()
+        ]
+        if not rows:
+            return
+        self.db.add_all(rows)
+        await self.db.flush()
+
+    async def clear_lines_nocommit(self, run_id: uuid.UUID) -> int:
+        d1 = await self.db.execute(
+            delete(WageLineDetailRow).where(WageLineDetailRow.wage_run_id == run_id))
+        d2 = await self.db.execute(
+            delete(WageLine).where(WageLine.wage_run_id == run_id))
+        await self.db.flush()
+        return int(d2.rowcount or 0) + int(d1.rowcount or 0)
+
+    def close_run_nocommit(self, run: WageRun) -> None:
+        run.status = RunStatus.CLOSED
+
+    async def commit(self) -> None:
+        """The single commit for a whole payroll run."""
+        await self.db.commit()
+
+    async def rollback(self) -> None:
+        await self.db.rollback()

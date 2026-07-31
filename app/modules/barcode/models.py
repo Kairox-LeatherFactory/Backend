@@ -113,7 +113,7 @@ class MaterialLot(Base, UUIDMixin, TimestampMixin):
     uom: Mapped[str] = mapped_column(String(20))
     on_hand: Mapped[Decimal] = mapped_column(Numeric(14, 3), default=0)
     supplier_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("supplier.id"), nullable=True, index=True)
+        GUID(), ForeignKey("material_supplier.id"), nullable=True, index=True)
     attributes: Mapped[dict | None] = mapped_column(JSON_VARIANT)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -151,11 +151,18 @@ class MaterialReceipt(Base, UUIDMixin, TimestampMixin):
         GUID(), ForeignKey("app_user.id"), nullable=True)
 
 
-class Supplier(Base, UUIDMixin, TimestampMixin):
+class MaterialSupplier(Base, UUIDMixin, TimestampMixin):
     """A material supplier. Minimal for v1 — the article→supplier suggestion reads
     `articles` (a comma list) as a simple lookup, NOT the AI procurement
-    classifier (that is separate August-20 scope)."""
-    __tablename__ = "supplier"
+    classifier (that is separate August-20 scope).
+
+    F104: table is `material_supplier` (NOT `supplier`) to avoid colliding with
+    the richer `supplier` table owned by the out-of-scope supplier_po module in
+    the same MetaData registry. See F126 — whether these two supplier concepts
+    should be unified is an Aug-20 procurement-scope decision, deliberately left
+    distinct here.
+    """
+    __tablename__ = "material_supplier"
     name: Mapped[str] = mapped_column(String(200), index=True)
     articles: Mapped[str | None] = mapped_column(String(600))   # "SUEDE-A32,NAP-11"
     contact: Mapped[str | None] = mapped_column(String(200))
@@ -172,7 +179,7 @@ class SupplierOrder(Base, UUIDMixin, TimestampMixin):
     uom: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(15), default="ordered", index=True)
     supplier_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("supplier.id"), nullable=True, index=True)
+        GUID(), ForeignKey("material_supplier.id"), nullable=True, index=True)
     ordered_by: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("app_user.id"), nullable=True)
     arrived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

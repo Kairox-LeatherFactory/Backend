@@ -51,17 +51,28 @@ class BarcodeRepository:
 
     # ── code minting ─────────────────────────────────────────────────────────
     async def _next_code(self, prefix: str, width: int = 6) -> str:
-        """PREFIX + zero-padded (max existing counter for this prefix) + 1."""
+        """PREFIX + zero-padded (max existing counter for this prefix) + 1.
+
+        F79/F99: previously this SELECTed every barcode with this prefix and took
+        the max in Python — O(all barcodes) transferred per mint, quadratic across
+        an import that mints hundreds of codes. Since the zero-padded numeric tail
+        is fixed-width, lexicographic order == numeric order, so ORDER BY code DESC
+        LIMIT 1 gives the highest existing code while transferring ONE row. This is
+        dialect-agnostic (works identically on SQLite and Postgres); a dedicated
+        integer sequence column would be the fully clean long-term form.
+        """
         like = f"{prefix}-%"
-        rows = await self.db.execute(
-            select(BarcodeRegistry.code).where(BarcodeRegistry.code.like(like))
+        top = await self.db.scalar(
+            select(BarcodeRegistry.code)
+            .where(BarcodeRegistry.code.like(like))
+            .order_by(BarcodeRegistry.code.desc())
+            .limit(1)
         )
         mx = 0
-        plen = len(prefix) + 1
-        for (c,) in rows.all():
-            tail = c[plen:]
+        if top:
+            tail = top[len(prefix) + 1:]
             if tail.isdigit():
-                mx = max(mx, int(tail))
+                mx = int(tail)
         return f"{prefix}-{mx + 1:0{width}d}"
 
     # ── registration (all *_nocommit; the SERVICE owns the transaction) ──────

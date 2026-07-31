@@ -146,6 +146,19 @@ async def lifespan(app: FastAPI):
             await conn.run_sync(Base.metadata.create_all)
         logger.info("Database tables verified (debug create_all)")
 
+    # F130: config_store warm-up runs HERE (inside lifespan), not at module
+    # import time. Importing app.main must not require a live database — tooling
+    # (OpenAPI export, test collection, linters) only imports the module. The
+    # warm cache is an optimisation, so a failure is logged and non-fatal.
+    try:
+        from app.core.database import AsyncSessionLocal
+        from app.modules.bom import config_store
+        async with AsyncSessionLocal() as s:
+            await s.run_sync(lambda sync_s: config_store.refresh_from_session(sync_s))
+        logger.info("config_store warmed from database")
+    except Exception:
+        logger.exception("config_store warm-up failed; using built-in defaults")
+
     sweeper = po_sweeper = None
     if settings.notification_sweeper_enabled:
         sweeper = asyncio.create_task(_notification_sweeper())
@@ -189,6 +202,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ──────────────────────────────────────────────────────────
+# F120: global exception handler — correlation id + generic body
+# ──────────────────────────────────────────────────────────
+# Without this, any unhandled exception returns Starlette's default 500 with no
+# correlation id and (under DEBUG) a full traceback served to the client. This
+# logs every unhandled error with a request id the client can quote to support,
+# and returns a generic body. The traceback is included ONLY in debug.
+import uuid as _uuid
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    # Let FastAPI/Starlette handle HTTPException (401/403/404/409/422 ...) itself;
+    # this catch-all is only for genuinely unexpected 500s.
+    if isinstance(exc, StarletteHTTPException):
+        raise exc
+    request_id = str(_uuid.uuid4())
+    logger.exception("unhandled error request_id=%s path=%s method=%s",
+                     request_id, request.url.path, request.method)
+    body = {"detail": "Internal server error", "request_id": request_id}
+    if settings.debug:
+        body["error"] = repr(exc)
+    return JSONResponse(status_code=500, content=body)
+
 # ──────────────────────────────────────────────────────────
 # Router registration (ALL under /api/v1)
 # ──────────────────────────────────────────────────────────
@@ -229,7 +270,29 @@ app.include_router(supplier_po_router, prefix=API_PREFIX, dependencies=_LOCKED)
 # ──────────────────────────────────────────────────────────
 @app.get("/health", tags=["Health"])
 async def health_check():
+    """Liveness: the process is up. Deliberately checks nothing external so an
+    orchestrator does not restart a healthy process on a transient DB blip."""
     return {"status": "healthy", "app": settings.app_name, "version": "1.0.0"}
+
+
+@app.get("/ready", tags=["Health"])
+async def readiness_check():
+    """Readiness (F136): can this replica actually serve traffic? Executes a
+    trivial query so a pool-exhausted or DB-unreachable replica reports NOT
+    ready and is taken out of rotation, instead of looking healthy from outside."""
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionLocal
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.execute(text("SELECT 1"))
+        return {"status": "ready"}
+    except Exception as exc:
+        logger.warning("readiness check failed: %s", exc)
+        return Response(
+            content='{"status": "not_ready"}',
+            status_code=503,
+            media_type="application/json",
+        )
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -240,13 +303,3 @@ async def favicon():
 @app.get("/", tags=["Root"])
 async def root():
     return {"message": f"Welcome to {settings.app_name}", "docs": "/docs", "health": "/health"}
-
-
-# config_store warm-up (unchanged)
-try:
-    from app.core.database import SessionLocal
-    from app.modules.bom import config_store
-    with SessionLocal() as s:
-        config_store.refresh_from_session(s)
-except Exception:
-    logger.exception("config_store warm-up failed; using built-in defaults")

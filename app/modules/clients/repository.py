@@ -112,7 +112,11 @@ class ClientRepository:
         for (color_code, color_name, size), qty in agg.items():
             self.db.add(SKU(style_id=st.id, color_code=color_code,
                             color_name=color_name, size=size, qty_ordered=int(qty),
-                            code=make_sku_code(order.order_number, st.name, 
+                            # F116: order is a dict — order.order_number raised
+                            # AttributeError on every order that produced ≥1 SKU
+                            # (i.e. every real order). Use the persisted ORM value,
+                            # matching make_style_code above which already uses co.
+                            code=make_sku_code(co.order_number, st.name,
                                 color_name or color_code, size),))
         await self.db.commit()
         return co.id, st.id
