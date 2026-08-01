@@ -210,7 +210,7 @@ class ProductionRepository:
             .where(ProductionEvent.work_date >= start, ProductionEvent.work_date <= end)
             .group_by(
                 ProductionEvent.employee_id,
-                Piece.style_id,
+                SKU.style_id,
                 ProductionEvent.operation_id,
                 ProductionEvent.work_date,
             )
@@ -219,7 +219,7 @@ class ProductionRepository:
             # depend on the query plan.
             .order_by(
                 ProductionEvent.employee_id,
-                Piece.style_id,
+                SKU.style_id,
                 ProductionEvent.operation_id,
                 ProductionEvent.work_date,
             )

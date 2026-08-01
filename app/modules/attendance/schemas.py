@@ -12,15 +12,13 @@ class GpsPoint(BaseModel):
     lon: float = Field(..., ge=-180, le=180)
 
 class ScanCheckIn(BaseModel):
-    """Barcode door. lat/lon stay optional because an indoor floor can genuinely
-    lack a fix — but H6 requires `reason` when they are omitted, so an
-    unverified row is always a deliberate, reviewable act."""
     employee_barcode: str
+    direction: str = Field("in", pattern="^(in|out)$")   # ADD — endpoint reads body.direction
     lat: float | None = None
     lon: float | None = None
     proxy: bool = False
     reason: str | None = Field(None, max_length=200)
-
+    
 class CheckInRequest(GpsPoint):
     """SELF check-in by the worker themselves (Flow A).
 

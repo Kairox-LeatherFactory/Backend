@@ -41,6 +41,14 @@ class EmployeeService:
         self.db = db
         self.repo = EmployeeRepository(db)
 
+    # employees/service.py — add near list_all
+    async def names_for(self, ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+        """id → name for a set of employees (payroll warning display)."""
+        if not ids:
+            return {}
+        rows = await self.repo.list_all(active_only=False)
+        return {e.id: e.name for e in rows if e.id in set(ids)}
+
     async def list_all(self, active_only: bool = True) -> list[Employee]:
         return await self.repo.list_all(active_only)
 
