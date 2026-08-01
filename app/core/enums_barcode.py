@@ -164,11 +164,11 @@ MERGE_GATE_ENTRY = ProductionStage.LINE_STITCHING
 STAGE_ROLE_ACCESS: dict[ProductionStage, set] = {
     ProductionStage.LEATHER_CUTTING:  {UserRole.CUTTING_MANAGER},
     ProductionStage.LINING_CUTTING:   {LINING_MANAGER},
-    ProductionStage.FUSING:           {UserRole.CUTTING_MANAGER},
+    ProductionStage.FUSING:           {UserRole.STITCHING_MANAGER},
     ProductionStage.PASTING:          {UserRole.STITCHING_MANAGER},
     ProductionStage.LINE_STITCHING:   {UserRole.STITCHING_MANAGER},
     ProductionStage.SHELL_STITCHING:  {UserRole.STITCHING_MANAGER},
-    ProductionStage.FINAL_FINISH:     set(),   # DM/MD only
+    ProductionStage.FINAL_FINISH:     {UserRole.STITCHING_MANAGER},
     ProductionStage.FINAL_INSPECTION: set(),   # DM/MD only (approval)
     ProductionStage.PACKAGE_EXPORT:   set(),   # DM/MD only
 }
@@ -220,7 +220,6 @@ class Designation(str, enum.Enum):
     TAILOR = "TAILOR"        # general stitching hand — multi-station
     HELPER = "HELPER"
     SUPERVISOR = "SUPERVISOR"
-    OTHER = "OTHER"
 
     @classmethod
     def normalise(cls, raw: str | None) -> str | None:
@@ -241,18 +240,18 @@ class Designation(str, enum.Enum):
 # Which designations may work which stage.
 STAGE_DESIGNATIONS: dict[ProductionStage, set[str]] = {
     ProductionStage.LEATHER_CUTTING:  {"CUTTER"},
-    ProductionStage.LINING_CUTTING:   {"LINING_CUTTER", "CUTTER"},
-    ProductionStage.FUSING:           {"FUSER", "CUTTER"},
-    ProductionStage.PASTING:          {"PASTER", "TAILOR"},
+    ProductionStage.LINING_CUTTING:   {"LINING_CUTTER"},
+    ProductionStage.FUSING:           {"FUSER"},
+    ProductionStage.PASTING:          {"PASTER"},
     ProductionStage.LINE_STITCHING:   {"LINE_TAILOR", "TAILOR"},
     ProductionStage.SHELL_STITCHING:  {"SHELL_TAILOR", "TAILOR"},
-    ProductionStage.FINAL_FINISH:     {"FINISHER"},
+    ProductionStage.FINAL_FINISH:     {"FINISHER", "TAILOR"},
     ProductionStage.FINAL_INSPECTION: {"INSPECTOR", "FINISHER"},
     ProductionStage.PACKAGE_EXPORT:   {"PACKER", "FINISHER"},
 }
 
 # Designations that may work ANY stage — no skill gate.
-MULTI_STAGE_DESIGNATIONS: frozenset[str] = frozenset({"HELPER", "SUPERVISOR", "OTHER"})
+MULTI_STAGE_DESIGNATIONS: frozenset[str] = frozenset({"HELPER", "SUPERVISOR"})
 
 
 # ══════════════════════════════════════════════════════════════════════════

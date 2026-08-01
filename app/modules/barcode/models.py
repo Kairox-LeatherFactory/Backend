@@ -31,7 +31,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String,
-    UniqueConstraint,
+    UniqueConstraint,Index
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -44,6 +44,7 @@ class BarcodeRegistry(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "barcode_registry"
     __table_args__ = (
         UniqueConstraint("code", name="uq_barcode_code"),
+        Index("ix_barcode_order_type", "order_id", "type"),
     )
     code: Mapped[str] = mapped_column(String(120), index=True)   # normalised upper
     type: Mapped[str] = mapped_column(String(20), index=True)    # BarcodeType value
@@ -52,6 +53,12 @@ class BarcodeRegistry(Base, UUIDMixin, TimestampMixin):
     # Exactly one of these is set, per `type`. All indexed, all real FKs.
     piece_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("piece.id"), nullable=True, index=True)
+    order_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("client_order.id"), nullable=True, index=True)
+    sku_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("sku.id"), nullable=True, index=True)
+    style_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("style.id"), nullable=True, index=True)
     employee_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("employee.id"), nullable=True, index=True)
     drawer_id: Mapped[uuid.UUID | None] = mapped_column(

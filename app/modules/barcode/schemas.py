@@ -1,7 +1,8 @@
 """modules/barcode/schemas.py — API contract for the barcode registry."""
+from datetime import datetime
 import uuid
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class BarcodeResolve(BaseModel):
@@ -50,3 +51,72 @@ class BarcodeActionResult(BaseModel):
     employee_barcode: str
     active: bool
     history_preserved: bool
+    
+class OrderPickerRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    order_id: uuid.UUID
+    order_number: str
+    client_name: str
+    minted: int
+    first_generated_at: datetime | None = None
+    last_generated_at: datetime | None = None
+ 
+ 
+class StyleAnalyticsRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    style_id: uuid.UUID
+    style_name: str
+    style_code: str | None = None
+    planned: int
+    minted: int
+    balance: int
+ 
+ 
+class OrderTotal(BaseModel):
+    planned: int
+    generated: int
+    balance: int
+    active: int
+    retired: int
+    duplicates: int
+    half_minted: bool
+    fully_generated: bool
+ 
+ 
+class OrderAnalytics(BaseModel):
+    order_id: uuid.UUID
+    order_total: OrderTotal
+    by_style: list[StyleAnalyticsRow]
+ 
+ 
+class BarcodeHistoryRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    code: str
+    status: str
+    sku_code: str | None = None
+    style_name: str | None = None
+    colour: str | None = None
+    size: str | None = None
+    seq: int | None = None
+    current_stage: str | None = None
+    generated_at: datetime | None = None
+ 
+ 
+class BarcodeHistoryPage(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    order_id: uuid.UUID
+    page: int
+    page_size: int
+    total: int
+    pages: int
+    items: list[BarcodeHistoryRow]
+ 
+ 
+class OrderSkuOption(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    sku_id: uuid.UUID
+    sku_code: str | None = None
+    colour: str | None = None
+    size: str | None = None
+    style_id: uuid.UUID
+    style_name: str | None = None

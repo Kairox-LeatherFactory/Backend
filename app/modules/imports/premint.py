@@ -147,7 +147,11 @@ def premint_order(db: Session, order) -> dict:
             db.add(BarcodeRegistry(
                 code=code, type=BarcodeType.PIECE.value,
                 status=BarcodeStatus.ACTIVE.value, piece_id=piece.id,
-                caption=_piece_caption(db, sku, seq)))
+                caption=_piece_caption(db, sku, seq),
+                order_id=order.id,            # <-- new: denormalised order context
+                sku_id=sku.id,                # <-- new
+                style_id=sku.style_id,        # <-- new
+            ))
             db.add(BarcodeRegistry(
                 code=drawer.code, type=BarcodeType.DRAWER.value,
                 status=BarcodeStatus.ACTIVE.value, drawer_id=drawer.id,
