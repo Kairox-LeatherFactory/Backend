@@ -73,7 +73,6 @@ def _role(name: str, value: str) -> UserRole:
 
 LINING_MANAGER = _role("LINING_MANAGER", "lining_manager")
 
-
 # ══════════════════════════════════════════════════════════════════════════
 # PRODUCTION STAGES
 # ══════════════════════════════════════════════════════════════════════════
