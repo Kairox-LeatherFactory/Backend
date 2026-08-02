@@ -283,3 +283,107 @@ class BarcodeService:
                 "known": r is not None,
             })
         return {"labels": labels}
+    
+    # ── order picker ────────────────────────────────────────────────────────
+    async def list_orders(self, client_scope: uuid.UUID | None) -> list[dict]:
+        """Orders that have barcodes. client_scope = caller's client_id for a
+        CLIENT login (scopes the list), None for staff (all orders)."""
+        return await self.repo.list_orders_with_barcodes(client_id=client_scope)
+ 
+    # ── analytics: order totals + per-style breakdown ───────────────────────
+    async def order_analytics(
+        self, order_id: uuid.UUID, client_scope: uuid.UUID | None
+    ) -> dict:
+        await self._assert_order_visible(order_id, client_scope)
+ 
+        planned = await self.repo.order_planned_total(order_id)
+        minted = await self.repo.order_minted_total(order_id)
+        active = await self.repo.order_active_total(order_id)
+        distinct = await self.repo.order_distinct_code_total(order_id)
+        styles = await self.repo.style_breakdown(order_id)
+ 
+        balance = max(planned - minted, 0)
+        return {
+            "order_id": order_id,
+            "order_total": {
+                "planned": planned,
+                "generated": minted,
+                "balance": balance,
+                "active": active,
+                "retired": minted - active,
+                # integrity: distinct codes must equal minted; if not, the unique
+                # index was somehow bypassed. Surfaced so the UI can prove it.
+                "duplicates": max(minted - distinct, 0),
+                # a positive balance = premint did not finish (or has not run) for
+                # this order. A visible flag, not a silent gap.
+                "half_minted": balance > 0,
+                "fully_generated": balance == 0 and minted > 0,
+            },
+            "by_style": styles,   # each: planned / minted / balance per style
+        }
+ 
+    # ── filterable history list ─────────────────────────────────────────────
+    async def list_history(
+        self,
+        order_id: uuid.UUID,
+        client_scope: uuid.UUID | None,
+        *,
+        sku_id: uuid.UUID | None = None,
+        style_id: uuid.UUID | None = None,
+        size: str | None = None,
+        status_filter: str | None = None,
+        date_from=None,
+        date_to=None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict:
+        await self._assert_order_visible(order_id, client_scope)
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 200)   # hard ceiling; JP is ~1273 rows
+ 
+        items, total = await self.repo.list_barcodes(
+            order_id, sku_id=sku_id, style_id=style_id, size=size,
+            status=status_filter, date_from=date_from, date_to=date_to,
+            page=page, page_size=page_size,
+        )
+        return {
+            "order_id": order_id,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "pages": (total + page_size - 1) // page_size,
+            "items": items,
+        }
+ 
+    async def list_order_skus(
+        self, order_id: uuid.UUID, client_scope: uuid.UUID | None
+    ) -> list[dict]:
+        await self._assert_order_visible(order_id, client_scope)
+        return await self.repo.list_order_skus(order_id)
+ 
+    # ── detail on click (reuses existing _piece_payload) ────────────────────
+    async def barcode_detail(self, code: str, client_scope: uuid.UUID | None) -> dict:
+        """Full detail for a scanned/clicked code. For a PIECE this is the same
+        rich payload resolve() returns — reused, not re-implemented. Tenancy is
+        applied for piece codes (a CLIENT must not read another client's piece)."""
+        row = await self._get_active_or_410(code)   # 404 unknown / 410 retired
+        if client_scope is not None and row.order_id is not None \
+                and row.order_id != client_scope:
+            # existence itself is information — 404, not 403
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown barcode '{code}'.")
+        return await self.resolve(code)
+ 
+    # ── tenancy helper ──────────────────────────────────────────────────────
+    async def _assert_order_visible(
+        self, order_id: uuid.UUID, client_scope: uuid.UUID | None
+    ) -> None:
+        """Staff (client_scope None) see everything. A CLIENT login may only touch
+        its own order; anything else 404s (never reveal another client's order)."""
+        from sqlalchemy import select
+        from app.modules.clients.models import ClientOrder
+ 
+        row = await self.db.get(ClientOrder, order_id)
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found.")
+        if client_scope is not None and row.client_id != client_scope:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found.")

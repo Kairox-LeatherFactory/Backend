@@ -35,7 +35,6 @@ ROLE MODEL (maps directly onto the factory's org chart)
 """
 import enum
 
-
 class UserRole(str, enum.Enum):
     MANAGING_DIRECTOR = "managing_director"   # superuser / BOM approver (outranks DM)
     DIRECT_MANAGER = "direct_manager"
