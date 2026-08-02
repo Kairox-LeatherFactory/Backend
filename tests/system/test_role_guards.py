@@ -255,18 +255,12 @@ async def test_employee_rates_is_gated(client):
     f"{API}/production/skus/{uuid.uuid4()}/pieces",
     f"{API}/production/styles/{uuid.uuid4()}/progress",
 ])
-async def test_the_client_scope_gets_are_broken(client, path):
-    """AUDIT F140 (BLOCKER, pass-01): the router passes `client_scope=scope`
-    (production/router.py:71,98,110) to service methods whose signatures accept no
-    such kwarg (service.py:376,435,438). Every call raises TypeError.
-
-    Asserted as a raised TypeError rather than a 500 because ASGITransport
-    propagates the exception instead of letting the handler convert it. When the
-    signatures are fixed this test fails — that is the point.
-    """
+async def test_the_client_scope_gets_are_respected(client, path):
+    """Production read endpoints should accept the client-scope dependency and
+    return a normal response instead of blowing up with a TypeError."""
     _as(UserRole.DIRECT_MANAGER)
-    with pytest.raises(TypeError, match="client_scope"):
-        await client.get(path)
+    r = await client.get(path)
+    assert r.status_code in {200, 404}, r.text
 
 
 @pytest.mark.asyncio
