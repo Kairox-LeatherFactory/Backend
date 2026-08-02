@@ -1,0 +1,1279 @@
+{
+  "employees": {
+    "employee": [
+      {
+        "id": "609d4e85-aa66-56aa-9a37-a0399778e494",
+        "name": "Raman Kumar",
+        "designation": "CUTTER",
+        "wage_type": "PIECE_RATE",
+        "monthly_salary": null,
+        "is_active": true,
+        "phone": "9000000011",
+        "email": null
+      },
+      {
+        "id": "9c367e4c-49e3-5f84-9086-d7568b2e22d2",
+        "name": "Suresh Babu",
+        "designation": "TAILOR",
+        "wage_type": "PIECE_RATE",
+        "monthly_salary": null,
+        "is_active": true,
+        "phone": "9000000012",
+        "email": null
+      },
+      {
+        "id": "4ed4301b-7f42-5ec7-8cab-7f666a2814fd",
+        "name": "Lakshmi Menon",
+        "designation": "SUPERVISOR",
+        "wage_type": "MONTHLY",
+        "monthly_salary": 22000,
+        "is_active": true,
+        "phone": "9000000013",
+        "email": null
+      }
+    ]
+  },
+  "clients": {
+    "client": [
+      {
+        "id": "964d8284-4a39-5b0f-9710-c639b25a3103",
+        "name": "Beau Geste",
+        "country": "France",
+        "code": "BG",
+        "currency": "USD",
+        "default_size_system": "LETTER",
+        "brand": "Beau Geste",
+        "label": "Beau Geste",
+        "contact_email": "buying@beaugeste.test",
+        "contact_phone": "+33-1-40-00-00-00",
+        "address": "12 Rue de la Mode, Paris",
+        "is_active": true
+      }
+    ],
+    "client_order": [
+      {
+        "id": "8a5456e7-3c4a-5935-86fa-39f7a98b335a",
+        "client_id": "964d8284-4a39-5b0f-9710-c639b25a3103",
+        "order_number": "ORD-1001",
+        "order_date": "2026-07-10",
+        "delivery_deadline": "2026-09-18",
+        "sea_cutoff_date": "2026-09-03",
+        "ship_mode": "sea",
+        "currency": "USD",
+        "agent": null,
+        "line": null,
+        "source_document_id": null
+      }
+    ],
+    "style": [
+      {
+        "id": "24dd0030-4f50-5d3d-bfbb-cc3b56e04f86",
+        "client_order_id": "8a5456e7-3c4a-5935-86fa-39f7a98b335a",
+        "name": "CARNABY",
+        "gender": "MENS",
+        "label": "Carnaby Leather Jacket",
+        "article": "CARNABY-J1",
+        "thickness": "1.0-1.2mm",
+        "code": "BEAUGESTE::CARNABY::2026AW",
+        "season": "2026AW",
+        "customer_ref": "CR1-02F5-PL02",
+        "internal_ref": "A32073-44",
+        "unit_price": 128,
+        "currency": "USD",
+        "base_style_id": null
+      }
+    ],
+    "sku": [
+      {
+        "id": "88e5ef0c-424e-5b97-93b6-11da1336b112",
+        "style_id": "24dd0030-4f50-5d3d-bfbb-cc3b56e04f86",
+        "color_code": "57",
+        "color_name": "PINE GREEN",
+        "size": "S",
+        "qty_ordered": 90,
+        "code": "BG-CARNABY-57-S",
+        "nylon_color": null,
+        "knit_color": null
+      },
+      {
+        "id": "dcef05a1-6009-58f7-990f-9bc2ea7de196",
+        "style_id": "24dd0030-4f50-5d3d-bfbb-cc3b56e04f86",
+        "color_code": "57",
+        "color_name": "PINE GREEN",
+        "size": "M",
+        "qty_ordered": 120,
+        "code": "BG-CARNABY-57-M",
+        "nylon_color": null,
+        "knit_color": null
+      },
+      {
+        "id": "88e67c05-3037-57f9-9374-09b12717075e",
+        "style_id": "24dd0030-4f50-5d3d-bfbb-cc3b56e04f86",
+        "color_code": "57",
+        "color_name": "PINE GREEN",
+        "size": "L",
+        "qty_ordered": 90,
+        "code": "BG-CARNABY-57-L",
+        "nylon_color": null,
+        "knit_color": null
+      }
+    ]
+  },
+  "users": {
+    "app_user": [
+      {
+        "id": "8191fff4-c8bb-5bc7-99b2-b2364454f0ed",
+        "name": "Priya Sharma",
+        "phone": "9000000001",
+        "email": "priya@factory.test",
+        "password_hash": "hash(9000000001)",
+        "role": "MANAGING_DIRECTOR",
+        "is_active": true,
+        "must_change_password": false,
+        "employee_id": null,
+        "client_id": null
+      },
+      {
+        "id": "1d19f749-b958-5b23-a627-1b2eed577c5b",
+        "name": "Rowan Fernandes",
+        "phone": "9000000002",
+        "email": "rowan@factory.test",
+        "password_hash": "hash(9000000002)",
+        "role": "DIRECT_MANAGER",
+        "is_active": true,
+        "must_change_password": false,
+        "employee_id": null,
+        "client_id": null
+      },
+      {
+        "id": "94da17df-a139-5620-bdd3-5df115061a20",
+        "name": "Arjun Nair",
+        "phone": "9000000003",
+        "email": "arjun@factory.test",
+        "password_hash": "hash(9000000003)",
+        "role": "CUTTING_MANAGER",
+        "is_active": true,
+        "must_change_password": true,
+        "employee_id": null,
+        "client_id": null
+      },
+      {
+        "id": "39486852-5a44-5f7f-b8da-2937ac4393c8",
+        "name": "Meera Iyer",
+        "phone": "9000000004",
+        "email": "meera@factory.test",
+        "password_hash": "hash(9000000004)",
+        "role": "STITCHING_MANAGER",
+        "is_active": true,
+        "must_change_password": true,
+        "employee_id": null,
+        "client_id": null
+      },
+      {
+        "id": "023d2786-f42b-544e-abfe-df9f6bb0d050",
+        "name": "Beau Geste Buyer",
+        "phone": "3310000001",
+        "email": "buyer@beaugeste.test",
+        "password_hash": "hash(3310000001)",
+        "role": "CLIENT",
+        "is_active": true,
+        "must_change_password": true,
+        "employee_id": null,
+        "client_id": "964d8284-4a39-5b0f-9710-c639b25a3103"
+      },
+      {
+        "id": "a9267cc4-2732-5e06-b521-efca0a4eff04",
+        "name": "Raman Kumar",
+        "phone": "9000000011",
+        "email": null,
+        "password_hash": "hash(9000000011)",
+        "role": "EMPLOYEE",
+        "is_active": true,
+        "must_change_password": true,
+        "employee_id": "609d4e85-aa66-56aa-9a37-a0399778e494",
+        "client_id": null
+      },
+      {
+        "id": "6a2f8c1c-221e-5d5b-946e-bcf1c777099e",
+        "name": "Suresh Babu",
+        "phone": "9000000012",
+        "email": null,
+        "password_hash": "hash(9000000012)",
+        "role": "EMPLOYEE",
+        "is_active": true,
+        "must_change_password": true,
+        "employee_id": "9c367e4c-49e3-5f84-9086-d7568b2e22d2",
+        "client_id": null
+      }
+    ]
+  },
+  "bom": {
+    "garment_type": [
+      {
+        "id": "d1438813-bc4c-531d-b0bf-d6ca4800badd",
+        "code": "JACKET",
+        "label": "Leather Jacket",
+        "required_poms": [
+          "CHEST",
+          "LENGTH",
+          "SLEEVE"
+        ],
+        "area_formula": {
+          "method": "source3"
+        },
+        "default_wastage_pct": 12.5
+      }
+    ],
+    "bom": [
+      {
+        "id": "08ec5312-7561-5192-a3e5-298ade31abf3",
+        "submission_id": null,
+        "style_signature": "BEAUGESTE::CARNABY::2026AW",
+        "client_id": "964d8284-4a39-5b0f-9710-c639b25a3103",
+        "client_order_id": "8a5456e7-3c4a-5935-86fa-39f7a98b335a",
+        "style_id": "24dd0030-4f50-5d3d-bfbb-cc3b56e04f86",
+        "order_identity": null,
+        "status": "approved",
+        "currency": "USD",
+        "garment_fob_price": 128,
+        "bulk_total": 300,
+        "order_qty": 300,
+        "revision": 1,
+        "approved_by": "8191fff4-c8bb-5bc7-99b2-b2364454f0ed",
+        "approved_at": "2026-07-20T10:00:00Z",
+        "locked_at": "2026-07-20T10:00:00Z",
+        "rejected_by": null,
+        "rejected_at": null,
+        "rejection_reason": null,
+        "export_document_id": null,
+        "exported_at": null,
+        "cutting_confirmed_by": null,
+        "cutting_confirmed_at": null,
+        "garment_type_id": "d1438813-bc4c-531d-b0bf-d6ca4800badd",
+        "dcm_base_size": "M",
+        "source_document_id": null
+      }
+    ],
+    "bom_item": [
+      {
+        "id": "69b3a5d8-1c2a-5db9-b5e5-ebb440c7289c",
+        "bom_id": "08ec5312-7561-5192-a3e5-298ade31abf3",
+        "category": "main_material",
+        "name": "Sheep Nappa Leather",
+        "material_color": "PINE GREEN",
+        "qty_per_garment": 34.5,
+        "uom": "SQFT",
+        "unit_price": 1.8,
+        "bulk_qty": 10350,
+        "total_cost": 18630,
+        "annotation": "57 colourway",
+        "source_ref": "BMO-1 L1",
+        "dcm_source": "template",
+        "dcm_confidence": 0.95,
+        "attribution_source": "lexicon",
+        "attribution_confidence": 0.98,
+        "attribution_status": "confirmed"
+      },
+      {
+        "id": "e54ead9e-f0b5-58a2-9c4e-2fb9720778bd",
+        "bom_id": "08ec5312-7561-5192-a3e5-298ade31abf3",
+        "category": "lining",
+        "name": "Poly Twill Lining",
+        "material_color": "BLACK",
+        "qty_per_garment": 1.4,
+        "uom": "MTR",
+        "unit_price": 3.2,
+        "bulk_qty": 420,
+        "total_cost": 1344,
+        "annotation": null,
+        "source_ref": "BMO-1 L2",
+        "dcm_source": "template",
+        "dcm_confidence": 0.9,
+        "attribution_source": "lexicon",
+        "attribution_confidence": 0.95,
+        "attribution_status": "confirmed"
+      },
+      {
+        "id": "6f16cca0-2594-5dd8-b570-8bd3acab6983",
+        "bom_id": "08ec5312-7561-5192-a3e5-298ade31abf3",
+        "category": "thread",
+        "name": "Polyester Thread 40/2",
+        "material_color": "BLACK",
+        "qty_per_garment": 0.08,
+        "uom": "CONE",
+        "unit_price": 2.1,
+        "bulk_qty": 24,
+        "total_cost": 50.4,
+        "annotation": null,
+        "source_ref": "BMO-1 L3",
+        "dcm_source": "similar_style",
+        "dcm_confidence": 0.8,
+        "attribution_source": "lexicon",
+        "attribution_confidence": 0.9,
+        "attribution_status": "confirmed"
+      },
+      {
+        "id": "abfe10be-5b15-5ca2-b46d-04086fdc4e88",
+        "bom_id": "08ec5312-7561-5192-a3e5-298ade31abf3",
+        "category": "accessory",
+        "name": "Metal Snap Button 15mm",
+        "material_color": "GUNMETAL",
+        "qty_per_garment": 5,
+        "uom": "PCS",
+        "unit_price": 0.12,
+        "bulk_qty": 1500,
+        "total_cost": 180,
+        "annotation": "TBC pending sample approval",
+        "source_ref": "BMO-1 L4",
+        "dcm_source": "manual",
+        "dcm_confidence": null,
+        "attribution_source": "ai_estimate",
+        "attribution_confidence": 0.7,
+        "attribution_status": "estimated"
+      },
+      {
+        "id": "965f3c2a-1f5d-5d8b-8ebc-64ae2eb8320c",
+        "bom_id": "08ec5312-7561-5192-a3e5-298ade31abf3",
+        "category": "manufacturing",
+        "name": "Cutting Cost",
+        "material_color": null,
+        "qty_per_garment": 1,
+        "uom": "PCS",
+        "unit_price": 2.5,
+        "bulk_qty": 300,
+        "total_cost": 750,
+        "annotation": null,
+        "source_ref": "BMO-1 L5",
+        "dcm_source": null,
+        "dcm_confidence": null,
+        "attribution_source": null,
+        "attribution_confidence": null,
+        "attribution_status": "confirmed"
+      },
+      {
+        "id": "cd1ec7d2-d8c4-5be0-bb08-f4a8cd08ccf9",
+        "bom_id": "08ec5312-7561-5192-a3e5-298ade31abf3",
+        "category": "manufacturing",
+        "name": "Stitching Cost",
+        "material_color": null,
+        "qty_per_garment": 1,
+        "uom": "PCS",
+        "unit_price": 6,
+        "bulk_qty": 300,
+        "total_cost": 1800,
+        "annotation": null,
+        "source_ref": "BMO-1 L6",
+        "dcm_source": null,
+        "dcm_confidence": null,
+        "attribution_source": null,
+        "attribution_confidence": null,
+        "attribution_status": "confirmed"
+      },
+      {
+        "id": "88908687-8dab-50af-b7d1-78fdb42c29ed",
+        "bom_id": "08ec5312-7561-5192-a3e5-298ade31abf3",
+        "category": "packaging",
+        "name": "Poly Bag + Carton Share",
+        "material_color": null,
+        "qty_per_garment": 1,
+        "uom": "PCS",
+        "unit_price": 0.9,
+        "bulk_qty": 300,
+        "total_cost": 270,
+        "annotation": null,
+        "source_ref": "BMO-1 L7",
+        "dcm_source": null,
+        "dcm_confidence": null,
+        "attribution_source": null,
+        "attribution_confidence": null,
+        "attribution_status": "confirmed"
+      }
+    ]
+  },
+  "procurement": {
+    "submission": [
+      {
+        "id": "c61b1531-0d18-53e1-a464-ed01316d7f3f",
+        "client_id": "964d8284-4a39-5b0f-9710-c639b25a3103",
+        "created_by": "1d19f749-b958-5b23-a627-1b2eed577c5b",
+        "status": "consumed",
+        "order_document_id": null,
+        "spec_document_id": null,
+        "client_order_id": "8a5456e7-3c4a-5935-86fa-39f7a98b335a"
+      }
+    ],
+    "client_template": [
+      {
+        "id": "95813967-88b9-5775-ada1-5e44b26845e4",
+        "client_code": "BG",
+        "display_name": "Beau Geste",
+        "doc_kind": "ORDER_SHEET",
+        "language": "en",
+        "size_system": "LETTER",
+        "currency": "USD",
+        "expected_layout": "GRID",
+        "spec_type_hint": "MEASUREMENT_GRID",
+        "accepted_mime": [
+          "xlsx",
+          "pdf"
+        ],
+        "anchors": null,
+        "fingerprints": null,
+        "grid_signals": null,
+        "thresholds": null,
+        "is_active": true
+      }
+    ]
+  },
+  "inventory": {
+    "inventory_item": [
+      {
+        "id": "b8eba17e-1588-5a37-aedd-cac120670ad5",
+        "description": "Sheep Nappa Leather - Pine Green",
+        "normalized_key": "sheep nappa leather pine green",
+        "uom": "SQFT",
+        "qty_on_hand": 6000,
+        "rate": 1.75,
+        "category": "LEATHER",
+        "color": "PINE GREEN",
+        "article_ref": "SNP-57",
+        "is_active": true
+      },
+      {
+        "id": "d416ad01-4749-5ab2-9fed-643ee5695a04",
+        "description": "Poly Twill Lining - Black",
+        "normalized_key": "poly twill lining black",
+        "uom": "MTR",
+        "qty_on_hand": 500,
+        "rate": 3,
+        "category": "LINING",
+        "color": "BLACK",
+        "article_ref": "PTL-BLK",
+        "is_active": true
+      },
+      {
+        "id": "06b78263-fc1d-55e7-ac5c-0f140747e339",
+        "description": "Polyester Thread 40/2 - Black",
+        "normalized_key": "polyester thread 40 2 black",
+        "uom": "CONE",
+        "qty_on_hand": 40,
+        "rate": 2,
+        "category": "TRIM",
+        "color": "BLACK",
+        "article_ref": "THR-402-BLK",
+        "is_active": true
+      },
+      {
+        "id": "4d819e69-d11f-5110-9b2a-0df4bbebf225",
+        "description": "Metal Snap Button 15mm - Gunmetal",
+        "normalized_key": "metal snap button 15mm gunmetal",
+        "uom": "PCS",
+        "qty_on_hand": 900,
+        "rate": 0.11,
+        "category": "TRIM",
+        "color": "GUNMETAL",
+        "article_ref": "BTN-15-GM",
+        "is_active": true
+      }
+    ],
+    "inventory_check": [
+      {
+        "id": "4cfcec7e-6b74-502b-9776-879653416e2c",
+        "bom_id": "08ec5312-7561-5192-a3e5-298ade31abf3",
+        "status": "complete",
+        "run_at": "2026-07-20T11:00:00Z",
+        "run_by": "1d19f749-b958-5b23-a627-1b2eed577c5b"
+      }
+    ],
+    "inventory_check_line": [
+      {
+        "id": "0c8823f8-fe3d-55c1-9608-baa3695d9001",
+        "inventory_check_id": "4cfcec7e-6b74-502b-9776-879653416e2c",
+        "bom_item_id": "69b3a5d8-1c2a-5db9-b5e5-ebb440c7289c",
+        "inventory_item_id": "b8eba17e-1588-5a37-aedd-cac120670ad5",
+        "required_qty": 10350,
+        "on_hand_qty": 6000,
+        "shortfall_qty": 4350,
+        "status": "partial",
+        "matched_method": "key",
+        "flags": null
+      },
+      {
+        "id": "5a2298f7-1ada-5d1d-9975-74903c8e50f1",
+        "inventory_check_id": "4cfcec7e-6b74-502b-9776-879653416e2c",
+        "bom_item_id": "e54ead9e-f0b5-58a2-9c4e-2fb9720778bd",
+        "inventory_item_id": "d416ad01-4749-5ab2-9fed-643ee5695a04",
+        "required_qty": 420,
+        "on_hand_qty": 500,
+        "shortfall_qty": 0,
+        "status": "sufficient",
+        "matched_method": "key",
+        "flags": null
+      },
+      {
+        "id": "36a67028-c905-5b7f-aed6-973661a40f27",
+        "inventory_check_id": "4cfcec7e-6b74-502b-9776-879653416e2c",
+        "bom_item_id": "6f16cca0-2594-5dd8-b570-8bd3acab6983",
+        "inventory_item_id": "06b78263-fc1d-55e7-ac5c-0f140747e339",
+        "required_qty": 24,
+        "on_hand_qty": 40,
+        "shortfall_qty": 0,
+        "status": "sufficient",
+        "matched_method": "key",
+        "flags": null
+      },
+      {
+        "id": "d0d1f168-536b-5cdd-bcf9-7a5a4cec4f66",
+        "inventory_check_id": "4cfcec7e-6b74-502b-9776-879653416e2c",
+        "bom_item_id": "abfe10be-5b15-5ca2-b46d-04086fdc4e88",
+        "inventory_item_id": "4d819e69-d11f-5110-9b2a-0df4bbebf225",
+        "required_qty": 1500,
+        "on_hand_qty": 900,
+        "shortfall_qty": 600,
+        "status": "partial",
+        "matched_method": "key",
+        "flags": null
+      }
+    ],
+    "inventory_reservation": [
+      {
+        "id": "3029f192-1d79-51e8-9542-5b18169b7987",
+        "inventory_item_id": "d416ad01-4749-5ab2-9fed-643ee5695a04",
+        "bom_id": "08ec5312-7561-5192-a3e5-298ade31abf3",
+        "inventory_check_line_id": "5a2298f7-1ada-5d1d-9975-74903c8e50f1",
+        "qty": 420,
+        "status": "active",
+        "released_at": null,
+        "released_reason": null
+      },
+      {
+        "id": "c565f2c3-0d12-5930-919c-e2572cf89423",
+        "inventory_item_id": "06b78263-fc1d-55e7-ac5c-0f140747e339",
+        "bom_id": "08ec5312-7561-5192-a3e5-298ade31abf3",
+        "inventory_check_line_id": "36a67028-c905-5b7f-aed6-973661a40f27",
+        "qty": 24,
+        "status": "active",
+        "released_at": null,
+        "released_reason": null
+      }
+    ],
+    "material_alias": [
+      {
+        "id": "c419046a-bee2-57d6-b943-06c8c1b1a841",
+        "bom_term": "sheep nappa leather",
+        "inventory_key": "sheep nappa leather pine green",
+        "is_active": true
+      }
+    ],
+    "uom_conversion": [
+      {
+        "id": "34597469-47cf-50b5-a599-3048f68b6a04",
+        "from_uom": "SQFT",
+        "to_uom": "SQFT",
+        "factor": 1
+      },
+      {
+        "id": "b9a26864-ff99-576e-ba6e-9b4550b620c6",
+        "from_uom": "MTR",
+        "to_uom": "MTR",
+        "factor": 1
+      }
+    ]
+  },
+  "supplier_po": {
+    "supplier": [
+      {
+        "id": "433b9c74-cf13-5305-ab1a-1101dfe8523f",
+        "name": "Hidecraft Tanners Pvt Ltd",
+        "phone": "+91-98765-00011",
+        "email": "sales@hidecrafttanners.test",
+        "service": "Leather supply",
+        "gstin": "27ABCDE1234F1Z5",
+        "address": "Plot 12, Tannery Rd, Chennai",
+        "currency": "INR",
+        "payment_terms_days": 60,
+        "lead_time_days": 12,
+        "is_active": true,
+        "email_status": "valid",
+        "supplier_type": "leather",
+        "state_code": "27",
+        "whatsapp_phone": "+91-98765-00011"
+      },
+      {
+        "id": "96d7b13b-9b69-5629-aacf-6ca09ff840f3",
+        "name": "Metalfast Trims Co",
+        "phone": "+91-98765-00022",
+        "email": "orders@metalfasttrims.test",
+        "service": "Buttons & hardware",
+        "gstin": "33ABCDE5678F1Z2",
+        "address": "SIDCO Estate, Coimbatore",
+        "currency": "INR",
+        "payment_terms_days": 45,
+        "lead_time_days": 7,
+        "is_active": true,
+        "email_status": "valid",
+        "supplier_type": "accessory",
+        "state_code": "33",
+        "whatsapp_phone": "+91-98765-00022"
+      }
+    ],
+    "supplier_supply_history": [
+      {
+        "id": "dde10ed7-fd25-50fe-b693-eaeb6e4220b0",
+        "supplier_id": "433b9c74-cf13-5305-ab1a-1101dfe8523f",
+        "normalized_description": "sheep nappa leather pine green",
+        "raw_description": "Sheep Nappa - Pine Green",
+        "mode": "PURCHASE",
+        "uom": "SQFT",
+        "txn_count": 14,
+        "first_purchased_at": "2024-02-10",
+        "last_purchased_at": "2026-05-20",
+        "last_rate": 1.78,
+        "min_rate": 1.65,
+        "max_rate": 1.85
+      }
+    ],
+    "purchase_order": [
+      {
+        "id": "6d07aa23-b191-5082-8001-8b0c4baad066",
+        "po_number": "PO-07(25-26)",
+        "supplier_id": "433b9c74-cf13-5305-ab1a-1101dfe8523f",
+        "bom_id": "08ec5312-7561-5192-a3e5-298ade31abf3",
+        "client_order_id": "8a5456e7-3c4a-5935-86fa-39f7a98b335a",
+        "buyer_ref": "ORD-1001",
+        "issue_date": "2026-07-21",
+        "delivery_days": 12,
+        "payment_terms_days": 60,
+        "currency": "INR",
+        "subtotal": 7743,
+        "cgst": 696.87,
+        "sgst": 696.87,
+        "igst": null,
+        "gst_mode": "INTRA",
+        "round_off": 0,
+        "total": 9136.74,
+        "status": "sent",
+        "needs_supplier": false,
+        "no_contact_channel": false,
+        "match_method": "key",
+        "candidates": null,
+        "revision": 1,
+        "created_by": "1d19f749-b958-5b23-a627-1b2eed577c5b",
+        "approved_by": "8191fff4-c8bb-5bc7-99b2-b2364454f0ed",
+        "approved_at": "2026-07-21T09:00:00Z",
+        "rejected_by": null,
+        "rejected_at": null,
+        "rejection_reason": null,
+        "sent_at": "2026-07-21T09:30:00Z",
+        "pdf_document_id": null,
+        "tracking_token": "f4b41091-db51-5b",
+        "first_opened_at": null,
+        "first_clicked_at": null,
+        "current_rung": 1,
+        "next_escalation_at": "2026-07-24T09:30:00Z",
+        "acknowledged_at": null,
+        "acknowledged_channel": null
+      },
+      {
+        "id": "8d3e985f-b36d-5628-bf5f-30800829c436",
+        "po_number": "PO-08(25-26)",
+        "supplier_id": "96d7b13b-9b69-5629-aacf-6ca09ff840f3",
+        "bom_id": "08ec5312-7561-5192-a3e5-298ade31abf3",
+        "client_order_id": "8a5456e7-3c4a-5935-86fa-39f7a98b335a",
+        "buyer_ref": "ORD-1001",
+        "issue_date": "2026-07-21",
+        "delivery_days": 7,
+        "payment_terms_days": 45,
+        "currency": "INR",
+        "subtotal": 72,
+        "cgst": 6.48,
+        "sgst": 6.48,
+        "igst": null,
+        "gst_mode": "INTRA",
+        "round_off": 0,
+        "total": 84.96,
+        "status": "confirmed",
+        "needs_supplier": false,
+        "no_contact_channel": false,
+        "match_method": "key",
+        "candidates": null,
+        "revision": 1,
+        "created_by": "1d19f749-b958-5b23-a627-1b2eed577c5b",
+        "approved_by": "8191fff4-c8bb-5bc7-99b2-b2364454f0ed",
+        "approved_at": "2026-07-21T09:05:00Z",
+        "rejected_by": null,
+        "rejected_at": null,
+        "rejection_reason": null,
+        "sent_at": "2026-07-21T09:35:00Z",
+        "pdf_document_id": null,
+        "tracking_token": "c8ac7537-24b7-5a",
+        "first_opened_at": "2026-07-22T13:50:00Z",
+        "first_clicked_at": "2026-07-22T13:52:00Z",
+        "current_rung": 0,
+        "next_escalation_at": null,
+        "acknowledged_at": "2026-07-22T14:00:00Z",
+        "acknowledged_channel": "email"
+      }
+    ],
+    "po_item": [
+      {
+        "id": "cbfaaab4-863a-593c-8b58-adbb1d1f87bf",
+        "purchase_order_id": "6d07aa23-b191-5082-8001-8b0c4baad066",
+        "item_no": 1,
+        "description": "Sheep Nappa Leather - Pine Green",
+        "color": "PINE GREEN",
+        "uom": "SQFT",
+        "qty": 4350,
+        "unit_price": 1.78,
+        "amount": 7743,
+        "inventory_item_id": "b8eba17e-1588-5a37-aedd-cac120670ad5",
+        "bom_item_id": "69b3a5d8-1c2a-5db9-b5e5-ebb440c7289c"
+      },
+      {
+        "id": "4988c872-56e0-57b1-bb84-9e7e2b1c0867",
+        "purchase_order_id": "8d3e985f-b36d-5628-bf5f-30800829c436",
+        "item_no": 1,
+        "description": "Metal Snap Button 15mm - Gunmetal",
+        "color": "GUNMETAL",
+        "uom": "PCS",
+        "qty": 600,
+        "unit_price": 0.12,
+        "amount": 72,
+        "inventory_item_id": "4d819e69-d11f-5110-9b2a-0df4bbebf225",
+        "bom_item_id": "abfe10be-5b15-5ca2-b46d-04086fdc4e88"
+      }
+    ],
+    "po_response": [
+      {
+        "id": "ff89653e-d97b-5b7f-a4e2-446fe80a9295",
+        "purchase_order_id": "8d3e985f-b36d-5628-bf5f-30800829c436",
+        "channel": "email",
+        "sent_at": "2026-07-21T09:35:00Z",
+        "responded_at": "2026-07-22T14:00:00Z",
+        "confirmed_qty": 600,
+        "status": "confirmed",
+        "notes": "Confirmed by return email, ships within 7 days.",
+        "tracking_token": "c8ac7537-24b7-5a",
+        "message_id": "msg-po-buttons-001"
+      }
+    ],
+    "po_tracking_event": [
+      {
+        "id": "cc16c19e-2fcb-5b32-b9fe-98d35a7044ed",
+        "purchase_order_id": "6d07aa23-b191-5082-8001-8b0c4baad066",
+        "po_response_id": null,
+        "tracking_token": "f4b41091-db51-5b",
+        "event_type": "delivery",
+        "channel": "email",
+        "ip": null,
+        "user_agent": null,
+        "meta": null,
+        "at": "2026-07-21T09:31:00Z"
+      },
+      {
+        "id": "b5230a36-2a2d-5e17-b549-6347343ecaa0",
+        "purchase_order_id": "8d3e985f-b36d-5628-bf5f-30800829c436",
+        "po_response_id": null,
+        "tracking_token": "c8ac7537-24b7-5a",
+        "event_type": "open",
+        "channel": "email",
+        "ip": "103.21.244.10",
+        "user_agent": "Mozilla/5.0",
+        "meta": null,
+        "at": "2026-07-22T13:50:00Z"
+      },
+      {
+        "id": "c0fdfe65-e800-5b8b-ac9a-1499fa478981",
+        "purchase_order_id": "8d3e985f-b36d-5628-bf5f-30800829c436",
+        "po_response_id": "ff89653e-d97b-5b7f-a4e2-446fe80a9295",
+        "tracking_token": "c8ac7537-24b7-5a",
+        "event_type": "click",
+        "channel": "email",
+        "ip": "103.21.244.10",
+        "user_agent": "Mozilla/5.0",
+        "meta": null,
+        "at": "2026-07-22T13:52:00Z"
+      }
+    ],
+    "production_tracking": [
+      {
+        "id": "03045301-baad-52d6-b6d9-aefd077f69ab",
+        "client_order_id": "8a5456e7-3c4a-5935-86fa-39f7a98b335a",
+        "style_id": "24dd0030-4f50-5d3d-bfbb-cc3b56e04f86",
+        "bom_id": "08ec5312-7561-5192-a3e5-298ade31abf3",
+        "status": "po_raised",
+        "po_count": 2,
+        "po_confirmed_count": 1,
+        "material_ready_at": null,
+        "released_at": null,
+        "updated_by": "1d19f749-b958-5b23-a627-1b2eed577c5b"
+      }
+    ]
+  },
+  "production": {
+    "operation": [
+      {
+        "id": "de007aec-3a88-5818-81cd-0e1f17ed035e",
+        "code": "CUTTING",
+        "label": "Cutting",
+        "sequence": 1,
+        "is_active": true
+      },
+      {
+        "id": "e170f270-3ba8-5ee2-9c66-0bde19e9d322",
+        "code": "FUSING",
+        "label": "Fusing",
+        "sequence": 2,
+        "is_active": true
+      },
+      {
+        "id": "be997513-1820-52d3-8ec8-325fcbaddc4a",
+        "code": "STITCHING",
+        "label": "Stitching",
+        "sequence": 3,
+        "is_active": true
+      },
+      {
+        "id": "ac279d43-78ec-5a72-a11a-88044cc77fea",
+        "code": "PACKING",
+        "label": "Packing",
+        "sequence": 4,
+        "is_active": true
+      }
+    ],
+    "operation_access": [
+      {
+        "id": "b5459f80-59d1-5763-a201-3e682c108f37",
+        "role": "CUTTING_MANAGER",
+        "operation_id": "de007aec-3a88-5818-81cd-0e1f17ed035e"
+      },
+      {
+        "id": "955ba005-f07a-582f-a550-3b5cbc54c8aa",
+        "role": "STITCHING_MANAGER",
+        "operation_id": "be997513-1820-52d3-8ec8-325fcbaddc4a"
+      },
+      {
+        "id": "560cb2c9-d3bf-589b-be9e-553fc02a8e95",
+        "role": "STITCHING_MANAGER",
+        "operation_id": "e170f270-3ba8-5ee2-9c66-0bde19e9d322"
+      },
+      {
+        "id": "16503648-77b3-52ad-81e8-b1b6e6e77a79",
+        "role": "DIRECT_MANAGER",
+        "operation_id": "ac279d43-78ec-5a72-a11a-88044cc77fea"
+      }
+    ],
+    "style_operation": [
+      {
+        "id": "dbe68e6e-8b48-5207-9f4f-37493e7b1083",
+        "style_id": "24dd0030-4f50-5d3d-bfbb-cc3b56e04f86",
+        "operation_id": "de007aec-3a88-5818-81cd-0e1f17ed035e"
+      },
+      {
+        "id": "0143ecfa-1f57-560a-bf13-7c711fb2b91d",
+        "style_id": "24dd0030-4f50-5d3d-bfbb-cc3b56e04f86",
+        "operation_id": "e170f270-3ba8-5ee2-9c66-0bde19e9d322"
+      },
+      {
+        "id": "185a6f92-1ffe-588e-ab56-ece183ad999c",
+        "style_id": "24dd0030-4f50-5d3d-bfbb-cc3b56e04f86",
+        "operation_id": "be997513-1820-52d3-8ec8-325fcbaddc4a"
+      },
+      {
+        "id": "61bc6f85-7faf-5ee4-9744-93a3379dbfd0",
+        "style_id": "24dd0030-4f50-5d3d-bfbb-cc3b56e04f86",
+        "operation_id": "ac279d43-78ec-5a72-a11a-88044cc77fea"
+      }
+    ],
+    "piece": [
+      {
+        "id": "4954c30c-a73d-5ffa-ab24-78222b522298",
+        "code": "BG-CARNABY-57-M-1",
+        "seq": 1,
+        "sku_id": "dcef05a1-6009-58f7-990f-9bc2ea7de196",
+        "current_operation_id": "be997513-1820-52d3-8ec8-325fcbaddc4a",
+        "is_active": true,
+        "needs_lining": true,
+        "drawer_id": "c4b022ba-6f81-5d45-b2bf-b67c15250094"
+      },
+      {
+        "id": "d52445f1-f972-57de-a259-ce84db30de47",
+        "code": "BG-CARNABY-57-M-2",
+        "seq": 2,
+        "sku_id": "dcef05a1-6009-58f7-990f-9bc2ea7de196",
+        "current_operation_id": "de007aec-3a88-5818-81cd-0e1f17ed035e",
+        "is_active": true,
+        "needs_lining": true,
+        "drawer_id": null
+      },
+      {
+        "id": "069c85d5-145e-56f5-95a9-635b530422ea",
+        "code": "BG-CARNABY-57-M-3",
+        "seq": 3,
+        "sku_id": "dcef05a1-6009-58f7-990f-9bc2ea7de196",
+        "current_operation_id": "de007aec-3a88-5818-81cd-0e1f17ed035e",
+        "is_active": true,
+        "needs_lining": true,
+        "drawer_id": null
+      }
+    ],
+    "production_event": [
+      {
+        "id": "46f8e534-b20e-587a-a05a-0fc97516254b",
+        "sku_id": "dcef05a1-6009-58f7-990f-9bc2ea7de196",
+        "operation_id": "de007aec-3a88-5818-81cd-0e1f17ed035e",
+        "employee_id": "609d4e85-aa66-56aa-9a37-a0399778e494",
+        "work_date": "2026-07-23",
+        "qty": 1,
+        "entered_by": "Rowan Fernandes",
+        "piece_id": "4954c30c-a73d-5ffa-ab24-78222b522298",
+        "leather_lot_id": "bc141ef1-ae3c-509e-9b77-ac1284f6b60e",
+        "lining_lot_id": "25290554-7dfd-56fc-a5de-1771f67fc28b",
+        "consumption_qty": 34.5
+      },
+      {
+        "id": "1ab46d37-f6fb-50ff-9ad8-08da53043a55",
+        "sku_id": "dcef05a1-6009-58f7-990f-9bc2ea7de196",
+        "operation_id": "e170f270-3ba8-5ee2-9c66-0bde19e9d322",
+        "employee_id": "9c367e4c-49e3-5f84-9086-d7568b2e22d2",
+        "work_date": "2026-07-24",
+        "qty": 1,
+        "entered_by": "Rowan Fernandes",
+        "piece_id": "4954c30c-a73d-5ffa-ab24-78222b522298",
+        "leather_lot_id": null,
+        "lining_lot_id": null,
+        "consumption_qty": null
+      },
+      {
+        "id": "b145e055-349b-5a40-ba76-3866cb93ad8f",
+        "sku_id": "dcef05a1-6009-58f7-990f-9bc2ea7de196",
+        "operation_id": "be997513-1820-52d3-8ec8-325fcbaddc4a",
+        "employee_id": "9c367e4c-49e3-5f84-9086-d7568b2e22d2",
+        "work_date": "2026-07-25",
+        "qty": 1,
+        "entered_by": "Rowan Fernandes",
+        "piece_id": "4954c30c-a73d-5ffa-ab24-78222b522298",
+        "leather_lot_id": null,
+        "lining_lot_id": null,
+        "consumption_qty": null
+      },
+      {
+        "id": "0cdbe072-22ba-5ddd-b8a8-34d30d8ed3ff",
+        "sku_id": "dcef05a1-6009-58f7-990f-9bc2ea7de196",
+        "operation_id": "de007aec-3a88-5818-81cd-0e1f17ed035e",
+        "employee_id": "609d4e85-aa66-56aa-9a37-a0399778e494",
+        "work_date": "2026-07-23",
+        "qty": 1,
+        "entered_by": "Rowan Fernandes",
+        "piece_id": "d52445f1-f972-57de-a259-ce84db30de47",
+        "leather_lot_id": "bc141ef1-ae3c-509e-9b77-ac1284f6b60e",
+        "lining_lot_id": "25290554-7dfd-56fc-a5de-1771f67fc28b",
+        "consumption_qty": 34.5
+      },
+      {
+        "id": "564201cd-78ae-57af-81ba-b2fe27c863e9",
+        "sku_id": "dcef05a1-6009-58f7-990f-9bc2ea7de196",
+        "operation_id": "de007aec-3a88-5818-81cd-0e1f17ed035e",
+        "employee_id": "609d4e85-aa66-56aa-9a37-a0399778e494",
+        "work_date": "2026-07-23",
+        "qty": 1,
+        "entered_by": "Rowan Fernandes",
+        "piece_id": "069c85d5-145e-56f5-95a9-635b530422ea",
+        "leather_lot_id": "bc141ef1-ae3c-509e-9b77-ac1284f6b60e",
+        "lining_lot_id": "25290554-7dfd-56fc-a5de-1771f67fc28b",
+        "consumption_qty": 34.5
+      }
+    ]
+  },
+  "barcode": {
+    "material_supplier": [
+      {
+        "id": "b3cb9eea-f491-5f0b-afec-84e219b2ecbe",
+        "name": "Hidecraft Tanners (local store)",
+        "articles": "SNP-57,SNP-J24",
+        "contact": "+91-98765-00011",
+        "is_active": true
+      }
+    ],
+    "material_lot": [
+      {
+        "id": "bc141ef1-ae3c-509e-9b77-ac1284f6b60e",
+        "category": "LEATHER",
+        "subtype": "NAPPA",
+        "article": "SNP-57",
+        "colour": "PINE GREEN",
+        "thickness": "1.0-1.2mm",
+        "size": null,
+        "uom": "SQFT",
+        "on_hand": 6000,
+        "supplier_id": "b3cb9eea-f491-5f0b-afec-84e219b2ecbe",
+        "attributes": {
+          "dcm": 34.5,
+          "thickness": "1.0-1.2mm"
+        },
+        "is_active": true
+      },
+      {
+        "id": "25290554-7dfd-56fc-a5de-1771f67fc28b",
+        "category": "LINING",
+        "subtype": "TWILL",
+        "article": "PTL-BLK",
+        "colour": "BLACK",
+        "thickness": null,
+        "size": null,
+        "uom": "MTR",
+        "on_hand": 500,
+        "supplier_id": "b3cb9eea-f491-5f0b-afec-84e219b2ecbe",
+        "attributes": {},
+        "is_active": true
+      }
+    ],
+    "material_reservation": [
+      {
+        "id": "1e407f7b-192e-5174-9019-1bc92f08c886",
+        "material_lot_id": "bc141ef1-ae3c-509e-9b77-ac1284f6b60e",
+        "qty": 103.5,
+        "status": "active",
+        "reason": "CARNABY cutting - 3 pieces",
+        "released_at": null
+      }
+    ],
+    "material_receipt": [
+      {
+        "id": "cfdb8cc8-3aeb-57da-ae1b-424627e0b429",
+        "material_lot_id": "bc141ef1-ae3c-509e-9b77-ac1284f6b60e",
+        "supplier_order_id": "87ec7efb-4f0d-5ce0-b7be-30935a4d6ab9",
+        "approved_qty": 4350,
+        "rejected_qty": 15,
+        "received_by": "1d19f749-b958-5b23-a627-1b2eed577c5b"
+      }
+    ],
+    "supplier_order": [
+      {
+        "id": "87ec7efb-4f0d-5ce0-b7be-30935a4d6ab9",
+        "category": "LEATHER",
+        "article": "SNP-57",
+        "colour": "PINE GREEN",
+        "qty": 4350,
+        "uom": "SQFT",
+        "status": "arrived",
+        "supplier_id": "b3cb9eea-f491-5f0b-afec-84e219b2ecbe",
+        "ordered_by": "1d19f749-b958-5b23-a627-1b2eed577c5b",
+        "arrived_at": "2026-08-02T10:00:00Z"
+      }
+    ],
+    "drawer": [
+      {
+        "id": "c4b022ba-6f81-5d45-b2bf-b67c15250094",
+        "code": "DRW-014",
+        "seq": 14,
+        "state": "merged",
+        "current_piece_id": "4954c30c-a73d-5ffa-ab24-78222b522298",
+        "leather_in": true,
+        "lining_in": true,
+        "received_at": "2026-07-23T08:00:00Z",
+        "sended_at": null
+      }
+    ],
+    "barcode_registry": [
+      {
+        "id": "38cfad35-8fee-5e4d-bfbc-6dd4056d7ee1",
+        "code": "BG-CARNABY-57-M-1",
+        "type": "PIECE",
+        "status": "active",
+        "piece_id": "4954c30c-a73d-5ffa-ab24-78222b522298",
+        "employee_id": null,
+        "drawer_id": null,
+        "material_lot_id": null,
+        "caption": "CARNABY · PINE GREEN · M · #1",
+        "retired_at": null,
+        "retired_reason": null
+      },
+      {
+        "id": "1420017e-a89a-5c62-aa6e-6bba03ae986a",
+        "code": "BG-CARNABY-57-M-2",
+        "type": "PIECE",
+        "status": "active",
+        "piece_id": "d52445f1-f972-57de-a259-ce84db30de47",
+        "employee_id": null,
+        "drawer_id": null,
+        "material_lot_id": null,
+        "caption": "CARNABY · PINE GREEN · M · #2",
+        "retired_at": null,
+        "retired_reason": null
+      },
+      {
+        "id": "53376101-5d73-5be8-9b3c-0f593c00c0c5",
+        "code": "BG-CARNABY-57-M-3",
+        "type": "PIECE",
+        "status": "active",
+        "piece_id": "069c85d5-145e-56f5-95a9-635b530422ea",
+        "employee_id": null,
+        "drawer_id": null,
+        "material_lot_id": null,
+        "caption": "CARNABY · PINE GREEN · M · #3",
+        "retired_at": null,
+        "retired_reason": null
+      },
+      {
+        "id": "d3dcbff1-51df-5e2b-b445-2fd014f5fd74",
+        "code": "EMP-0011",
+        "type": "EMPLOYEE",
+        "status": "active",
+        "piece_id": null,
+        "employee_id": "609d4e85-aa66-56aa-9a37-a0399778e494",
+        "drawer_id": null,
+        "material_lot_id": null,
+        "caption": "Raman Kumar - CUTTER",
+        "retired_at": null,
+        "retired_reason": null
+      },
+      {
+        "id": "8d9558cc-9858-5a3e-9b75-20fabddc78e1",
+        "code": "EMP-0012",
+        "type": "EMPLOYEE",
+        "status": "active",
+        "piece_id": null,
+        "employee_id": "9c367e4c-49e3-5f84-9086-d7568b2e22d2",
+        "drawer_id": null,
+        "material_lot_id": null,
+        "caption": "Suresh Babu - TAILOR",
+        "retired_at": null,
+        "retired_reason": null
+      },
+      {
+        "id": "8450459e-e9a5-5d60-9138-1bd505cf15d8",
+        "code": "DRW-014",
+        "type": "DRAWER",
+        "status": "active",
+        "piece_id": null,
+        "employee_id": null,
+        "drawer_id": "c4b022ba-6f81-5d45-b2bf-b67c15250094",
+        "material_lot_id": null,
+        "caption": "Drawer 14",
+        "retired_at": null,
+        "retired_reason": null
+      },
+      {
+        "id": "615d58a6-c390-5504-8804-d712b5b6baf4",
+        "code": "LOT-SNP57-B1",
+        "type": "LEATHER_LOT",
+        "status": "active",
+        "piece_id": null,
+        "employee_id": null,
+        "drawer_id": null,
+        "material_lot_id": "bc141ef1-ae3c-509e-9b77-ac1284f6b60e",
+        "caption": "Sheep Nappa Pine Green - Batch 1",
+        "retired_at": null,
+        "retired_reason": null
+      },
+      {
+        "id": "80f73e46-8c94-5d8e-b3fe-a87a51310bb5",
+        "code": "LOT-PTLBLK-B1",
+        "type": "LINING_LOT",
+        "status": "active",
+        "piece_id": null,
+        "employee_id": null,
+        "drawer_id": null,
+        "material_lot_id": "25290554-7dfd-56fc-a5de-1771f67fc28b",
+        "caption": "Poly Twill Black - Batch 1",
+        "retired_at": null,
+        "retired_reason": null
+      }
+    ]
+  },
+  "wages": {
+    "rate": [
+      {
+        "id": "a7ed7094-6c5e-58ae-8f91-adbb85acc448",
+        "style_id": "24dd0030-4f50-5d3d-bfbb-cc3b56e04f86",
+        "operation_id": "de007aec-3a88-5818-81cd-0e1f17ed035e",
+        "rate": 45,
+        "effective_from": "2026-07-20"
+      },
+      {
+        "id": "9bde1f40-58a2-557a-ab9f-1da6dcdde615",
+        "style_id": "24dd0030-4f50-5d3d-bfbb-cc3b56e04f86",
+        "operation_id": "e170f270-3ba8-5ee2-9c66-0bde19e9d322",
+        "rate": 30,
+        "effective_from": "2026-07-20"
+      },
+      {
+        "id": "212b6d9b-ca20-51b2-b414-7a307d9b57c9",
+        "style_id": "24dd0030-4f50-5d3d-bfbb-cc3b56e04f86",
+        "operation_id": "be997513-1820-52d3-8ec8-325fcbaddc4a",
+        "rate": 120,
+        "effective_from": "2026-07-20"
+      }
+    ],
+    "wage_run": [
+      {
+        "id": "24aa787e-0733-5074-9454-cee7248c5d98",
+        "period_start": "2026-07-20",
+        "period_end": "2026-07-26",
+        "status": "CLOSED",
+        "recompute_count": 0,
+        "last_recomputed_at": null,
+        "last_recomputed_by": null
+      }
+    ],
+    "wage_line_detail": [
+      {
+        "id": "87ba3b8a-4733-5466-a4a2-163928d78677",
+        "wage_run_id": "24aa787e-0733-5074-9454-cee7248c5d98",
+        "employee_id": "609d4e85-aa66-56aa-9a37-a0399778e494",
+        "style_id": "24dd0030-4f50-5d3d-bfbb-cc3b56e04f86",
+        "operation_id": "de007aec-3a88-5818-81cd-0e1f17ed035e",
+        "pieces": 3,
+        "rate": 45,
+        "amount": 135
+      },
+      {
+        "id": "86386d50-3ac2-5ba1-a94f-51643d94b45b",
+        "wage_run_id": "24aa787e-0733-5074-9454-cee7248c5d98",
+        "employee_id": "9c367e4c-49e3-5f84-9086-d7568b2e22d2",
+        "style_id": "24dd0030-4f50-5d3d-bfbb-cc3b56e04f86",
+        "operation_id": "e170f270-3ba8-5ee2-9c66-0bde19e9d322",
+        "pieces": 1,
+        "rate": 30,
+        "amount": 30
+      },
+      {
+        "id": "369c0e17-c98e-580c-89ba-6de3aab79be7",
+        "wage_run_id": "24aa787e-0733-5074-9454-cee7248c5d98",
+        "employee_id": "9c367e4c-49e3-5f84-9086-d7568b2e22d2",
+        "style_id": "24dd0030-4f50-5d3d-bfbb-cc3b56e04f86",
+        "operation_id": "be997513-1820-52d3-8ec8-325fcbaddc4a",
+        "pieces": 1,
+        "rate": 120,
+        "amount": 120
+      }
+    ],
+    "wage_line": [
+      {
+        "id": "77f171c3-6ef1-53ca-995d-995ed59385f6",
+        "wage_run_id": "24aa787e-0733-5074-9454-cee7248c5d98",
+        "employee_id": "609d4e85-aa66-56aa-9a37-a0399778e494",
+        "wage_type": "PIECE_RATE",
+        "pieces": 3,
+        "amount": 135
+      },
+      {
+        "id": "6c29d3dc-2915-5836-9646-d12ce015d52a",
+        "wage_run_id": "24aa787e-0733-5074-9454-cee7248c5d98",
+        "employee_id": "9c367e4c-49e3-5f84-9086-d7568b2e22d2",
+        "wage_type": "PIECE_RATE",
+        "pieces": 2,
+        "amount": 150
+      },
+      {
+        "id": "4ed765ba-af6d-5c8a-a09d-3e4e6f90fc0d",
+        "wage_run_id": "24aa787e-0733-5074-9454-cee7248c5d98",
+        "employee_id": "4ed4301b-7f42-5ec7-8cab-7f666a2814fd",
+        "wage_type": "MONTHLY",
+        "pieces": 0,
+        "amount": 5077
+      }
+    ]
+  }
+}

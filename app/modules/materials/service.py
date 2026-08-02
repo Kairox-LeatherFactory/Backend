@@ -63,14 +63,14 @@ class MaterialService:
         required on the lot itself; the rest are validated in `attributes` against
         MATERIAL_SPEC. The quantity is read from the category's own qty field
         (dcm / mtrs / kg / pcs / count), never a generic 'qty'."""
-        cat = body.category.upper()
+        cat = body.category.upper() # accessories
         if cat not in _LOT_BARCODE_TYPE:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 f"Unknown category '{body.category}'.")
-        subtype = (body.subtype or None)
+        subtype = (body.subtype or None) # if leather ok other wise error
         subtype = subtype.upper() if subtype else None
 
-        spec = resolve_spec(cat, subtype)
+        spec = resolve_spec(cat, subtype) # get the spec for this category/subtype like thickness filtered by
         if spec is None:
             # ACCESSORY with no/unknown subtype, or an unrecognised lining subtype.
             hint = ("Accessory needs a subtype: BUTTON, ZIP, THREAD or OTHER."
@@ -86,10 +86,45 @@ class MaterialService:
         if not body.colour or not str(body.colour).strip():
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 "colour is required.")
+            
+#             Suppose
+
+#         "attributes":{
+#             "grade":"A",
+#             "thickness":"1.2",
+#             "remarks":"",
+#             "brand":null
+#         }
+
+#         After cleaning
+
+#         attrs = {
+#             "grade":"A",
+#             "thickness":"1.2"
+# }
 
         attrs = {k: v for k, v in dict(body.attributes or {}).items()
                  if v is not None and str(v).strip() != ""}
 
+        
+        # Required
+
+        # {
+        #     "grade",
+        #     "thickness",
+        #     "dcm"
+        # }
+
+        # User sends
+
+        # {
+        #     "grade":"A",
+        #     "dcm":500
+        # }
+
+        # Then
+
+        # missing = {"thickness"}
         # STRICT: every required attribute key must be present and non-empty.
         missing = spec["required"] - set(attrs)
         if missing:
@@ -145,6 +180,16 @@ class MaterialService:
             "description": attrs.get("description"), "qty": f"{qty} {uom}",
         }
         return " · ".join(str(values[f]) for f in fields if values.get(f))
+    
+    
+    # material_lot
+    # lot_id	article	on_hand
+    # LOT001	Cow Leather	500
+    # material_reservation
+    # reservation_id	lot_id	quantity	status
+    # R001	LOT001	120	ACTIVE
+    # R002	LOT001	30	ACTIVE
+    # R003	LOT001	50	RELEASED
 
     # ── stock check ──────────────────────────────────────────────────────────
     async def available_for_lot(self, lot_id: uuid.UUID) -> float:
@@ -176,6 +221,8 @@ class MaterialService:
         lots = await self.repo.find_lots(
             category=category, subtype=subtype, article=article,
             colour=colour, thickness=thickness, size=size)
+        # return list here
+        # initialize total into zero
         on_hand = Decimal(0)
         reserved = Decimal(0)
         for lot in lots:
@@ -193,8 +240,18 @@ class MaterialService:
             "available": float(available),
             "lot_count": len(lots),
         }
+        
+        # short fall if bom say = 500 available = 300
         if required is not None:
             short = max(Decimal(0), Decimal(str(required)) - available)
+            
+            # Calculation
+
+            # 500 - 340
+
+            # equals
+
+            # 160
             out["required"] = float(required)
             out["short_by"] = float(short)
             if short > 0 and article:
@@ -226,8 +283,9 @@ class MaterialService:
                 reason="receiving reservation")
 
         order_status = None
+        # noting order time and status
         if body.supplier_order_id:
-            order = await self.repo.get_order(body.supplier_order_id)
+            order = await self.repo.get_order(body.supplier_order_id) # get the specific supplier_order
             if order and order.status != SupplierOrderStatus.ARRIVED.value:
                 from datetime import datetime, timezone
                 order.status = SupplierOrderStatus.ARRIVED.value

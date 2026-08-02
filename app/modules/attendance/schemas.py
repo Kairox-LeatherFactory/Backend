@@ -18,6 +18,7 @@ class ScanCheckIn(BaseModel):
     employee_barcode: str
     lat: float | None = None
     lon: float | None = None
+    direction: str = Field(..., pattern="^(in|out)$")
     proxy: bool = False
     reason: str | None = Field(None, max_length=200)
 
