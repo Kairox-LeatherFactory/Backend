@@ -16,6 +16,7 @@ class ScanCheckIn(BaseModel):
     lack a fix — but H6 requires `reason` when they are omitted, so an
     unverified row is always a deliberate, reviewable act."""
     employee_barcode: str
+    direction: str = Field(..., pattern="^(in|out)$")
     lat: float | None = None
     lon: float | None = None
     proxy: bool = False

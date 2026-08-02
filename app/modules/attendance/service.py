@@ -169,8 +169,8 @@ class AttendanceService:
         return await self._close(employee_id=user.employee_id)
 
 
-    async def barcode_scan(self, *, employee_id: uuid.UUID, actor: User,
-                           direction: str, lat: float | None,
+    async def barcode_scan(self, *, employee_id: uuid.UUID, actor: User,direction: str,
+                           lat: float | None,
                            lon: float | None, proxy: bool, reason: str | None = None):
         """Barcode check in/out. Reuses _open_or_reject / _close.
 

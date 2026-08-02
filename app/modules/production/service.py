@@ -375,12 +375,17 @@ class ProductionService:
     # ══════════════════════════════════════════════════════════════ readers
     async def list_pieces_for_sku(self, *, sku_id: uuid.UUID | None = None,
                                   sku_code: str | None = None,
-                                  operation_id: uuid.UUID | None = None) -> dict:
+                                  operation_id: uuid.UUID | None = None,
+                                  client_scope: uuid.UUID | None = None) -> dict:
         sku_id = await self._resolve_sku_id(sku_id, sku_code)
         if not sku_id:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Provide sku_id or sku_code.")
         sku = await self.clients.get_sku(sku_id)
         if not sku:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "SKU not found")
+        if client_scope is not None and not await self.clients.is_sku_visible_to_client(
+            sku_id, client_scope
+        ):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "SKU not found")
 
         op = None
@@ -432,11 +437,14 @@ class ProductionService:
     async def list_events(self, **filters) -> list[ProductionEvent]:
         return await self.repo.list_events(**filters)
 
-    async def style_progress(self, style_id: uuid.UUID) -> dict[str, int]:
-        return await self.repo.stage_totals_for_style(style_id)
+    async def style_progress(self, style_id: uuid.UUID,
+                             client_scope: uuid.UUID | None = None) -> dict[str, int]:
+        return await self.repo.stage_totals_for_style(style_id, client_scope=client_scope)
 
-    async def list_sku_options(self, *, order_id=None, style_id=None) -> list[dict]:
-        return await self.clients.list_sku_options(order_id=order_id, style_id=style_id)
+    async def list_sku_options(self, *, order_id=None, style_id=None,
+                               client_scope: uuid.UUID | None = None) -> list[dict]:
+        return await self.clients.list_sku_options(
+            order_id=order_id, style_id=style_id, client_scope=client_scope)
 
     async def piece_counts(self, start: date, end: date):
         return await self.repo.piece_counts_by_employee_style_op(start, end)
