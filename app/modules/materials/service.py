@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.enums import (
     BarcodeType, MaterialCategory, SupplierOrderStatus, resolve_spec, uom_for,
 )
+from app.core.enums import UserRole
 from app.modules.barcode.repository import BarcodeRepository
 from app.modules.materials.repository import MaterialRepository
 
@@ -204,48 +205,102 @@ class MaterialService:
         return out
 
     # ── receive (approved / rejected) ────────────────────────────────────────
-    async def receive(self, body, actor_id: uuid.UUID | None) -> dict:
+    async def receive(self, body, actor_id, actor_role=None) -> dict:
+        """Approved adds to stock, rejected logged. NEW: when a supplier_order_id
+        is supplied, the delivered lot must MATCH the order on
+        article/colour/thickness/dcm. On mismatch:
+            • default → 409 (rejected, nothing added)
+            • approve_mismatch=True AND actor is DM/MD → the approved qty is
+              received into a NEW lot carrying the DELIVERED spec (a substitution),
+              audited, and the order is marked ARRIVED. The originally-targeted lot
+              is never topped up with the wrong material."""
         lot = await self.repo.get_lot(body.lot_id)
         if not lot:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Lot not found.")
-
+ 
         approved = Decimal(str(body.approved_qty or 0))
         rejected = Decimal(str(body.rejected_qty or 0))
         if approved < 0 or rejected < 0:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 "Quantities cannot be negative.")
-
-        lot.on_hand = (lot.on_hand or 0) + approved
-        self.repo.add_receipt_nocommit(
-            material_lot_id=lot.id, supplier_order_id=body.supplier_order_id,
-            approved_qty=approved, rejected_qty=rejected, received_by=actor_id)
-
-        if body.reserve_for_required:
-            self.repo.add_reservation_nocommit(
-                lot.id, Decimal(str(body.reserve_for_required)),
-                reason="receiving reservation")
-
-        order_status = None
+ 
+        order = None
+        mismatch = []
+        substituted = False
+        target_lot = lot
+ 
         if body.supplier_order_id:
             order = await self.repo.get_order(body.supplier_order_id)
-            if order and order.status != SupplierOrderStatus.ARRIVED.value:
-                from datetime import datetime, timezone
-                order.status = SupplierOrderStatus.ARRIVED.value
-                order.arrived_at = datetime.now(timezone.utc)
-            order_status = order.status if order else None
-
-        await self._audit(actor_id, "MATERIAL_RECEIVED", lot.id,
-                          {"approved": float(approved), "rejected": float(rejected)})
+            if not order:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Supplier order not found.")
+            mismatch = self._match_order_to_lot(order, lot)
+            if mismatch:
+                is_dm_md = actor_role in (UserRole.DIRECT_MANAGER,
+                                          UserRole.MANAGING_DIRECTOR)
+                if not (body.approve_mismatch and is_dm_md):
+                    # reject: nothing enters stock
+                    raise HTTPException(
+                        status.HTTP_409_CONFLICT,
+                        f"Received material does not match the order on: "
+                        f"{', '.join(mismatch)}. A DM/MD may accept it as a "
+                        f"substitution with approve_mismatch=true.")
+                # DM/MD substitution: mint a NEW lot for the DELIVERED material,
+                # copying the delivered lot's real spec, and receive into THAT.
+                substituted = True
+                new_attrs = dict(lot.attributes or {})
+                target_lot = self.repo.add_lot_nocommit(
+                    category=lot.category, subtype=lot.subtype, article=lot.article,
+                    colour=lot.colour, thickness=lot.thickness, size=lot.size,
+                    uom=lot.uom, on_hand=Decimal(0), supplier_id=lot.supplier_id,
+                    attributes=new_attrs, is_active=True)
+                await self.db.flush()
+                from app.core.enums import BarcodeType
+                _type = {"LEATHER": BarcodeType.LEATHER_LOT,
+                         "LINING": BarcodeType.LINING_LOT,
+                         "ACCESSORY": BarcodeType.ACCESSORY_LOT}[lot.category]
+                await self.barcodes.mint_lot_code_nocommit(
+                    target_lot.id, _type,
+                    f"SUBSTITUTE · {lot.article} · {lot.colour or ''}")
+ 
+        # add approved qty to whichever lot we settled on
+        target_lot.on_hand = (target_lot.on_hand or 0) + approved
+        self.repo.add_receipt_nocommit(
+            material_lot_id=target_lot.id, supplier_order_id=body.supplier_order_id,
+            approved_qty=approved, rejected_qty=rejected, received_by=actor_id)
+ 
+        if body.reserve_for_required:
+            self.repo.add_reservation_nocommit(
+                target_lot.id, Decimal(str(body.reserve_for_required)),
+                reason="receiving reservation")
+ 
+        order_status = None
+        if order and order.status != SupplierOrderStatus.ARRIVED.value:
+            from datetime import datetime, timezone
+            order.status = SupplierOrderStatus.ARRIVED.value
+            order.arrived_at = datetime.now(timezone.utc)
+            order_status = order.status
+        elif order:
+            order_status = order.status
+ 
+        await self._audit(
+            actor_id,
+            "MATERIAL_RECEIVED_SUBSTITUTE" if substituted else "MATERIAL_RECEIVED",
+            target_lot.id,
+            {"approved": float(approved), "rejected": float(rejected),
+             "mismatch_fields": mismatch or None,
+             "original_lot_id": str(lot.id) if substituted else None})
         await self.db.commit()
-        await self.db.refresh(lot)
-
-        reserved = await self.repo.active_reserved(lot.id)
+        await self.db.refresh(target_lot)
+ 
+        reserved = await self.repo.active_reserved(target_lot.id)
         return {
-            "lot_id": lot.id, "on_hand": float(lot.on_hand),
+            "lot_id": target_lot.id, "on_hand": float(target_lot.on_hand),
             "reserved": float(reserved),
-            "available": float(lot.on_hand - reserved),
+            "available": float(target_lot.on_hand - reserved),
             "rejected_logged": float(rejected),
             "supplier_order_status": order_status,
+            "substituted": substituted,
+            "mismatch_fields": mismatch or None,
         }
 
     # ── consumption hook (called by the cutting log) ─────────────────────────
@@ -271,16 +326,36 @@ class MaterialService:
         return float(lot.on_hand - reserved)
 
     # ── supplier orders ──────────────────────────────────────────────────────
-    async def create_order(self, body, actor_id: uuid.UUID | None) -> dict:
+    async def create_order(self, body, actor_id, actor_role=None) -> dict:
+        """Raise a manual supplier order (ORDERED). NEW: validate the requested
+        spec against the supplier catalog before creating. If a supplier is named
+        (or suggested) and does not supply this article, 422 — do not create an
+        order the supplier cannot fill."""
         supplier = None
         if body.supplier_id:
             supplier = await self.repo.get_supplier(body.supplier_id)
+            if supplier is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Supplier not found.")
+            # explicit supplier MUST supply the article (hard 422)
+            if not await self.repo.supplier_supplies(supplier, body.article):
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    f"Supplier '{supplier.name}' does not supply article "
+                    f"'{body.article}'. Choose a supplier that carries it.")
         else:
             supplier = await self.repo.suggest_supplier(body.article)
+            # suggestion is best-effort: an order with no supplier is allowed
+            # (the DM assigns one later), so no 422 here.
+ 
         uom = uom_for(body.category, getattr(body, "subtype", None))
+        cat = body.category.upper()
+        dcm = None
+        if getattr(body, "dcm", None) is not None:
+            dcm = Decimal(str(body.dcm))
         order = self.repo.add_order_nocommit(
-            category=body.category.upper(), article=body.article,
-            colour=body.colour, qty=Decimal(str(body.qty)), uom=uom,
+            category=cat, article=body.article, colour=body.colour,
+            thickness=getattr(body, "thickness", None), dcm=dcm,
+            qty=Decimal(str(body.qty)), uom=uom,
             status=SupplierOrderStatus.ORDERED.value,
             supplier_id=supplier.id if supplier else None, ordered_by=actor_id)
         await self.db.commit()
@@ -291,6 +366,59 @@ class MaterialService:
             "supplier": ({"id": str(supplier.id), "name": supplier.name}
                          if supplier else None),
         }
+        
+    # ── DM/MD edit an order's spec (NEW) ─────────────────────────────────────
+    async def edit_order_spec(self, order_id, body, actor_id) -> dict:
+        """Correct an order's article/colour/thickness/dcm/qty. DM/MD only
+        (enforced in the router). Only allowed while ORDERED."""
+        order = await self.repo.get_order(order_id)
+        if not order:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found.")
+        if order.status != SupplierOrderStatus.ORDERED.value:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Only an ORDERED order's spec may be edited.")
+        before = {"article": order.article, "colour": order.colour,
+                  "thickness": order.thickness,
+                  "dcm": float(order.dcm) if order.dcm is not None else None,
+                  "qty": float(order.qty)}
+        if body.article is not None:   order.article = body.article
+        if body.colour is not None:    order.colour = body.colour
+        if body.thickness is not None: order.thickness = body.thickness
+        if body.dcm is not None:       order.dcm = Decimal(str(body.dcm))
+        if body.qty is not None:       order.qty = Decimal(str(body.qty))
+        await self._audit(actor_id, "SUPPLIER_ORDER_SPEC_EDIT", order.id,
+                          {"before": before, "after": {
+                              "article": order.article, "colour": order.colour,
+                              "thickness": order.thickness,
+                              "dcm": float(order.dcm) if order.dcm is not None else None,
+                              "qty": float(order.qty)}})
+        await self.db.commit()
+        await self.db.refresh(order)
+        return {"order_id": order.id, "status": order.status}
+ 
+    # ── PO-vs-received matching helper (NEW) ─────────────────────────────────
+    @staticmethod
+    def _match_order_to_lot(order, lot) -> list:
+        """Return the list of fields that DIFFER between the ordered spec and the
+        delivered lot. Empty list = exact match. Compares article, colour,
+        thickness, and dcm (dcm read from lot.attributes)."""
+        diffs = []
+        def norm(x):
+            return (str(x).strip().upper() if x is not None else None)
+        if norm(order.article) != norm(lot.article):
+            diffs.append("article")
+        if norm(order.colour) != norm(lot.colour):
+            diffs.append("colour")
+        if norm(order.thickness) != norm(lot.thickness):
+            diffs.append("thickness")
+        # dcm: order.dcm (Decimal) vs lot.attributes["dcm"]
+        lot_dcm = (lot.attributes or {}).get("dcm") if lot.attributes else None
+        o_dcm = float(order.dcm) if order.dcm is not None else None
+        l_dcm = float(lot_dcm) if lot_dcm is not None else None
+        if o_dcm != l_dcm:
+            diffs.append("dcm")
+        return diffs
 
     async def mark_arrived(self, order_id: uuid.UUID) -> dict:
         order = await self.repo.get_order(order_id)

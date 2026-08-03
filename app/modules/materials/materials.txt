@@ -326,6 +326,8 @@ class SupplierOrderCreate(BaseModel):
     article: str
     colour: str | None = None
     qty: float = Field(gt=0)
+    thickness: str | None = None # new
+    dcm: float | None = None # for leather and lining
     supplier_id: uuid.UUID | None = None
 
 

@@ -10,8 +10,12 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from app.core.enums import WageType
+from app.core.enums import UserRole, WageType
 
+_EMPLOYEE_LOGIN_ROLES = {
+    UserRole.HR, UserRole.SUPERVISOR, UserRole.CUTTING_MANAGER,
+    UserRole.LINING_MANAGER, UserRole.STITCHING_MANAGER, UserRole.SECURITY,
+}
 
 
 class EmployeeRead(BaseModel):
@@ -41,15 +45,27 @@ class EmployeeCreate(BaseModel):
     phone: str | None = None
     email: str | None = None
     password: str | None = None
-
+    role: UserRole | None = None          # NEW: manager/HR login role, optional
+ 
     @model_validator(mode="after")
     def _login_fields(self):
-        if self.wage_type is WageType.MONTHLY:
+        # A staff LOGIN role (manager/HR/etc.) or a MONTHLY wage requires
+        # credentials, because both mint a login.
+        needs_login = (self.wage_type is WageType.MONTHLY
+                       or self.role in _EMPLOYEE_LOGIN_ROLES)
+        if needs_login:
             missing = [f for f in ("phone", "password") if not getattr(self, f)]
             if missing:
-                raise ValueError(f"{', '.join(missing)} required for MONTHLY employees")
+                raise ValueError(
+                    f"{', '.join(missing)} required when creating a login "
+                    f"(MONTHLY wage or a staff role)")
         elif self.password:
-            raise ValueError("password is only accepted for MONTHLY employees")
+            raise ValueError("password is only accepted when a login is created")
+        # DM/MD may not be minted here — they belong to user-creation.
+        if self.role in (UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER):
+            raise ValueError(
+                "DIRECT_MANAGER and MANAGING_DIRECTOR logins are created via "
+                "user-creation, not the employee service.")
         return self
 
 

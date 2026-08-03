@@ -170,11 +170,12 @@ class Consumption(BaseModel):
 
 
 class LogRequest(BaseModel):
-    screen_context: str = "PIPELINE"       # LEATHER_CUT | LINING_CUT | PIPELINE
+    screen_context: str | None = None       # (item 5) role-derived if omitted
     actor: Actor
     targets: Targets
     work_date: date
     consumption: Consumption | None = None
+    preview: bool = False                    # NEW: dry-run, compute buckets, write nothing
 
 
 class LogResult(BaseModel):
@@ -188,3 +189,4 @@ class LogResult(BaseModel):
     merge_blocked: list[str]
     screen_role_warning: str | None = None
     consumption_recorded: dict | None = None
+    preview: bool = False                    # NEW: echoes whether this was a dry-run

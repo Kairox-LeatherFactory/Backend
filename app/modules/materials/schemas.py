@@ -61,6 +61,7 @@ class ReceiveRequest(BaseModel):
     approved_qty: float = Field(ge=0)
     rejected_qty: float = Field(ge=0, default=0)
     reserve_for_required: float | None = None
+    approve_mismatch: bool = False          # NEW: DM/MD accept a substitution
 
 
 class ReceiveResult(BaseModel):
@@ -70,7 +71,16 @@ class ReceiveResult(BaseModel):
     available: float
     rejected_logged: float
     supplier_order_status: str | None
+    substituted: bool = False               # NEW: received into a NEW lot
+    mismatch_fields: list[str] | None = None  # NEW: which fields differed
 
+
+class OrderSpecPatch(BaseModel):            # NEW: DM/MD edit an order's spec
+    article: str | None = None
+    colour: str | None = None
+    thickness: str | None = None
+    dcm: float | None = None
+    qty: float | None = Field(default=None, gt=0)
 
 class SupplierOrderCreate(BaseModel):
     category: str
@@ -78,6 +88,8 @@ class SupplierOrderCreate(BaseModel):
     article: str
     colour: str | None = None
     qty: float = Field(gt=0)
+    thickness: str | None = None # new
+    dcm: float | None = None # for leather and lining
     supplier_id: uuid.UUID | None = None
 
 

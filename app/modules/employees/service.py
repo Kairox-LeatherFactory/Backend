@@ -85,41 +85,86 @@ class EmployeeService:
         )
 
     # ── create ──────────────────────────────────────────────────────────────
-    async def create(self, body: schemas.EmployeeCreate) -> schemas.EmployeeCreateRead:
-        data = body.model_dump(exclude={"password"})
+     async def create(self, body: schemas.EmployeeCreate,
+                     actor=None) -> schemas.EmployeeCreateRead:
+        """Create an employee. If `role` is a staff login role (manager/HR/etc.)
+        OR wage_type is MONTHLY, provision a linked login in the SAME transaction.
+ 
+        `actor` (the creating User) is used to enforce grant authority: the actor
+        may only create a login whose role they are permitted to grant."""
+        from app.modules.employees.schemas import _EMPLOYEE_LOGIN_ROLES
+ 
+        data = body.model_dump(exclude={"password", "role"})
         data["name"] = await self._unique_name(body.name)
         data["designation"] = Designation.normalise(body.designation)
         data["wage_type"] = WageType(body.wage_type)
  
         emp = await self.repo.create(**data)   # flush only, no commit
  
+        # decide whether (and as what role) to mint a login
+        login_role = None
+        if body.role in _EMPLOYEE_LOGIN_ROLES:
+            login_role = body.role
+        elif data["wage_type"] is WageType.MONTHLY:
+            login_role = UserRole.EMPLOYEE
+ 
         user_created = False
-        if data["wage_type"] is WageType.MONTHLY:
+        if login_role is not None:
+            # grant-authority check: actor may only create roles they can grant.
+            if actor is not None:
+                allowed = UserService(self.db)._GRANTABLE.get(actor.role, set())
+                if login_role not in allowed:
+                    raise HTTPException(
+                        status.HTTP_403_FORBIDDEN,
+                        f"Role '{actor.role.value}' may not create a "
+                        f"'{login_role.value}' login.")
             await UserService(self.db).provision_user(
                 UserCreate(
                     name=data["name"], phone=body.phone, email=body.email,
-                    role=UserRole.EMPLOYEE, password=body.password,
-                    employee_id=emp.id,
+                    role=login_role, password=body.password, employee_id=emp.id,
                 ),
                 must_change_password=True,
             )
             user_created = True
  
-        # issue the scannable card (nocommit — same transaction as the employee)
         from app.modules.barcode.service import BarcodeService
         code = await BarcodeService(self.db).issue_employee_barcode_nocommit(
             emp.id, emp.name)
  
         await self.db.commit()
         await self.db.refresh(emp)
-        logger.info("Created employee %s (%s) barcode=%s", emp.name, emp.designation, code)
+        logger.info("Created employee %s (%s) role=%s barcode=%s",
+                    emp.name, emp.designation, login_role, code)
  
-        # return the read model WITH the barcode so the UI can print the card
         out = schemas.EmployeeCreateRead.model_validate(emp)
         out.user_created = user_created
         out.login_phone = body.phone if user_created else None
         out.employee_barcode = code
         return out
+ 
+    # ── delete (NEW — soft) ──────────────────────────────────────────────────
+    async def delete(self, employee_id: uuid.UUID, actor_id=None) -> dict:
+        """SOFT delete. is_active=False (preserves ProductionEvent + wage history)
+        and retires the scannable barcode in the same transaction. A hard delete
+        is refused by design — it would orphan closed wage lines."""
+        emp = await self.repo.get(employee_id)
+        if not emp:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Employee not found")
+        if not emp.is_active:
+            return {"employee_id": str(employee_id), "active": False,
+                    "already_inactive": True}
+        emp.is_active = False
+        # retire the card (nocommit — same txn)
+        from app.modules.barcode.service import BarcodeService
+        try:
+            await BarcodeService(self.db).deactivate_employee_barcode(
+                employee_id, actor_id=actor_id)
+        except HTTPException:
+            # no active card is fine — the employee may never have had one
+            pass
+        await self.repo.save(emp)
+        return {"employee_id": str(employee_id), "active": False,
+                "history_preserved": True}
 
     async def update(self, employee_id: uuid.UUID,
                      body: schemas.EmployeeUpdate) -> Employee:

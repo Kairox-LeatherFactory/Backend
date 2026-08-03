@@ -32,6 +32,10 @@ from app.modules.attendance.schemas import ScanCheckIn
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
 
+_ATTENDANCE_OPERATORS = {
+    UserRole.SECURITY, UserRole.HR,
+    UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER,
+}
 
 @router.post("/scan-check-in")
 async def scan_check_in(
@@ -39,24 +43,29 @@ async def scan_check_in(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Check in/out by scanning an employee barcode. A worker may scan only their
-    own card; proxy mode is supervisor/manager only (daily-wage workers)."""
+    """Check in/out by scanning an employee barcode (direction = "in" | "out").
+ 
+    Every employee has a card. An operator (SECURITY / HR / MD / DM) may scan ANY
+    employee's card — monthly or daily. A plain EMPLOYEE may scan only their own.
+    `proxy=True` here is the MANUAL fallback (card won't scan / forgotten) and is
+    operator-only."""
     from app.modules.attendance.service import AttendanceService
  
     employee_id = await BarcodeService(db).resolve_employee_id(body.employee_barcode)
  
-    proxy_roles = {UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER,
-                   UserRole.MANAGING_DIRECTOR, UserRole.HR}
     if user.role == UserRole.EMPLOYEE:
         if getattr(user, "employee_id", None) != employee_id:
-            raise HTTPException(status.HTTP_403_FORBIDDEN,
-                                "You can only check in with your own barcode.")
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "You can only check in/out with your own barcode.")
         if body.proxy:
-            raise HTTPException(status.HTTP_403_FORBIDDEN,
-                                "Workers cannot proxy for others.")
-    elif body.proxy and user.role not in proxy_roles:
-        raise HTTPException(status.HTTP_403_FORBIDDEN,
-                            "Proxy check-in is limited to supervisors and managers.")
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "Workers cannot enter attendance for others.")
+    else:
+        if user.role not in _ATTENDANCE_OPERATORS:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "This login may not operate attendance.")
  
     return await AttendanceService(db).barcode_scan(
         employee_id=employee_id, actor=user, direction=body.direction,
@@ -76,21 +85,33 @@ async def check_out(body: schemas.CheckOutRequest,
     return await AttendanceService(db).self_check_out(user, body)
 
 
+# Manual check-in fallback (no card scan — operator types the employee in).
+# Reuses ProxyMarkRequest (employee_ids + gps). Now open to all four operators
+# and to ANY wage type. Direction handled by the two routes below.
+ 
 @router.post("/proxy/check-in", response_model=list[schemas.AttendanceRead], status_code=201)
-async def proxy_check_in(body: schemas.ProxyMarkRequest,
-                        db: AsyncSession = Depends(get_db),
-                        user: User = Depends(require_roles(UserRole.SUPERVISOR,UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR))):
-    """Spec Flow B. F50: SUPERVISOR is the PRIMARY actor here (daily-wage workers
-    carry no phone, so the supervisor marks them present) and must not be locked
-    out by the router. The router is now the single authorization decision — the
-    service no longer re-checks the role."""
+async def proxy_check_in(
+    body: schemas.ProxyMarkRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(
+        UserRole.SECURITY, UserRole.HR,
+        UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER)),
+):
+    """Manual check-in fallback for one or more employees (card failed / forgotten).
+    SECURITY / HR / MD / DM. Works for ANY wage type."""
     return await AttendanceService(db).proxy_mark_present(user, body)
 
 
+
 @router.post("/proxy/check-out", response_model=list[schemas.AttendanceRead])
-async def proxy_check_out(body: schemas.ProxyMarkRequest,
-                        db: AsyncSession = Depends(get_db),
-                        user: User = Depends(require_roles(UserRole.SUPERVISOR,UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR))):
+async def proxy_check_out(
+    body: schemas.ProxyMarkRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(
+        UserRole.SECURITY, UserRole.HR,
+        UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER)),
+):
+    """Manual check-out fallback. Same four operators, any wage type."""
     return await AttendanceService(db).proxy_check_out(user, body)
 
 
@@ -188,7 +209,7 @@ async def today_roster(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_roles(
         UserRole.SUPERVISOR, UserRole.HR, UserRole.CUTTING_MANAGER,
-        UserRole.STITCHING_MANAGER, UserRole.LINING_MANAGER)),
+        UserRole.STITCHING_MANAGER, UserRole.LINING_MANAGER, UserRole.SECURITY,)),
 ):
     """Whole-floor roster. Never visible to an EMPLOYEE."""
     return await AttendanceService(db).today_roster()
