@@ -33,6 +33,8 @@ from app.modules.attendance.schemas import ScanCheckIn
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
 
 
+
+ 
 @router.post("/scan-check-in")
 async def scan_check_in(
     body: ScanCheckIn,

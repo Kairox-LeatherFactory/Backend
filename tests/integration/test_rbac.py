@@ -22,6 +22,7 @@ from app.modules.barcode.models import BarcodeRegistry
 from app.modules.clients import models as cm
 from app.modules.employees import models as em
 from app.modules.production import models as pm
+from app.modules.production.repository import ProductionRepository
 from app.modules.production.service import ProductionService
 from app.modules.users.models import User
 
@@ -96,6 +97,18 @@ async def _complete(db, piece, op, emp):
                               employee_id=emp.id, work_date=TODAY, qty=1,
                               entered_by="test", piece_id=piece.id))
     await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_get_operation_by_code_backfills_canonical_stage(db):
+    repo = ProductionRepository(db)
+
+    op = await repo.get_operation_by_code("LEATHER_CUTTING")
+
+    assert op is not None
+    assert op.code == "LEATHER_CUTTING"
+    assert op.label == "Leather Cutting"
+    assert op.sequence == 1
 
 
 @pytest.mark.asyncio

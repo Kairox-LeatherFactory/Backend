@@ -99,7 +99,7 @@ class ProductionStage(str, enum.Enum):
     we do not recognise.
     """
 
-    LEATHER_CUTTING = "LEATHER_CUTTING"
+    LEATHER_CUTTING = "CUTTING"  # the canonical leather-cutting stage (the login screen says "LEATHER CUT")
     LINING_CUTTING = "LINING_CUTTING"
     FUSING = "FUSING"
     PASTING = "PASTING"
