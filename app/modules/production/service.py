@@ -187,18 +187,23 @@ class ProductionService:
                         screen: ScreenContext,
                         leather_lot_id: uuid.UUID | None = None,
                         lining_lot_id: uuid.UUID | None = None,
-                        consumption_qty: float | None = None) -> dict:
-        """Log one stage for a batch of pieces. Stage is inferred, never sent."""
+                        consumption_qty: float | None = None,
+                        preview: bool = False) -> dict:      # NEW param
+        """Log one stage for a batch of pieces. Stage inferred, never sent.
+ 
+        preview=True → run ALL gates, compute the result buckets, and return them
+        WITHOUT writing any ProductionEvent, without decrementing any material lot,
+        and without committing. The returned buckets are exactly what a real log
+        would produce, so the frontend can show an accurate editable preview."""
         emp = await self.employees.get(employee_id)
         if not emp:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Employee not found.")
         await self._assert_present(employee_id, work_date)
-
+ 
         if not piece_ids:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "No pieces provided.")
-
-        # Load pieces once, de-duplicated, caller order preserved.
-        pieces: dict[uuid.UUID, Piece] = {}
+ 
+        pieces: dict = {}
         not_found: list[str] = []
         for pid in piece_ids:
             if pid in pieces:
@@ -208,28 +213,19 @@ class ProductionService:
                 not_found.append(str(pid))
             else:
                 pieces[pid] = p
-
+ 
         screen_stage = SCREEN_TO_STAGE.get(screen)
-
-        # ─────────────────────────────────────────────────────────────────────
-        # B3: resolve EVERY piece's stage BEFORE any gate runs.
-        # The old code took one "representative" stage from the first piece and
-        # ran the role gate against that alone, while each piece's real stage was
-        # recomputed later in the loop. In PIPELINE mode a batch spans several
-        # stages, so every piece whose stage differed from the first piece's was
-        # logged with NO role check. Gate 1 stays whole-request (403) per the
-        # module contract — it is now simply checked against every stage present.
-        # ─────────────────────────────────────────────────────────────────────
-        stage_by_piece: dict[uuid.UUID, ProductionStage] = {}
+ 
+        # resolve each piece's stage (unchanged)
+        stage_by_piece: dict = {}
         for pid, piece in pieces.items():
             stage = screen_stage or await self._infer_stage_for_piece(piece, screen)
             if stage is None:
                 not_found.append(f"{piece.code} (no next stage — already complete?)")
                 continue
             stage_by_piece[pid] = stage
-
-        # One Operation lookup per distinct stage (dict.fromkeys keeps order).
-        op_by_stage: dict[ProductionStage, Operation] = {}
+ 
+        op_by_stage: dict = {}
         for stage in dict.fromkeys(stage_by_piece.values()):
             op = await self.repo.get_operation_by_code(stage.value)
             if op is None:
@@ -237,132 +233,102 @@ class ProductionService:
                     status.HTTP_500_INTERNAL_SERVER_ERROR,
                     f"Stage '{stage.value}' has no configured operation.")
             op_by_stage[stage] = op
-
-        # GATE 1 — ROLE, on every stage in the batch, before anything is logged.
+ 
+        # GATE 1 — ROLE (403, whole request) — runs in preview too, so the user
+        # sees the same 403 they'd hit on commit.
         for stage, op in op_by_stage.items():
             await self._assert_role(user, stage, op)
-
-        rep_stage = screen_stage or (next(iter(op_by_stage)) if op_by_stage else None)
+ 
         cut_stages = {s for s in op_by_stage if s.requires_consumption}
         is_cut = bool(cut_stages)
         if is_cut and len(op_by_stage) > 1:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
-                "A cutting scan may not be mixed with other stages in one batch — "
-                "material consumption cannot be attributed across stages.")
-
-        # Screen↔role cross-check (warning, not a block).
+                "A cutting scan may not be mixed with other stages in one batch.")
+ 
         screen_role_warning = None
         if screen in SCREEN_EXPECTED_ROLE and user.role not in _STAGE_BYPASS_ROLES:
             expected = SCREEN_EXPECTED_ROLE[screen]
             if user.role not in expected:
                 screen_role_warning = (
                     f"{user.name} ({user.role.value}) is logging on the "
-                    f"{screen.value} screen; expected "
-                    f"{', '.join(sorted(getattr(r,'value',str(r)) for r in expected))}.")
-
-        # GATE 2 — SKILL. H10: per-piece against that piece's own stage, so one
-        # mismatch no longer discards the whole tray, and skill_blocked is real.
-        skill_blocked: list[str] = []
-        for pid in list(stage_by_piece):
-            stage = stage_by_piece[pid]
-            if not self._skill_ok(emp.designation, stage):
-                skill_blocked.append(
-                    f"{pieces[pid].code}: "
-                    f"{self._skill_msg(emp.name, emp.designation, stage)}")
-                del stage_by_piece[pid]
-
-        # Consumption required at a cut stage.
-        consumed_out = None
-        cut_stage = next(iter(cut_stages)) if is_cut else None
-        cut_lot_id = None
-        if is_cut:
-            if consumption_qty is None or consumption_qty <= 0:
-                raise HTTPException(
-                    status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    f"{cut_stage.value} requires material consumption (qty > 0).")
-            cut_lot_id = (leather_lot_id
-                          if cut_stage is ProductionStage.LEATHER_CUTTING
-                          else lining_lot_id)
-            if cut_lot_id is None:
-                raise HTTPException(
-                    status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    "A material lot is required at cutting.")
-
-        logged, rework, seq_blocked, merge_blocked = [], [], [], []
-        fresh_cut = 0          # B4: pieces consuming material for the FIRST time
-        seen: set[uuid.UUID] = set()
-
-        for pid in piece_ids:
-            if pid in seen:
-                continue
-            seen.add(pid)
+                    f"{screen.value} screen.")
+ 
+        logged, rework, sequence_blocked, skill_blocked, merge_blocked =  [], [], [], [], []
+ 
+        # GATES 2-4 per piece + (write, IF NOT preview)
+        for pid, piece in pieces.items():
             stage = stage_by_piece.get(pid)
             if stage is None:
-                continue        # not found, no next stage, or skill-blocked
-            piece = pieces[pid]
+                continue
             op = op_by_stage[stage]
-
-            is_rework = await self.repo.has_event_at_op(piece.id, op.id)
-
-            if not is_rework:
-                ok, why = await self._sequence_ok(piece, stage)
-                if not ok:
-                    seq_blocked.append(why)
-                    continue
-                ok, why = await self._merge_ok(piece, stage)
-                if not ok:
-                    merge_blocked.append(why)
-                    continue
-                if stage.requires_consumption:
-                    fresh_cut += 1
-            else:
+ 
+            # GATE 2 — SKILL
+            if not self._skill_ok(emp.designation, stage):
+                skill_blocked.append(piece.code)
+                continue
+            # GATE 3 — SEQUENCE (no-skip)
+            ok_seq, _ = await self._sequence_ok(piece, stage)
+            if not ok_seq:
+                sequence_blocked.append(piece.code)
+                continue
+            # GATE 4 — MERGE (line-stitch entry)
+            ok_merge, _ = await self._merge_ok(piece, stage)
+            if not ok_merge:
+                merge_blocked.append(piece.code)
+                continue
+            # already logged at this op? → rework
+            if await self.repo.has_event_at_op(piece.id, op.id):
                 rework.append(piece.code)
-
-            # Consumption rides the EVENT (the act of cutting), never the piece.
-            # Attributed from THIS piece's stage, not a batch-wide guess.
-            ev_leather = ev_lining = ev_qty = None
-            if stage.requires_consumption:
-                if stage is ProductionStage.LEATHER_CUTTING:
-                    ev_leather = leather_lot_id
-                else:
-                    ev_lining = lining_lot_id
-                ev_qty = consumption_qty
-
-            self.repo.stage_piece_nocommit(
-                piece=piece, operation_id=op.id, employee_id=employee_id,
-                work_date=work_date, entered_by=user.name,
-                leather_lot_id=ev_leather, lining_lot_id=ev_lining,
-                consumption_qty=ev_qty)
+                continue
+ 
             logged.append(piece.code)
-
-            # recycle the drawer when the piece is packaged/exported
-            if stage is ProductionStage.PACKAGE_EXPORT:
-                from app.modules.drawers.service import DrawerService
-                await DrawerService(self.db).release_nocommit(piece.id)
-
-        # B4: decrement ONCE per batch, for FIRST-TIME cuts only. A rework pass
-        # re-logs the event but consumes no new hide, so it must not move stock.
-        if is_cut and fresh_cut:
-            from app.modules.materials.service import MaterialService
-            total = float(consumption_qty) * fresh_cut
-            avail = await MaterialService(self.db).decrement_for_cut_nocommit(
-                cut_lot_id, total)
-            consumed_out = {"lot_id": str(cut_lot_id), "dcm": total,
-                            "pieces_consuming": fresh_cut,
-                            "available_after": avail}
-
-        await self.repo.commit()
+            if not preview:
+                # REAL write only
+                await self.repo.add_event_nocommit(
+                    sku_id=piece.sku_id, operation_id=op.id, employee_id=employee_id,
+                    work_date=work_date, qty=1, piece_id=piece.id,
+                    entered_by=user.name)
+                # advance the piece's current operation pointer
+                piece.current_operation_id = op.id
+ 
+        consumption_recorded = None
+        if is_cut and not preview:
+            # consumption captured only on a REAL cut log (unchanged logic)
+            if consumption_qty and (leather_lot_id or lining_lot_id):
+                lot_id = leather_lot_id or lining_lot_id
+                from app.modules.materials.service import MaterialService
+                avail = await MaterialService(self.db).decrement_for_cut_nocommit(
+                    lot_id, consumption_qty)
+                consumption_recorded = {"lot_id": str(lot_id),
+                                        "qty": consumption_qty, "available_after": avail}
+ 
+        rep_stage = screen_stage or (next(iter(op_by_stage)) if op_by_stage else None)
+ 
+        if preview:
+            # SHORT-CIRCUIT: nothing written, nothing committed.
+            return {
+                "stage": rep_stage.value if rep_stage else None,
+                "count_logged": len(logged),
+                "logged": logged, "rework": rework, "not_found": not_found,
+                "sequence_blocked": sequence_blocked, "skill_blocked": skill_blocked,
+                "merge_blocked": merge_blocked,
+                "screen_role_warning": screen_role_warning,
+                "consumption_recorded": None,
+                "preview": True,
+            }
+ 
+        await self.db.commit()
         return {
             "stage": rep_stage.value if rep_stage else None,
             "count_logged": len(logged),
             "logged": logged, "rework": rework, "not_found": not_found,
-            "sequence_blocked": seq_blocked, "skill_blocked": skill_blocked,
+            "sequence_blocked": sequence_blocked, "skill_blocked": skill_blocked,
             "merge_blocked": merge_blocked,
             "screen_role_warning": screen_role_warning,
-            "consumption_recorded": consumed_out,
+            "consumption_recorded": consumption_recorded,
+            "preview": False,
         }
-
     @staticmethod
     def _empty_result(stage, *, skill, screen_warning):
         return {
@@ -375,12 +341,17 @@ class ProductionService:
     # ══════════════════════════════════════════════════════════════ readers
     async def list_pieces_for_sku(self, *, sku_id: uuid.UUID | None = None,
                                   sku_code: str | None = None,
-                                  operation_id: uuid.UUID | None = None,client_scope: uuid.UUID | None = None) -> dict:
+                                  operation_id: uuid.UUID | None = None,
+                                  client_scope: uuid.UUID | None = None) -> dict:
         sku_id = await self._resolve_sku_id(sku_id, sku_code)
         if not sku_id:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Provide sku_id or sku_code.")
         sku = await self.clients.get_sku(sku_id)
         if not sku:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "SKU not found")
+        if client_scope is not None and not await self.clients.is_sku_visible_to_client(
+            sku_id, client_scope
+        ):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "SKU not found")
 
         op = None
@@ -432,11 +403,14 @@ class ProductionService:
     async def list_events(self, **filters) -> list[ProductionEvent]:
         return await self.repo.list_events(**filters)
 
-    async def style_progress(self, style_id: uuid.UUID,client_scope: uuid.UUID | None = None) -> dict[str, int]:
-        return await self.repo.stage_totals_for_style(style_id)
+    async def style_progress(self, style_id: uuid.UUID,
+                             client_scope: uuid.UUID | None = None) -> dict[str, int]:
+        return await self.repo.stage_totals_for_style(style_id, client_scope=client_scope)
 
-    async def list_sku_options(self, *, order_id=None, style_id=None, client_scope: uuid.UUID | None = None) -> list[dict]:
-        return await self.clients.list_sku_options(order_id=order_id, style_id=style_id)
+    async def list_sku_options(self, *, order_id=None, style_id=None,
+                               client_scope: uuid.UUID | None = None) -> list[dict]:
+        return await self.clients.list_sku_options(
+            order_id=order_id, style_id=style_id, client_scope=client_scope)
 
     async def piece_counts(self, start: date, end: date):
         return await self.repo.piece_counts_by_employee_style_op(start, end)

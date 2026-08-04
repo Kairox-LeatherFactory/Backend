@@ -68,21 +68,27 @@ async def get_current_user(
 # DIRECT_MANAGER from this set once an MD owner is confirmed in every environment.
 SUPERUSER_ROLES = (UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER)
 
-# Roles with NO access to factory data. An EMPLOYEE login exists for exactly one
-# purpose: check in and check out. It must not reach the staff roster, other
-# people's attendance, production, wages, clients, or analytics.
+# Roles with NO access to factory data.
+#
+# The EMPLOYEE role is no longer minted at all — shop-floor workers are not given
+# system access (UserRole.login_roles()), and their attendance is entered for
+# them by an operator (SECURITY / HR / MD / DM). This guard therefore now covers
+# LEGACY rows only: `app_user.role` is a native PG enum whose values cannot be
+# dropped, so any employee login issued before the change must still be shut out
+# of the roster, other people's attendance, production, wages, clients and
+# analytics.
 #
 # WHY A DENY-LIST DEPENDENCY AND NOT PER-ROUTE ALLOW-LISTS:
 #   Most read routes in this codebase use bare get_current_user. Retro-fitting an
-#   allow-list to every one of them before July 28 is not realistic, and any route
-#   missed is a leak. `block_employees` is one line per route and, more
-#   importantly, is the DEFAULT applied at the router level (see main.py) so a
-#   NEW route is closed to employees unless someone opens it deliberately.
+#   allow-list to every one of them is not realistic, and any route missed is a
+#   leak. `block_employees` is one line per route and, more importantly, is the
+#   DEFAULT applied at the router level (see main.py) so a NEW route is closed to
+#   employees unless someone opens it deliberately.
 RESTRICTED_SELF_SERVICE_ROLES = frozenset({UserRole.EMPLOYEE})
 
 
 async def block_employees(user: "User" = Depends(get_current_user)) -> "User":
-    """Reject the EMPLOYEE role. Managers (and every non-employee role) pass."""
+    """Reject the legacy EMPLOYEE role. Every login role passes."""
     if user.role == UserRole.EMPLOYEE:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,

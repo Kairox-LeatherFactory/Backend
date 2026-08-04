@@ -1,0 +1,340 @@
+"""
+UAT · Payroll — the executable form of `tests/uat/05-payroll.md`.
+
+WHY THIS FILE EXISTS ALONGSIDE THE MARKDOWN
+    `05-payroll.md` is a human checklist a manager ticks off against a running
+    system. It is also, right now, WRONG: it opens with a warning that "piece-rate
+    payroll currently raises an error before it emits any SQL" and that steps 6
+    onward "are expected to fail today". That was true when F139 was open. F139 is
+    fixed — `production/repository.py` groups on `SKU.style_id` — and the money
+    path runs end to end. A checklist that tells a tester to expect failure will
+    get a real failure ticked off as "known".
+
+    So each step below is the same scenario in the same business language, but
+    executable, so the answer comes from the code rather than from a document
+    someone has to remember to update.
+
+Note on placement: pytest.ini's comment says tests/uat holds markdown only. That
+was accurate before this file; the markdown checklists remain, and this sits
+beside them as the automated pass.
+
+SCENARIO
+    A fortnight has ended. RAMESH cut pieces at a rate that changed mid-period.
+    TARA is on a salary. HR reads the result; only the DM may run it.
+"""
+import datetime
+
+import pytest
+from fastapi import HTTPException
+
+from app.core.enums import RunStatus, UserRole, WageType
+from app.modules.clients.models import SKU, Client, ClientOrder, Style
+from app.modules.employees.models import Employee
+from app.modules.production.models import Operation, ProductionEvent
+from app.modules.wages.models import Rate
+from app.modules.wages.service import WageService
+
+pytestmark = pytest.mark.money
+
+API = "/api/v1"
+
+# The fortnight that just ended. Payroll may not be run for the future
+# (wages/service.py:290-294), so the window closes yesterday.
+PERIOD_END = datetime.date.today() - datetime.timedelta(days=1)
+PERIOD_START = PERIOD_END - datetime.timedelta(days=13)
+EARLY_DAY = PERIOD_START + datetime.timedelta(days=2)
+RAISE_DAY = PERIOD_START + datetime.timedelta(days=7)
+
+
+@pytest.fixture
+async def fortnight(db):
+    """The factory as payroll finds it: one style, one operation, two workers
+    paid two different ways, and a fortnight of logged output."""
+    client = Client(name="UAT BUYER", country="IT")
+    db.add(client)
+    await db.flush()
+    order = ClientOrder(client_id=client.id, order_number="UAT-PO")
+    db.add(order)
+    await db.flush()
+    style = Style(client_order_id=order.id, name="CLERMONT", article="CL1",
+                  code="CLERMONT")
+    db.add(style)
+    await db.flush()
+    sku = SKU(style_id=style.id, color_code="PINE", color_name="PINE GREEN",
+              size="M", qty_ordered=200, code="UAT-PO-CLERMONT-PINE-M")
+    db.add(sku)
+    op = Operation(code="LEATHER_CUTTING", label="Leather Cutting", sequence=1,
+                   is_active=True)
+    db.add(op)
+    await db.flush()
+
+    ramesh = Employee(name="RAMESH", designation="CUTTER",
+                      wage_type=WageType.PIECE_RATE, is_active=True)
+    tara = Employee(name="TARA", designation="TAILOR",
+                    wage_type=WageType.MONTHLY, monthly_salary=30000,
+                    is_active=True)
+    db.add_all([ramesh, tara])
+    await db.commit()
+    for o in (style, sku, op, ramesh, tara):
+        await db.refresh(o)
+
+    # 100 pieces before the raise, 100 after.
+    for day, qty in ((EARLY_DAY, 100), (RAISE_DAY, 100)):
+        db.add(ProductionEvent(sku_id=sku.id, operation_id=op.id,
+                               employee_id=ramesh.id, work_date=day, qty=qty,
+                               entered_by="UAT"))
+    await db.commit()
+    return {"style": style, "op": op, "ramesh": ramesh, "tara": tara}
+
+
+def _line(payload, name):
+    return next((l for l in payload["lines"] if l["employee_name"] == name), None)
+
+
+# ══════════════════════════════════════════════════════ steps 1-5 · rates first
+@pytest.mark.asyncio
+async def test_uat05_step1_the_dm_sets_a_rate_and_hr_cannot(api_client, as_role,
+                                                            fortnight):
+    """AS a DM, WHEN I set a piece rate for a style x operation, THEN it is
+    accepted — AND when HR tries the same thing, it is refused (step 5).
+
+    Rates are the factory's cost base. HR reads payroll; only the DM decides what
+    a piece is worth (wages/router.py:106-113)."""
+    as_role(UserRole.DIRECT_MANAGER)
+    r = await api_client.post(f"{API}/wages/rates", json={
+        "style_code": "CLERMONT", "operation_code": "LEATHER_CUTTING",
+        "rate": 12.50, "effective_from": PERIOD_START.isoformat()})
+    assert r.status_code == 200, r.text
+
+    as_role(UserRole.HR)
+    r = await api_client.post(f"{API}/wages/rates", json={
+        "style_code": "CLERMONT", "operation_code": "LEATHER_CUTTING",
+        "rate": 99.00, "effective_from": PERIOD_START.isoformat()})
+    assert r.status_code == 403, "HR set a piece rate"
+
+
+@pytest.mark.asyncio
+async def test_uat05_step2_the_rate_sheet_shows_it_against_the_right_operation(
+        api_client, as_role, fortnight, db):
+    """AS a DM, WHEN I open the rate sheet, THEN my rate appears against the
+    right style and operation, and unpriced operations are counted for me."""
+    db.add(Rate(style_id=fortnight["style"].id, operation_id=fortnight["op"].id,
+                rate=12.50, effective_from=PERIOD_START))
+    await db.commit()
+
+    as_role(UserRole.DIRECT_MANAGER)
+    r = await api_client.get(f"{API}/wages/rate-sheet",
+                             params={"style_code": "CLERMONT"})
+    assert r.status_code == 200, r.text
+    sheet = r.json()
+
+    row = next(o for o in sheet["operations"]
+               if o["operation_code"] == "LEATHER_CUTTING")
+    assert row["rate"] == pytest.approx(12.50)
+    assert sheet["missing_rate_count"] == sum(
+        1 for o in sheet["operations"] if o["rate"] is None)
+
+
+@pytest.mark.asyncio
+async def test_uat05_steps3_and_4_a_second_rate_is_added_not_substituted(
+        api_client, as_role, fortnight, db):
+    """AS a DM, WHEN I raise the rate mid-period, THEN the old rate is NOT
+    replaced — both appear in the history with their effective dates.
+
+    This is what makes April defensible when the sheet says 14.00 today."""
+    as_role(UserRole.DIRECT_MANAGER)
+    for value, day in ((12.50, PERIOD_START), (15.00, RAISE_DAY)):
+        r = await api_client.post(f"{API}/wages/rates", json={
+            "style_code": "CLERMONT", "operation_code": "LEATHER_CUTTING",
+            "rate": value, "effective_from": day.isoformat()})
+        assert r.status_code == 200, r.text
+
+    r = await api_client.get(f"{API}/wages/rate-history", params={
+        "style_code": "CLERMONT", "operation_code": "LEATHER_CUTTING"})
+    assert r.status_code == 200
+    history = r.json()["history"]
+    assert len(history) == 2, f"a rate raise overwrote its predecessor: {history}"
+    assert {h["rate"] for h in history} == {12.50, 15.00}
+
+
+# ══════════════════════════════════════════════ steps 6-9 · run the fortnight
+@pytest.mark.asyncio
+async def test_uat05_step6_the_dm_computes_the_fortnight(db, fortnight):
+    """AS a DM, WHEN I compute the run for the fortnight just ended, THEN I get a
+    payload with one line per worker.
+
+    `05-payroll.md` warns this step fails with an internal error. It does not —
+    F139 is fixed. If this test ever raises AttributeError again, that regression
+    is back."""
+    db.add_all([
+        Rate(style_id=fortnight["style"].id, operation_id=fortnight["op"].id,
+             rate=12.50, effective_from=PERIOD_START),
+        Rate(style_id=fortnight["style"].id, operation_id=fortnight["op"].id,
+             rate=15.00, effective_from=RAISE_DAY),
+    ])
+    await db.commit()
+
+    payload = await WageService(db).compute_run(PERIOD_START, PERIOD_END)
+
+    assert payload["status"] == RunStatus.CLOSED
+    assert payload["employee_count"] == 2
+    assert len(payload["lines"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_uat05_step7_every_worker_gets_exactly_one_line(db, fortnight):
+    """AS the factory, WHEN payroll runs, THEN nobody is paid twice — one line
+    per employee per run, never two."""
+    db.add(Rate(style_id=fortnight["style"].id, operation_id=fortnight["op"].id,
+                rate=12.50, effective_from=PERIOD_START))
+    await db.commit()
+
+    payload = await WageService(db).compute_run(PERIOD_START, PERIOD_END)
+    ids = [str(l["employee_id"]) for l in payload["lines"]]
+    assert len(ids) == len(set(ids)), "an employee appeared on two lines"
+
+
+@pytest.mark.asyncio
+async def test_uat05_step8_the_piece_worker_is_priced_per_piece_at_each_days_rate(
+        db, fortnight):
+    """AS RAMESH, WHEN I cut 100 pieces at 12.50 and then 100 at 15.00, THEN I am
+    paid 2,750 — each day priced at the rate in force THAT day, with no salary
+    component anywhere on my line."""
+    db.add_all([
+        Rate(style_id=fortnight["style"].id, operation_id=fortnight["op"].id,
+             rate=12.50, effective_from=PERIOD_START),
+        Rate(style_id=fortnight["style"].id, operation_id=fortnight["op"].id,
+             rate=15.00, effective_from=RAISE_DAY),
+    ])
+    await db.commit()
+
+    payload = await WageService(db).compute_run(PERIOD_START, PERIOD_END)
+    line = _line(payload, "RAMESH")
+
+    assert line["wage_type"] == WageType.PIECE_RATE.value
+    assert line["pieces"] == 200
+    assert line["amount"] == pytest.approx(100 * 12.50 + 100 * 15.00)
+    assert line["amount"] == pytest.approx(2750.00)
+
+
+@pytest.mark.asyncio
+async def test_uat05_step9_the_monthly_worker_is_prorated_not_paid_per_piece(
+        db, fortnight):
+    """AS TARA, WHEN the fortnight closes, THEN I am paid a share of my salary
+    for the days it covered — and NOT a rupee of piece money, even though the
+    line I work produced 200 pieces."""
+    db.add(Rate(style_id=fortnight["style"].id, operation_id=fortnight["op"].id,
+                rate=12.50, effective_from=PERIOD_START))
+    await db.commit()
+
+    payload = await WageService(db).compute_run(PERIOD_START, PERIOD_END)
+    line = _line(payload, "TARA")
+
+    assert line["wage_type"] == WageType.MONTHLY.value
+    assert line["pieces"] == 0, "a salaried worker was credited with pieces"
+    assert 0 < line["amount"] < 30000, (
+        "a 14-day window must pay a fraction of a month, not zero and not all of it")
+
+
+# ═══════════════════════════════════════════ steps 10-12 · the run is frozen
+@pytest.mark.asyncio
+async def test_uat05_step10_the_same_fortnight_cannot_be_paid_twice(db, fortnight):
+    """AS the factory, WHEN someone re-runs a window that overlaps a run that
+    already exists, THEN it is refused — the alternative is paying the same
+    fortnight twice and never finding out."""
+    db.add(Rate(style_id=fortnight["style"].id, operation_id=fortnight["op"].id,
+                rate=12.50, effective_from=PERIOD_START))
+    await db.commit()
+    await WageService(db).compute_run(PERIOD_START, PERIOD_END)
+
+    with pytest.raises(HTTPException) as exc:
+        await WageService(db).compute_run(
+            PERIOD_START + datetime.timedelta(days=3), PERIOD_END)
+    assert exc.value.status_code == 409
+    assert "twice" in str(exc.value.detail).lower()
+
+
+@pytest.mark.asyncio
+async def test_uat05_step11_hr_reads_the_payslip_but_cannot_run_payroll(
+        api_client, as_role, db, fortnight):
+    """AS HR, WHEN I open a closed run, THEN I see the payslip detail — but if I
+    try to start a run, I am refused."""
+    db.add(Rate(style_id=fortnight["style"].id, operation_id=fortnight["op"].id,
+                rate=12.50, effective_from=PERIOD_START))
+    await db.commit()
+    run = await WageService(db).compute_run(PERIOD_START, PERIOD_END)
+
+    as_role(UserRole.HR)
+    r = await api_client.get(f"{API}/wages/runs/{run['id']}")
+    assert r.status_code == 200, r.text
+    assert len(r.json()["lines"]) == 2
+
+    r = await api_client.post(f"{API}/wages/runs", json={
+        "period_start": (PERIOD_START - datetime.timedelta(days=30)).isoformat(),
+        "period_end": (PERIOD_START - datetime.timedelta(days=17)).isoformat()})
+    assert r.status_code == 403, "HR started a payroll run"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", [UserRole.SUPERVISOR, UserRole.CUTTING_MANAGER,
+                                  UserRole.VIEWER, UserRole.CLIENT,
+                                  UserRole.EMPLOYEE])
+async def test_uat05_step12_nobody_else_may_read_the_payroll(api_client, as_role,
+                                                             role):
+    """AS anyone else, WHEN I ask for the payroll list, THEN I am refused.
+
+    A supervisor reading the whole factory's pay is exactly the exposure the role
+    list exists to prevent."""
+    as_role(role)
+    r = await api_client.get(f"{API}/wages/runs")
+    assert r.status_code == 403, f"{role.value} read the payroll"
+
+
+@pytest.mark.asyncio
+async def test_uat05_step13_the_payslip_reconciles_for_the_worker_holding_it(
+        db, fortnight):
+    """AS RAMESH, WHEN I am handed my payslip, THEN the breakdown explains the
+    total: a style, an operation, a piece count and a rate that multiply out to
+    the amount I was paid.
+
+    This is the difference between an auditable payslip and an unexplained
+    number — and the reason H11 stores the blended rate rather than whichever
+    rate the query happened to return last."""
+    db.add_all([
+        Rate(style_id=fortnight["style"].id, operation_id=fortnight["op"].id,
+             rate=12.50, effective_from=PERIOD_START),
+        Rate(style_id=fortnight["style"].id, operation_id=fortnight["op"].id,
+             rate=15.00, effective_from=RAISE_DAY),
+    ])
+    await db.commit()
+
+    payload = await WageService(db).compute_run(PERIOD_START, PERIOD_END)
+    line = _line(payload, "RAMESH")
+
+    assert line["breakdown"], "the payslip carries no explanation of the total"
+    row = line["breakdown"][0]
+    assert row["style_code"] == "CLERMONT"
+    assert row["operation_code"] == "LEATHER_CUTTING"
+    assert row["pieces"] == 200
+    assert row["pieces"] * row["rate"] == pytest.approx(row["amount"], abs=0.01)
+    assert sum(b["amount"] for b in line["breakdown"]) == pytest.approx(
+        line["amount"], abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_uat05_step14_unpriced_work_is_named_before_anyone_is_paid(
+        db, fortnight):
+    """AS a DM, WHEN a style x operation has no rate, THEN the run TELLS me how
+    many pieces went unpaid and which style they belong to — rather than quietly
+    paying zero for them.
+
+    The checklist's instruction is "check unrated_operations before paying
+    anyone"; this asserts there is something worth checking."""
+    payload = await WageService(db).compute_run(PERIOD_START, PERIOD_END)
+
+    unrated = [u for u in payload["unrated_operations"]
+               if u.get("kind") == "unrated_operation"]
+    assert unrated, "200 unpriced pieces produced no warning at all"
+    assert unrated[0]["style_code"] == "CLERMONT"
+    assert unrated[0]["unpaid_pieces"] == 200
+    assert _line(payload, "RAMESH") is None, "unpriced work became a zero-rupee line"

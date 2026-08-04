@@ -140,7 +140,8 @@ class ClientRepository:
             "color_name": color_name, "size": size, "qty_ordered": int(qty or 0),
         }
  
-    async def list_sku_options(self, *, order_id=None, style_id=None) -> list[dict]:
+    async def list_sku_options(self, *, order_id=None, style_id=None,
+                               client_scope: uuid.UUID | None = None) -> list[dict]:
         stmt = (
             select(
                 SKU.id, SKU.code, ClientOrder.order_number, Style.name,
@@ -149,6 +150,8 @@ class ClientRepository:
             .join(Style, Style.id == SKU.style_id)
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
         )
+        if client_scope is not None:
+            stmt = stmt.where(ClientOrder.client_id == client_scope)
         if order_id:
             stmt = stmt.where(Style.client_order_id == order_id)
         if style_id:
@@ -164,6 +167,17 @@ class ClientRepository:
             for r in rows
         ]
         
+    async def is_sku_visible_to_client(self, sku_id: uuid.UUID,
+                                       client_id: uuid.UUID) -> bool:
+        res = await self.db.execute(
+            select(SKU.id)
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .where(SKU.id == sku_id, ClientOrder.client_id == client_id)
+            .limit(1)
+        )
+        return res.scalar_one_or_none() is not None
+
     async def get_sku_by_code(self, code: str):
         from app.modules.clients.models import SKU
         res = await self.db.execute(

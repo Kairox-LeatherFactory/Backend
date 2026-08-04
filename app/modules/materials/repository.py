@@ -28,6 +28,15 @@ class MaterialRepository:
         lot = MaterialLot(**kw)
         self.db.add(lot)
         return lot
+    
+    async def supplier_supplies(self, supplier, article: str) -> bool:
+        """Does this supplier list this article? `articles` is a comma list
+        ("SUEDE-A32,NAP-11"). Case-insensitive substring on a token match."""
+        if supplier is None or not (supplier.articles or "").strip():
+            return False
+        tokens = {t.strip().upper() for t in supplier.articles.split(",") if t.strip()}
+        a = (article or "").strip().upper()
+        return a in tokens or any(a in t or t in a for t in tokens)
 
     async def get_lot(self, lot_id: uuid.UUID) -> MaterialLot | None:
         return await self.db.get(MaterialLot, lot_id)

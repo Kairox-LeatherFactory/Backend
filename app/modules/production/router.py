@@ -30,6 +30,7 @@ from app.modules.production.service import ProductionService
 from app.modules.users.deps import get_current_user, require_roles
 from app.modules.users.models import User
 from app.modules.production.schemas import LogRequest, LogResult, Consumption
+from app.core.enums import ScreenContext, screen_for_role   
 
 router = APIRouter(prefix="/production", tags=["Production"])
 
@@ -151,18 +152,25 @@ async def log_batch(
             raise HTTPException(status.HTTP_404_NOT_FOUND,
                                 "None of the given piece numbers exist for this SKU.")
 
-    try:
-        screen = ScreenContext(body.screen_context.upper())
-    except ValueError:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            "screen_context must be LEATHER_CUT, LINING_CUT, or PIPELINE.")
+    # Screen context is DERIVED FROM ROLE. The client no longer needs to send it.
+    # DM/MD may pass an explicit override; any other role's sent value is ignored.
+    override = None
+    if body.screen_context:
+        try:
+            override = ScreenContext(body.screen_context.upper())
+        except ValueError:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "screen_context, if sent, must be LEATHER_CUT, LINING_CUT, or "
+                "PIPELINE.")
+    screen = screen_for_role(user.role, override=override)
 
     cons = body.consumption or Consumption()
     return await svc.log_batch(
         user=user, employee_id=employee_id, piece_ids=piece_ids,
         work_date=body.work_date, screen=screen,
         leather_lot_id=cons.leather_lot_id, lining_lot_id=cons.lining_lot_id,
-        consumption_qty=cons.dcm)
+        consumption_qty=cons.dcm,preview=body.preview)
 
 
 

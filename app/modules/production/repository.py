@@ -26,7 +26,7 @@ from datetime import date
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.clients.models import SKU
+from app.modules.clients.models import ClientOrder, SKU, Style
 from app.modules.production.models import (
     Operation,
     OperationAccess,
@@ -180,16 +180,21 @@ class ProductionRepository:
         res = await self.db.execute(stmt.order_by(ProductionEvent.work_date.desc()))
         return list(res.scalars())
 
-    async def stage_totals_for_style(self, style_id: uuid.UUID) -> dict[str, int]:
+    async def stage_totals_for_style(self, style_id: uuid.UUID,
+                                      client_scope: uuid.UUID | None = None) -> dict[str, int]:
         """SUM qty per operation across all SKUs of a style — the live card."""
         stmt = (
             select(Operation.code, func.coalesce(func.sum(ProductionEvent.qty), 0))
             .select_from(ProductionEvent)
             .join(SKU, SKU.id == ProductionEvent.sku_id)
             .join(Operation, Operation.id == ProductionEvent.operation_id)
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(SKU.style_id == style_id)
-            .group_by(Operation.code)
         )
+        if client_scope is not None:
+            stmt = stmt.where(ClientOrder.client_id == client_scope)
+        stmt = stmt.group_by(Operation.code)
         res = await self.db.execute(stmt)
         return {code: int(total) for code, total in res.all()}
 

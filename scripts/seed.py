@@ -321,7 +321,9 @@ def _make_user(db: Session, *, name: str, phone: str, role: UserRole,
 
 
 def seed_users(db: Session, employees: list[Employee]) -> dict[str, int]:
-    stats = {"staff": 0, "employees": 0, "clients": 0}
+    """Seed the LOGIN accounts. `employees` is accepted (and deliberately unused)
+    because workers no longer get logins — see the note below."""
+    stats = {"staff": 0, "employee_logins": 0, "clients": 0}
 
     # Management / viewer accounts. MANAGING_DIRECTOR is the new superuser / BOM
     # approver; DIRECT_MANAGER stays as operational lead (still bypasses role gates
@@ -333,19 +335,18 @@ def seed_users(db: Session, employees: list[Employee]) -> dict[str, int]:
         ("Stitching Manager", "9000000003", UserRole.STITCHING_MANAGER),
         ("Office Viewer", "9000000004", UserRole.VIEWER),
         ("HR / Accounts", "9000000005", UserRole.HR),
+        ("Lining Manager", "9000000006", UserRole.LINING_MANAGER),
+        ("Security Gate", "9000000007", UserRole.SECURITY),
     ]
     for nm, ph, role in staff:
         _make_user(db, name=nm, phone=ph, role=role,
                    email=f"{_slug(nm)}@factory.local")
         stats["staff"] += 1
 
-    # One login per employee.
-    for emp in employees:
-        if not emp.phone:
-            continue
-        _make_user(db, name=emp.name, phone=emp.phone, role=UserRole.EMPLOYEE,
-                   email=emp.email, employee_id=emp.id)
-        stats["employees"] += 1
+    # NO logins for shop-floor employees. Workers are not given system access:
+    # they hold an employee record + a scannable card, and SECURITY / HR / MD /
+    # DM check them in and out. Seeding an EMPLOYEE login here would recreate
+    # exactly the app_user rows the app no longer mints (UserRole.login_roles()).
 
     # One CLIENT login per client (manager-provisioned in real life; pre-seeded here).
     cidx = 0

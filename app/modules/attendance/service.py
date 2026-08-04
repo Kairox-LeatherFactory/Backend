@@ -153,7 +153,9 @@ class AttendanceService:
     # Flow A — Self-service check-in / check-out
     # ══════════════════════════════════════════════════════════════════
     async def self_check_in(self, user: User, body: schemas.CheckInRequest) -> AttendanceLog:
-        """The acting user IS the worker (manager / HR / permanent worker)."""
+        """The acting user IS the person being marked — an OPERATOR (SECURITY /
+        HR / MD / DM) recording their own arrival. Shop-floor workers hold no
+        login, so they never take this path; they are scanned in instead."""
         if user.employee_id is None:
             raise HTTPException(400, "This login is not linked to an employee record.")
         dist = await self._enforce_geofence(body.lat, body.lon)
@@ -169,13 +171,13 @@ class AttendanceService:
         return await self._close(employee_id=user.employee_id)
 
 
-    async def barcode_scan(self, *, employee_id: uuid.UUID, actor: User,
-                           direction: str, lat: float | None,
+    async def barcode_scan(self, *, employee_id: uuid.UUID, actor: User,direction: str,
+                           lat: float | None,
                            lon: float | None, proxy: bool, reason: str | None = None):
         """Barcode check in/out. Reuses _open_or_reject / _close.
 
-        A worker (EMPLOYEE role) may only scan their own card — enforced in the
-        router before this is called. Proxy is supervisor/manager only.
+        `actor` is always an operator (SECURITY / HR / MD / DM) — enforced in the
+        router before this is called. Workers have no login and cannot reach it.
         """
         emp = await self.employees.get(employee_id)
         if not emp:
@@ -225,38 +227,35 @@ class AttendanceService:
     # ══════════════════════════════════════════════════════════════════
     # Flow B — Supervisor proxy-marks daily-wage workers
     # ══════════════════════════════════════════════════════════════════
-    async def proxy_mark_present(self, supervisor: User,
+    async def proxy_mark_present(self, operator: User,
                                 body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
-        # Permission: SUPERVISOR (and DIRECT_MANAGER as superuser) only.
-        # F50: authorization is decided once, in the router (now includes
-        # SUPERVISOR). No duplicate role check here — two gates that disagree is
-        # exactly what locked supervisors out of a flow built for them.
+        """Manual check-in fallback (card failed / forgotten). Authorised in the
+        router (SECURITY / HR / MD / DM). Works for ANY wage type — every employee
+        has a card, and any of them can forget it.
+ 
+        The GPS pinged is the OPERATOR's device (they are standing at the gate)."""
         dist = await self._enforce_geofence(body.lat, body.lon)
-
+ 
         out: list[AttendanceLog] = []
         for emp_id in body.employee_ids:
             emp = await self.employees.get(emp_id)
             if not emp:
                 raise HTTPException(
-                    status_code=404,
-                    detail=f"Employee {emp_id} not found."
-                )                                    # silently skip unknown ids
-            # Spec restricts PROXY to piece-rate workers.
-            if emp.wage_type != WageType.PIECE_RATE:
-                raise HTTPException(
-                    400, f"{emp.name} is not a piece-rate worker — proxy not allowed.")
+                    status_code=404, detail=f"Employee {emp_id} not found.")
+            # REMOVED: the "not a piece-rate worker — proxy not allowed" refusal.
+            # A monthly worker who forgot their card must still get a manual
+            # check-in. Manual attendance is a fallback for EVERYONE now.
             log = await self._open_or_reject(
                 employee_id=emp.id, source=AttendanceSource.PROXY,
-                recorded_by=supervisor.id, distance_m=dist,
-            )
+                recorded_by=operator.id, distance_m=dist)
             out.append(log)
         return out
 
-    async def proxy_check_out(self, supervisor: User,
+    async def proxy_check_out(self, operator: User,
                               body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
-        # F50: role decided in the router.
+        """Manual check-out fallback. Authorised in the router. Any wage type."""
         await self._enforce_geofence(body.lat, body.lon)
-        out = []
+        out: list[AttendanceLog] = []
         for emp_id in body.employee_ids:
             out.append(await self._close(employee_id=emp_id))
         return out
@@ -264,11 +263,13 @@ class AttendanceService:
     # ══════════════════════════════════════════════════════════════════
     # Flow C — Onboard a new daily-wage worker on the floor
     # ══════════════════════════════════════════════════════════════════
-    async def add_daily_worker(self, supervisor: User,
+    async def add_daily_worker(self, operator: User,
                                body: schemas.AddDailyWorkerRequest) -> Employee:
-        # F51: onboarding creates a LOGIN, so this stays DM/HR/MD (aligned with
-        # the router). SUPERVISOR is deliberately NOT permitted to create users.
-        if supervisor.role not in (
+        """Put a daily-wage worker on the payroll. NO login is created — they get
+        an employee record and an employee barcode, and an operator scans them in
+        from then on. Stays DM/HR/MD (aligned with the router); SUPERVISOR is
+        deliberately not permitted to add people to the payroll."""
+        if operator.role not in (
             UserRole.DIRECT_MANAGER, UserRole.HR, UserRole.MANAGING_DIRECTOR):
             raise HTTPException(
                 403, "Only a manager or HR may onboard a daily worker.")
@@ -278,7 +279,7 @@ class AttendanceService:
             name=body.name,
             designation=body.designation,
             wage_type=WageType.PIECE_RATE,
-            phone=body.phone,
+            phone=body.phone,     # contact detail only; may be None
             email=None,
         )
         return await self.employees.create(emp_create)

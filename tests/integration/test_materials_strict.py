@@ -13,6 +13,8 @@ import pytest
 from app.modules.materials.schemas import LotCreate
 from app.modules.materials.service import MaterialService
 
+from starlette.exceptions import HTTPException
+
 
 async def _make(db, **kw):
     return await MaterialService(db).create_lot(LotCreate(**kw))
@@ -138,3 +140,59 @@ async def test_filter_fields_per_category(db):
     assert svc.filter_fields("ACCESSORY", "THREAD")["filters"] == ["article", "colour", "thickness"]
     assert svc.filter_fields("LINING", "RIBS")["filters"] == ["article", "colour"]
     assert set(svc.filter_fields("ACCESSORY", "BUTTON")["required_to_add"]) == {"size", "count"}
+    
+@pytest.mark.asyncio
+async def test_order_rejects_supplier_without_article(db, dm):
+    from app.modules.barcode.models import MaterialSupplier
+    from app.modules.materials.schemas import SupplierOrderCreate
+    s = MaterialSupplier(name="X", articles="NAP-11", is_active=True)
+    db.add(s); await db.commit(); await db.refresh(s)
+    with pytest.raises(HTTPException) as e:
+        await MaterialService(db).create_order(
+            SupplierOrderCreate(category="LEATHER", article="SUEDE-A32", qty=100,
+                                supplier_id=s.id),
+            actor_id=dm.id, actor_role=dm.role)
+    assert e.value.status_code == 422
+ 
+@pytest.mark.asyncio
+async def test_receive_rejects_mismatch(db, dm):
+    from app.modules.materials.schemas import (LotCreate, ReceiveRequest,
+                                               SupplierOrderCreate)
+    await MaterialService(db).create_lot(LotCreate(
+        category="LEATHER", article="GOAT-SUEDE", colour="PINE",
+        attributes={"thickness": "1.2mm", "dcm": 100}))
+    order = await MaterialService(db).create_order(
+        SupplierOrderCreate(category="LEATHER", article="SHEEP-NAPPA",
+                            colour="PINE", thickness="1.2mm", dcm=100, qty=100),
+        actor_id=dm.id, actor_role=dm.role)
+    from app.modules.barcode.models import MaterialLot
+    from sqlalchemy import select
+    lot = await db.scalar(select(MaterialLot).where(MaterialLot.article == "GOAT-SUEDE"))
+    with pytest.raises(HTTPException) as e:
+        await MaterialService(db).receive(ReceiveRequest(
+            lot_id=lot.id, supplier_order_id=order["order_id"], approved_qty=100),
+            actor_id=dm.id, actor_role=dm.role)
+    assert e.value.status_code == 409   # article mismatch → rejected
+ 
+@pytest.mark.asyncio
+async def test_dm_can_approve_mismatch_into_new_lot(db, dm):
+    from app.modules.materials.schemas import (LotCreate, ReceiveRequest,
+                                               SupplierOrderCreate)
+    from app.core.enums import UserRole
+    await MaterialService(db).create_lot(LotCreate(
+        category="LEATHER", article="GOAT-SUEDE", colour="PINE",
+        attributes={"thickness": "1.2mm", "dcm": 100}))
+    order = await MaterialService(db).create_order(
+        SupplierOrderCreate(category="LEATHER", article="SHEEP-NAPPA",
+                            colour="PINE", thickness="1.2mm", dcm=100, qty=100),
+        actor_id=dm.id, actor_role=dm.role)
+    from app.modules.barcode.models import MaterialLot
+    from sqlalchemy import select, func
+    lot = await db.scalar(select(MaterialLot).where(MaterialLot.article == "GOAT-SUEDE"))
+    res = await MaterialService(db).receive(ReceiveRequest(
+        lot_id=lot.id, supplier_order_id=order["order_id"], approved_qty=100,
+        approve_mismatch=True), actor_id=dm.id, actor_role=UserRole.DIRECT_MANAGER)
+    assert res["substituted"] is True
+    assert "article" in res["mismatch_fields"]
+    # a NEW lot was created; the original GOAT-SUEDE lot stays at 0 on_hand
+    assert res["lot_id"] != lot.id

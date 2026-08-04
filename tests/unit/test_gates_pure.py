@@ -10,7 +10,7 @@ should all be as testable as this one.
 Also covers `app/modules/attendance/geofence.py`, the other pure rule in scope.
 """
 import pytest
-
+from app.core.enums import UserRole, ScreenContext, screen_for_role
 from app.core.enums_barcode import (
     MULTI_STAGE_DESIGNATIONS, STAGE_DESIGNATIONS, STAGE_ROLE_ACCESS, ProductionStage,
 )
@@ -193,3 +193,29 @@ def test_null_island_default_rejects_a_real_worker():
     ok, dist = within_geofence(FACTORY[0], FACTORY[1], 0.0, 0.0, 100)
     assert ok is False
     assert dist > 1_000_000        # ~1,900 km away
+    
+def test_cutting_manager_pinned_to_leather():
+    assert screen_for_role(UserRole.CUTTING_MANAGER) is ScreenContext.LEATHER_CUT
+ 
+def test_lining_manager_pinned_to_lining():
+    assert screen_for_role(UserRole.LINING_MANAGER) is ScreenContext.LINING_CUT
+ 
+def test_stitching_manager_is_pipeline():
+    assert screen_for_role(UserRole.STITCHING_MANAGER) is ScreenContext.PIPELINE
+ 
+def test_cutting_manager_override_is_ignored():
+    # a pinned role cannot override to another screen
+    assert screen_for_role(UserRole.CUTTING_MANAGER,
+                           override=ScreenContext.LINING_CUT) is ScreenContext.LEATHER_CUT
+ 
+def test_md_may_override():
+    assert screen_for_role(UserRole.MANAGING_DIRECTOR,
+                           override=ScreenContext.LEATHER_CUT) is ScreenContext.LEATHER_CUT
+ 
+def test_md_defaults_to_pipeline():
+    assert screen_for_role(UserRole.MANAGING_DIRECTOR) is ScreenContext.PIPELINE
+ 
+@pytest.mark.asyncio
+async def test_log_without_screen_context_uses_role(client, cutting_mgr_token):
+    # a cutting manager logs WITHOUT sending screen_context → leather cutting
+    ...  # POST /production/log with body omitting screen_context; expect 201

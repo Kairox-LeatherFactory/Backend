@@ -13,7 +13,7 @@ class GpsPoint(BaseModel):
 
 class ScanCheckIn(BaseModel):
     employee_barcode: str
-    direction: str = Field("in", pattern="^(in|out)$")   # ADD — endpoint reads body.direction
+    direction: str = Field(..., pattern="^(in|out)$")
     lat: float | None = None
     lon: float | None = None
     proxy: bool = False
@@ -43,10 +43,13 @@ class ProxyMarkRequest(BaseModel):
 
 
 class AddDailyWorkerRequest(BaseModel):
-    """Supervisor onboards a new daily-wage worker on the floor (Flow C)."""
+    """Onboard a new daily-wage worker on the floor (Flow C).
+
+    `phone` is optional: the worker gets no login, so there is nothing to
+    authenticate with it — it is contact detail only."""
     name: str
-    phone: str
     designation: str
+    phone: str | None = None
     daily_rate: float | None = None
 
 

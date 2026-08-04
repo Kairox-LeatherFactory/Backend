@@ -187,6 +187,29 @@ SCREEN_TO_STAGE: dict[ScreenContext, ProductionStage] = {
     ScreenContext.LINING_CUT: ProductionStage.LINING_CUTTING,
 }
 
+ROLE_TO_SCREEN: dict = {
+    UserRole.CUTTING_MANAGER: ScreenContext.LEATHER_CUT,
+    UserRole.LINING_MANAGER:  ScreenContext.LINING_CUT,
+    UserRole.STITCHING_MANAGER: ScreenContext.PIPELINE,
+    UserRole.SUPERVISOR: ScreenContext.PIPELINE,
+    UserRole.HR: ScreenContext.PIPELINE,
+}
+
+def screen_for_role(role, override=None):
+    """Resolve the screen context for a logging request.
+ 
+    - CUTTING/LINING/STITCHING managers, supervisor, HR: pinned by role.
+    - DM / MD (or any role not in ROLE_TO_SCREEN): may pass an explicit override;
+      default to PIPELINE when none is given.
+    """
+    from app.core.enums import UserRole  # local import to avoid cycles
+    if role in (UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER):
+        return override or ScreenContext.PIPELINE
+    pinned = ROLE_TO_SCREEN.get(role)
+    if pinned is not None:
+        return pinned                     # role wins; sent value ignored
+    return override or ScreenContext.PIPELINE
+
 # Which role each cut SCREEN expects — the screen↔role cross-check. A leather
 # cutter scanned on the lining screen (or the reverse) raises a warning, not a
 # hard block: the work still logs, but the mismatch is surfaced.
@@ -206,7 +229,6 @@ class Designation(str, enum.Enum):
     CONTROLLED VOCABULARY, not free text: the moment it is free text, 'Cutter',
     'cutter ' and 'CUTTTER' become three skills and the gate is decorative.
     """
-
     CUTTER = "CUTTER"
     LINING_CUTTER = "LINING_CUTTER"
     FUSER = "FUSER"
@@ -219,6 +241,13 @@ class Designation(str, enum.Enum):
     TAILOR = "TAILOR"        # general stitching hand — multi-station
     HELPER = "HELPER"
     SUPERVISOR = "SUPERVISOR"
+    TRIMMER = "TRIMMER"
+    CHEMICAL_TECHNICIAN = "CHEMICAL_TECHNICIAN"
+    SECURITY = "SECURITY"
+    MERCHANDISER = "MERCHANDISER"
+    STITCHING_INSTRUCTOR = "STITCHING_INSTRUCTOR"
+    QC_INSPECTOR = "QC_INSPECTOR"
+
 
     @classmethod
     def normalise(cls, raw: str | None) -> str | None:

@@ -54,6 +54,29 @@ class BarcodeRepository:
             stmt = stmt.where(BarcodeRegistry.status == BarcodeStatus.ACTIVE.value)
         return await self.db.scalar(stmt.order_by(BarcodeRegistry.created_at.desc()))
 
+    async def codes_for_employees(
+        self, employee_ids: list[uuid.UUID], active_only: bool = True
+    ) -> dict[uuid.UUID, str]:
+        """employee_id → its card code, for a whole roster in ONE query.
+
+        The per-row `get_for_employee` would be N queries behind a roster list;
+        this is the batch form. Newest-first ordering means the dict keeps the
+        most recent code per employee when a reissue left older retired rows
+        behind (active_only=False)."""
+        if not employee_ids:
+            return {}
+        stmt = select(
+            BarcodeRegistry.employee_id, BarcodeRegistry.code
+        ).where(
+            BarcodeRegistry.employee_id.in_(employee_ids),
+            BarcodeRegistry.type == BarcodeType.EMPLOYEE.value,
+        )
+        if active_only:
+            stmt = stmt.where(BarcodeRegistry.status == BarcodeStatus.ACTIVE.value)
+        res = await self.db.execute(stmt.order_by(BarcodeRegistry.created_at.asc()))
+        # asc + overwrite == newest wins, without a window function.
+        return {emp_id: code for emp_id, code in res.all() if emp_id is not None}
+
     # ── code minting ─────────────────────────────────────────────────────────
     async def _next_code(self, prefix: str, width: int = 6) -> str:
         """PREFIX + zero-padded (max existing counter for this prefix) + 1.

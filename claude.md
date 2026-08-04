@@ -52,15 +52,24 @@ production event, attendance, and wage.
 | Cutting Manager | `cutting_manager` | Logs leather cutting + fusing; creates material lots |
 | **Lining Manager** | `lining_manager` | **NEW in Phase 1** — logs the lining-cut path |
 | Stitching Manager | `stitching_manager` | Logs pasting, line-stitching, shell-stitching |
-| Supervisor | `supervisor` | Proxy attendance for daily-wage workers |
-| HR | `hr` | Employees, wages visibility, designation backfill |
-| Employee | `employee` | **Only** their own attendance screen (scan own card) |
+| Supervisor | `supervisor` | Reads the floor roster (no attendance writes, no user creation) |
+| HR | `hr` | Employees, wages visibility, designation backfill, attendance operator |
+| **Security** | `security` | **Gate operator** — scans employee cards in and out |
 | Client | `client` | (read-only order views — not core to Phase 1 floor) |
 | Viewer | `viewer` | Read-only |
+| ~~Employee~~ | ~~`employee`~~ | **LEGACY — never minted. Workers get no login.** |
 
-**Rule:** an `employee` token can reach **only** attendance (their own check-in) and resolving
-their own barcode. Everything else is blocked (`block_employees` dependency + per-route
-`require_roles`).
+**Rule: SHOP-FLOOR WORKERS ARE NOT GIVEN SYSTEM ACCESS.** A worker has no login and no
+`app_user` row, so creating one needs no phone, email or password — just a name, a designation
+and a wage type. They are identified on the floor by their **employee barcode**, and their
+attendance is entered *for* them by an **operator: SECURITY / HR / MD / DM**
+(`core.enums.ATTENDANCE_OPERATOR_ROLES`). `UserRole.login_roles()` is the authority on who may
+hold a login; `UserService._reject_non_login_role` is the single choke point that enforces it,
+so neither the users API nor the employee-create path can put a worker in `app_user`.
+
+The `employee` value stays in the enum only because `app_user.role` is a **native PG enum**
+(values cannot be dropped) and pre-change rows may still carry it. The `block_employees`
+dependency now guards those legacy tokens only.
 
 ---
 
@@ -217,11 +226,15 @@ WAITING → MERGED (at upload) → HOLDING_LEATHER → HOLDING_BOTH
 ## 10. Attendance, Employees, Users, Wages, Analytics
 
 ### Attendance
-- Two flows: **SELF** (worker checks themselves in) and **PROXY** (supervisor marks a daily-wage
-  worker who holds no login).
-- **Barcode door:** `POST /attendance/scan-check-in` resolves the employee barcode → calls the
-  existing `_open_or_reject` / `_close` primitives, so barcode check-in behaves identically to the
-  manual flow (same geofence, same late/short flags, same idempotent re-tap).
+- **Every attendance write comes from an operator login — SECURITY / HR / MD / DM.** Nobody else
+  can punch, because nobody else on the floor has a login. Both doors share one dependency
+  (`require_operator`) so the barcode door and the manual door can never drift apart.
+- **Barcode door (primary):** `POST /attendance/scan-check-in` — the operator resolves the worker's
+  card and calls the existing `_open_or_reject` / `_close` primitives, so it behaves identically to
+  the manual flow (same geofence, same late/short flags, same idempotent re-tap).
+- **Manual door (fallback):** `POST /attendance/proxy/check-in|check-out` when a card fails or is
+  forgotten. Any wage type.
+- `/attendance/check-in|check-out` is now an operator recording **their own** arrival/departure.
 - `work_date` uniqueness is enforced at the DB level; check-in is idempotent (re-tap = no-op).
 - Production logging requires the employee to be **present today**.
 
@@ -229,8 +242,13 @@ WAITING → MERGED (at upload) → HOLDING_LEATHER → HOLDING_BOTH
 - **Designations are always UPPERCASE** (`Designation.normalise`) — a controlled vocabulary that
   drives the skill gate. Unknown designations fail-open (HR backfills).
 - **Names are unique**; a collision is prefixed `IN-CHAL`.
-- On create: a **MONTHLY** worker also gets a login; **every** new employee gets an **employee
-  barcode** (issued in the same transaction; the code is returned so the card can be printed).
+- On create: **every** new employee gets an **employee barcode** (issued in the same transaction;
+  the code is returned so the card can be printed). **No login is minted for a worker** — wage_type
+  is a payroll fact and does not imply system access (a MONTHLY worker used to be auto-given an
+  `employee` login; that was removed).
+- A login *is* minted alongside the employee row when the caller passes an explicit **staff** role
+  (`schemas._EMPLOYEE_LOGIN_ROLES`: HR, SUPERVISOR, CUTTING/LINING/STITCHING_MANAGER, SECURITY) —
+  that path does need phone + password. DM/MD are created via user-creation, not here.
 
 ### Users
 - Self-issued JWT. `provision_user` creates the login for monthly employees.
@@ -261,8 +279,9 @@ WAITING → MERGED (at upload) → HOLDING_LEATHER → HOLDING_BOTH
   Alembic autogenerate try to DROP the table — the schema-drift trap). `barcode.models` holds the
   barcode + material + drawer + supplier tables.
 - **Router locking:** manager-only routers are wrapped with `block_employees`; **auth, users,
-  attendance, attendance-scan, and `/barcode/resolve` stay open** (a worker must log in, check in,
-  and scan their own card).
+  attendance and `/barcode/resolve` stay open** at the router level — the attendance write routes
+  do their own operator gate (`require_operator`), and resolve must stay reachable from the
+  attendance screen. `block_employees` now shuts out legacy `employee` tokens only.
 - **One `lifespan`** (deps check + optional sweepers + dev `create_all`). Do not define two.
 - Register routers under `/api/v1`.
 
