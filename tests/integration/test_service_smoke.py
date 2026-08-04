@@ -84,11 +84,11 @@ async def _seed_catalog(db) -> dict:
     afzal = await EmployeeService(db).create(EmployeeCreate(
         name="Afzal", designation="CUTTER", wage_type=WageType.PIECE_RATE,
         phone="9100000001", email="afzal@factory.local"))
-    # MONTHLY employees are provisioned a login, so phone + password are required.
+    # A MONTHLY worker is still just a worker: no login, so no password. wage_type
+    # is a payroll fact and no longer implies system access.
     rahim = await EmployeeService(db).create(EmployeeCreate(
         name="Rahim", designation="TAILOR", wage_type=WageType.MONTHLY,
-        monthly_salary=20000, phone="9100000002", email="rahim@factory.local",
-        password="9100000002"))
+        monthly_salary=20000, phone="9100000002", email="rahim@factory.local"))
     await db.commit()
 
     return dict(client=client, order=order, carnaby=carnaby, clermont=clermont,

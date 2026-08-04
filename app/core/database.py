@@ -88,7 +88,6 @@ def _engine_kwargs(url: str) -> dict:
     # SQLite (tests/local): a single shared connection, no pool sizing.
     return dict()
 
-
 # ──────────────────────────────────────────────────────────────────────────
 # ASYNC engine + session  (the live API runs on these)
 # ──────────────────────────────────────────────────────────────────────────

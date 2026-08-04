@@ -89,18 +89,40 @@ class UserService:
     # below their own authority — otherwise HR, whose job is employee admin,
     # can mint a managing_director (a superuser that bypasses every
     # require_roles check, see users/deps.py:69) and then log into it.
+    #
+    # EMPLOYEE is grantable by NOBODY, not even the MD: shop-floor workers are
+    # not given system access at all (UserRole.login_roles()). MD's set is
+    # login_roles() rather than set(UserRole) precisely so adding a new role to
+    # the enum can't silently become mintable.
     _GRANTABLE: dict[UserRole, set[UserRole]] = {
-        UserRole.MANAGING_DIRECTOR: set(UserRole),          # MD grants anything
+        UserRole.MANAGING_DIRECTOR: UserRole.login_roles(),   # MD grants any LOGIN role
         UserRole.DIRECT_MANAGER: {
             UserRole.HR, UserRole.SUPERVISOR, UserRole.CUTTING_MANAGER,
             UserRole.LINING_MANAGER, UserRole.STITCHING_MANAGER,
-            UserRole.EMPLOYEE, UserRole.CLIENT, UserRole.VIEWER,
+            UserRole.SECURITY, UserRole.MERCHANDISER,
+            UserRole.CLIENT, UserRole.VIEWER,
         },
-        UserRole.HR: {UserRole.EMPLOYEE, UserRole.SUPERVISOR, UserRole.VIEWER},
+        UserRole.HR: {UserRole.SUPERVISOR, UserRole.VIEWER},
     }
+
+    @staticmethod
+    def _reject_non_login_role(role: UserRole) -> None:
+        """A login may only ever be minted for a role that belongs in app_user.
+
+        This is the single choke point for "workers get no system access": both
+        create_user() and provision_user() pass through it, so neither the users
+        API nor the employee-create path can put an EMPLOYEE row in app_user.
+        """
+        if role not in UserRole.login_roles():
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Role '{role.value}' does not get a login. Shop-floor workers "
+                f"have no system access — create them via /employees instead; "
+                f"their attendance is scanned by SECURITY / HR / MD / DM.")
 
     async def create_user(self, body: schemas.UserCreate,
                           *, actor: User | None = None) -> User:
+        self._reject_non_login_role(body.role)
         if actor is not None:
             allowed = self._GRANTABLE.get(actor.role, set())
             if body.role not in allowed:
@@ -156,8 +178,13 @@ class UserService:
         return await self.repo.get(user_id)
     
     async def provision_user(self, body: schemas.UserCreate,must_change_password: bool) -> User:
-        """Validate + stage. Does NOT commit — the caller owns the transaction."""
+        """Validate + stage. Does NOT commit — the caller owns the transaction.
+
+        Used by employees.create() when the new person is STAFF (a manager, HR,
+        security…). A plain worker never reaches here — see _reject_non_login_role.
+        """
         logger.info("Entered provision_user")
+        self._reject_non_login_role(body.role)
         logger.info("Creating user for phone=%s", body.phone)
         if await self.repo.get_by_username(body.phone):
             raise HTTPException(409, "Phone already registered")

@@ -153,7 +153,9 @@ class AttendanceService:
     # Flow A — Self-service check-in / check-out
     # ══════════════════════════════════════════════════════════════════
     async def self_check_in(self, user: User, body: schemas.CheckInRequest) -> AttendanceLog:
-        """The acting user IS the worker (manager / HR / permanent worker)."""
+        """The acting user IS the person being marked — an OPERATOR (SECURITY /
+        HR / MD / DM) recording their own arrival. Shop-floor workers hold no
+        login, so they never take this path; they are scanned in instead."""
         if user.employee_id is None:
             raise HTTPException(400, "This login is not linked to an employee record.")
         dist = await self._enforce_geofence(body.lat, body.lon)
@@ -174,8 +176,8 @@ class AttendanceService:
                            lon: float | None, proxy: bool, reason: str | None = None):
         """Barcode check in/out. Reuses _open_or_reject / _close.
 
-        A worker (EMPLOYEE role) may only scan their own card — enforced in the
-        router before this is called. Proxy is supervisor/manager only.
+        `actor` is always an operator (SECURITY / HR / MD / DM) — enforced in the
+        router before this is called. Workers have no login and cannot reach it.
         """
         emp = await self.employees.get(employee_id)
         if not emp:
@@ -261,11 +263,13 @@ class AttendanceService:
     # ══════════════════════════════════════════════════════════════════
     # Flow C — Onboard a new daily-wage worker on the floor
     # ══════════════════════════════════════════════════════════════════
-    async def add_daily_worker(self, supervisor: User,
+    async def add_daily_worker(self, operator: User,
                                body: schemas.AddDailyWorkerRequest) -> Employee:
-        # F51: onboarding creates a LOGIN, so this stays DM/HR/MD (aligned with
-        # the router). SUPERVISOR is deliberately NOT permitted to create users.
-        if supervisor.role not in (
+        """Put a daily-wage worker on the payroll. NO login is created — they get
+        an employee record and an employee barcode, and an operator scans them in
+        from then on. Stays DM/HR/MD (aligned with the router); SUPERVISOR is
+        deliberately not permitted to add people to the payroll."""
+        if operator.role not in (
             UserRole.DIRECT_MANAGER, UserRole.HR, UserRole.MANAGING_DIRECTOR):
             raise HTTPException(
                 403, "Only a manager or HR may onboard a daily worker.")
@@ -275,7 +279,7 @@ class AttendanceService:
             name=body.name,
             designation=body.designation,
             wage_type=WageType.PIECE_RATE,
-            phone=body.phone,
+            phone=body.phone,     # contact detail only; may be None
             email=None,
         )
         return await self.employees.create(emp_create)

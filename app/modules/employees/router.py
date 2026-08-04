@@ -48,11 +48,14 @@ async def create_employee(
     actor: User = Depends(require_roles(
         UserRole.DIRECT_MANAGER, UserRole.HR, UserRole.MANAGING_DIRECTOR)),
 ):
-    """Create an employee (and, for a staff role or MONTHLY wage, a linked login).
-    Managers/HR are created HERE now (except DM/MD)."""
+    """Create an employee. A linked login is minted ONLY when `role` names a
+    staff role (managers/HR/security are created HERE now, except DM/MD).
+
+    A plain worker needs name + designation + wage_type and nothing else: no
+    phone, no email, no password, no app_user row. They get an employee barcode
+    back so their card can be printed and scanned at the gate."""
     return await EmployeeService(db).create(body, actor=actor)
- 
- 
+
 @router.patch("/{employee_id}", response_model=schemas.EmployeeRead)
 async def update_employee(
     employee_id: uuid.UUID,

@@ -46,10 +46,13 @@ class ProxyMarkRequest(BaseModel):
 
 
 class AddDailyWorkerRequest(BaseModel):
-    """Supervisor onboards a new daily-wage worker on the floor (Flow C)."""
+    """Onboard a new daily-wage worker on the floor (Flow C).
+
+    `phone` is optional: the worker gets no login, so there is nothing to
+    authenticate with it — it is contact detail only."""
     name: str
-    phone: str
     designation: str
+    phone: str | None = None
     daily_rate: float | None = None
 
 
