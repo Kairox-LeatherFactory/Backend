@@ -37,6 +37,19 @@ from app.modules.users.repository import UserRepository
 from app.modules.users import schemas
 
 
+# F41: a fixed dummy hash to compare against on the unknown-user path so the
+# bcrypt cost is paid whether or not the user exists. Computed once, lazily, to
+# avoid doing bcrypt work at import time.
+_DUMMY_HASH_CACHE: str | None = None
+
+
+def _dummy_hash() -> str:
+    global _DUMMY_HASH_CACHE
+    if _DUMMY_HASH_CACHE is None:
+        _DUMMY_HASH_CACHE = get_password_hash("timing-equalizer-not-a-real-password")
+    return _DUMMY_HASH_CACHE
+
+
 class UserService:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -46,6 +59,10 @@ class UserService:
     async def authenticate(self, username: str, password: str) -> User | None:
         user = await self.repo.get_by_username(username)
         if not user or not user.is_active:
+            # F41: burn the same bcrypt time on the unknown-user path so "no such
+            # user" and "wrong password" take about equally long — otherwise the
+            # timing difference enumerates the roster (phone numbers are PII).
+            verify_password(password, _dummy_hash())
             return None
         if not verify_password(password, user.password_hash):
             return None
@@ -68,7 +85,52 @@ class UserService:
         )
 
     # ── User management (direct manager) ─────────────────────────────────────
-    async def create_user(self, body: schemas.UserCreate) -> User:
+    # B8: who may GRANT which role. A caller can only ever create a login at or
+    # below their own authority — otherwise HR, whose job is employee admin,
+    # can mint a managing_director (a superuser that bypasses every
+    # require_roles check, see users/deps.py:69) and then log into it.
+    #
+    # EMPLOYEE is grantable by NOBODY, not even the MD: shop-floor workers are
+    # not given system access at all (UserRole.login_roles()). MD's set is
+    # login_roles() rather than set(UserRole) precisely so adding a new role to
+    # the enum can't silently become mintable.
+    _GRANTABLE: dict[UserRole, set[UserRole]] = {
+        UserRole.MANAGING_DIRECTOR: UserRole.login_roles(),   # MD grants any LOGIN role
+        UserRole.DIRECT_MANAGER: {
+            UserRole.HR, UserRole.SUPERVISOR, UserRole.CUTTING_MANAGER,
+            UserRole.LINING_MANAGER, UserRole.STITCHING_MANAGER,
+            UserRole.SECURITY, UserRole.MERCHANDISER,
+            UserRole.CLIENT, UserRole.VIEWER,
+        },
+        UserRole.HR: {UserRole.SUPERVISOR, UserRole.VIEWER},
+    }
+
+    @staticmethod
+    def _reject_non_login_role(role: UserRole) -> None:
+        """A login may only ever be minted for a role that belongs in app_user.
+
+        This is the single choke point for "workers get no system access": both
+        create_user() and provision_user() pass through it, so neither the users
+        API nor the employee-create path can put an EMPLOYEE row in app_user.
+        """
+        if role not in UserRole.login_roles():
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Role '{role.value}' does not get a login. Shop-floor workers "
+                f"have no system access — create them via /employees instead; "
+                f"their attendance is scanned by SECURITY / HR / MD / DM.")
+
+    async def create_user(self, body: schemas.UserCreate,
+                          *, actor: User | None = None) -> User:
+        self._reject_non_login_role(body.role)
+        if actor is not None:
+            allowed = self._GRANTABLE.get(actor.role, set())
+            if body.role not in allowed:
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    f"Role '{actor.role.value}' may not create a "
+                    f"'{body.role.value}' login. Permitted: "
+                    f"{', '.join(sorted(r.value for r in allowed)) or '—'}.")
         if await self.repo.get_by_username(body.phone):
             raise HTTPException(status.HTTP_409_CONFLICT, "Phone already registered")
         if body.email and await self.repo.get_by_email(body.email):
@@ -79,7 +141,6 @@ class UserService:
             password_hash=get_password_hash(raw), employee_id=body.employee_id,
             must_change_password=body.password is None,
         )
-
     async def create_client_user(self, body: schemas.ClientUserCreate) -> User:
         if await self.repo.get_by_username(body.phone):
             raise HTTPException(status.HTTP_409_CONFLICT, "Phone already registered")
@@ -93,6 +154,12 @@ class UserService:
     async def change_password(self, user: User, current: str, new: str) -> None:
         if not verify_password(current, user.password_hash):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is wrong")
+        # F43: don't let the forced-change rotation swap the seeded phone-password
+        # for the phone number again.
+        if new.strip() == (user.phone or "").strip():
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "New password must not be your phone number.")
         user.password_hash = get_password_hash(new)
         user.must_change_password = False
         await self.repo.save(user)
@@ -111,8 +178,13 @@ class UserService:
         return await self.repo.get(user_id)
     
     async def provision_user(self, body: schemas.UserCreate,must_change_password: bool) -> User:
-        """Validate + stage. Does NOT commit — the caller owns the transaction."""
+        """Validate + stage. Does NOT commit — the caller owns the transaction.
+
+        Used by employees.create() when the new person is STAFF (a manager, HR,
+        security…). A plain worker never reaches here — see _reject_non_login_role.
+        """
         logger.info("Entered provision_user")
+        self._reject_non_login_role(body.role)
         logger.info("Creating user for phone=%s", body.phone)
         if await self.repo.get_by_username(body.phone):
             raise HTTPException(409, "Phone already registered")

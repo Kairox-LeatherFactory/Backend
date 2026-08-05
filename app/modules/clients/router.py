@@ -26,9 +26,15 @@ router = APIRouter(prefix="/clients", tags=["Clients"])
 @router.get("", response_model=list[schemas.ClientRead])
 async def list_clients(
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
-    return await ClientService(db).list_clients()
+    """H1: a CLIENT login sees only its own row. The sibling endpoints in this
+    file already pin the caller (see :57-58 and :91-94); this one did not, so a
+    customer could read the whole customer list."""
+    rows = await ClientService(db).list_clients()
+    if user.role == UserRole.CLIENT:
+        return [c for c in rows if c.id == user.client_id]
+    return rows
 
 
 @router.post("", response_model=schemas.CreatedClientRead, status_code=201)
@@ -78,9 +84,22 @@ async def add_order(
     
 @router.get("/styles", response_model=list[schemas.StyleOption])
 async def list_styles(
-    order_id: uuid.UUID | None = None,
+    order_number: str | None = None,
     client_id: uuid.UUID | None = None,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
-    return await ClientService(db).list_style_options(order_id=order_id, client_id=client_id)
+    # F39: a CLIENT caller is pinned to their own client_id regardless of what
+    # they pass, mirroring the ownership check on /{client_id}/orders. Without
+    # this, omitting the filter returned every client's styles (commercially
+    # sensitive names/codes). client_id is combined (AND) with any order_number,
+    # so a CLIENT cannot read another client's styles via a borrowed order_number.
+    if user.role == UserRole.CLIENT:
+        if user.client_id is None:
+            raise HTTPException(403, "This login is not linked to a client.")
+        client_id = user.client_id
+    # NOTE: the service/repo filter by order_number (string), not order_id — the
+    # previous router param was order_id: uuid.UUID and would have raised
+    # TypeError when passed through. Corrected to order_number.
+    return await ClientService(db).list_style_options(
+        order_number=order_number, client_id=client_id)

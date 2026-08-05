@@ -1,0 +1,343 @@
+<title>KairoX ERP — Pre-Ship Audit, 31 Jul 2026</title>
+<style>
+  :root{
+    --ink:#14171c; --ink-2:#2b313a; --steel:#5a6472; --steel-2:#878f9c;
+    --paper:#f6f7f8; --card:#ffffff; --rule:#d8dce1; --rule-2:#e8ebee;
+    --accent:#d9481a;
+    --blocker:#c02717; --high:#b06a12; --med:#5a6472; --low:#9aa1ab; --good:#1a6f52;
+    --blocker-bg:#fbeceb; --high-bg:#fbf3e6; --good-bg:#e9f4f0;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --ink:#eef1f4; --ink-2:#c3cad3; --steel:#8d97a5; --steel-2:#6b7481;
+      --paper:#101317; --card:#171b21; --rule:#2c333c; --rule-2:#232931;
+      --accent:#ff6a37;
+      --blocker:#ff6b5a; --high:#e5a03f; --med:#8d97a5; --low:#6b7481; --good:#4dc79b;
+      --blocker-bg:#2a1815; --high-bg:#2a2214; --good-bg:#13251f;
+    }
+  }
+  :root[data-theme="dark"]{
+    --ink:#eef1f4; --ink-2:#c3cad3; --steel:#8d97a5; --steel-2:#6b7481;
+    --paper:#101317; --card:#171b21; --rule:#2c333c; --rule-2:#232931;
+    --accent:#ff6a37;
+    --blocker:#ff6b5a; --high:#e5a03f; --med:#8d97a5; --low:#6b7481; --good:#4dc79b;
+    --blocker-bg:#2a1815; --high-bg:#2a2214; --good-bg:#13251f;
+  }
+  :root[data-theme="light"]{
+    --ink:#14171c; --ink-2:#2b313a; --steel:#5a6472; --steel-2:#878f9c;
+    --paper:#f6f7f8; --card:#ffffff; --rule:#d8dce1; --rule-2:#e8ebee;
+    --accent:#d9481a;
+    --blocker:#c02717; --high:#b06a12; --med:#5a6472; --low:#9aa1ab; --good:#1a6f52;
+    --blocker-bg:#fbeceb; --high-bg:#fbf3e6; --good-bg:#e9f4f0;
+  }
+
+  body{background:var(--paper);color:var(--ink);font-family:var(--sans);
+    font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:60rem;margin:0 auto;padding:0 1.5rem 6rem;}
+  h1,h2,h3{text-wrap:balance;line-height:1.15;margin:0;}
+
+  /* ── masthead: an inspection stamp, not a hero ── */
+  .mast{border-bottom:3px solid var(--ink);padding:3.5rem 0 1.25rem;margin-bottom:2.5rem;}
+  .stamp{font-family:var(--mono);font-size:.7rem;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--accent);margin-bottom:1.5rem;}
+  h1{font-size:clamp(2rem,5.5vw,3.25rem);font-weight:800;letter-spacing:-.028em;}
+  h1 em{font-style:normal;color:var(--steel);font-weight:400;}
+  .meta{display:flex;flex-wrap:wrap;gap:.5rem 2rem;margin-top:1.5rem;
+    font-family:var(--mono);font-size:.75rem;color:var(--steel);}
+  .meta b{color:var(--ink);font-weight:600;}
+
+  /* ── verdict ── */
+  .verdict{background:var(--blocker-bg);border-left:4px solid var(--blocker);
+    padding:1.5rem 1.75rem;margin-bottom:1rem;}
+  .verdict h2{font-size:1.375rem;font-weight:750;letter-spacing:-.02em;color:var(--blocker);}
+  .verdict p{margin:.75rem 0 0;color:var(--ink-2);}
+  .won{background:var(--good-bg);border-left:4px solid var(--good);padding:1.25rem 1.75rem;margin-bottom:3rem;}
+  .won h3{font-size:.7rem;font-family:var(--mono);letter-spacing:.14em;text-transform:uppercase;
+    color:var(--good);margin-bottom:.6rem;}
+  .won ul{margin:0;padding-left:1.1rem;color:var(--ink-2);font-size:.9rem;}
+  .won li{margin:.2rem 0;}
+
+  section{margin-bottom:3.5rem;}
+  h2.sec{font-size:.72rem;font-family:var(--mono);letter-spacing:.16em;text-transform:uppercase;
+    color:var(--steel);padding-bottom:.5rem;border-bottom:1px solid var(--rule);margin-bottom:1.5rem;
+    display:flex;justify-content:space-between;align-items:baseline;gap:1rem;}
+  h2.sec span{color:var(--steel-2);letter-spacing:.08em;}
+
+  /* ── blocker list: spec-sheet rows, squared off ── */
+  .blk{border-top:1px solid var(--rule);}
+  .blk li{display:grid;grid-template-columns:2.5rem 1fr;gap:1.25rem;padding:1.1rem 0;
+    border-bottom:1px solid var(--rule-2);list-style:none;}
+  .blk .n{font-family:var(--mono);font-size:1.5rem;font-weight:700;color:var(--blocker);
+    line-height:1;font-variant-numeric:tabular-nums;}
+  .blk h3{font-size:1.02rem;font-weight:650;letter-spacing:-.012em;margin-bottom:.35rem;}
+  .blk p{margin:0;font-size:.9rem;color:var(--ink-2);}
+  code{font-family:var(--mono);font-size:.83em;background:var(--rule-2);
+    padding:.08em .34em;color:var(--ink-2);white-space:nowrap;}
+
+  /* ── matrix ── */
+  .scroll{overflow-x:auto;border:1px solid var(--rule);background:var(--card);}
+  table{border-collapse:collapse;width:100%;font-size:.85rem;min-width:38rem;}
+  th,td{padding:.6rem .85rem;text-align:left;border-bottom:1px solid var(--rule-2);}
+  thead th{font-family:var(--mono);font-size:.64rem;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--steel);background:var(--paper);border-bottom:1px solid var(--rule);
+    position:sticky;top:0;}
+  td.num,th.num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;}
+  tbody tr:last-child td{border-bottom:none;}
+  tr.total td{font-weight:700;border-top:2px solid var(--ink);background:var(--paper);}
+  td.mod{font-family:var(--mono);font-size:.8rem;}
+  .z{color:var(--steel-2);}
+  .b{color:var(--blocker);font-weight:700;}
+  .h{color:var(--high);font-weight:650;}
+
+  .pill{display:inline-block;font-family:var(--mono);font-size:.6rem;letter-spacing:.09em;
+    text-transform:uppercase;padding:.2em .55em;white-space:nowrap;font-weight:600;}
+  .p-no{background:var(--blocker);color:#fff;}
+  .p-risk{background:var(--high-bg);color:var(--high);border:1px solid var(--high);}
+  .p-go{background:var(--good-bg);color:var(--good);border:1px solid var(--good);}
+  .p-d0{background:var(--blocker);color:#fff;}
+
+  /* ── burn-down: a real sequence, so it is numbered ── */
+  .burn{border-left:2px solid var(--rule);padding-left:1.5rem;display:flex;
+    flex-direction:column;gap:1.5rem;}
+  .burn > div{position:relative;}
+  .burn > div::before{content:"";position:absolute;left:calc(-1.5rem - 5px);top:.45rem;
+    width:8px;height:8px;background:var(--accent);}
+  .burn h4{font-family:var(--mono);font-size:.7rem;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--accent);margin:0 0 .3rem;}
+  .burn p{margin:0;font-size:.9rem;color:var(--ink-2);}
+  .burn .exit{display:block;margin-top:.35rem;font-family:var(--mono);font-size:.75rem;color:var(--steel);}
+
+  /* ── passes ── */
+  .passes{display:grid;grid-template-columns:repeat(auto-fill,minmax(15rem,1fr));gap:1px;
+    background:var(--rule);border:1px solid var(--rule);}
+  .passes a{background:var(--card);padding:.85rem 1rem;text-decoration:none;color:inherit;
+    display:flex;gap:.7rem;align-items:baseline;transition:background .12s;}
+  .passes a:hover,.passes a:focus-visible{background:var(--paper);outline:none;color:var(--accent);}
+  .passes a:focus-visible{box-shadow:inset 0 0 0 2px var(--accent);}
+  .passes .pn{font-family:var(--mono);font-size:.7rem;color:var(--steel-2);
+    font-variant-numeric:tabular-nums;}
+  .passes .pt{font-size:.85rem;font-weight:500;}
+
+  .note{font-size:.85rem;color:var(--steel);border-top:1px solid var(--rule);
+    padding-top:1.25rem;margin-top:3rem;}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;}}
+  @media (max-width:34rem){ .blk li{grid-template-columns:1.75rem 1fr;gap:.85rem;} }
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <div class="stamp">Delta re-audit · read-only · no code modified</div>
+  <h1>KairoX ERP <em>Phase&nbsp;1</em><br>pre-ship audit</h1>
+  <div class="meta">
+    <span>AUDITED <b>2026-07-31</b></span>
+    <span>SHIP TARGET <b>2026-08-02</b></span>
+    <span>WINDOW <b>2 days</b></span>
+    <span>FINDINGS OPEN <b>135</b></span>
+  </div>
+</header>
+
+<div class="verdict">
+  <h2>Do not ship as it stands.</h2>
+  <p>Six blockers fail on <em>ordinary</em> input — not edge cases. Four of them were introduced
+  by yesterday's burn-down edits, so the net blocker count is unchanged at six and the money path
+  is worse than it was on 30 July: piece-rate payroll now fails at the query layer, before any of
+  yesterday's new guards are reached.</p>
+</div>
+
+<div class="won">
+  <h3>What yesterday's work did close</h3>
+  <ul>
+    <li>The application imports cleanly — all three startup import errors are gone.</li>
+    <li>Alembic is single-root, single-head, no placeholder revisions.</li>
+    <li><code>uq_wage_line_run_emp</code> exists in both the model and the migration.</li>
+    <li>The <code>Supplier</code> table/class collision is resolved; suite failures fell 93 → 53.</li>
+    <li>38 prior findings verified closed.</li>
+  </ul>
+</div>
+
+<section>
+  <h2 class="sec">The six blockers <span>all tagged D0</span></h2>
+  <ol class="blk">
+    <li><span class="n">1</span><div>
+      <h3>Piece-rate payroll cannot run at all</h3>
+      <p><code>production/repository.py:213,222</code> — the wage aggregate groups and orders by
+      <code>Piece.style_id</code>, a column that does not exist. Every run raises
+      <code>AttributeError</code> before emitting SQL. Reproduced in <code>tests/test_wages.py</code>.</p>
+    </div></li>
+    <li><span class="n">2</span><div>
+      <h3>A payroll run 500s <em>after</em> committing and closing</h3>
+      <p><code>wages/service.py:572</code> calls <code>employees.names_for</code>, which does not
+      exist, whenever a MONTHLY employee has a null salary — after <code>add_lines</code> and
+      <code>close_run</code> have already committed. The cleanup handler then fails on the FK.</p>
+    </div></li>
+    <li><span class="n">3</span><div>
+      <h3>The repository is in an unresolved merge</h3>
+      <p><code>git ls-files -u</code> shows three index stages for <code>imports/load_to_db.py</code>
+      and add/add for <code>production/router.py</code>. What was tested is the working tree; what
+      would be committed is undefined.</p>
+    </div></li>
+    <li><span class="n">4</span><div>
+      <h3>The barcode attendance door is 100% broken</h3>
+      <p><code>attendance/router.py:64</code> reads <code>body.direction</code>; the field is not on
+      <code>ScanCheckIn</code>. Every scan check-in 500s — this is how the floor punches in.</p>
+    </div></li>
+    <li><span class="n">5</span><div>
+      <h3>Any client login can check in any employee</h3>
+      <p><code>attendance/router.py:59</code> guards only the <code>proxy=true</code> case. With
+      <code>proxy=false</code> a CLIENT or VIEWER token writes attendance for anyone — and
+      attendance gates all production logging. Masked today by blocker 4.</p>
+    </div></li>
+    <li><span class="n">6</span><div>
+      <h3>Three production GETs 500 on every call</h3>
+      <p><code>production/router.py:71,98,110</code> pass a <code>client_scope</code> kwarg the
+      service signatures do not accept. They are also untenanted once the TypeError is fixed —
+      fix the signature, not the call site.</p>
+    </div></li>
+  </ol>
+</section>
+
+<section>
+  <h2 class="sec">Open findings by module <span>new + carried</span></h2>
+  <div class="scroll"><table>
+    <thead><tr>
+      <th>Module</th><th class="num">Blk</th><th class="num">High</th><th class="num">Med</th>
+      <th class="num">Low</th><th class="num">Total</th><th>Verdict for Aug 2</th>
+    </tr></thead>
+    <tbody>
+      <tr><td class="mod">production</td><td class="num b">2</td><td class="num h">4</td><td class="num">11</td><td class="num z">1</td><td class="num">18</td><td><span class="pill p-no">Do not ship</span></td></tr>
+      <tr><td class="mod">wages</td><td class="num b">1</td><td class="num h">4</td><td class="num">8</td><td class="num z">1</td><td class="num">14</td><td><span class="pill p-no">Do not ship</span></td></tr>
+      <tr><td class="mod">attendance</td><td class="num b">2</td><td class="num h">4</td><td class="num">7</td><td class="num z">0</td><td class="num">13</td><td><span class="pill p-no">Do not ship</span></td></tr>
+      <tr><td class="mod">imports</td><td class="num b">1</td><td class="num h">2</td><td class="num">6</td><td class="num z">0</td><td class="num">9</td><td><span class="pill p-no">Do not ship</span></td></tr>
+      <tr><td class="mod">core</td><td class="num z">0</td><td class="num h">5</td><td class="num">21</td><td class="num z">3</td><td class="num">29</td><td><span class="pill p-risk">Named risk</span></td></tr>
+      <tr><td class="mod">users</td><td class="num z">0</td><td class="num h">1</td><td class="num">8</td><td class="num z">2</td><td class="num">11</td><td><span class="pill p-risk">Named risk</span></td></tr>
+      <tr><td class="mod">materials</td><td class="num z">0</td><td class="num h">2</td><td class="num">8</td><td class="num z">0</td><td class="num">10</td><td><span class="pill p-risk">Named risk</span></td></tr>
+      <tr><td class="mod">analytics</td><td class="num z">0</td><td class="num h">2</td><td class="num">6</td><td class="num z">0</td><td class="num">8</td><td><span class="pill p-risk">Named risk</span></td></tr>
+      <tr><td class="mod">drawers</td><td class="num z">0</td><td class="num h">1</td><td class="num">6</td><td class="num z">0</td><td class="num">7</td><td><span class="pill p-risk">Named risk</span></td></tr>
+      <tr><td class="mod">clients</td><td class="num z">0</td><td class="num h">1</td><td class="num">5</td><td class="num z">1</td><td class="num">7</td><td><span class="pill p-risk">Named risk</span></td></tr>
+      <tr><td class="mod">barcode</td><td class="num z">0</td><td class="num z">0</td><td class="num">4</td><td class="num z">1</td><td class="num">5</td><td><span class="pill p-go">Ship</span></td></tr>
+      <tr><td class="mod">employees</td><td class="num z">0</td><td class="num z">0</td><td class="num">3</td><td class="num z">1</td><td class="num">4</td><td><span class="pill p-go">Ship</span></td></tr>
+      <tr class="total"><td class="mod">all</td><td class="num b">6</td><td class="num h">26</td><td class="num">93</td><td class="num">10</td><td class="num">135</td><td></td></tr>
+    </tbody>
+  </table></div>
+  <p class="note" style="margin-top:1rem;border:none;padding:0;">
+    39 new this run · 96 carried from 30 Jul · 38 closed since yesterday.
+    By deadline: <b>D0&nbsp;=&nbsp;14</b>, D1&nbsp;=&nbsp;41, D2&nbsp;=&nbsp;80.
+  </p>
+</section>
+
+<section>
+  <h2 class="sec">Two-day burn-down <span>sequence matters</span></h2>
+  <div class="burn">
+    <div>
+      <h4>Jul 31 · pm</h4>
+      <p>Resolve and stage the merge; delete the eight committed <code>*_dump.txt</code> source dumps.
+      <span class="exit">EXIT — <code>git ls-files -u</code> empty; working tree matches index</span></p>
+    </div>
+    <div>
+      <h4>Aug 1 · am — blockers 1, 2, 6</h4>
+      <p>Swap <code>SKU.style_id</code> into the group/order by; hoist <code>_name_unrated</code>
+      above <code>close_run</code> and use the existing <code>list_all</code>; add
+      <code>client_scope</code> to the three service signatures.
+      <span class="exit">EXIT — a piece-rate run completes; the three GETs return 200</span></p>
+    </div>
+    <div>
+      <h4>Aug 1 · pm — blockers 4, 5, 7</h4>
+      <p>Restore <code>direction</code> on <code>ScanCheckIn</code>; collapse the BOLA guard to one
+      condition; reject GPS-less SELF scans with 422.
+      <span class="exit">EXIT — CLIENT token 403s on another worker's barcode; a valid scan 201s</span></p>
+    </div>
+    <div>
+      <h4>Aug 2 · am — blockers 8, 9, 10</h4>
+      <p>Flip the <code>environment</code>/<code>debug</code> defaults; wire <code>compute_run</code>
+      to the dead-but-written <code>*_nocommit</code> seam behind one commit; make an unconfigured
+      geofence fail open with a warning.
+      <span class="exit">EXIT — a killed run leaves no committed lines; a fresh DB accepts a check-in</span></p>
+    </div>
+    <div>
+      <h4>Aug 2 · pm</h4>
+      <p>Regression sweep, deploy, sign the D1/D2 risk register.
+      <span class="exit">EXIT — in-scope failures below the 18 baseline; register signed</span></p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2 class="sec">Three findings most likely to be under-rated</h2>
+  <ol class="blk">
+    <li><span class="n">7</span><div>
+      <h3>The geofence is opt-out by the caller</h3>
+      <p><code>attendance/service.py:195-207</code> — omit <code>lat</code>/<code>lon</code> and the
+      fence never runs. The only cost is a free-text <code>reason</code> nothing validates, and the
+      row still counts as present for production logging.</p>
+    </div></li>
+    <li><span class="n">9</span><div>
+      <h3>One payroll run issues four commits</h3>
+      <p><code>wages/repository.py:252,266,239,270</code>. A crash between any two leaves committed
+      money at <code>status=OPEN</code>, invisible to the duplicate-run check. The correct
+      single-transaction implementation exists at <code>repository.py:382-430</code> with zero callers.</p>
+    </div></li>
+    <li><span class="n">10</span><div>
+      <h3>A fresh database blocks the entire floor</h3>
+      <p><code>attendance/models.py:63-64</code> — factory coordinates default to <code>0.0, 0.0</code>
+      and the config row auto-creates on first read. Until a DM sets them, every check-in 403s
+      against Null Island, and no one can log production. No attacker, no unusual data — just a
+      clean deploy.</p>
+    </div></li>
+  </ol>
+</section>
+
+<section>
+  <h2 class="sec">The fifteen passes <span>full reports in docs/audit/</span></h2>
+  <div class="passes">
+    <a href="pass-01-business-logic.md"><span class="pn">01</span><span class="pt">Business logic / flow</span></a>
+    <a href="pass-02-money-paths.md"><span class="pn">02</span><span class="pt">Money paths</span></a>
+    <a href="pass-03-security.md"><span class="pn">03</span><span class="pt">Security</span></a>
+    <a href="pass-04-role-permissions.md"><span class="pn">04</span><span class="pt">Role permissions</span></a>
+    <a href="pass-05-data-integrity.md"><span class="pn">05</span><span class="pt">Data integrity / DB</span></a>
+    <a href="pass-06-transactions.md"><span class="pn">06</span><span class="pt">Transactions</span></a>
+    <a href="pass-07-repository-layer.md"><span class="pn">07</span><span class="pt">Repository layer</span></a>
+    <a href="pass-08-service-layer.md"><span class="pn">08</span><span class="pt">Service layer</span></a>
+    <a href="pass-09-router-api-contract.md"><span class="pn">09</span><span class="pt">Router / API contract</span></a>
+    <a href="pass-10-sql-performance.md"><span class="pn">10</span><span class="pt">SQL performance</span></a>
+    <a href="pass-11-model-coverage-matrix.md"><span class="pn">11</span><span class="pt">Model coverage matrix</span></a>
+    <a href="pass-12-boundary-values.md"><span class="pn">12</span><span class="pt">Boundary values</span></a>
+    <a href="pass-13-error-handling.md"><span class="pn">13</span><span class="pt">Error handling</span></a>
+    <a href="pass-14-architecture.md"><span class="pn">14</span><span class="pt">Architecture</span></a>
+    <a href="pass-15-production-readiness.md"><span class="pn">15</span><span class="pt">Production readiness</span></a>
+  </div>
+</section>
+
+<section>
+  <h2 class="sec">Test baseline <span>full_test.log was stale</span></h2>
+  <div class="scroll"><table>
+    <thead><tr><th>Run</th><th class="num">Failed</th><th class="num">Passed</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td class="mod">full_test.log (stale)</td><td class="num z">93</td><td class="num z">100</td><td>Recorded against the <code>Supplier</code> collision that no longer exists</td></tr>
+      <tr><td class="mod">whole suite, today</td><td class="num h">53</td><td class="num">153</td><td>1 xfailed</td></tr>
+      <tr><td class="mod">in scope only</td><td class="num h">18</td><td class="num">112</td><td>Excludes the 7 BOM/procurement files</td></tr>
+      <tr class="total"><td class="mod">of which test defects</td><td class="num">3</td><td class="num"></td><td>Not counted against any module</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note" style="margin-top:1rem;border:none;padding:0;">
+    <code>tests/test_attendance_fixes.py.py</code> carries a double <code>.py</code> extension and
+    <b>aborts collection of the entire suite</b> — every run needs <code>--ignore</code> until it is
+    renamed. The other two read a renamed symbol and a file with the platform default encoding.
+  </p>
+</section>
+
+<p class="note">
+  Scope: <code>app/core</code> plus users, wages, analytics, employees, attendance, drawers, barcode,
+  production, clients, materials, imports. <code>bom</code>, <code>procurement</code>,
+  <code>inventory</code> and <code>supplier_po</code> were not audited — their seams into scoped
+  modules are recorded in pass 14, and their imports were not followed.
+  <br><br>
+  No application code was modified in producing this audit. Every fix sketch is a proposal, each
+  carrying a primary approach, its risk, and a fallback for the two-day window.
+  Prior audit preserved at <code>AUDIT_SUMMARY-2026-07-30.md</code> and <code>kairox-audit.html</code>;
+  all 124 prior findings re-verified individually in <code>delta-register.md</code>.
+</p>
+
+</div>

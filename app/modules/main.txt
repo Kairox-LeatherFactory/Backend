@@ -1,0 +1,22 @@
+
+====================================================================================================
+FILE: __init__.py
+====================================================================================================
+
+"""
+modules — the business domains, each a self-contained package.
+
+    users/       central login table + authentication + user management
+    clients/     client -> purchase order -> style -> SKU order hierarchy
+    employees/   shop-floor workers and their wage type
+    production/  operations, the production-event log, role->operation access
+    wages/       effective-dated rates and frozen payroll runs
+    analytics/   read-only dashboards + freight-risk / bottleneck alerts
+    imports/     idempotent Excel import (preview + commit)
+    procurement/ reserved for future supplier/PO procurement features
+
+Each module follows the same shape: models -> repository -> service -> router.
+Cross-module access goes through SERVICES, never another module's repository.
+"""
+
+

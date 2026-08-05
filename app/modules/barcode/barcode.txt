@@ -1,0 +1,1254 @@
+
+====================================================================================================
+FILE: init.py
+====================================================================================================
+
+"""barcode-feature module."""
+
+
+====================================================================================================
+FILE: models.py
+====================================================================================================
+
+"""
+================================================================================
+modules/barcode/models.py — The barcode registry + the new physical entities
+================================================================================
+
+ONE REGISTRY, EVERY CODE.
+    BarcodeRegistry is the single table every scan resolves through. Each printed
+    code — a piece, a material lot, a drawer, an employee card — has exactly one
+    row here, carrying its type, its status, and a nullable FK to the domain row
+    it names. `resolve(code)` is therefore one indexed lookup, and there is one
+    answer to "what is this code", never a guess.
+
+WHY THE FK IS NULLABLE + POLYMORPHIC-BY-TYPE (not a hard relationship per type)
+    A registry row points at exactly one of {piece, employee, drawer, material
+    lot}. Modelling that as four nullable FKs keeps every link a real, indexed
+    foreign key (so a deleted piece can't orphan a code) while letting one table
+    serve all types. The `type` column says which FK is populated.
+
+EMPLOYEE BARCODE IS EDITABLE; THE PIECE BARCODE IS NOT.
+    A piece code is a permanent identity (it is Piece.code, minted at breakdown
+    upload, printed on the garment). An employee code is a credential on a card:
+    it can be reissued and it is RETIRED when the worker leaves. Retiring flips
+    `status` to RETIRED — resolve() then returns 410 — and NEVER touches the
+    employee row or any production/wage history. That is the whole point: you
+    delete the scannable code, not the person.
+================================================================================
+"""
+import uuid
+from datetime import date, datetime
+from decimal import Decimal
+
+from sqlalchemy import (
+    Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String,
+    UniqueConstraint,Index
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.core.database import Base
+from app.core.models import GUID, JSON_VARIANT, TimestampMixin, UUIDMixin
+
+
+class BarcodeRegistry(Base, UUIDMixin, TimestampMixin):
+    """Every printed/scannable code. resolve() reads this and nothing else first."""
+    __tablename__ = "barcode_registry"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_barcode_code"),
+        Index("ix_barcode_order_type", "order_id", "type"),
+    )
+    code: Mapped[str] = mapped_column(String(120), index=True)   # normalised upper
+    type: Mapped[str] = mapped_column(String(20), index=True)    # BarcodeType value
+    status: Mapped[str] = mapped_column(String(15), index=True, default="active")
+
+    # Exactly one of these is set, per `type`. All indexed, all real FKs.
+    piece_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("piece.id"), nullable=True, index=True)
+    order_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("client_order.id"), nullable=True, index=True)
+    sku_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("sku.id"), nullable=True, index=True)
+    style_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("style.id"), nullable=True, index=True)
+    employee_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("employee.id"), nullable=True, index=True)
+    drawer_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("drawer.id"), nullable=True, index=True)
+    material_lot_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("material_lot.id"), nullable=True, index=True)
+
+    # Freeform caption for the label (STYLE · COLOUR · SIZE · #seq, etc.)
+    caption: Mapped[str | None] = mapped_column(String(200))
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retired_reason: Mapped[str | None] = mapped_column(String(120))
+
+
+class Drawer(Base, UUIDMixin, TimestampMixin):
+    """A physical storage drawer. STATIC code, RECYCLING state.
+
+    seq is the human number on the drawer; code is the scannable label. A drawer
+    is merged to exactly one (sku_id, piece_seq) at a time, holds that piece's
+    parts, and returns to WAITING after the piece ships — so `current_piece_id`
+    moves over the drawer's life while `code` never changes.
+    """
+    __tablename__ = "drawer"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_drawer_code"),
+    )
+    code: Mapped[str] = mapped_column(String(60), index=True)     # "DRW-014"
+    seq: Mapped[int] = mapped_column(Integer, index=True)
+    state: Mapped[str] = mapped_column(String(20), default="waiting", index=True)
+    current_piece_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("piece.id"), nullable=True, index=True)
+    leather_in: Mapped[bool] = mapped_column(Boolean, default=False)
+    lining_in: Mapped[bool] = mapped_column(Boolean, default=False)
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MaterialLot(Base, UUIDMixin, TimestampMixin):
+    """A batch of stock. Creating a lot registers a child barcode AND adds stock.
+
+    STOCK IS THREE NUMBERS, computed the same way inventory has always meant it:
+        on_hand   — physically in the building
+        reserved  — committed to a required quantity (can't be spent elsewhere)
+        available — on_hand − reserved   (a derived read, not a stored column, so
+                    the two can never drift; see MaterialService.stock)
+
+    Category-specific attributes live in `attributes` (JSON) rather than 20 mostly
+    -null columns: leather needs dcm+thickness, thread needs mtrs+thickness,
+    buttons need size, 'other' needs a description. The typed ones the queries
+    filter on (article, colour, thickness, size) are promoted to real columns so
+    the stock-check filter is indexable.
+    """
+    __tablename__ = "material_lot"
+    category: Mapped[str] = mapped_column(String(20), index=True)   # MaterialCategory
+    subtype: Mapped[str | None] = mapped_column(String(20), index=True)
+    article: Mapped[str] = mapped_column(String(120), index=True)
+    colour: Mapped[str | None] = mapped_column(String(80), index=True)
+    thickness: Mapped[str | None] = mapped_column(String(40), index=True)
+    size: Mapped[str | None] = mapped_column(String(40), index=True)
+    uom: Mapped[str] = mapped_column(String(20))
+    on_hand: Mapped[Decimal] = mapped_column(Numeric(14, 3), default=0)
+    supplier_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("material_supplier.id"), nullable=True, index=True)
+    attributes: Mapped[dict | None] = mapped_column(JSON_VARIANT)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class MaterialReservation(Base, UUIDMixin, TimestampMixin):
+    """A soft allocation against a lot. available = on_hand − Σ active reservations.
+
+    Never mutates on_hand — mirrors the shipped inventory_reservation pattern so a
+    reserved requirement can't be silently spent, and releasing frees it without
+    disturbing physical stock.
+    """
+    __tablename__ = "material_reservation"
+    material_lot_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("material_lot.id"), index=True)
+    qty: Mapped[Decimal] = mapped_column(Numeric(14, 3), default=0)
+    status: Mapped[str] = mapped_column(String(15), default="active", index=True)
+    reason: Mapped[str | None] = mapped_column(String(120))
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MaterialReceipt(Base, UUIDMixin, TimestampMixin):
+    """One receiving record: approved qty added to a lot, rejected qty logged.
+
+    Rejected quantity is kept for the supplier's quality history — it is the only
+    place the factory learns which suppliers ship rejects.
+    """
+    __tablename__ = "material_receipt"
+    material_lot_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("material_lot.id"), index=True)
+    supplier_order_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("supplier_order.id"), nullable=True, index=True)
+    approved_qty: Mapped[Decimal] = mapped_column(Numeric(14, 3), default=0)
+    rejected_qty: Mapped[Decimal] = mapped_column(Numeric(14, 3), default=0)
+    received_by: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("app_user.id"), nullable=True)
+
+
+class MaterialSupplier(Base, UUIDMixin, TimestampMixin):
+    """A material supplier. Minimal for v1 — the article→supplier suggestion reads
+    `articles` (a comma list) as a simple lookup, NOT the AI procurement
+    classifier (that is separate August-20 scope).
+
+    F104: table is `material_supplier` (NOT `supplier`) to avoid colliding with
+    the richer `supplier` table owned by the out-of-scope supplier_po module in
+    the same MetaData registry. See F126 — whether these two supplier concepts
+    should be unified is an Aug-20 procurement-scope decision, deliberately left
+    distinct here.
+    """
+    __tablename__ = "material_supplier"
+    name: Mapped[str] = mapped_column(String(200), index=True)
+    articles: Mapped[str | None] = mapped_column(String(600))   # "SUEDE-A32,NAP-11"
+    contact: Mapped[str | None] = mapped_column(String(200))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class SupplierOrder(Base, UUIDMixin, TimestampMixin):
+    """A manual supplier order. Two states only: ORDERED → ARRIVED."""
+    __tablename__ = "supplier_order"
+    category: Mapped[str] = mapped_column(String(20))
+    article: Mapped[str] = mapped_column(String(120), index=True)
+    colour: Mapped[str | None] = mapped_column(String(80))
+    qty: Mapped[Decimal] = mapped_column(Numeric(14, 3))
+    uom: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(15), default="ordered", index=True)
+    supplier_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("material_supplier.id"), nullable=True, index=True)
+    ordered_by: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("app_user.id"), nullable=True)
+    arrived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+====================================================================================================
+FILE: repository.py
+====================================================================================================
+
+"""
+================================================================================
+modules/barcode/repository.py — Async data access for the barcode registry
+================================================================================
+Owns every write to barcode_registry + the sequence counters that make employee
+and drawer codes unique. resolve() is a single indexed read on `code`.
+
+CODE GENERATION IS DETERMINISTIC AND COLLISION-SAFE.
+    Piece codes come from the piece (STYLE-COLOUR-SIZE-seq, already unique).
+    Employee/drawer/lot codes are minted here as PREFIX + zero-padded counter
+    (EMP-000123). The counter is the current max for that prefix + 1; the unique
+    index on `code` is the hard guard, so a concurrent mint fails loudly rather
+    than colliding — retry the request if that ever fires (create rate is a few
+    per day, so it effectively never does).
+================================================================================
+"""
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.enums import BarcodeStatus, BarcodeType
+from app.modules.barcode.models import BarcodeRegistry
+
+from datetime import datetime
+from sqlalchemy import and_, func, select
+from app.modules.clients.models import SKU, Client, ClientOrder, Style
+from app.modules.production.models import Operation, Piece
+
+
+def _norm(code: str | None) -> str:
+    return (code or "").strip().upper()
+
+
+class BarcodeRepository:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    # ── resolve ──────────────────────────────────────────────────────────────
+    async def get_by_code(self, code: str) -> BarcodeRegistry | None:
+        res = await self.db.execute(
+            select(BarcodeRegistry).where(BarcodeRegistry.code == _norm(code))
+        )
+        return res.scalar_one_or_none()
+
+    async def get_for_employee(self, employee_id: uuid.UUID,
+                               active_only: bool = True) -> BarcodeRegistry | None:
+        stmt = select(BarcodeRegistry).where(
+            BarcodeRegistry.employee_id == employee_id,
+            BarcodeRegistry.type == BarcodeType.EMPLOYEE.value,
+        )
+        if active_only:
+            stmt = stmt.where(BarcodeRegistry.status == BarcodeStatus.ACTIVE.value)
+        return await self.db.scalar(stmt.order_by(BarcodeRegistry.created_at.desc()))
+
+    # ── code minting ─────────────────────────────────────────────────────────
+    async def _next_code(self, prefix: str, width: int = 6) -> str:
+        """PREFIX + zero-padded (max existing counter for this prefix) + 1.
+
+        F79/F99: previously this SELECTed every barcode with this prefix and took
+        the max in Python — O(all barcodes) transferred per mint, quadratic across
+        an import that mints hundreds of codes. Since the zero-padded numeric tail
+        is fixed-width, lexicographic order == numeric order, so ORDER BY code DESC
+        LIMIT 1 gives the highest existing code while transferring ONE row. This is
+        dialect-agnostic (works identically on SQLite and Postgres); a dedicated
+        integer sequence column would be the fully clean long-term form.
+        """
+        like = f"{prefix}-%"
+        top = await self.db.scalar(
+            select(BarcodeRegistry.code)
+            .where(BarcodeRegistry.code.like(like))
+            .order_by(BarcodeRegistry.code.desc())
+            .limit(1)
+        )
+        mx = 0
+        if top:
+            tail = top[len(prefix) + 1:]
+            if tail.isdigit():
+                mx = int(tail)
+        return f"{prefix}-{mx + 1:0{width}d}"
+
+    # ── registration (all *_nocommit; the SERVICE owns the transaction) ──────
+    def register_nocommit(self, *, code: str, type_: BarcodeType,
+                          caption: str | None = None,
+                          piece_id: uuid.UUID | None = None,
+                          employee_id: uuid.UUID | None = None,
+                          drawer_id: uuid.UUID | None = None,
+                          material_lot_id: uuid.UUID | None = None) -> BarcodeRegistry:
+        row = BarcodeRegistry(
+            code=_norm(code), type=type_.value, status=BarcodeStatus.ACTIVE.value,
+            caption=caption, piece_id=piece_id, employee_id=employee_id,
+            drawer_id=drawer_id, material_lot_id=material_lot_id,
+        )
+        self.db.add(row)
+        return row
+
+    async def mint_employee_code_nocommit(self, employee_id: uuid.UUID,
+                                          caption: str | None) -> BarcodeRegistry:
+        code = await self._next_code("EMP")
+        return self.register_nocommit(
+            code=code, type_=BarcodeType.EMPLOYEE,
+            employee_id=employee_id, caption=caption)
+
+    async def mint_drawer_code_nocommit(self, drawer_id: uuid.UUID, seq: int,
+                                        caption: str | None = None) -> BarcodeRegistry:
+        code = f"DRW-{seq:04d}"
+        return self.register_nocommit(
+            code=code, type_=BarcodeType.DRAWER, drawer_id=drawer_id,
+            caption=caption or f"Drawer {seq}")
+
+    async def mint_lot_code_nocommit(self, material_lot_id: uuid.UUID,
+                                     type_: BarcodeType,
+                                     caption: str | None) -> BarcodeRegistry:
+        prefix = {"LEATHER_LOT": "LOT-LEA", "LINING_LOT": "LOT-LIN",
+                  "ACCESSORY_LOT": "LOT-ACC"}[type_.value]
+        code = await self._next_code(prefix)
+        return self.register_nocommit(
+            code=code, type_=type_, material_lot_id=material_lot_id, caption=caption)
+
+    # ── retire / reissue (employee) ──────────────────────────────────────────
+    async def retire_nocommit(self, row: BarcodeRegistry, reason: str) -> None:
+        row.status = BarcodeStatus.RETIRED.value
+        row.retired_at = datetime.now(timezone.utc)
+        row.retired_reason = reason
+
+    # ── batch fetch for print ────────────────────────────────────────────────
+    async def get_many(self, codes: list[str]) -> list[BarcodeRegistry]:
+        if not codes:
+            return []
+        norm = [_norm(c) for c in codes]
+        res = await self.db.execute(
+            select(BarcodeRegistry).where(BarcodeRegistry.code.in_(norm))
+        )
+        return list(res.scalars())
+
+    async def commit(self) -> None:
+        await self.db.commit()
+
+    # ── order picker ────────────────────────────────────────────────────────
+    async def list_orders_with_barcodes(
+        self, client_id: uuid.UUID | None = None
+    ) -> list[dict]:
+        """Every order that has at least one PIECE barcode, with its minted count
+        and the generated-at date range. `client_id` (a CLIENT login) scopes to
+        that client's orders only; None = staff, all orders."""
+        from app.modules.barcode.models import BarcodeRegistry
+        from app.modules.clients.models import Client, ClientOrder
+
+        stmt = (
+            select(
+                ClientOrder.id.label("order_id"),
+                ClientOrder.order_number,
+                Client.name.label("client_name"),
+                func.count(BarcodeRegistry.id).label("minted"),
+                func.min(BarcodeRegistry.created_at).label("first_generated_at"),
+                func.max(BarcodeRegistry.created_at).label("last_generated_at"),
+            )
+            .join(Client, Client.id == ClientOrder.client_id)
+            .join(
+                BarcodeRegistry,
+                and_(BarcodeRegistry.order_id == ClientOrder.id,
+                        BarcodeRegistry.type == "piece"),
+            )
+            .group_by(ClientOrder.id, ClientOrder.order_number, Client.name)
+            .order_by(func.max(BarcodeRegistry.created_at).desc())
+        )
+        if client_id is not None:
+            stmt = stmt.where(ClientOrder.client_id == client_id)
+
+        rows = (await self.db.execute(stmt)).all()
+        return [
+            {
+                "order_id": r.order_id,
+                "order_number": r.order_number,
+                "client_name": r.client_name,
+                "minted": int(r.minted),
+                "first_generated_at": r.first_generated_at,
+                "last_generated_at": r.last_generated_at,
+            }
+            for r in rows
+        ]
+
+    # ── planned totals (SKU.qty_ordered) ────────────────────────────────────
+    async def order_planned_total(self, order_id: uuid.UUID) -> int:
+        from app.modules.clients.models import SKU, Style
+        total = await self.db.scalar(
+            select(func.coalesce(func.sum(SKU.qty_ordered), 0))
+            .select_from(SKU)
+            .join(Style, Style.id == SKU.style_id)
+            .where(Style.client_order_id == order_id)
+        )
+        return int(total or 0)
+
+    async def order_minted_total(self, order_id: uuid.UUID) -> int:
+        from app.modules.barcode.models import BarcodeRegistry
+        total = await self.db.scalar(
+            select(func.count(BarcodeRegistry.id))
+            .where(BarcodeRegistry.order_id == order_id,
+                    BarcodeRegistry.type == "piece")
+        )
+        return int(total or 0)
+
+    async def order_active_total(self, order_id: uuid.UUID) -> int:
+        """Minted AND still active (a retired label is minted but not scannable)."""
+        from app.modules.barcode.models import BarcodeRegistry
+        total = await self.db.scalar(
+            select(func.count(BarcodeRegistry.id))
+            .where(BarcodeRegistry.order_id == order_id,
+                    BarcodeRegistry.type == "piece",
+                    BarcodeRegistry.status == "active")
+        )
+        return int(total or 0)
+
+    async def order_distinct_code_total(self, order_id: uuid.UUID) -> int:
+        """DISTINCT codes — if this ever differs from minted, a duplicate slipped
+        past the unique index. Lets analytics PROVE uniqueness (duplicates=0)."""
+        from app.modules.barcode.models import BarcodeRegistry
+        total = await self.db.scalar(
+            select(func.count(func.distinct(BarcodeRegistry.code)))
+            .where(BarcodeRegistry.order_id == order_id,
+                    BarcodeRegistry.type == "piece")
+        )
+        return int(total or 0)
+
+    # ── per-style analytics (planned vs minted vs balance) ──────────────────
+    async def style_breakdown(self, order_id: uuid.UUID) -> list[dict]:
+        """Per-style planned (SUM qty_ordered) vs minted (count of piece barcodes)
+        vs balance. Two independent aggregates joined on style_id in Python so a
+        style with 0 minted still appears (LEFT side = planned)."""
+        from app.modules.barcode.models import BarcodeRegistry
+        from app.modules.clients.models import SKU, Style
+
+        planned_rows = (await self.db.execute(
+            select(Style.id, Style.name, Style.code,
+                    func.coalesce(func.sum(SKU.qty_ordered), 0).label("planned"))
+            .select_from(Style)
+            .join(SKU, SKU.style_id == Style.id)
+            .where(Style.client_order_id == order_id)
+            .group_by(Style.id, Style.name, Style.code)
+        )).all()
+
+        minted_rows = (await self.db.execute(
+            select(BarcodeRegistry.style_id,
+                    func.count(BarcodeRegistry.id).label("minted"))
+            .where(BarcodeRegistry.order_id == order_id,
+                    BarcodeRegistry.type == "piece")
+            .group_by(BarcodeRegistry.style_id)
+        )).all()
+        minted_by_style = {r.style_id: int(r.minted) for r in minted_rows}
+
+        out = []
+        for r in planned_rows:
+            minted = minted_by_style.get(r.id, 0)
+            planned = int(r.planned)
+            out.append({
+                "style_id": r.id,
+                "style_name": r.name,
+                "style_code": r.code,
+                "planned": planned,
+                "minted": minted,
+                "balance": max(planned - minted, 0),
+            })
+        out.sort(key=lambda x: x["style_name"] or "")
+        return out
+
+    # ── filterable history list (paginated) ─────────────────────────────────
+    async def list_barcodes(
+        self,
+        order_id: uuid.UUID,
+        *,
+        sku_id: uuid.UUID | None = None,
+        style_id: uuid.UUID | None = None,
+        size: str | None = None,
+        status: str | None = None,
+        date_from: "datetime | None" = None,
+        date_to: "datetime | None" = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> tuple[list[dict], int]:
+        """Return (rows, total_count). Filters: style, sku, style+size, status,
+        generated-date range. size filters via SKU.size (join only when needed)."""
+        from app.modules.barcode.models import BarcodeRegistry
+        from app.modules.clients.models import SKU, Style
+        from app.modules.production.models import Operation, Piece
+
+        # Base filter on the indexed denormalised columns.
+        conds = [BarcodeRegistry.order_id == order_id,
+                    BarcodeRegistry.type == "piece"]
+        if sku_id:
+            conds.append(BarcodeRegistry.sku_id == sku_id)
+        if style_id:
+            conds.append(BarcodeRegistry.style_id == style_id)
+        if status:
+            conds.append(BarcodeRegistry.status == status.lower())
+        if date_from:
+            conds.append(BarcodeRegistry.created_at >= date_from)
+        if date_to:
+            conds.append(BarcodeRegistry.created_at <= date_to)
+
+        need_sku_join = bool(size)  # size lives on SKU
+
+        # total count (respecting filters)
+        count_stmt = select(func.count(BarcodeRegistry.id))
+        if need_sku_join:
+            count_stmt = count_stmt.join(SKU, SKU.id == BarcodeRegistry.sku_id)
+            conds.append(func.upper(SKU.size) == size.strip().upper())
+        count_stmt = count_stmt.where(and_(*conds))
+        total = int(await self.db.scalar(count_stmt) or 0)
+
+        # page of rows, enriched with sku/style/size/colour/seq/stage/drawer
+        stmt = (
+            select(
+                BarcodeRegistry.code,
+                BarcodeRegistry.status,
+                BarcodeRegistry.caption,
+                BarcodeRegistry.created_at,
+                SKU.code.label("sku_code"),
+                SKU.color_name, SKU.color_code, SKU.size,
+                Style.name.label("style_name"),
+                Piece.seq,
+                Operation.code.label("current_stage"),
+            )
+            .join(SKU, SKU.id == BarcodeRegistry.sku_id)
+            .join(Style, Style.id == BarcodeRegistry.style_id)
+            .outerjoin(Piece, Piece.id == BarcodeRegistry.piece_id)
+            .outerjoin(Operation, Operation.id == Piece.current_operation_id)
+            .where(and_(*conds))
+            .order_by(BarcodeRegistry.created_at.desc(), BarcodeRegistry.code)
+            .limit(page_size)
+            .offset((max(page, 1) - 1) * page_size)
+        )
+        rows = (await self.db.execute(stmt)).all()
+        items = [
+            {
+                "code": r.code,
+                "status": r.status,
+                "sku_code": r.sku_code,
+                "style_name": r.style_name,
+                "colour": r.color_name or r.color_code,
+                "size": r.size,
+                "seq": r.seq,
+                "current_stage": r.current_stage,
+                "generated_at": r.created_at,
+            }
+            for r in rows
+        ]
+        return items, total
+
+    # ── SKU picker for the filter dropdowns (scoped to one order) ────────────
+    async def list_order_skus(self, order_id: uuid.UUID) -> list[dict]:
+        from app.modules.clients.models import SKU, Style
+        rows = (await self.db.execute(
+            select(SKU.id, SKU.code, SKU.color_name, SKU.color_code, SKU.size,
+                    Style.id.label("style_id"), Style.name.label("style_name"))
+            .join(Style, Style.id == SKU.style_id)
+            .where(Style.client_order_id == order_id)
+            .order_by(Style.name, SKU.size)
+        )).all()
+        return [
+            {"sku_id": r.id, "sku_code": r.code,
+                "colour": r.color_name or r.color_code, "size": r.size,
+                "style_id": r.style_id, "style_name": r.style_name}
+            for r in rows
+        ]
+
+
+====================================================================================================
+FILE: router.py
+====================================================================================================
+
+"""
+================================================================================
+modules/barcode/router.py — Barcode registry HTTP API (async)
+================================================================================
+GET  /barcode/resolve                  every scan's front door
+POST /barcode/print                    printable payload for a set of codes
+PATCH /employees/{id}/barcode          reissue / deactivate (lives here, employee
+                                       barcodes are a barcode concern)
+
+resolve is available to any authenticated staff INCLUDING the attendance path —
+a worker scanning their own card to check in must resolve it. So resolve is NOT
+behind block_employees; the write endpoints are.
+================================================================================
+"""
+from datetime import datetime
+import uuid
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
+from app.core.enums import UserRole
+from app.modules.barcode import schemas
+from app.modules.barcode.service import BarcodeService
+from app.modules.users.deps import get_current_user, require_roles
+from app.modules.users.models import User
+
+router = APIRouter(prefix="/barcode", tags=["Barcode"])
+# employee-barcode lifecycle mounts under /employees but is a barcode concern.
+emp_router = APIRouter(prefix="/employees", tags=["Barcode"])
+
+def client_scope(user: User = Depends(get_current_user)) -> uuid.UUID | None:
+    """CLIENT login → its own client_id (list/reads scoped to it). Staff → None."""
+    return user.client_id if user.role == UserRole.CLIENT else None
+
+_SCREEN_READERS = require_roles(
+    UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER, UserRole.HR,
+    UserRole.SUPERVISOR, UserRole.CUTTING_MANAGER, UserRole.LINING_MANAGER,
+    UserRole.STITCHING_MANAGER, UserRole.CLIENT,
+)
+
+@router.get("/resolve", response_model=schemas.BarcodeResolve)
+async def resolve(
+    code: str = Query(..., description="The scanned/typed barcode string."),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),   # NOT block_employees — attendance uses it
+):
+    """Resolve any barcode to its type + live payload. 404 unknown, 410 retired."""
+    return await BarcodeService(db).resolve(code)
+
+
+@router.post("/print", response_model=schemas.PrintResponse)
+async def print_labels(
+    body: schemas.PrintRequest,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(
+        UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR,
+        UserRole.CUTTING_MANAGER, UserRole.STITCHING_MANAGER, UserRole.HR)),
+):
+    """Code128-ready payload for one or many codes (or all pieces of a SKU/order)."""
+    return await BarcodeService(db).print_payload(
+        codes=body.codes, sku_id=body.sku_id, order_id=body.order_id)
+
+
+@emp_router.patch("/{employee_id}/barcode", response_model=schemas.BarcodeActionResult)
+async def employee_barcode_action(
+    employee_id: uuid.UUID,
+    body: schemas.BarcodeAction,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(
+        UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.HR)),
+):
+    """Reissue a card (damaged/lost) or deactivate it (worker left). Deactivation
+    NEVER deletes the employee or their history — it retires the scannable code."""
+    svc = BarcodeService(db)
+    if body.action == "reissue":
+        return await svc.reissue_employee_barcode(employee_id, actor_id=user.id)
+    return await svc.deactivate_employee_barcode(employee_id, actor_id=user.id)
+
+
+@router.get("/orders", response_model=list[schemas.OrderPickerRow])
+async def list_barcode_orders(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_SCREEN_READERS),
+    scope: uuid.UUID | None = Depends(client_scope),
+):
+    """Orders that have generated barcodes — the picker. Unique per order_number.
+    Shows minted count + generated date range so the user picks the right order."""
+    return await BarcodeService(db).list_orders(scope)
+ 
+ 
+@router.get("/orders/{order_id}/skus", response_model=list[schemas.OrderSkuOption])
+async def list_order_sku_options(
+    order_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_SCREEN_READERS),
+    scope: uuid.UUID | None = Depends(client_scope),
+):
+    """SKU + style options to populate the filter dropdowns for this order."""
+    return await BarcodeService(db).list_order_skus(order_id, scope)
+ 
+ 
+@router.get("/orders/{order_id}/analytics", response_model=schemas.OrderAnalytics)
+async def order_barcode_analytics(
+    order_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_SCREEN_READERS),
+    scope: uuid.UUID | None = Depends(client_scope),
+):
+    """Per-order: planned vs generated vs balance (order total AND per style).
+    Includes duplicates=0 integrity proof and a half_minted flag."""
+    return await BarcodeService(db).order_analytics(order_id, scope)
+ 
+ 
+@router.get("/orders/{order_id}/barcodes", response_model=schemas.BarcodeHistoryPage)
+async def order_barcode_history(
+    order_id: uuid.UUID,
+    sku_id: uuid.UUID | None = Query(None, description="Filter to one SKU."),
+    style_id: uuid.UUID | None = Query(None, description="Filter to one style."),
+    size: str | None = Query(None, description="Filter to one size (style+size)."),
+    status: str | None = Query(None, pattern="^(active|retired)$"),
+    date_from: datetime | None = Query(None, description="Generated at/after."),
+    date_to: datetime | None = Query(None, description="Generated at/before."),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_SCREEN_READERS),
+    scope: uuid.UUID | None = Depends(client_scope),
+):
+    """The history table: order → style → piece, filterable by SKU, style, or
+    style+size, plus status and generated-date range. Paginated (JP ~= 1,273)."""
+    return await BarcodeService(db).list_history(
+        order_id, scope, sku_id=sku_id, style_id=style_id, size=size,
+        status_filter=status, date_from=date_from, date_to=date_to,
+        page=page, page_size=page_size,
+    )
+ 
+ 
+@router.get("/detail", response_model=schemas.BarcodeResolve)
+async def barcode_detail(
+    code: str = Query(..., description="The clicked/scanned barcode string."),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_SCREEN_READERS),
+    scope: uuid.UUID | None = Depends(client_scope),
+):
+    """Full detail for one barcode (click-through from the history list). Same
+    rich payload as /resolve, tenancy-scoped for CLIENT logins."""
+    return await BarcodeService(db).barcode_detail(code, scope)
+
+
+====================================================================================================
+FILE: schemas.py
+====================================================================================================
+
+"""modules/barcode/schemas.py — API contract for the barcode registry."""
+from datetime import datetime
+import uuid
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class BarcodeResolve(BaseModel):
+    """Loose by design: resolve() returns a type + a type-specific sub-object, and
+    the frontend branches on `type`. Kept as a passthrough dict rather than a
+    rigid union so a new barcode type never breaks the read contract."""
+    code: str
+    type: str
+    active: bool
+    caption: str | None = None
+    piece: dict | None = None
+    employee: dict | None = None
+    drawer: dict | None = None
+    lot: dict | None = None
+
+
+class PrintRequest(BaseModel):
+    codes: list[str] | None = None
+    sku_id: uuid.UUID | None = None
+    order_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def _one_source(self):
+        if not self.codes and not self.sku_id and not self.order_id:
+            raise ValueError("Provide codes, sku_id, or order_id.")
+        return self
+
+
+class PrintLabel(BaseModel):
+    code: str
+    symbology: str
+    caption: str
+    known: bool
+
+
+class PrintResponse(BaseModel):
+    labels: list[PrintLabel]
+
+
+class BarcodeAction(BaseModel):
+    action: str = Field(pattern="^(deactivate|reissue)$")
+
+
+class BarcodeActionResult(BaseModel):
+    employee_id: uuid.UUID
+    employee_barcode: str
+    active: bool
+    history_preserved: bool
+    
+class OrderPickerRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    order_id: uuid.UUID
+    order_number: str
+    client_name: str
+    minted: int
+    first_generated_at: datetime | None = None
+    last_generated_at: datetime | None = None
+ 
+ 
+class StyleAnalyticsRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    style_id: uuid.UUID
+    style_name: str
+    style_code: str | None = None
+    planned: int
+    minted: int
+    balance: int
+ 
+ 
+class OrderTotal(BaseModel):
+    planned: int
+    generated: int
+    balance: int
+    active: int
+    retired: int
+    duplicates: int
+    half_minted: bool
+    fully_generated: bool
+ 
+ 
+class OrderAnalytics(BaseModel):
+    order_id: uuid.UUID
+    order_total: OrderTotal
+    by_style: list[StyleAnalyticsRow]
+ 
+ 
+class BarcodeHistoryRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    code: str
+    status: str
+    sku_code: str | None = None
+    style_name: str | None = None
+    colour: str | None = None
+    size: str | None = None
+    seq: int | None = None
+    current_stage: str | None = None
+    generated_at: datetime | None = None
+ 
+ 
+class BarcodeHistoryPage(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    order_id: uuid.UUID
+    page: int
+    page_size: int
+    total: int
+    pages: int
+    items: list[BarcodeHistoryRow]
+ 
+ 
+class OrderSkuOption(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    sku_id: uuid.UUID
+    sku_code: str | None = None
+    colour: str | None = None
+    size: str | None = None
+    style_id: uuid.UUID
+    style_name: str | None = None
+
+
+====================================================================================================
+FILE: service.py
+====================================================================================================
+
+"""
+================================================================================
+modules/barcode/service.py — The one front door every scan resolves through
+================================================================================
+
+resolve(code) is called the instant any scanner or camera produces a string. It
+returns the code's type + a type-specific live payload, so no screen needs to
+know how to parse a barcode and a scanner gun and a phone camera are identical to
+the caller.
+
+INTEGRITY, NOT GUESSING.
+    Unknown code → 404. Retired employee code → 410 Gone (distinguish 'never
+    existed' from 'retired', so the UI can say "this card was deactivated" rather
+    than "invalid"). A guess is never returned.
+
+CROSS-MODULE READS GO THROUGH SERVICES, NEVER REPOSITORIES.
+    For a PIECE code we need the piece's SKU/style/order + current stage + drawer
+    + consumption. Those live in production/clients/drawers. We read them via
+    their services so barcode stays liftable into its own process later.
+================================================================================
+"""
+import uuid
+
+from fastapi import HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.enums import BarcodeStatus, BarcodeType
+from app.modules.barcode.repository import BarcodeRepository
+
+
+class BarcodeService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+        self.repo = BarcodeRepository(db)
+
+    # ── resolve ──────────────────────────────────────────────────────────────
+    async def _get_active_or_410(self, code: str):
+        """Shared lookup: 404 if unknown, 410 if the barcode is retired — for ANY
+        barcode type, not just employee (F18). Retirement is a lifecycle state on
+        the registry; a retired piece/lot/drawer label must not silently resolve.
+        Returns the row on success."""
+        row = await self.repo.get_by_code(code)
+        if not row:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown barcode '{code}'.")
+        if row.status == BarcodeStatus.RETIRED.value:
+            raise HTTPException(
+                status.HTTP_410_GONE,
+                "This barcode was deactivated. The underlying record and history "
+                "are intact; issue a new label to scan again.",
+            )
+        return row
+
+    async def resolve(self, code: str) -> dict:
+        row = await self.repo.get_by_code(code)
+        if not row:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown barcode '{code}'.")
+
+        # F18: retirement applies to every barcode type, not only EMPLOYEE.
+        if row.status == BarcodeStatus.RETIRED.value:
+            raise HTTPException(
+                status.HTTP_410_GONE,
+                "This barcode was deactivated. The underlying record and history "
+                "are intact; issue a new label to scan again.",
+            )
+
+        out = {
+            "code": row.code,
+            "type": row.type,
+            "active": row.status == BarcodeStatus.ACTIVE.value,
+            "caption": row.caption,
+        }
+        if row.type == BarcodeType.PIECE.value and row.piece_id:
+            out["piece"] = await self._piece_payload(row.piece_id)
+        elif row.type == BarcodeType.EMPLOYEE.value and row.employee_id:
+            out["employee"] = await self._employee_payload(row.employee_id)
+        elif row.type == BarcodeType.DRAWER.value and row.drawer_id:
+            out["drawer"] = await self._drawer_payload(row.drawer_id)
+        elif row.material_lot_id:
+            out["lot"] = await self._lot_payload(row.material_lot_id)
+        return out
+
+    async def resolve_piece_id(self, code: str) -> uuid.UUID:
+        """resolve() narrowed to 'give me the piece id or 404'. Used by /production/log
+        when the target came in as a piece barcode."""
+        row = await self._get_active_or_410(code)   # F18: 410 on retired
+        if row.type != BarcodeType.PIECE.value or not row.piece_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                f"'{code}' is not a known piece barcode.")
+        return row.piece_id
+
+    async def resolve_employee_id(self, code: str) -> uuid.UUID:
+        """resolve() narrowed to 'give me the (active) employee id'. 410 on retired."""
+        row = await self._get_active_or_410(code)   # F18
+        if row.type != BarcodeType.EMPLOYEE.value or not row.employee_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                f"'{code}' is not a known employee barcode.")
+        return row.employee_id
+
+    async def resolve_lot_id(self, code: str) -> uuid.UUID:
+        row = await self._get_active_or_410(code)   # F18
+        if not row.material_lot_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                f"'{code}' is not a known material-lot barcode.")
+        return row.material_lot_id
+
+    async def resolve_drawer_id(self, code: str) -> uuid.UUID:
+        row = await self._get_active_or_410(code)   # F18
+        if row.type != BarcodeType.DRAWER.value or not row.drawer_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                f"'{code}' is not a known drawer barcode.")
+        return row.drawer_id
+
+    # ── payloads (read via ORM directly here to avoid a service import cycle) ─
+    async def _piece_payload(self, piece_id: uuid.UUID) -> dict:
+        from app.modules.clients.models import SKU, Client, ClientOrder, Style
+        from app.modules.production.models import Operation, Piece
+
+        row = (await self.db.execute(
+            select(Piece, SKU, Style, ClientOrder.order_number, Client.name,
+                   Operation.code)
+            .join(SKU, SKU.id == Piece.sku_id)
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .join(Client, Client.id == ClientOrder.client_id)
+            .outerjoin(Operation, Operation.id == Piece.current_operation_id)
+            .where(Piece.id == piece_id)
+        )).first()
+        if not row:
+            return {"piece_id": str(piece_id)}
+        piece, sku, style, order_number, client, stage = row
+
+        # drawer + consumption (best-effort; may be null pre-cut / pre-merge)
+        drawer_code = None
+        drawer_id = getattr(piece, "drawer_id", None)
+        if drawer_id:
+            from app.modules.barcode.models import Drawer
+            drawer = await self.db.get(Drawer, drawer_id)
+            drawer_code = drawer.code if drawer else None
+
+        consumption = await self._piece_consumption(piece_id)
+        return {
+            "piece_id": str(piece.id),
+            "code": piece.code,
+            "sku_code": sku.code,
+            "style_name": style.name,
+            "colour": sku.color_name or sku.color_code,
+            "size": sku.size,
+            "seq": piece.seq,
+            "order_number": order_number,
+            "client": client,
+            "current_stage": stage,
+            "drawer_code": drawer_code,
+            "leather_consumption_dcm": consumption,
+            "needs_lining": bool(getattr(piece, "needs_lining", True)),
+        }
+
+    async def _piece_consumption(self, piece_id: uuid.UUID):
+        from app.modules.production.models import ProductionEvent
+        # The leather-cut event's consumption for this piece, if recorded.
+        val = await self.db.scalar(
+            select(ProductionEvent.consumption_qty)
+            .where(ProductionEvent.piece_id == piece_id,
+                   ProductionEvent.consumption_qty.isnot(None))
+            .order_by(ProductionEvent.created_at)
+            .limit(1)
+        )
+        return float(val) if val is not None else None
+
+    async def _employee_payload(self, employee_id: uuid.UUID) -> dict:
+        from app.modules.employees.models import Employee
+        emp = await self.db.get(Employee, employee_id)
+        if not emp:
+            return {"employee_id": str(employee_id)}
+        return {
+            "employee_id": str(emp.id),
+            "name": emp.name,
+            "designation": emp.designation,
+            "wage_type": getattr(emp.wage_type, "value", str(emp.wage_type)),
+            "is_active": emp.is_active,
+        }
+
+    async def _drawer_payload(self, drawer_id: uuid.UUID) -> dict:
+        from app.modules.barcode.models import Drawer
+        d = await self.db.get(Drawer, drawer_id)
+        if not d:
+            return {"drawer_id": str(drawer_id)}
+        return {
+            "drawer_id": str(d.id), "drawer_code": d.code, "seq": d.seq,
+            "state": d.state, "current_piece_id": str(d.current_piece_id) if d.current_piece_id else None,
+            "leather_in": d.leather_in, "lining_in": d.lining_in,
+        }
+
+    async def _lot_payload(self, lot_id: uuid.UUID) -> dict:
+        from app.modules.barcode.models import MaterialLot
+        lot = await self.db.get(MaterialLot, lot_id)
+        if not lot:
+            return {"lot_id": str(lot_id)}
+        # available needs the reservation sum — delegate to MaterialService lazily.
+        from app.modules.materials.service import MaterialService
+        avail = await MaterialService(self.db).available_for_lot(lot.id)
+        return {
+            "lot_id": str(lot.id), "category": lot.category, "subtype": lot.subtype,
+            "article": lot.article, "colour": lot.colour, "thickness": lot.thickness,
+            "size": lot.size, "uom": lot.uom,
+            "on_hand": float(lot.on_hand), "available": avail,
+        }
+
+    # ── employee barcode lifecycle ──────────────────────────────────────────
+    async def issue_employee_barcode_nocommit(self, employee_id: uuid.UUID,
+                                              caption: str | None) -> str:
+        """Mint + register an employee's card. Caller commits (employees.create
+        wraps it in the employee transaction so a worker never exists without a
+        code)."""
+        row = await self.repo.mint_employee_code_nocommit(employee_id, caption)
+        await self.db.flush()
+        return row.code
+
+    async def reissue_employee_barcode(self, employee_id: uuid.UUID,
+                                       actor_id: uuid.UUID | None) -> dict:
+        """Retire the old card, mint a new one. History untouched."""
+        old = await self.repo.get_for_employee(employee_id, active_only=True)
+        if old:
+            await self.repo.retire_nocommit(old, reason="reissued")
+        caption = old.caption if old else None
+        new = await self.repo.mint_employee_code_nocommit(employee_id, caption)
+        await self._audit(actor_id, "EMPLOYEE_BARCODE_REISSUE", employee_id,
+                          {"old": old.code if old else None, "new": new.code})
+        await self.repo.commit()
+        return {"employee_id": str(employee_id), "employee_barcode": new.code,
+                "active": True, "history_preserved": True}
+
+    async def deactivate_employee_barcode(self, employee_id: uuid.UUID,
+                                          actor_id: uuid.UUID | None) -> dict:
+        """Retire the card (worker left). Employee row + all events + closed wage
+        lines are untouched — this ONLY flips the registry status."""
+        row = await self.repo.get_for_employee(employee_id, active_only=True)
+        if not row:
+            raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                "No active barcode for this employee.")
+        await self.repo.retire_nocommit(row, reason="left_company")
+        await self._audit(actor_id, "EMPLOYEE_BARCODE_DEACTIVATE", employee_id,
+                          {"code": row.code})
+        await self.repo.commit()
+        return {"employee_id": str(employee_id), "employee_barcode": row.code,
+                "active": False, "history_preserved": True}
+
+    async def _audit(self, actor_id, action, entity_id, after: dict) -> None:
+        from datetime import datetime, timezone
+        from app.core.models import AuditLog
+        self.db.add(AuditLog(
+            actor_user_id=actor_id, action=action, entity_type="employee_barcode",
+            entity_id=entity_id, after=after, at=datetime.now(timezone.utc)))
+
+    # ── print payload ────────────────────────────────────────────────────────
+    async def print_payload(self, *, codes: list[str] | None = None,
+                            sku_id: uuid.UUID | None = None,
+                            order_id: uuid.UUID | None = None) -> dict:
+        """Return {code, symbology, caption} for a set of codes so the frontend
+        can render Code128 labels. Backend renders no images."""
+        resolved_codes: list[str] = list(codes or [])
+
+        if sku_id or order_id:
+            from app.modules.clients.models import SKU, Style
+            from app.modules.production.models import Piece
+            stmt = select(Piece.code).join(SKU, SKU.id == Piece.sku_id)
+            if sku_id:
+                stmt = stmt.where(Piece.sku_id == sku_id)
+            if order_id:
+                stmt = stmt.join(Style, Style.id == SKU.style_id).where(
+                    Style.client_order_id == order_id)
+            resolved_codes += [c for (c,) in (await self.db.execute(stmt)).all()]
+
+        rows = await self.repo.get_many(resolved_codes)
+        found = {r.code: r for r in rows}
+        labels = []
+        for c in resolved_codes:
+            r = found.get((c or "").strip().upper())
+            labels.append({
+                "code": r.code if r else (c or "").strip().upper(),
+                "symbology": "code128",
+                "caption": (r.caption if r else None) or (c or ""),
+                "known": r is not None,
+            })
+        return {"labels": labels}
+    
+    # ── order picker ────────────────────────────────────────────────────────
+    async def list_orders(self, client_scope: uuid.UUID | None) -> list[dict]:
+        """Orders that have barcodes. client_scope = caller's client_id for a
+        CLIENT login (scopes the list), None for staff (all orders)."""
+        return await self.repo.list_orders_with_barcodes(client_id=client_scope)
+ 
+    # ── analytics: order totals + per-style breakdown ───────────────────────
+    async def order_analytics(
+        self, order_id: uuid.UUID, client_scope: uuid.UUID | None
+    ) -> dict:
+        await self._assert_order_visible(order_id, client_scope)
+ 
+        planned = await self.repo.order_planned_total(order_id)
+        minted = await self.repo.order_minted_total(order_id)
+        active = await self.repo.order_active_total(order_id)
+        distinct = await self.repo.order_distinct_code_total(order_id)
+        styles = await self.repo.style_breakdown(order_id)
+ 
+        balance = max(planned - minted, 0)
+        return {
+            "order_id": order_id,
+            "order_total": {
+                "planned": planned,
+                "generated": minted,
+                "balance": balance,
+                "active": active,
+                "retired": minted - active,
+                # integrity: distinct codes must equal minted; if not, the unique
+                # index was somehow bypassed. Surfaced so the UI can prove it.
+                "duplicates": max(minted - distinct, 0),
+                # a positive balance = premint did not finish (or has not run) for
+                # this order. A visible flag, not a silent gap.
+                "half_minted": balance > 0,
+                "fully_generated": balance == 0 and minted > 0,
+            },
+            "by_style": styles,   # each: planned / minted / balance per style
+        }
+ 
+    # ── filterable history list ─────────────────────────────────────────────
+    async def list_history(
+        self,
+        order_id: uuid.UUID,
+        client_scope: uuid.UUID | None,
+        *,
+        sku_id: uuid.UUID | None = None,
+        style_id: uuid.UUID | None = None,
+        size: str | None = None,
+        status_filter: str | None = None,
+        date_from=None,
+        date_to=None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict:
+        await self._assert_order_visible(order_id, client_scope)
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 200)   # hard ceiling; JP is ~1273 rows
+ 
+        items, total = await self.repo.list_barcodes(
+            order_id, sku_id=sku_id, style_id=style_id, size=size,
+            status=status_filter, date_from=date_from, date_to=date_to,
+            page=page, page_size=page_size,
+        )
+        return {
+            "order_id": order_id,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "pages": (total + page_size - 1) // page_size,
+            "items": items,
+        }
+ 
+    async def list_order_skus(
+        self, order_id: uuid.UUID, client_scope: uuid.UUID | None
+    ) -> list[dict]:
+        await self._assert_order_visible(order_id, client_scope)
+        return await self.repo.list_order_skus(order_id)
+ 
+    # ── detail on click (reuses existing _piece_payload) ────────────────────
+    async def barcode_detail(self, code: str, client_scope: uuid.UUID | None) -> dict:
+        """Full detail for a scanned/clicked code. For a PIECE this is the same
+        rich payload resolve() returns — reused, not re-implemented. Tenancy is
+        applied for piece codes (a CLIENT must not read another client's piece)."""
+        row = await self._get_active_or_410(code)   # 404 unknown / 410 retired
+        if client_scope is not None and row.order_id is not None \
+                and row.order_id != client_scope:
+            # existence itself is information — 404, not 403
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown barcode '{code}'.")
+        return await self.resolve(code)
+ 
+    # ── tenancy helper ──────────────────────────────────────────────────────
+    async def _assert_order_visible(
+        self, order_id: uuid.UUID, client_scope: uuid.UUID | None
+    ) -> None:
+        """Staff (client_scope None) see everything. A CLIENT login may only touch
+        its own order; anything else 404s (never reveal another client's order)."""
+        from sqlalchemy import select
+        from app.modules.clients.models import ClientOrder
+ 
+        row = await self.db.get(ClientOrder, order_id)
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found.")
+        if client_scope is not None and row.client_id != client_scope:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found.")
+
+

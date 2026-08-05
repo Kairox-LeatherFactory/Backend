@@ -111,6 +111,12 @@ class ClientService:
     # Public interface other modules rely on:
     async def get_sku(self, sku_id: uuid.UUID) -> SKU | None:
         return await self.repo.get_sku(sku_id)
+    async def get_sku_by_code(self, sku_code: str) -> SKU | None:
+        return await self.repo.get_sku_by_code(sku_code)
+
+    async def is_sku_visible_to_client(self, sku_id: uuid.UUID,
+                                       client_id: uuid.UUID) -> bool:
+        return await self.repo.is_sku_visible_to_client(sku_id, client_id)
 
     async def get_skus_for_style(self, style_id: uuid.UUID) -> list[SKU]:
         return await self.repo.get_skus_for_style(style_id)
@@ -136,8 +142,10 @@ class ClientService:
             )
         return ctx
  
-    async def list_sku_options(self, *, order_id=None, style_id=None) -> list[dict]:
-        rows = await self.repo.list_sku_options(order_id=order_id, style_id=style_id)
+    async def list_sku_options(self, *, order_id=None, style_id=None,
+                               client_scope: uuid.UUID | None = None) -> list[dict]:
+        rows = await self.repo.list_sku_options(
+            order_id=order_id, style_id=style_id, client_scope=client_scope)
         for r in rows:
             r["label"] = sku_label(
                 r["style_name"], r["color_name"], r["color_code"], r["size"]

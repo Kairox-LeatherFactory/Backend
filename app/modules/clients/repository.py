@@ -112,7 +112,11 @@ class ClientRepository:
         for (color_code, color_name, size), qty in agg.items():
             self.db.add(SKU(style_id=st.id, color_code=color_code,
                             color_name=color_name, size=size, qty_ordered=int(qty),
-                            code=make_sku_code(order.order_number, st.name, 
+                            # F116: order is a dict — order.order_number raised
+                            # AttributeError on every order that produced ≥1 SKU
+                            # (i.e. every real order). Use the persisted ORM value,
+                            # matching make_style_code above which already uses co.
+                            code=make_sku_code(co.order_number, st.name,
                                 color_name or color_code, size),))
         await self.db.commit()
         return co.id, st.id
@@ -136,7 +140,8 @@ class ClientRepository:
             "color_name": color_name, "size": size, "qty_ordered": int(qty or 0),
         }
  
-    async def list_sku_options(self, *, order_id=None, style_id=None) -> list[dict]:
+    async def list_sku_options(self, *, order_id=None, style_id=None,
+                               client_scope: uuid.UUID | None = None) -> list[dict]:
         stmt = (
             select(
                 SKU.id, SKU.code, ClientOrder.order_number, Style.name,
@@ -145,6 +150,8 @@ class ClientRepository:
             .join(Style, Style.id == SKU.style_id)
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
         )
+        if client_scope is not None:
+            stmt = stmt.where(ClientOrder.client_id == client_scope)
         if order_id:
             stmt = stmt.where(Style.client_order_id == order_id)
         if style_id:
@@ -160,6 +167,17 @@ class ClientRepository:
             for r in rows
         ]
         
+    async def is_sku_visible_to_client(self, sku_id: uuid.UUID,
+                                       client_id: uuid.UUID) -> bool:
+        res = await self.db.execute(
+            select(SKU.id)
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .where(SKU.id == sku_id, ClientOrder.client_id == client_id)
+            .limit(1)
+        )
+        return res.scalar_one_or_none() is not None
+
     async def get_sku_by_code(self, code: str):
         from app.modules.clients.models import SKU
         res = await self.db.execute(

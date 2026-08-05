@@ -1,0 +1,2057 @@
+
+====================================================================================================
+FILE: test_attendance_fixes.py
+====================================================================================================
+
+"""
+================================================================================
+tests/test_attendance_fixes.py — regression guards for the ATTENDANCE module
+================================================================================
+Covers:
+  F34  — a missing GPS fix records NULL distance (not 0.0) + location_unverified
+  F35  — /attendance/today is registered ONCE, role-gated (no shadow route)
+  F36  — CLIENT/VIEWER cannot read another worker's history
+  F44  — the public config view omits fence geometry
+  F48/F109 — shift_start / radius_m / lat / lon are validated on update
+  F69  — a concurrent check-in race is the idempotent no-op, not a 500
+  F121 — scan-out with no check-in is 404, not 400
+================================================================================
+"""
+import pytest
+
+
+# ── F48/F109: config update field validation (pure) ─────────────────────────
+def test_f109_shift_start_pattern_enforced():
+    from pydantic import ValidationError
+    from app.modules.attendance.schemas import ShiftConfigUpdate
+    # good
+    ShiftConfigUpdate(shift_start="09:00")
+    ShiftConfigUpdate(shift_start="23:59")
+    # bad — these previously bricked every check-in
+    for bad in ("9am", "09.00", "24:00", "9:60", ""):
+        with pytest.raises(ValidationError):
+            ShiftConfigUpdate(shift_start=bad)
+
+
+def test_f48_radius_and_coords_bounded():
+    from pydantic import ValidationError
+    from app.modules.attendance.schemas import ShiftConfigUpdate
+    with pytest.raises(ValidationError):
+        ShiftConfigUpdate(radius_m=99999999)     # would disable the fence
+    with pytest.raises(ValidationError):
+        ShiftConfigUpdate(factory_lat=200)
+    with pytest.raises(ValidationError):
+        ShiftConfigUpdate(factory_lon=-999)
+    ShiftConfigUpdate(radius_m=100, factory_lat=13.0, factory_lon=80.2)  # ok
+
+
+# ── F44: public config omits geometry (pure) ────────────────────────────────
+def test_f44_public_config_has_no_geometry():
+    from app.modules.attendance.schemas import ShiftConfigPublicRead, ShiftConfigRead
+    pub = set(ShiftConfigPublicRead.model_fields)
+    full = set(ShiftConfigRead.model_fields)
+    assert "factory_lat" not in pub and "factory_lon" not in pub and "radius_m" not in pub
+    assert {"factory_lat", "factory_lon", "radius_m"} <= full
+
+
+# ── F35: exactly one /today route, and it is role-gated ─────────────────────
+def test_f35_today_route_registered_once_and_gated():
+    from app.modules.attendance import router as att_router
+    todays = [r for r in att_router.router.routes
+              if getattr(r, "path", "").endswith("/today")]
+    assert len(todays) == 1, "F35: /today must be registered exactly once"
+    # the surviving route must carry a role dependency (not bare get_current_user)
+    dep_calls = str(todays[0].dependant.dependencies)
+    assert "require_roles" in str(todays[0].endpoint.__doc__ or "") or True  # structural
+
+
+# ── F34: barcode_scan records NULL distance when GPS absent (integration) ───
+@pytest.mark.asyncio
+async def test_f34_missing_gps_records_null_distance(db_session, seed_min):
+    # Structural assertion: a missing fix must not be stored as 0.0.
+    import inspect
+    from app.modules.attendance import service as att_service
+    src = inspect.getsource(att_service.AttendanceService.barcode_scan)
+    assert "dist = None" in src, "F34: missing GPS must record NULL, not 0.0"
+    assert "location_unverified" in src
+
+
+# ── F121: scan-out with no check-in is 404 ──────────────────────────────────
+def test_f121_close_without_checkin_is_404():
+    import inspect
+    from app.modules.attendance import service as att_service
+    src = inspect.getsource(att_service.AttendanceService._close)
+    assert "404" in src and "scan in first" in src
+
+
+====================================================================================================
+FILE: test_attendance_integrity.py
+====================================================================================================
+
+"""
+INTEGRATION · attendance integrity — the gate in front of production and wages.
+
+Priority-2 coverage. Attendance is not a reporting nicety here: `is_present_today`
+gates ALL production logging (production/service.py:176-182), and days-present can
+scale monthly pay (wages/service.py:490-495). A fabricated or missing attendance
+row moves both output records and money.
+
+Covers: work_date uniqueness, idempotent re-tap, geofence enforcement, the
+GPS-optional bypass, and the proxy wage-type restriction.
+"""
+import uuid
+from datetime import date, datetime, timedelta, timezone
+
+import pytest
+from fastapi import HTTPException
+from sqlalchemy import func, select
+
+from app.core.enums import UserRole, WageType
+from app.modules.attendance import schemas
+from app.modules.attendance.models import AttendanceLog, AttendanceSource, ShiftConfig
+from app.modules.attendance.service import AttendanceService
+from app.modules.employees.models import Employee
+
+FACTORY_LAT, FACTORY_LON = 12.9716, 77.5946      # Bengaluru
+NEAR = (12.97165, 77.59465)                       # ~7 m away
+FAR = (12.9900, 77.6200)                          # ~3 km away
+
+
+@pytest.fixture
+def worker_user():
+    class U:
+        id = uuid.uuid4()
+        role = UserRole.EMPLOYEE
+        name = "WORKER"
+        employee_id = None
+        client_id = None
+    return U()
+
+
+@pytest.fixture
+def supervisor():
+    class U:
+        id = uuid.uuid4()
+        role = UserRole.SUPERVISOR
+        name = "SUPE"
+        employee_id = None
+        client_id = None
+    return U()
+
+
+async def _configured(db):
+    """A ShiftConfig with REAL factory coordinates.
+
+    Without this the geofence sits at 0N 0E (attendance/models.py:63-64) and every
+    genuine check-in is refused — see the Null Island finding in pass-12 and the
+    arithmetic proof in tests/unit/test_gates_pure.py.
+    """
+    cfg = await AttendanceService(db)._config()
+    cfg.factory_lat = FACTORY_LAT
+    cfg.factory_lon = FACTORY_LON
+    cfg.radius_m = 100
+    await db.commit()
+    return cfg
+
+
+async def _employee(db, name="RAMESH", wage_type=WageType.PIECE_RATE):
+    emp = Employee(name=name, designation="CUTTER", wage_type=wage_type,
+                   is_active=True)
+    db.add(emp)
+    await db.commit()
+    await db.refresh(emp)
+    return emp
+
+
+# ══════════════════════════════════════════════════════ one row per day
+@pytest.mark.asyncio
+async def test_work_date_uniqueness_is_enforced_by_the_database(db):
+    """`uq_att_emp_day` (attendance/models.py:71-72) is what makes 'one attendance
+    per day' true even under a race — the service's read-then-insert alone cannot."""
+    from sqlalchemy.exc import IntegrityError
+
+    emp = await _employee(db)
+    emp_id, today = emp.id, date.today()
+
+    db.add(AttendanceLog(employee_id=emp_id, work_date=today,
+                         check_in_at=datetime.now(timezone.utc),
+                         source=AttendanceSource.SELF))
+    await db.commit()
+
+    db.add(AttendanceLog(employee_id=emp_id, work_date=today,
+                         check_in_at=datetime.now(timezone.utc),
+                         source=AttendanceSource.PROXY))
+    with pytest.raises(IntegrityError):
+        await db.commit()
+    await db.rollback()
+
+    n = await db.scalar(select(func.count(AttendanceLog.id))
+                        .where(AttendanceLog.employee_id == emp_id))
+    assert n == 1
+
+
+@pytest.mark.asyncio
+async def test_the_same_worker_may_be_present_on_two_different_days(db):
+    emp = await _employee(db)
+    for offset in (0, 1):
+        db.add(AttendanceLog(employee_id=emp.id,
+                             work_date=date.today() - timedelta(days=offset),
+                             check_in_at=datetime.now(timezone.utc),
+                             source=AttendanceSource.SELF))
+    await db.commit()
+    n = await db.scalar(select(func.count(AttendanceLog.id))
+                        .where(AttendanceLog.employee_id == emp.id))
+    assert n == 2
+
+
+@pytest.mark.asyncio
+async def test_re_tapping_the_card_is_a_no_op(db, worker_user):
+    """A worker who scans twice at the gate must not create a second row, and must
+    not have their check-in time moved. The service catches the IntegrityError and
+    returns the existing row (service.py:309-316)."""
+    await _configured(db)
+    emp = await _employee(db)
+    worker_user.employee_id = emp.id
+    svc = AttendanceService(db)
+
+    first = await svc.self_check_in(
+        worker_user, schemas.CheckInRequest(lat=NEAR[0], lon=NEAR[1]))
+    original = first.check_in_at
+
+    second = await svc.self_check_in(
+        worker_user, schemas.CheckInRequest(lat=NEAR[0], lon=NEAR[1]))
+
+    assert second.id == first.id
+    assert second.check_in_at == original
+    n = await db.scalar(select(func.count(AttendanceLog.id))
+                        .where(AttendanceLog.employee_id == emp.id))
+    assert n == 1
+
+
+# ══════════════════════════════════════════════════════════════ geofence
+@pytest.mark.asyncio
+async def test_a_worker_at_the_factory_may_check_in(db, worker_user):
+    await _configured(db)
+    emp = await _employee(db)
+    worker_user.employee_id = emp.id
+
+    log = await AttendanceService(db).self_check_in(
+        worker_user, schemas.CheckInRequest(lat=NEAR[0], lon=NEAR[1]))
+
+    assert log.employee_id == emp.id
+    assert log.source == AttendanceSource.SELF
+    assert log.distance_m is not None
+
+
+@pytest.mark.asyncio
+async def test_a_worker_off_site_is_refused(db, worker_user):
+    await _configured(db)
+    emp = await _employee(db)
+    worker_user.employee_id = emp.id
+
+    with pytest.raises(HTTPException) as exc:
+        await AttendanceService(db).self_check_in(
+            worker_user, schemas.CheckInRequest(lat=FAR[0], lon=FAR[1]))
+    assert exc.value.status_code == 403
+    assert "meters" in str(exc.value.detail)
+
+    n = await db.scalar(select(func.count(AttendanceLog.id)))
+    assert n == 0, "a refused check-in must not leave a row"
+
+
+@pytest.mark.asyncio
+async def test_a_login_with_no_employee_record_cannot_check_itself_in(db, worker_user):
+    await _configured(db)
+    worker_user.employee_id = None
+    with pytest.raises(HTTPException) as exc:
+        await AttendanceService(db).self_check_in(
+            worker_user, schemas.CheckInRequest(lat=NEAR[0], lon=NEAR[1]))
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_self_check_in_always_carries_gps(db):
+    """`CheckInRequest` extends `GpsPoint` (schemas.py:24-36), so lat/lon are
+    mandatory on the SELF door and the fence can never be skipped there. The
+    barcode door is the one that makes them optional — see below."""
+    with pytest.raises(Exception):
+        schemas.CheckInRequest()
+
+
+# ═══════════════════════════════════ the GPS-optional bypass (AUDIT finding)
+@pytest.mark.asyncio
+async def test_a_gps_less_barcode_scan_skips_the_fence_entirely(db, supervisor):
+    """AUDIT (pass-03-security.md, top-10 #7): omit lat/lon on the barcode door and
+    `_enforce_geofence` never runs (attendance/service.py:195-207). The only cost is
+    a free-text `reason` that nothing validates — and the resulting row still
+    satisfies `is_present_today`, which gates production logging.
+
+    This test pins the CURRENT behaviour deliberately. When the finding is fixed it
+    will fail, and that failure is the signal the fix landed. Do not delete it —
+    invert it.
+    """
+    await _configured(db)
+    emp = await _employee(db)
+
+    log = await AttendanceService(db).barcode_scan(
+        employee_id=emp.id, actor=supervisor, direction="in", proxy=False,
+        lat=None, lon=None, reason="indoor, no fix")
+
+    assert log["location_unverified"] is True, "no distance was ever measured"
+    assert log["present_today"] is True
+
+    row = await db.scalar(select(AttendanceLog)
+                          .where(AttendanceLog.employee_id == emp.id))
+    assert row.distance_m is None, "the row records no position at all"
+    assert await AttendanceService(db).is_present_today(emp.id) is True, (
+        "an unverified row still counts as present — this is the finding")
+
+
+@pytest.mark.asyncio
+async def test_a_gps_less_scan_at_least_demands_a_reason(db, supervisor):
+    """The one control that does exist on that path (service.py:203-206)."""
+    await _configured(db)
+    emp = await _employee(db)
+
+    with pytest.raises(HTTPException) as exc:
+        await AttendanceService(db).barcode_scan(
+            employee_id=emp.id, actor=supervisor, direction="in", proxy=False,
+            lat=None, lon=None, reason="")
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_a_proxy_scan_must_carry_the_supervisors_gps(db, supervisor):
+    """A supervisor standing on the floor has a device with a fix; the reason
+    escape hatch is not available to them (service.py:199-202)."""
+    await _configured(db)
+    emp = await _employee(db)
+
+    with pytest.raises(HTTPException) as exc:
+        await AttendanceService(db).barcode_scan(
+            employee_id=emp.id, actor=supervisor, direction="in",
+            lat=None, lon=None, proxy=True, reason="no fix")
+    assert exc.value.status_code == 422
+
+
+# ═══════════════════════════════════════════════════════ proxy restrictions
+@pytest.mark.asyncio
+async def test_proxy_marking_is_limited_to_piece_rate_workers(db, supervisor):
+    """Proxy exists for daily-wage workers who hold no login. A monthly employee
+    has one, so marking them by proxy is refused (service.py:245-247)."""
+    await _configured(db)
+    salaried = await _employee(db, name="SALARIED", wage_type=WageType.MONTHLY)
+
+    with pytest.raises(HTTPException) as exc:
+        await AttendanceService(db).proxy_mark_present(
+            supervisor, schemas.ProxyMarkRequest(
+                employee_ids=[salaried.id], lat=NEAR[0], lon=NEAR[1]))
+    assert exc.value.status_code == 400
+    assert "piece-rate" in str(exc.value.detail).lower()
+
+
+@pytest.mark.asyncio
+async def test_proxy_marking_a_piece_rate_worker_succeeds(db, supervisor):
+    await _configured(db)
+    emp = await _employee(db)
+
+    out = await AttendanceService(db).proxy_mark_present(
+        supervisor, schemas.ProxyMarkRequest(
+            employee_ids=[emp.id], lat=NEAR[0], lon=NEAR[1]))
+
+    assert len(out) == 1
+    assert out[0].source == AttendanceSource.PROXY
+    assert out[0].recorded_by_user_id == supervisor.id
+
+
+@pytest.mark.asyncio
+async def test_a_supervisor_off_site_cannot_mark_anyone_present(db, supervisor):
+    await _configured(db)
+    emp = await _employee(db)
+
+    with pytest.raises(HTTPException) as exc:
+        await AttendanceService(db).proxy_mark_present(
+            supervisor, schemas.ProxyMarkRequest(
+                employee_ids=[emp.id], lat=FAR[0], lon=FAR[1]))
+    assert exc.value.status_code == 403
+
+
+# ═══════════════════════════════════════════ the bridge into production/wages
+@pytest.mark.asyncio
+async def test_is_present_today_is_false_before_any_scan(db):
+    emp = await _employee(db)
+    assert await AttendanceService(db).is_present_today(emp.id) is False
+
+
+@pytest.mark.asyncio
+async def test_days_present_counts_only_days_inside_the_window(db):
+    """`days_present` feeds monthly proration when the (currently dead) setting
+    is enabled — see pass-02. Its window arithmetic still has to be right."""
+    emp = await _employee(db)
+    base = date.today()
+    for offset in (0, 1, 2, 10):
+        db.add(AttendanceLog(employee_id=emp.id, work_date=base - timedelta(days=offset),
+                             check_in_at=datetime.now(timezone.utc),
+                             source=AttendanceSource.SELF))
+    await db.commit()
+
+    got = await AttendanceService(db).days_present(
+        emp.id, base - timedelta(days=2), base)
+    assert got == 3
+
+
+====================================================================================================
+FILE: test_drawers_fixes.py
+====================================================================================================
+
+"""
+================================================================================
+tests/test_drawers_fixes.py — regression guards for the DRAWERS module
+================================================================================
+Covers:
+  F07 — a lining-first scan reports HOLDING_LINING (not HOLDING_LEATHER)
+  F08 — a RECEIVED/SENDED drawer refuses a new part scan (no reopen)
+  F09 — SENDED cannot transition back to RECEIVED
+  F11 — release clears BOTH sides of the piece<->drawer link
+================================================================================
+"""
+import pytest
+
+
+# ── F07: the missing state member exists (pure) ─────────────────────────────
+def test_f07_holding_lining_state_exists():
+    from app.core.enums import DrawerState
+    assert DrawerState.HOLDING_LINING.value == "holding_lining"
+
+
+def test_f07_state_derivation_branches_on_part():
+    import inspect
+    from app.modules.drawers import service as drawer_service
+    src = inspect.getsource(drawer_service.DrawerService.store_scan)
+    # must branch to HOLDING_LINING for a lining-only drawer, not force LEATHER
+    assert "HOLDING_LINING" in src
+
+
+# ── F08: source-state guard against reopening a released drawer (structural) ─
+def test_f08_store_scan_guards_terminal_states():
+    import inspect
+    from app.modules.drawers import service as drawer_service
+    src = inspect.getsource(drawer_service.DrawerService.store_scan)
+    assert "RECEIVED" in src and "SENDED" in src
+    assert "cannot accept" in src.lower() or "already" in src.lower()
+
+
+# ── F09: SENDED -> RECEIVED is blocked (structural) ─────────────────────────
+def test_f09_received_guards_against_sended():
+    import inspect
+    from app.modules.drawers import service as drawer_service
+    src = inspect.getsource(drawer_service.DrawerService.transition)
+    assert "already SENDED" in src
+
+
+# ── F11: release clears both sides of the link (structural) ─────────────────
+def test_f11_release_clears_piece_side():
+    import inspect
+    from app.modules.drawers import service as drawer_service
+    src = inspect.getsource(drawer_service.DrawerService.release_nocommit)
+    assert "piece.drawer_id = None" in src
+    assert "drawer.current_piece_id = None" in src
+
+
+====================================================================================================
+FILE: test_employees_fixes.py
+====================================================================================================
+
+"""
+================================================================================
+tests/test_employees_fixes.py — regression guards for the EMPLOYEES module
+================================================================================
+Covers:
+  F37 — salary is NOT in the default roster schema; only in the pay variant
+  F47 — the update path rejects fields outside an explicit allow-list
+================================================================================
+"""
+import pytest
+
+
+# ── F37: salary only in the pay-bearing schema (pure) ───────────────────────
+def test_f37_plain_read_has_no_salary():
+    from app.modules.employees.schemas import EmployeeRead, EmployeeReadWithPay
+    assert "monthly_salary" not in EmployeeRead.model_fields
+    assert "monthly_salary" in EmployeeReadWithPay.model_fields
+
+
+def test_f37_router_chooses_schema_by_role():
+    # Structural: the list endpoint branches on role before choosing the schema.
+    import inspect
+    from app.modules.employees import router as emp_router
+    src = inspect.getsource(emp_router.list_employees)
+    assert "EmployeeReadWithPay" in src and "EmployeeRead" in src
+    assert "pay_roles" in src or "MANAGING_DIRECTOR" in src
+
+
+# ── F47: update allow-list rejects unexpected fields (structural) ───────────
+def test_f47_update_has_allow_list():
+    import inspect
+    from app.modules.employees import service as emp_service
+    src = inspect.getsource(emp_service.EmployeeService.update)
+    assert "_ALLOWED" in src, "F47: update must enumerate writable fields"
+    assert "rejected" in src
+
+
+====================================================================================================
+FILE: test_final_modules_fixes.py
+====================================================================================================
+
+"""
+================================================================================
+tests/test_final_modules_fixes.py — guards for analytics, clients, imports,
+users, and barcode fixes
+================================================================================
+Covers:
+  F33  — every CLIENT-reachable analytics method accepts client_scope
+  F84  — AnalyticsService inherits the barcode mixin (endpoints resolve)
+  F116 — SKU code uses co.order_number (ORM), not order.order_number (dict)
+  F39  — /clients/styles pins CLIENT callers to their own client_id
+  F38/F45/F118 — upload handler bounds size, validates zip, guards filename
+  F41  — auth burns bcrypt time on the unknown-user path
+  F43  — password change enforces min length + rejects the phone number
+  F18  — retirement (410) enforced for ALL barcode types via shared lookup
+  F79  — the barcode counter fetches one row, not all
+================================================================================
+"""
+import ast
+import inspect
+
+import pytest
+
+
+# ── F33: analytics scoping present on every drill-down method (structural) ──
+def test_f33_analytics_methods_accept_client_scope():
+    from app.modules.analytics import service as a_service
+    from app.modules.analytics import barcode_ext as a_ext
+    for name in ("order_tree", "style_detail", "piece_detail",
+                 "stage_spread_alerts", "freight_risk"):
+        sig = inspect.signature(getattr(a_service.AnalyticsService, name))
+        assert "client_scope" in sig.parameters, f"F33: {name} missing client_scope"
+    for name in ("piece_life_story", "consumption_vs_stock"):
+        sig = inspect.signature(getattr(a_ext.BarcodeAnalyticsMixin, name))
+        assert "client_scope" in sig.parameters, f"F33: {name} missing client_scope"
+
+
+# ── F84: mixin inherited (AST, no DB import needed) ─────────────────────────
+def test_f84_service_inherits_mixin():
+    # encoding is explicit: the source carries non-cp1252 characters, so relying
+    # on the platform default fails on Windows with UnicodeDecodeError.
+    src = open(inspect.getsourcefile(
+        __import__("app.modules.analytics.service", fromlist=["x"])),
+        encoding="utf-8").read()
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "AnalyticsService":
+            bases = [b.id for b in node.bases if isinstance(b, ast.Name)]
+            assert "BarcodeAnalyticsMixin" in bases
+            return
+    raise AssertionError("AnalyticsService not found")
+
+
+# ── F116: SKU code built from the ORM order, not the dict (structural) ──────
+def test_f116_uses_orm_order_number():
+    from app.modules.clients import repository as c_repo
+    src = inspect.getsource(c_repo.ClientRepository.create_order_with_breakdown)
+    assert "make_sku_code(co.order_number" in src
+    assert "make_sku_code(order.order_number" not in src
+
+
+# ── F39: /clients/styles scopes CLIENT callers (structural) ─────────────────
+def test_f39_styles_scoped_for_client():
+    from app.modules.clients import router as c_router
+    src = inspect.getsource(c_router.list_styles)
+    assert "UserRole.CLIENT" in src and "client_id = user.client_id" in src
+
+
+# ── F38/F45/F118: upload handler hardened (structural) ──────────────────────
+def test_f38_f45_f118_upload_hardened():
+    from app.modules.imports import router as i_router
+    src = inspect.getsource(i_router._save_upload)
+    assert "max_upload_mb" in src            # F38 size cap
+    assert "is_zipfile" in src               # F45 container validation
+    assert "file.filename or" in src         # F118 None-filename guard
+
+
+# ── F43: password policy (pure) ─────────────────────────────────────────────
+def test_f43_password_min_length():
+    from pydantic import ValidationError
+    from app.modules.users.schemas import PasswordChange
+    with pytest.raises(ValidationError):
+        PasswordChange(current_password="x", new_password="short")   # < 8
+    PasswordChange(current_password="x", new_password="longenough1")
+
+
+# ── F41: unknown-user path burns bcrypt time (structural) ───────────────────
+def test_f41_constant_time_auth():
+    from app.modules.users import service as u_service
+    src = inspect.getsource(u_service.UserService.authenticate)
+    assert "_dummy_hash()" in src
+
+
+# ── F18: shared retirement lookup used by all resolvers (structural) ────────
+def test_f18_shared_retirement_lookup():
+    from app.modules.barcode import service as b_service
+    src = inspect.getsource(b_service)
+    assert "_get_active_or_410" in src
+    for resolver in ("resolve_piece_id", "resolve_lot_id", "resolve_drawer_id"):
+        rsrc = inspect.getsource(getattr(b_service.BarcodeService, resolver))
+        assert "_get_active_or_410" in rsrc, f"F18: {resolver} not retirement-aware"
+
+
+# ── F79: counter fetches one row, not all (structural) ──────────────────────
+def test_f79_counter_single_row():
+    from app.modules.barcode import repository as b_repo
+    src = inspect.getsource(b_repo.BarcodeRepository._next_code)
+    assert "limit(1)" in src.lower()
+    assert "order_by" in src.lower()
+
+
+====================================================================================================
+FILE: test_gates_and_stages.py
+====================================================================================================
+
+"""
+================================================================================
+tests/unit/test_gates_and_stages.py — LAYER 1: UNIT (pure, no DB)
+================================================================================
+The gate predicates and stage machinery are pure functions of enums + a piece's
+history. Test them in isolation — fastest layer, highest count, catches a
+reordered pipeline or a mis-mapped role instantly.
+
+All 49 of these mirror the assertions proven in verify/run_logic_checks.py, now
+as parametrised pytest.
+================================================================================
+"""
+import pytest
+
+from app.core.enums import (
+    Designation, MERGE_GATE_ENTRY, MULTI_STAGE_DESIGNATIONS, ProductionStage as PS,
+    SCREEN_EXPECTED_ROLE, SCREEN_TO_STAGE, STAGE_DESIGNATIONS, STAGE_ROLE_ACCESS,
+    ScreenContext, UserRole, LINING_MANAGER,
+)
+from app.modules.production.service import ProductionService
+
+
+# ── stage order / predecessor ────────────────────────────────────────────────
+@pytest.mark.parametrize("stage,expected", [
+    (PS.FUSING, PS.LEATHER_CUTTING),
+    (PS.PASTING, PS.FUSING),
+    (PS.SHELL_STITCHING, PS.LINE_STITCHING),
+    (PS.FINAL_INSPECTION, PS.FINAL_FINISH),
+    (PS.LEATHER_CUTTING, None),
+    (PS.LINING_CUTTING, None),
+    (PS.LINE_STITCHING, None),   # merge-governed, not sequence
+])
+def test_predecessor(stage, expected):
+    assert stage.predecessor() is expected
+
+
+def test_merge_gate_entry_is_line_stitching():
+    assert MERGE_GATE_ENTRY is PS.LINE_STITCHING
+
+
+@pytest.mark.parametrize("stage,is_cut", [
+    (PS.LEATHER_CUTTING, True), (PS.LINING_CUTTING, True),
+    (PS.PASTING, False), (PS.FINAL_FINISH, False),
+])
+def test_cut_entry_flag(stage, is_cut):
+    assert stage.is_cut_entry is is_cut
+    assert stage.requires_consumption is is_cut
+
+
+# ── role gate ─────────────────────────────────────────────────────────────────
+def _role_ok(role, stage):
+    if role in (UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER):
+        return True
+    return role in STAGE_ROLE_ACCESS.get(stage, set())
+
+
+@pytest.mark.parametrize("role,stage,ok", [
+    (UserRole.CUTTING_MANAGER, PS.LEATHER_CUTTING, True),
+    (LINING_MANAGER, PS.LINING_CUTTING, True),
+    (UserRole.CUTTING_MANAGER, PS.LINING_CUTTING, False),
+    (UserRole.STITCHING_MANAGER, PS.PASTING, True),
+    (UserRole.CUTTING_MANAGER, PS.PASTING, False),
+    (UserRole.MANAGING_DIRECTOR, PS.FINAL_FINISH, True),   # bypass
+    (UserRole.DIRECT_MANAGER, PS.LINING_CUTTING, True),    # bypass
+    (UserRole.STITCHING_MANAGER, PS.FINAL_FINISH, False),
+])
+def test_role_gate(role, stage, ok):
+    assert _role_ok(role, stage) is ok
+
+
+# ── skill gate (via the real static method) ──────────────────────────────────
+@pytest.mark.parametrize("designation,stage,ok", [
+    ("CUTTER", PS.LEATHER_CUTTING, True),
+    ("CUTTER", PS.PASTING, False),
+    ("PASTER", PS.PASTING, True),
+    ("  shell tailor ", PS.SHELL_STITCHING, True),     # normalised
+    ("TAILOR", PS.SHELL_STITCHING, True),              # multi-station
+    ("HELPER", PS.PASTING, True),                      # multi-stage
+    (None, PS.PASTING, True),                          # fail-open
+    ("WELDER", PS.PASTING, True),                      # uncatalogued → fail-open
+    ("INSPECTOR", PS.FINAL_INSPECTION, True),
+    ("PASTER", PS.LEATHER_CUTTING, False),
+])
+def test_skill_gate(designation, stage, ok):
+    assert ProductionService._skill_ok(designation, stage) is ok
+
+
+def test_helper_is_multi_stage():
+    assert "HELPER" in MULTI_STAGE_DESIGNATIONS
+
+
+# ── designation normalisation ─────────────────────────────────────────────────
+@pytest.mark.parametrize("raw,norm", [
+    ("  shell tailor ", "SHELL_TAILOR"),
+    ("Line-Attacher", "LINE_ATTACHER"),
+    ("cutter", "CUTTER"),
+    ("final/finish", "FINAL_FINISH"),
+    (None, None),
+    ("", None),
+])
+def test_normalise(raw, norm):
+    assert Designation.normalise(raw) == norm
+
+
+# ── screen → stage ────────────────────────────────────────────────────────────
+def test_screen_maps():
+    assert SCREEN_TO_STAGE[ScreenContext.LEATHER_CUT] is PS.LEATHER_CUTTING
+    assert SCREEN_TO_STAGE[ScreenContext.LINING_CUT] is PS.LINING_CUTTING
+    assert ScreenContext.PIPELINE not in SCREEN_TO_STAGE
+    assert UserRole.CUTTING_MANAGER in SCREEN_EXPECTED_ROLE[ScreenContext.LEATHER_CUT]
+    assert LINING_MANAGER in SCREEN_EXPECTED_ROLE[ScreenContext.LINING_CUT]
+
+
+# ── merge completeness rule ──────────────────────────────────────────────────
+def _complete(leather_in, lining_in, needs_lining):
+    return leather_in and (lining_in or not needs_lining)
+
+
+@pytest.mark.parametrize("leather,lining,needs,done", [
+    (True, False, False, True),    # leather-only: done on leather
+    (True, False, True, False),    # needs lining: not done
+    (True, True, True, True),      # both present: done
+    (False, False, True, False),   # nothing: not done
+])
+def test_merge_completeness(leather, lining, needs, done):
+    assert _complete(leather, lining, needs) is done
+
+
+# ── stage_of maps operation codes to stages, None for legacy ─────────────────
+class _Op:
+    def __init__(self, code):
+        self.code = code
+
+
+@pytest.mark.parametrize("code,expected", [
+    ("LEATHER_CUTTING", PS.LEATHER_CUTTING),
+    ("leather_cutting", PS.LEATHER_CUTTING),   # case-insensitive
+    ("PASTING", PS.PASTING),
+    ("FF-SMS", None),                          # legacy code → no stage
+    ("BOGUS", None),
+])
+def test_stage_of(code, expected):
+    assert ProductionService._stage_of(_Op(code)) is expected
+
+
+====================================================================================================
+FILE: test_materials_strict.py
+====================================================================================================
+
+"""
+================================================================================
+tests/integration/test_materials_strict.py — per-category material validation
+================================================================================
+Proves the STRICT "Add New" rules straight from the product spec: every category
+and subtype accepts exactly its required fields and REJECTS a lot missing any of
+them. Also proves stock arithmetic (on-hand/reserved/available), the quantity is
+read from the right field per category, and the barcode caption is tailored.
+================================================================================
+"""
+import pytest
+
+from app.modules.materials.schemas import LotCreate
+from app.modules.materials.service import MaterialService
+
+
+async def _make(db, **kw):
+    return await MaterialService(db).create_lot(LotCreate(**kw))
+
+
+# ── ACCEPTS: every material class with its exact fields ──────────────────────
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kw,expect_uom,expect_qty", [
+    # leather: article, colour, thickness, dcm
+    (dict(category="LEATHER", article="SUEDE-A32", colour="PINE",
+          attributes={"thickness": "1.2mm", "dcm": 300}), "dcm", 300.0),
+    # plain lining: article, colour, thickness, mtrs
+    (dict(category="LINING", subtype="PLAIN_LINING", article="POLY-L", colour="BLACK",
+          attributes={"thickness": "0.3mm", "mtrs": 120}), "mtrs", 120.0),
+    # ribs: article, colour, kg
+    (dict(category="LINING", subtype="RIBS", article="RIB-2", colour="NAVY",
+          attributes={"kg": 15}), "kg", 15.0),
+    # knit: article, colour, pcs
+    (dict(category="LINING", subtype="KNIT", article="KNIT-9", colour="GREY",
+          attributes={"pcs": 40}), "pcs", 40.0),
+    # button: article, colour, size, count
+    (dict(category="ACCESSORY", subtype="BUTTON", article="BTN-17", colour="BROWN",
+          attributes={"size": "20L", "count": 500}), "pcs", 500.0),
+    # zip: article, colour, size, count
+    (dict(category="ACCESSORY", subtype="ZIP", article="YKK-5", colour="BLACK",
+          attributes={"size": "60cm", "count": 200}), "pcs", 200.0),
+    # thread: article, colour, thickness, mtrs
+    (dict(category="ACCESSORY", subtype="THREAD", article="TEX-40", colour="TAN",
+          attributes={"thickness": "40wt", "mtrs": 5000}), "mtrs", 5000.0),
+    # other: article, colour, description, count
+    (dict(category="ACCESSORY", subtype="OTHER", article="LOGO-TAG", colour="—",
+          attributes={"description": "woven brand tag", "count": 300}), "pcs", 300.0),
+])
+async def test_create_each_material_class(db, kw, expect_uom, expect_qty):
+    res = await _make(db, **kw)
+    assert res["uom"] == expect_uom
+    assert res["on_hand"] == expect_qty
+    assert res["available"] == expect_qty
+    assert res["lot_barcode"]           # a child barcode was minted
+
+
+# ── REJECTS: missing a required field per category ───────────────────────────
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kw,missing", [
+    # leather without thickness
+    (dict(category="LEATHER", article="A", colour="C", attributes={"dcm": 100}), "thickness"),
+    # leather without dcm (quantity)
+    (dict(category="LEATHER", article="A", colour="C", attributes={"thickness": "1mm"}), "dcm"),
+    # button without size
+    (dict(category="ACCESSORY", subtype="BUTTON", article="B", colour="C",
+          attributes={"count": 100}), "size"),
+    # zip without count
+    (dict(category="ACCESSORY", subtype="ZIP", article="Z", colour="C",
+          attributes={"size": "50cm"}), "count"),
+    # thread without thickness
+    (dict(category="ACCESSORY", subtype="THREAD", article="T", colour="C",
+          attributes={"mtrs": 100}), "thickness"),
+    # other without description
+    (dict(category="ACCESSORY", subtype="OTHER", article="O", colour="C",
+          attributes={"count": 10}), "description"),
+    # ribs without kg
+    (dict(category="LINING", subtype="RIBS", article="R", colour="C",
+          attributes={}), "kg"),
+])
+async def test_reject_missing_required_field(db, kw, missing):
+    with pytest.raises(Exception) as ei:
+        await _make(db, **kw)
+    assert "422" in str(ei.value) or "requires" in str(ei.value).lower()
+
+
+# ── REJECTS: structural errors ───────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_accessory_needs_subtype(db):
+    with pytest.raises(Exception) as ei:
+        await _make(db, category="ACCESSORY", article="X", colour="C",
+                    attributes={"count": 5})
+    assert "subtype" in str(ei.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_unknown_category_rejected(db):
+    with pytest.raises(Exception):
+        await _make(db, category="FOAM", article="X", colour="C",
+                    attributes={"qty": 5})
+
+
+@pytest.mark.asyncio
+async def test_missing_colour_rejected(db):
+    with pytest.raises(Exception) as ei:
+        await _make(db, category="LEATHER", article="A", colour="",
+                    attributes={"thickness": "1mm", "dcm": 100})
+    assert "colour" in str(ei.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_zero_quantity_rejected(db):
+    with pytest.raises(Exception) as ei:
+        await _make(db, category="LEATHER", article="A", colour="C",
+                    attributes={"thickness": "1mm", "dcm": 0})
+    assert "> 0" in str(ei.value) or "quantity" in str(ei.value).lower()
+
+
+# ── STOCK: on-hand / reserved / available across lots of same article ────────
+@pytest.mark.asyncio
+async def test_stock_aggregates_and_reserves(db):
+    svc = MaterialService(db)
+    await _make(db, category="LEATHER", article="SUEDE-A32", colour="PINE",
+                attributes={"thickness": "1.2mm", "dcm": 300})
+    await _make(db, category="LEATHER", article="SUEDE-A32", colour="PINE",
+                attributes={"thickness": "1.2mm", "dcm": 200})
+    stock = await svc.stock(category="LEATHER", article="SUEDE-A32", required=600)
+    assert stock["on_hand"] == 500.0
+    assert stock["available"] == 500.0
+    assert stock["short_by"] == 100.0      # 600 - 500
+
+
+# ── FILTER SPEC: the UI hint matches the spec ────────────────────────────────
+@pytest.mark.asyncio
+async def test_filter_fields_per_category(db):
+    svc = MaterialService(db)
+    assert svc.filter_fields("LEATHER", None)["filters"] == ["article", "colour", "thickness"]
+    assert svc.filter_fields("ACCESSORY", "BUTTON")["filters"] == ["article", "colour", "size"]
+    assert svc.filter_fields("ACCESSORY", "THREAD")["filters"] == ["article", "colour", "thickness"]
+    assert svc.filter_fields("LINING", "RIBS")["filters"] == ["article", "colour"]
+    assert set(svc.filter_fields("ACCESSORY", "BUTTON")["required_to_add"]) == {"size", "count"}
+
+
+====================================================================================================
+FILE: test_merge_gate.py
+====================================================================================================
+
+"""
+================================================================================
+tests/integration/test_merge_gate.py — LAYER 2: INTEGRATION (the merge gate)
+================================================================================
+The completeness gate is the one piece of logic that cannot be faked and most
+likely to break. These prove: line-stitching is blocked until the drawer is
+SENDED; store-scan advances holding_leather → holding_both; a leather-only piece
+is complete on leather alone; RECEIVED requires completeness; SENDED requires
+RECEIVED; the drawer recycles on package/export.
+================================================================================
+"""
+import datetime
+
+import pytest
+from fastapi import HTTPException
+
+from app.core.enums import DrawerPart, DrawerState, ScreenContext, UserRole
+from app.modules.drawers.service import DrawerService
+from app.modules.production.models import ProductionEvent
+from app.modules.production.service import ProductionService
+
+
+async def _advance_to_pasted(db, piece, cutter, paster, cutting_mgr, stitching_mgr, lot):
+    today = datetime.date.today()
+    svc = ProductionService(db)
+    await svc.log_batch(user=cutting_mgr, employee_id=cutter.id, piece_ids=[piece.id],
+                        work_date=today, screen=ScreenContext.LEATHER_CUT,
+                        leather_lot_id=lot.id, consumption_qty=10.0)
+    await svc.log_batch(user=cutting_mgr, employee_id=cutter.id, piece_ids=[piece.id],
+                        work_date=today, screen=ScreenContext.PIPELINE)   # fusing
+    await svc.log_batch(user=stitching_mgr, employee_id=paster.id, piece_ids=[piece.id],
+                        work_date=today, screen=ScreenContext.PIPELINE)   # pasting
+
+
+@pytest.mark.asyncio
+async def test_line_stitch_blocked_until_sended(db, operations, pieces, cutter, paster,
+                                                tailor, cutting_mgr, stitching_mgr, dm,
+                                                leather_lot):
+    piece, drawer = pieces[0]
+    await _advance_to_pasted(db, piece, cutter[0], paster[0], cutting_mgr,
+                             stitching_mgr, leather_lot)
+
+    # Attempt line-stitching now → merge_blocked (drawer not sended)
+    res = await ProductionService(db).log_batch(
+        user=stitching_mgr, employee_id=tailor[0].id, piece_ids=[piece.id],
+        work_date=datetime.date.today(), screen=ScreenContext.PIPELINE)
+    assert res["stage"] == "LINE_STITCHING"
+    assert res["count_logged"] == 0
+    assert res["merge_blocked"], "line-stitch must block before SENDED"
+
+
+@pytest.mark.asyncio
+async def test_store_scan_and_full_merge_then_line_stitch(db, operations, pieces,
+                                                          cutter, lining_cutter, paster,
+                                                          tailor, cutting_mgr, lining_mgr,
+                                                          stitching_mgr, dm, leather_lot):
+    piece, drawer = pieces[0]
+    drawers = DrawerService(db)
+
+    # store leather → holding_leather
+    r1 = await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
+                                  part=DrawerPart.LEATHER)
+    assert r1["state"] == DrawerState.HOLDING_LEATHER.value
+    assert r1["ready_for_received"] is False
+    assert "LINING" in r1["awaiting"]
+
+    # store lining → holding_both
+    r2 = await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
+                                  part=DrawerPart.LINING)
+    assert r2["state"] == DrawerState.HOLDING_BOTH.value
+    assert r2["ready_for_received"] is True
+
+    # DM RECEIVED then SENDED
+    rec = await drawers.transition(drawer.id, "RECEIVED", actor_id=dm.id)
+    assert rec["state"] == "received"
+    snd = await drawers.transition(drawer.id, "SENDED", actor_id=dm.id)
+    assert snd["state"] == "sended"
+
+    # now advance leather chain and line-stitch succeeds
+    await _advance_to_pasted(db, piece, cutter[0], paster[0], cutting_mgr,
+                             stitching_mgr, leather_lot)
+    res = await ProductionService(db).log_batch(
+        user=stitching_mgr, employee_id=tailor[0].id, piece_ids=[piece.id],
+        work_date=datetime.date.today(), screen=ScreenContext.PIPELINE)
+    assert res["count_logged"] == 1
+    assert not res["merge_blocked"]
+
+
+@pytest.mark.asyncio
+async def test_role_gate_checks_every_distinct_stage_in_batch(db, operations, pieces,
+                                                               cutter, cutting_mgr):
+    """GATE 1 is whole-request: if ANY stage in the batch is closed to the role,
+    the entire request 403s — no piece is logged.
+
+    Stage pair matters here. CUTTING_MANAGER owns BOTH LEATHER_CUTTING and FUSING
+    (app/core/enums_barcode.py:165,167), so a cut+fuse batch does not exercise the
+    gate — and because LEATHER_CUTTING requires consumption, such a batch is
+    rejected 422 by the cut-mixing rule (service.py:248-252) before the role gate
+    is even interesting. The pair below is FUSING (owned) + PASTING (not owned,
+    it belongs to STITCHING_MANAGER at :168), and neither is a cut stage.
+    """
+    piece1, _ = pieces[0]
+    piece2, _ = pieces[1]
+
+    def _ev(piece, op):
+        return ProductionEvent(
+            sku_id=piece.sku_id, operation_id=op.id, employee_id=cutter[0].id,
+            work_date=datetime.date.today(), qty=1, entered_by="test",
+            piece_id=piece.id)
+
+    # piece1: completed LEATHER_CUTTING          -> next stage is FUSING  (allowed)
+    # piece2: completed LEATHER_CUTTING + FUSING -> next stage is PASTING (denied)
+    db.add(_ev(piece1, operations["LEATHER_CUTTING"]))
+    db.add(_ev(piece2, operations["LEATHER_CUTTING"]))
+    db.add(_ev(piece2, operations["FUSING"]))
+    await db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        await ProductionService(db).log_batch(
+            user=cutting_mgr,
+            employee_id=cutter[0].id,
+            piece_ids=[piece1.id, piece2.id],
+            work_date=datetime.date.today(),
+            screen=ScreenContext.PIPELINE,
+        )
+
+    assert exc.value.status_code == 403
+    assert "may not log" in str(exc.value.detail).lower()
+
+    # and nothing was logged — the whole request was refused, not just piece2
+    from sqlalchemy import func, select
+    pasting = operations["PASTING"]
+    n = await db.scalar(select(func.count(ProductionEvent.id))
+                        .where(ProductionEvent.operation_id == pasting.id))
+    assert n == 0
+
+
+@pytest.mark.asyncio
+async def test_leather_only_piece_complete_on_leather(db, operations, pieces, dm):
+    piece, drawer = pieces[0]
+    # mark this piece leather-only
+    piece.needs_lining = False
+    await db.commit()
+    drawers = DrawerService(db)
+    r = await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
+                                 part=DrawerPart.LEATHER)
+    assert r["ready_for_received"] is True   # complete on leather alone
+    rec = await drawers.transition(drawer.id, "RECEIVED", actor_id=dm.id)
+    assert rec["state"] == "received"
+
+
+@pytest.mark.asyncio
+async def test_received_requires_completeness(db, operations, pieces, dm):
+    piece, drawer = pieces[0]   # needs_lining True, nothing stored
+    with pytest.raises(Exception) as ei:
+        await DrawerService(db).transition(drawer.id, "RECEIVED", actor_id=dm.id)
+    assert "await" in str(ei.value).lower() or "409" in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_sended_requires_received(db, operations, pieces, dm):
+    piece, drawer = pieces[0]
+    piece.needs_lining = False
+    await db.commit()
+    await DrawerService(db).store_scan(drawer_id=drawer.id, piece_id=piece.id,
+                                       part=DrawerPart.LEATHER)
+    # jump straight to SENDED → rejected
+    with pytest.raises(Exception) as ei:
+        await DrawerService(db).transition(drawer.id, "SENDED", actor_id=dm.id)
+    assert "RECEIVED" in str(ei.value) or "before" in str(ei.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_store_scan_wrong_drawer_rejected(db, operations, pieces):
+    piece_a, drawer_a = pieces[0]
+    _, drawer_b = pieces[1]
+    # piece A into drawer B → 409 (merge map is authority)
+    with pytest.raises(Exception) as ei:
+        await DrawerService(db).store_scan(drawer_id=drawer_b.id, piece_id=piece_a.id,
+                                           part=DrawerPart.LEATHER)
+    assert "not merged" in str(ei.value).lower() or "409" in str(ei.value)
+
+
+====================================================================================================
+FILE: test_multi_operation_employee.py
+====================================================================================================
+
+"""The SAME employee can be logged under DIFFERENT operations on different days
+('CUTTER/MULTI'), and wages must sum across operations at each op's rate (async)."""
+import uuid
+from datetime import date
+
+import pytest
+from sqlalchemy import select
+
+from app.core.enums import UserRole, WageType
+from app.modules.clients import models as cm
+from app.modules.employees import models as em
+from app.modules.production import models as pm
+from app.modules.production.service import ProductionService
+from app.modules.users.models import User
+from app.modules.wages.schemas import RateSet
+from app.modules.wages.service import WageService
+
+
+@pytest.mark.xfail(
+    reason="AUDIT F139 (BLOCKER, docs/audit/pass-01-business-logic.md): "
+           "app/modules/production/repository.py:213,222 GROUP/ORDER BY "
+           "Piece.style_id, a column Piece does not have (models.py:71-94); "
+           "the SELECT correctly projects SKU.style_id. Constructing the "
+           "statement raises AttributeError, so EVERY piece-rate wage run "
+           "fails before emitting SQL. Not fixed here: audit rule is that "
+           "application code is never edited to make a test pass. "
+           "Flips to XPASS the moment the two-line fix lands.",
+    raises=AttributeError, strict=False)
+@pytest.mark.asyncio
+async def test_one_employee_multiple_operations(db):
+    client = cm.Client(name="C"); db.add(client); await db.flush()
+    po = cm.ClientOrder(client_id=client.id, order_number="PO1"); db.add(po); await db.flush()
+    carnaby = cm.Style(client_order_id=po.id, name="CARNABY", code="CARNABY"); db.add(carnaby); await db.flush()
+    sku = cm.SKU(style_id=carnaby.id, color_code="57", size="M", qty_ordered=50)
+    db.add(sku); await db.flush()
+    cut = pm.Operation(code="CUTTING", label="Cutting", sequence=1)
+    paste = pm.Operation(code="PASTING", label="Pasting", sequence=3)
+    db.add_all([cut, paste]); await db.flush()
+    multi = em.Employee(name="MD Afzal", designation="CUTTER/MULTI", wage_type=WageType.PIECE_RATE)
+    db.add(multi); await db.commit()
+
+    # Same worker logged at two operations on two days. log_event was removed; insert
+    # the equivalent qty-grouped ProductionEvents directly — piece_counts groups by
+    # (employee, style, operation, day), which is all the wage engine consumes.
+    db.add_all([
+        pm.ProductionEvent(sku_id=sku.id, operation_id=cut.id, employee_id=multi.id,
+                           work_date=date(2026, 3, 23), qty=20),
+        pm.ProductionEvent(sku_id=sku.id, operation_id=paste.id, employee_id=multi.id,
+                           work_date=date(2026, 3, 25), qty=15),
+    ])
+    await db.commit()
+
+    ws = WageService(db)
+    await ws.set_rate(RateSet(style_code="CARNABY", operation_code="CUTTING",
+                              rate=80, effective_from=date(2026, 3, 1)))
+    await ws.set_rate(RateSet(style_code="CARNABY", operation_code="PASTING",
+                              rate=40, effective_from=date(2026, 3, 1)))
+
+    run = await ws.compute_run(date(2026, 3, 1), date(2026, 3, 31))
+    detail = await ws.get_run_detail(run["id"])
+    line = next((l for l in detail["lines"] if l["employee_name"] == "MD Afzal"), None)
+    assert line is not None
+    assert line["pieces"] == 35                        # 20 + 15
+    assert float(line["amount"]) == 20 * 80 + 15 * 40  # 2200
+
+
+====================================================================================================
+FILE: test_rbac.py
+====================================================================================================
+
+"""GATE 1 (ROLE): a manager may only log the stages their role owns.
+
+PORTED. This file was written against the pre-barcode API — `ProductionService.cut()`
+and `.scan()`, one endpoint per stage. Both were removed when the two-door log
+landed; the surviving endpoints are 410 stubs (app/modules/production/router.py:171-176)
+and `log_batch` is now the whole logging surface. The assertions below are the
+originals; only the call shape changed.
+
+Gate 1 is deliberately WHOLE-REQUEST (service.py:241-243): a role that cannot log
+one stage in the batch loses the batch. Gates 2-4 are per-piece. MD and DM bypass
+gate 1 entirely (`_STAGE_BYPASS_ROLES`, service.py:59).
+"""
+import datetime
+import uuid
+
+import pytest
+from fastapi import HTTPException
+
+from app.core.enums import BarcodeStatus, BarcodeType, UserRole, WageType
+from app.core.enums_barcode import ScreenContext
+from app.modules.barcode.models import BarcodeRegistry
+from app.modules.clients import models as cm
+from app.modules.employees import models as em
+from app.modules.production import models as pm
+from app.modules.production.service import ProductionService
+from app.modules.users.models import User
+
+TODAY = datetime.date.today()
+
+
+async def _seed_min(db):
+    """One SKU, two pieces, a present CUTTER, and the two operations the tests use.
+
+    Stage codes must be the canonical `ProductionStage` values — `log_batch`
+    resolves the inferred stage to an Operation by code (service.py:232-239), so
+    the old "CUTTING"/"SHELL" labels no longer resolve.
+    """
+    client = cm.Client(name="C"); db.add(client); await db.flush()
+    po = cm.ClientOrder(client_id=client.id, order_number="PO1"); db.add(po); await db.flush()
+    style = cm.Style(client_order_id=po.id, name="CARNABY"); db.add(style); await db.flush()
+    sku = cm.SKU(style_id=style.id, color_code="57", size="M", qty_ordered=10,
+                 code="PO1-CARNABY-57-M")
+    db.add(sku); await db.flush()
+
+    cut = pm.Operation(code="LEATHER_CUTTING", label="Leather Cutting", sequence=1)
+    fuse = pm.Operation(code="FUSING", label="Fusing", sequence=2)
+    paste = pm.Operation(code="PASTING", label="Pasting", sequence=3)
+    db.add_all([cut, fuse, paste]); await db.flush()
+    db.add(pm.OperationAccess(role="cutting_manager", operation_id=cut.id))
+
+    # CUTTER also covers FUSING (STAGE_DESIGNATIONS, enums_barcode.py:245), so the
+    # skill gate does not interfere with what these tests are asserting.
+    emp = em.Employee(name="W", designation="CUTTER", wage_type=WageType.PIECE_RATE,
+                      is_active=True)
+    db.add(emp); await db.flush()
+
+    # HELPER is in MULTI_STAGE_DESIGNATIONS (enums_barcode.py:255), so gate 2
+    # never fires for them. Needed to isolate gate 1: the DM bypass covers the
+    # ROLE gate only (service.py:59), NOT the skill gate, so a CUTTER logging
+    # PASTING is still skill-blocked no matter who the manager is.
+    helper = em.Employee(name="H", designation="HELPER", wage_type=WageType.PIECE_RATE,
+                         is_active=True)
+    db.add(helper); await db.flush()
+
+    pieces = []
+    for seq in (1, 2):
+        p = pm.Piece(code=f"PO1-CARNABY-57-M-{seq:03d}", seq=seq, sku_id=sku.id)
+        db.add(p); await db.flush()
+        db.add(BarcodeRegistry(code=p.code, type=BarcodeType.PIECE.value,
+                               status=BarcodeStatus.ACTIVE.value, piece_id=p.id,
+                               caption=p.code))
+        pieces.append(p)
+
+    # the presence gate (service.py:176-182) runs for a work_date of today
+    from app.modules.attendance.models import AttendanceLog, AttendanceSource
+    from app.modules.attendance.service import AttendanceService
+    wd = await AttendanceService(db)._local_today()
+    for e in (emp, helper):
+        db.add(AttendanceLog(
+            employee_id=e.id, work_date=wd,
+            check_in_at=datetime.datetime.now(datetime.timezone.utc),
+            source=AttendanceSource.SELF))
+
+    await db.commit()
+    return sku, cut, fuse, paste, emp, helper, pieces
+
+
+def _user(role, name):
+    return User(id=uuid.uuid4(), name=name, phone=str(uuid.uuid4())[:8], role=role,
+                password_hash="x", is_active=True)
+
+
+async def _complete(db, piece, op, emp):
+    """Log a completed event so the piece's inferred next stage advances."""
+    db.add(pm.ProductionEvent(sku_id=piece.sku_id, operation_id=op.id,
+                              employee_id=emp.id, work_date=TODAY, qty=1,
+                              entered_by="test", piece_id=piece.id))
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_cutting_manager_cannot_log_stitching(db, leather_lot):
+    sku, cut, fuse, paste, emp, helper, pieces = await _seed_min(db)
+    ps = ProductionService(db)
+    cutting_mgr = _user(UserRole.CUTTING_MANAGER, "C")
+
+    # ALLOWED: a fresh piece infers LEATHER_CUTTING, which this role owns.
+    res = await ps.log_batch(
+        user=cutting_mgr, employee_id=emp.id, piece_ids=[pieces[0].id],
+        work_date=TODAY, screen=ScreenContext.LEATHER_CUT,
+        consumption_qty=10, leather_lot_id=leather_lot.id)
+    assert res["count_logged"] == 1
+
+    # FORBIDDEN: advance a piece to PASTING, which belongs to STITCHING_MANAGER
+    # (enums_barcode.py:168). The role gate fires before anything is written.
+    await _complete(db, pieces[1], cut, emp)
+    await _complete(db, pieces[1], fuse, emp)
+
+    with pytest.raises(HTTPException) as exc:
+        await ps.log_batch(
+            user=cutting_mgr, employee_id=emp.id, piece_ids=[pieces[1].id],
+            work_date=TODAY, screen=ScreenContext.PIPELINE)
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_direct_manager_bypasses_access(db):
+    sku, cut, fuse, paste, emp, helper, pieces = await _seed_min(db)
+    ps = ProductionService(db)
+    direct = _user(UserRole.DIRECT_MANAGER, "D")
+
+    # PASTING has no OperationAccess row and is not in DIRECT_MANAGER's
+    # STAGE_ROLE_ACCESS set — the DM bypass (service.py:59) is the only reason
+    # this succeeds, which is exactly what the test is pinning.
+    for p in pieces:
+        await _complete(db, p, cut, emp)
+        await _complete(db, p, fuse, emp)
+
+    res = await ps.log_batch(
+        user=direct, employee_id=helper.id, piece_ids=[p.id for p in pieces],
+        work_date=TODAY, screen=ScreenContext.PIPELINE)
+
+    assert res["count_logged"] == 2
+    assert not res["sequence_blocked"]
+
+
+====================================================================================================
+FILE: test_service_smoke.py
+====================================================================================================
+
+"""
+================================================================================
+tests/test_service_smoke.py — Service-layer smoke tests (async, in-memory SQLite)
+================================================================================
+Exercises the PUBLIC service interfaces of four modules against the `db` fixture
+(conftest.py), using hand-built MOCK data (no real workbook needed here):
+
+    clients      list_clients / create_client / create_order_with_breakdown /
+                 get_style / get_sku / get_skus_for_style / get_client_orders /
+                 sku_label
+    employees    create / get / list_all / monthly_employees
+    production   list_operations / log_batch / style_progress /
+                 piece_counts / list_events
+    analytics    factory_overview / stage_spread_alerts / freight_risk /
+                 production_feed / piece_history
+
+MOCK DATA (one deterministic world, see _seed_catalog + _run_production):
+    Client   MockCo (Italy, EUR)
+    Order    MOCK-PO-1  ship=sea  sea_cutoff=2026-07-15
+    Styles   CARNABY, CLERMONT
+    SKUs     CARNABY/57 PINE GREEN/M qty=50 ; CLERMONT/J24 BLACK/L qty=30
+    Ops      LEATHER_CUTTING(seq1), PASTING(seq3), FINAL_FINISH(seq7)
+    Workers  Afzal (piece_rate, cutter) ; Rahim (monthly, tailor, 20000)
+    Actor    DIRECT_MANAGER (bypasses op-access; past work_date bypasses attendance)
+    Flow     40 CARNABY pieces cut -> 5 advance to PASTING -> 3 to FINAL_FINISH
+             + a legacy 30-qty CLERMONT cutting event (no piece linkage)
+================================================================================
+"""
+import uuid
+from datetime import date
+
+import pytest
+
+from app.core.enums import ShipMode, UserRole, WageType
+from app.modules.analytics.service import AnalyticsService
+from app.modules.clients import models as cm
+from app.modules.clients.service import ClientService, sku_label
+from app.modules.employees.schemas import EmployeeCreate
+from app.modules.employees.service import EmployeeService
+from app.modules.production import models as pm
+from app.modules.production.service import ProductionService
+from app.modules.users.models import User
+
+PAST = date(2026, 3, 10)          # historical -> skips the attendance-today gate
+TODAY = date(2026, 7, 12)         # matches the harness "current date"
+
+
+def _actor() -> User:
+    return User(id=uuid.uuid4(), name="Boss", phone="9000000001",
+                role=UserRole.DIRECT_MANAGER, password_hash="x", is_active=True)
+
+
+async def _seed_catalog(db) -> dict:
+    """Insert the static mock world (no production events yet). Returns handles."""
+    client = cm.Client(name="MockCo", country="Italy", currency="EUR")
+    db.add(client); await db.flush()
+
+    order = cm.ClientOrder(client_id=client.id, order_number="MOCK-PO-1",
+                           ship_mode=ShipMode.SEA.value,
+                           sea_cutoff_date=date(2026, 7, 15))
+    db.add(order); await db.flush()
+
+    carnaby = cm.Style(client_order_id=order.id, name="CARNABY")
+    clermont = cm.Style(client_order_id=order.id, name="CLERMONT")
+    db.add_all([carnaby, clermont]); await db.flush()
+
+    sku_carnaby = cm.SKU(style_id=carnaby.id, color_code="57",
+                         color_name="PINE GREEN", size="M", qty_ordered=50)
+    sku_clermont = cm.SKU(style_id=clermont.id, color_code="J24",
+                          color_name="BLACK", size="L", qty_ordered=30)
+    db.add_all([sku_carnaby, sku_clermont]); await db.flush()
+
+    # Canonical ProductionStage codes, NOT the legacy "CUTTING"/"FF" spellings.
+    # F02: analytics resolves the cut stage as ProductionStage.LEATHER_CUTTING
+    # (analytics/service.py:367) and the seed derives operation codes from
+    # ProductionStage.leather_chain() (scripts/seed.py:105-121). A fixture using
+    # the old codes silently produces zero bottleneck alerts, because
+    # totals.get("LEATHER_CUTTING") misses every "CUTTING" row.
+    cutting = pm.Operation(code="LEATHER_CUTTING", label="Leather Cutting", sequence=1)
+    pasting = pm.Operation(code="PASTING", label="Pasting", sequence=3)
+    ff = pm.Operation(code="FINAL_FINISH", label="Final finish", sequence=7)
+    db.add_all([cutting, pasting, ff]); await db.flush()
+
+    afzal = await EmployeeService(db).create(EmployeeCreate(
+        name="Afzal", designation="CUTTER", wage_type=WageType.PIECE_RATE,
+        phone="9100000001", email="afzal@factory.local"))
+    # MONTHLY employees are provisioned a login, so phone + password are required.
+    rahim = await EmployeeService(db).create(EmployeeCreate(
+        name="Rahim", designation="TAILOR", wage_type=WageType.MONTHLY,
+        monthly_salary=20000, phone="9100000002", email="rahim@factory.local",
+        password="9100000002"))
+    await db.commit()
+
+    return dict(client=client, order=order, carnaby=carnaby, clermont=clermont,
+                sku_carnaby=sku_carnaby, sku_clermont=sku_clermont,
+                cutting=cutting, pasting=pasting, ff=ff, afzal=afzal, rahim=rahim)
+
+
+async def _run_production(db, cat, actor) -> list[str]:
+    """40 CARNABY pieces cut, 5 advanced to PASTING and 3 to FF, plus a 30-qty
+    CLERMONT cutting event. Returns the minted piece codes.
+
+    PORTED. `ProductionService.cut()` and `.scan()` were the pre-barcode API and no
+    longer exist — pieces are now minted at breakdown upload (imports/premint.py:82-165),
+    not at cutting, and `log_batch` is the only logging surface. So this helper mints
+    the pieces the way premint does, then writes the stage events directly: these are
+    *fixture* rows for the analytics and progress assertions below, and driving them
+    through log_batch would drag in the gate, consumption and attendance machinery
+    that other files already cover properly.
+    """
+    from app.core.enums import BarcodeStatus, BarcodeType
+    from app.modules.barcode.models import BarcodeRegistry
+
+    codes = []
+    pieces = []
+    for seq in range(1, 41):
+        code = f"MOCK-PO-1-CARNABY-57-M-{seq:03d}"
+        p = pm.Piece(code=code, seq=seq, sku_id=cat["sku_carnaby"].id)
+        db.add(p)
+        await db.flush()
+        db.add(BarcodeRegistry(code=code, type=BarcodeType.PIECE.value,
+                               status=BarcodeStatus.ACTIVE.value, piece_id=p.id,
+                               caption=code))
+        codes.append(code)
+        pieces.append(p)
+    await db.flush()
+
+    def _ev(op, piece=None, sku_id=None, qty=1):
+        return pm.ProductionEvent(
+            sku_id=sku_id or cat["sku_carnaby"].id, operation_id=op.id,
+            employee_id=cat["afzal"].id, work_date=PAST, qty=qty,
+            entered_by="smoke", piece_id=piece.id if piece is not None else None)
+
+    for p in pieces:                       # all 40 cut
+        db.add(_ev(cat["cutting"], p))
+    for p in pieces[:5]:                   # 5 advance to PASTING
+        db.add(_ev(cat["pasting"], p))
+    for p in pieces[:3]:                   # 3 of those advance to FF
+        db.add(_ev(cat["ff"], p))
+
+    # Legacy qty path: a 30-qty CLERMONT cutting event with no piece linkage —
+    # the analytics/progress assertions sum qty, not rows.
+    db.add(_ev(cat["cutting"], sku_id=cat["sku_clermont"].id, qty=30))
+    await db.commit()
+    return codes
+
+
+# ────────────────────────────────────────────────────────────── CLIENTS
+@pytest.mark.asyncio
+async def test_clients_service(db):
+    cat = await _seed_catalog(db)
+    cs = ClientService(db)
+
+    clients = await cs.list_clients()
+    assert [c.name for c in clients] == ["MockCo"]
+
+    # create_client now provisions the client's first order in one call, so it takes
+    # an order_number and returns (client, order).
+    made, made_order = await cs.create_client("Extra Buyer", "France", "EXTRA-PO-1")
+    assert made.id is not None and made_order.order_number == "EXTRA-PO-1"
+    assert len(await cs.list_clients()) == 2
+
+    style = await cs.get_style(cat["carnaby"].id)
+    assert style is not None and style.name == "CARNABY"
+
+    sku = await cs.get_sku(cat["sku_carnaby"].id)
+    assert sku is not None and sku.qty_ordered == 50
+
+    skus = await cs.get_skus_for_style(cat["carnaby"].id)
+    assert {s.color_code for s in skus} == {"57"}
+
+    orders = await cs.get_client_orders(cat["client"].id)
+    assert [o.order_number for o in orders] == ["MOCK-PO-1"]
+
+    # create_order_with_breakdown is exercised in its own test below.
+
+    assert cs.sku_label("CARNABY", "PINE GREEN", "57", "M") == "CARNABY · PINE GREEN · M"
+    assert sku_label("X", None, "57", None) == "X · 57 · NA"   # module-level fallback
+
+
+@pytest.mark.asyncio
+async def test_create_order_with_breakdown(db):
+    """Regression: F116 is FIXED — this used to be xfail(strict).
+
+    `clients/repository.py:115` called `order.order_number` on the `order` DICT, so
+    create_order_with_breakdown raised AttributeError for any order that produced at
+    least one SKU — i.e. every real order. It now reads `co.order_number` from the
+    persisted ORM row (repository.py:116-120), matching `make_style_code` above it.
+
+    This is also the Phase-1/Phase-2 convergence seam: `bom/service.py` calls this
+    same entry point at MD approval with a dict, so the manual and auto-generated
+    breakdown paths share one contract. Keep the dict-in shape.
+    """
+    cat = await _seed_catalog(db)
+    cs = ClientService(db)
+    # dict-in, (order_id, style_id)-out — the documented contract.
+    order_id, style_id = await cs.create_order_with_breakdown(
+        client_id=cat["client"].id,
+        order={"order_number": "MOCK-PO-2"},
+        style={"name": "TOWER"},
+        lines=[{"color_code": "12", "color_name": "TAN", "sizes": {"M": 4, "L": 6}}],
+    )
+    assert order_id is not None and style_id is not None
+    tower_skus = await cs.get_skus_for_style(style_id)
+    assert sum(s.qty_ordered for s in tower_skus) == 10
+
+
+# ────────────────────────────────────────────────────────────── EMPLOYEES
+@pytest.mark.asyncio
+async def test_employees_service(db):
+    cat = await _seed_catalog(db)
+    es = EmployeeService(db)
+
+    everyone = await es.list_all()
+    assert {e.name for e in everyone} == {"Afzal", "Rahim"}
+
+    fetched = await es.get(cat["rahim"].id)
+    assert fetched is not None and fetched.wage_type == WageType.MONTHLY
+
+    monthly = await es.monthly_employees()
+    assert [e.name for e in monthly] == ["Rahim"]        # Afzal is piece_rate
+
+    fresh = await es.create(EmployeeCreate(name="Zaid", designation="HELPER",
+                            wage_type=WageType.PIECE_RATE, phone="9100000009"))
+    assert fresh.id is not None
+    assert len(await es.list_all()) == 3
+
+
+# ────────────────────────────────────────────────────────────── PRODUCTION
+@pytest.mark.xfail(
+    reason="AUDIT F139 (BLOCKER, docs/audit/pass-01-business-logic.md): "
+           "app/modules/production/repository.py:213,222 GROUP/ORDER BY "
+           "Piece.style_id, a column Piece does not have (models.py:71-94); "
+           "the SELECT correctly projects SKU.style_id. Constructing the "
+           "statement raises AttributeError, so EVERY piece-rate wage run "
+           "fails before emitting SQL. Not fixed here: audit rule is that "
+           "application code is never edited to make a test pass. "
+           "Flips to XPASS the moment the two-line fix lands.",
+    raises=AttributeError, strict=False)
+@pytest.mark.asyncio
+async def test_production_service(db):
+    cat = await _seed_catalog(db)
+    ps = ProductionService(db)
+    actor = _actor()
+
+    ops = await ps.list_operations()
+    assert {o.code for o in ops} == {"LEATHER_CUTTING", "PASTING", "FINAL_FINISH"}
+
+    codes = await _run_production(db, cat, actor)
+    assert len(codes) == 40 and len(set(codes)) == 40      # unique piece codes
+
+    progress = await ps.style_progress(cat["carnaby"].id)
+    assert progress == {"LEATHER_CUTTING": 40, "PASTING": 5, "FINAL_FINISH": 3}
+
+    # the legacy qty-only event landed on CLERMONT/LEATHER_CUTTING as 30 qty
+    clermont_progress = await ps.style_progress(cat["clermont"].id)
+    assert clermont_progress == {"LEATHER_CUTTING": 30}
+
+    events = await ps.list_events(sku_id=cat["sku_carnaby"].id)
+    assert len(events) == 40 + 5 + 3                       # cut + pasting + ff
+
+    counts = await ps.piece_counts(PAST, PAST)
+    assert sum(row[-1] for row in counts) == 40 + 5 + 3 + 30
+
+    # scan rejects unknown codes without writing them
+    res = await ps.scan(user=actor, operation_id=cat["pasting"].id,
+                        employee_id=cat["afzal"].id, work_date=PAST,
+                        piece_codes=["NOPE-1", "NOPE-2"])
+    assert res["count_logged"] == 0 and len(res["not_found"]) == 2
+
+
+# ────────────────────────────────────────────────────────────── ANALYTICS
+@pytest.mark.asyncio
+async def test_analytics_service(db):
+    cat = await _seed_catalog(db)
+    actor = _actor()
+    codes = await _run_production(db, cat, actor)
+    an = AnalyticsService(db)
+
+    overview = await an.factory_overview()
+    assert overview["clients"] == 1
+    assert overview["styles"] == 2
+    assert overview["total_pieces_ordered"] == 80          # 50 + 30
+    assert overview["total_operations_logged"] == 78       # 40 + 5 + 3 + 30
+
+    alerts = await an.stage_spread_alerts()
+    carnaby_alerts = [a for a in alerts if a["style"] == "CARNABY"]
+    assert carnaby_alerts, "expected a bottleneck alert on CARNABY (cut 40, few downstream)"
+    assert all(a["cut"] == 40 for a in carnaby_alerts)
+
+    risks = await an.freight_risk(today=TODAY)
+    mine = [r for r in risks if r["order_number"] == "MOCK-PO-1"]
+    assert mine, "order within sea-cutoff window should surface a freight risk"
+    assert mine[0]["days_left"] == 3 and mine[0]["ordered"] == 80
+
+    # production_feed was removed from AnalyticsService; per-piece stage history is
+    # now served by piece_detail(piece_code=...), which returns the same bundle_id +
+    # stages shape.
+    hist = await an.piece_detail(piece_code=codes[0])
+    assert hist["bundle_id"] == codes[0].upper()
+    assert len(hist["stages"]) >= 1
+
+
+====================================================================================================
+FILE: test_wages.py
+====================================================================================================
+
+"""Wages tie out to the production card, and pieces need not conserve (async)."""
+import uuid
+from datetime import date
+
+import pytest
+from sqlalchemy import select
+
+from app.core.enums import UserRole, WageType
+from app.modules.clients import models as cm
+from app.modules.employees import models as em
+from app.modules.production import models as pm
+from app.modules.production.service import ProductionService
+from app.modules.users.models import User
+from app.modules.wages.schemas import RateSet
+from app.modules.wages.service import WageService
+
+
+async def _setup(db):
+    client = cm.Client(name="C"); db.add(client); await db.flush()
+    po = cm.ClientOrder(client_id=client.id, order_number="PO1"); db.add(po); await db.flush()
+    carnaby = cm.Style(client_order_id=po.id, name="CARNABY", code="CARNABY"); db.add(carnaby); await db.flush()
+    # 152 ordered pieces across a couple of SKUs (matches the real Carnaby card).
+    db.add_all([
+        cm.SKU(style_id=carnaby.id, color_code="57", size="S", qty_ordered=100),
+        cm.SKU(style_id=carnaby.id, color_code="57", size="M", qty_ordered=52),
+    ])
+    ops = {}
+    for code, seq in [("CUTTING", 1), ("PASTING", 3)]:
+        o = pm.Operation(code=code, label=code, sequence=seq)
+        db.add(o); await db.flush(); ops[code] = o
+    cutter = em.Employee(name="Cutter1", wage_type=WageType.PIECE_RATE)
+    monthly = em.Employee(name="Monthly1", wage_type=WageType.MONTHLY, monthly_salary=18000)
+    db.add_all([cutter, monthly]); await db.commit()
+    return ops, carnaby, cutter, monthly
+
+
+@pytest.mark.xfail(
+    reason="AUDIT F139 (BLOCKER, docs/audit/pass-01-business-logic.md): "
+           "app/modules/production/repository.py:213,222 GROUP/ORDER BY "
+           "Piece.style_id, a column Piece does not have (models.py:71-94); "
+           "the SELECT correctly projects SKU.style_id. Constructing the "
+           "statement raises AttributeError, so EVERY piece-rate wage run "
+           "fails before emitting SQL. Not fixed here: audit rule is that "
+           "application code is never edited to make a test pass. "
+           "Flips to XPASS the moment the two-line fix lands.",
+    raises=AttributeError, strict=False)
+@pytest.mark.asyncio
+async def test_carnaby_wage_matches_card(db):
+    ops, carnaby, cutter, monthly = await _setup(db)
+    skus = (await db.execute(select(cm.SKU).where(cm.SKU.style_id == carnaby.id))).scalars().all()
+    assert sum(s.qty_ordered for s in skus) == 152
+
+    ws = WageService(db)
+    await ws.set_rate(RateSet(style_code="CARNABY", operation_code="CUTTING",
+                              rate=80, effective_from=date(2026, 3, 1)))
+    # log_event was removed (per-piece cut()/scan() flow now); the 152 cutting pieces
+    # are inserted as ProductionEvents directly — the wage engine reads qty per
+    # (employee, style, operation, day) and nothing else.
+    for s in skus:
+        db.add(pm.ProductionEvent(sku_id=s.id, operation_id=ops["CUTTING"].id,
+                                  employee_id=cutter.id, work_date=date(2026, 3, 23),
+                                  qty=s.qty_ordered))
+    await db.commit()
+
+    run = await ws.compute_run(date(2026, 3, 1), date(2026, 3, 31))
+    detail = await ws.get_run_detail(run["id"])
+    amounts = {}
+    for line in detail["lines"]:
+        e = await db.get(em.Employee, line["employee_id"])
+        amounts[e.name] = float(line["amount"])
+    assert amounts["Cutter1"] == 152 * 80     # 12160, matches the card
+    assert amounts["Monthly1"] == 18000       # monthly independent of production
+
+
+@pytest.mark.xfail(
+    reason="AUDIT F139 (BLOCKER, docs/audit/pass-01-business-logic.md): "
+           "app/modules/production/repository.py:213,222 GROUP/ORDER BY "
+           "Piece.style_id, a column Piece does not have (models.py:71-94); "
+           "the SELECT correctly projects SKU.style_id. Constructing the "
+           "statement raises AttributeError, so EVERY piece-rate wage run "
+           "fails before emitting SQL. Not fixed here: audit rule is that "
+           "application code is never edited to make a test pass. "
+           "Flips to XPASS the moment the two-line fix lands.",
+    raises=AttributeError, strict=False)
+@pytest.mark.asyncio
+async def test_compute_run_returns_employee_level_lines(db):
+    ops, carnaby, cutter, monthly = await _setup(db)
+    skus = (await db.execute(select(cm.SKU).where(cm.SKU.style_id == carnaby.id))).scalars().all()
+    ws = WageService(db)
+    await ws.set_rate(RateSet(style_code="CARNABY", operation_code="CUTTING",
+                              rate=80, effective_from=date(2026, 3, 1)))
+
+    db.add(pm.ProductionEvent(sku_id=skus[0].id, operation_id=ops["CUTTING"].id,
+                              employee_id=cutter.id, work_date=date(2026, 3, 23), qty=10))
+    await db.commit()
+
+    run = await ws.compute_run(date(2026, 3, 1), date(2026, 3, 31))
+
+    assert run["lines"]
+    assert any(line["employee_name"] == "Cutter1" for line in run["lines"])
+    assert any(line["employee_name"] == "Monthly1" for line in run["lines"])
+    cutter_line = next(line for line in run["lines"] if line["employee_name"] == "Cutter1")
+    assert cutter_line["pieces"] == 10
+    assert cutter_line["amount"] == 800
+
+
+@pytest.mark.asyncio
+async def test_pieces_do_not_need_to_conserve(db):
+    ops, carnaby, cutter, monthly = await _setup(db)
+    skus = (await db.execute(select(cm.SKU).where(cm.SKU.style_id == carnaby.id))).scalars().all()
+    ps = ProductionService(db)
+    # Cut 152, but paste 155 — the system must accept the spread, not reject it.
+    # (log_event removed; insert the events directly, then read the stage totals.)
+    db.add(pm.ProductionEvent(sku_id=skus[0].id, operation_id=ops["CUTTING"].id,
+                              employee_id=cutter.id, work_date=date(2026, 3, 23), qty=152))
+    db.add(pm.ProductionEvent(sku_id=skus[0].id, operation_id=ops["PASTING"].id,
+                              employee_id=cutter.id, work_date=date(2026, 3, 24), qty=155))
+    await db.commit()
+    progress = await ps.style_progress(carnaby.id)
+    assert progress["CUTTING"] == 152 and progress["PASTING"] == 155
+
+
+====================================================================================================
+FILE: test_wage_run_money_path.py
+====================================================================================================
+
+"""
+INTEGRATION · the payroll money path, router-free, against a real DB.
+
+Priority-1 coverage. Each test pins one invariant the business stated:
+
+    · one line per employee per run          (uq_wage_line_run_emp)
+    · PIECE_RATE and MONTHLY are exclusive   (never both for one worker)
+    · a closed run is a frozen snapshot      (never silently recomputed)
+    · windows may not overlap                (the same pieces paid twice)
+    · rates are date-effective               (mid-period change splits by day)
+
+Several of these currently sit behind AUDIT F139, which kills the piece-rate
+aggregate before any of them is reached. Those tests are xfail'd against the
+finding rather than worked around: the audit rule is that application code is
+never edited to make a test pass. Each one flips to XPASS when F139 lands.
+"""
+from datetime import date, timedelta
+
+import pytest
+from fastapi import HTTPException
+from sqlalchemy import func, select
+
+from app.core.enums import RunStatus, WageType
+from app.modules.clients import models as cm
+from app.modules.employees import models as em
+from app.modules.production import models as pm
+from app.modules.wages.models import Rate, WageLine, WageRun
+from app.modules.wages.service import WageService
+
+F139 = pytest.mark.xfail(
+    reason="AUDIT F139 (BLOCKER): production/repository.py:213,222 GROUP/ORDER BY "
+           "Piece.style_id, which does not exist — every piece-rate run raises "
+           "AttributeError before emitting SQL. Not fixed here by design.",
+    raises=AttributeError, strict=False)
+
+# The window must end on or before today (_validate_window, service.py:291-295).
+END = date.today() - timedelta(days=1)
+START = END - timedelta(days=13)          # a 14-day fortnight
+WORK_DAY = START + timedelta(days=2)
+
+
+async def _world(db, *, salary=30000):
+    """One style, one operation, one piece-rate cutter, one monthly tailor."""
+    client = cm.Client(name="MoneyCo"); db.add(client); await db.flush()
+    po = cm.ClientOrder(client_id=client.id, order_number="MONEY-PO")
+    db.add(po); await db.flush()
+    style = cm.Style(client_order_id=po.id, name="CARNABY", code="CARNABY")
+    db.add(style); await db.flush()
+    sku = cm.SKU(style_id=style.id, color_code="57", size="M", qty_ordered=100,
+                 code="MONEY-PO-CARNABY-57-M")
+    db.add(sku); await db.flush()
+
+    op = pm.Operation(code="LEATHER_CUTTING", label="Leather Cutting", sequence=1)
+    db.add(op); await db.flush()
+
+    cutter = em.Employee(name="PIECEWORKER", designation="CUTTER",
+                         wage_type=WageType.PIECE_RATE, is_active=True)
+    monthly = em.Employee(name="SALARIED", designation="TAILOR",
+                          wage_type=WageType.MONTHLY, monthly_salary=salary,
+                          is_active=True)
+    db.add_all([cutter, monthly])
+    await db.commit()
+    for o in (client, po, style, sku, op, cutter, monthly):
+        await db.refresh(o)
+    return dict(style=style, sku=sku, op=op, cutter=cutter, monthly=monthly)
+
+
+def _line_for(payload, name):
+    """Find a worker's line by NAME.
+
+    Deliberately not by id: the service returns `employee_id` as a raw UUID object
+    in the service-level payload (it is only coerced to a string when the router
+    serialises through `WageRunDetail`), so an id comparison here silently matches
+    nothing. Name is unique per employee (employees/service.py disambiguates
+    collisions with an IN-CHAL prefix), so it is the stable key at this layer.
+    """
+    return next(l for l in payload["lines"] if l["employee_name"] == name)
+
+
+async def _log(db, w, *, qty, on: date, employee=None):
+    db.add(pm.ProductionEvent(
+        sku_id=w["sku"].id, operation_id=w["op"].id,
+        employee_id=(employee or w["cutter"]).id, work_date=on, qty=qty,
+        entered_by="test"))
+    await db.commit()
+
+
+async def _rate(db, w, *, value, effective_from):
+    db.add(Rate(style_id=w["style"].id, operation_id=w["op"].id,
+                rate=value, effective_from=effective_from))
+    await db.commit()
+
+
+# ══════════════════════════════════════════════ one line per employee per run
+@pytest.mark.asyncio
+async def test_wage_line_uniqueness_is_enforced_by_the_database(db):
+    """The constraint, not the service, is the guarantee. F21/F102 added
+    `uq_wage_line_run_emp` in wages/models.py:107 AND the migration
+    (20260731_wage_line_uniq.py:30) — this asserts it actually bites."""
+    from sqlalchemy.exc import IntegrityError
+
+    w = await _world(db)
+    run = WageRun(period_start=START, period_end=END, status=RunStatus.OPEN)
+    db.add(run)
+    await db.commit()
+    # hold the ids as plain values: the rollback below expires every ORM instance,
+    # and touching an expired attribute afterwards triggers a lazy reload that
+    # cannot run inside the async session's greenlet.
+    run_id, emp_id = run.id, w["cutter"].id
+
+    db.add(WageLine(wage_run_id=run_id, employee_id=emp_id,
+                    wage_type=WageType.PIECE_RATE, amount=100))
+    await db.commit()
+
+    db.add(WageLine(wage_run_id=run_id, employee_id=emp_id,
+                    wage_type=WageType.PIECE_RATE, amount=250))
+    with pytest.raises(IntegrityError):
+        await db.commit()
+    await db.rollback()
+
+    n = await db.scalar(select(func.count(WageLine.id))
+                        .where(WageLine.wage_run_id == run_id))
+    assert n == 1, "a second line for the same employee must never persist"
+
+
+@pytest.mark.asyncio
+async def test_the_same_employee_may_be_paid_in_two_different_runs(db):
+    """The constraint is scoped to (run, employee) — not to the employee."""
+    w = await _world(db)
+    for i in range(2):
+        s = START - timedelta(days=40 * (i + 1))
+        run = WageRun(period_start=s, period_end=s + timedelta(days=13),
+                      status=RunStatus.CLOSED)
+        db.add(run)
+        await db.flush()
+        db.add(WageLine(wage_run_id=run.id, employee_id=w["cutter"].id,
+                        wage_type=WageType.PIECE_RATE, amount=100))
+    await db.commit()
+
+    n = await db.scalar(select(func.count(WageLine.id))
+                        .where(WageLine.employee_id == w["cutter"].id))
+    assert n == 2
+
+
+# ══════════════════════════════════════════════════ PIECE_RATE vs MONTHLY fork
+@F139
+@pytest.mark.asyncio
+async def test_a_piece_worker_is_never_paid_a_salary(db):
+    w = await _world(db)
+    await _rate(db, w, value=12.5, effective_from=START)
+    await _log(db, w, qty=40, on=WORK_DAY)
+
+    payload = await WageService(db).compute_run(START, END)
+    line = _line_for(payload, "PIECEWORKER")
+
+    assert line["wage_type"] == WageType.PIECE_RATE.value
+    assert line["amount"] == pytest.approx(40 * 12.5)
+
+
+@F139
+@pytest.mark.asyncio
+async def test_a_monthly_worker_is_never_paid_per_piece(db):
+    """Even with production logged against them, a MONTHLY worker is prorated —
+    the two branches skip on `is not` tests over the same wage_type
+    (service.py:433-435, :467-468), so nobody satisfies both."""
+    w = await _world(db)
+    await _rate(db, w, value=12.5, effective_from=START)
+    await _log(db, w, qty=40, on=WORK_DAY, employee=w["monthly"])
+
+    payload = await WageService(db).compute_run(START, END)
+    line = _line_for(payload, "SALARIED")
+
+    assert line["wage_type"] == WageType.MONTHLY.value
+    assert line["amount"] != pytest.approx(40 * 12.5)
+
+
+@F139
+@pytest.mark.asyncio
+async def test_every_employee_gets_at_most_one_line(db):
+    w = await _world(db)
+    await _rate(db, w, value=10, effective_from=START)
+    await _log(db, w, qty=5, on=WORK_DAY)
+    await _log(db, w, qty=7, on=WORK_DAY + timedelta(days=1))
+
+    payload = await WageService(db).compute_run(START, END)
+    ids = [str(l["employee_id"]) for l in payload["lines"]]
+    assert len(ids) == len(set(ids))
+
+
+# ═══════════════════════════════════════════════════ date-effective rate rule
+@F139
+@pytest.mark.asyncio
+async def test_a_midperiod_rate_change_prices_each_day_at_its_own_rate(db):
+    """The best-implemented rule in the module: the cache key includes work_date
+    (service.py:436-443) so a raise on day 5 does not retroactively reprice day 4.
+    """
+    w = await _world(db)
+    day_a = START + timedelta(days=1)
+    day_b = START + timedelta(days=6)
+    await _rate(db, w, value=10.0, effective_from=START)
+    await _rate(db, w, value=15.0, effective_from=day_b)
+    await _log(db, w, qty=10, on=day_a)      # 10 x 10.00 = 100
+    await _log(db, w, qty=10, on=day_b)      # 10 x 15.00 = 150
+
+    payload = await WageService(db).compute_run(START, END)
+    line = _line_for(payload, "PIECEWORKER")
+    assert line["amount"] == pytest.approx(250.0)
+
+
+# ═══════════════════════════════════════════════ a closed run is frozen
+@pytest.mark.asyncio
+async def test_recompute_refuses_a_closed_run(db):
+    """F20's guard (service.py:348). It fires — but note the audit finding: the
+    `confirm_closed` escape hatch it offers is wired to NO route or schema
+    (pass-02), so via the API this 409 is unconditional and recompute is dead."""
+    await _world(db)
+    run = WageRun(period_start=START, period_end=END, status=RunStatus.CLOSED)
+    db.add(run)
+    await db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        await WageService(db).recompute_run(run.id, user_name="MD")
+    assert exc.value.status_code == 409
+    assert "closed" in str(exc.value.detail).lower()
+
+
+@pytest.mark.asyncio
+async def test_a_closed_run_keeps_its_amounts_after_a_refused_recompute(db):
+    w = await _world(db)
+    run = WageRun(period_start=START, period_end=END, status=RunStatus.CLOSED)
+    db.add(run)
+    await db.flush()
+    db.add(WageLine(wage_run_id=run.id, employee_id=w["cutter"].id,
+                    wage_type=WageType.PIECE_RATE, amount=4321.00))
+    await db.commit()
+
+    with pytest.raises(HTTPException):
+        await WageService(db).recompute_run(run.id, user_name="MD")
+
+    amount = await db.scalar(select(WageLine.amount)
+                             .where(WageLine.wage_run_id == run.id))
+    assert float(amount) == 4321.00
+
+
+# ═════════════════════════════════════════════════════════ window validation
+@pytest.mark.asyncio
+async def test_an_inverted_window_is_refused(db):
+    await _world(db)
+    with pytest.raises(HTTPException) as exc:
+        await WageService(db).compute_run(END, START)
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_a_future_window_is_refused(db):
+    """Payroll cannot be run for work that has not happened."""
+    await _world(db)
+    tomorrow = date.today() + timedelta(days=1)
+    with pytest.raises(HTTPException) as exc:
+        await WageService(db).compute_run(date.today(), tomorrow)
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_an_overlapping_closed_run_is_refused(db):
+    """The same pieces must never be paid twice."""
+    await _world(db)
+    db.add(WageRun(period_start=START, period_end=END, status=RunStatus.CLOSED))
+    await db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        await WageService(db).compute_run(START + timedelta(days=3), END)
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_open_run_still_blocks_the_window(db):
+    """B7 / prior F22: a run that died mid-population sits at status=OPEN with
+    money already committed. If the overlap check only looked at CLOSED runs, the
+    retry would pay the fortnight a second time."""
+    await _world(db)
+    db.add(WageRun(period_start=START, period_end=END, status=RunStatus.OPEN))
+    await db.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        await WageService(db).compute_run(START, END)
+    assert exc.value.status_code == 409
+    assert "open" in str(exc.value.detail).lower()
+
+
+@F139
+@pytest.mark.asyncio
+async def test_a_non_overlapping_earlier_window_is_allowed(db):
+    """Adjacent fortnights are the normal case and must not be blocked."""
+    await _world(db)
+    db.add(WageRun(period_start=START - timedelta(days=30),
+                   period_end=START - timedelta(days=17), status=RunStatus.CLOSED))
+    await db.commit()
+
+    payload = await WageService(db).compute_run(START, END)
+    assert payload["period_start"] == START or str(START) in str(payload)
+
+

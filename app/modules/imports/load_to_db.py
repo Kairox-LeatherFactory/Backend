@@ -80,94 +80,94 @@ def _get_or_create_operation(db: Session, code: str, seq: int) -> Operation:
     return op
 
 
-def load_preview(db: Session, preview, country_map: dict | None = None,
-                 replace: bool = True) -> dict:
-    """Write a validated preview to the DB. Returns a stats dict.
+# def load_preview(db: Session, preview, country_map: dict | None = None,
+#                  replace: bool = True) -> dict:
+#     """Write a validated preview to the DB. Returns a stats dict.
 
-    replace=True (default) gives true idempotency: before loading a client we
-    delete its existing styles/SKUs, so re-importing the same file yields the
-    same final numbers instead of doubling them. The within-import summing in
-    _upsert_sku still correctly combines split rows of the SAME import.
-    """
-    country_map = country_map or {}
-    stats = {"clients": 0, "styles": 0, "skus_created": 0, "skus_updated": 0,
-             "operations": 0, "rates": 0}
+#     replace=True (default) gives true idempotency: before loading a client we
+#     delete its existing styles/SKUs, so re-importing the same file yields the
+#     same final numbers instead of doubling them. The within-import summing in
+#     _upsert_sku still correctly combines split rows of the SAME import.
+#     """
+#     country_map = country_map or {}
+#     stats = {"clients": 0, "styles": 0, "skus_created": 0, "skus_updated": 0,
+#              "operations": 0, "rates": 0}
 
-    # Stable operation ordering for sequence numbers.
-    OP_SEQ = {"CUTTING":1,"FUSING":2,"PASTING":3,"SHELL":4,"L/A":5,
-              "LINING STICH":6,"FF":7,"FF-SAMPLE":8,"FF-SMS":9,"FF-SAMPLE ":8}
+#     # Stable operation ordering for sequence numbers.
+#     OP_SEQ = {"CUTTING":1,"FUSING":2,"PASTING":3,"SHELL":4,"L/A":5,
+#               "LINING STICH":6,"FF":7,"FF-SAMPLE":8,"FF-SMS":9,"FF-SAMPLE ":8}
 
-    op_cache: dict[str, Operation] = {}
-    seen_rates: set = set()        # (style_id, op_id) already inserted this run
+#     op_cache: dict[str, Operation] = {}
+#     seen_rates: set = set()        # (style_id, op_id) already inserted this run
 
-    for key, cp in preview.clients.items():
-        client = _get_or_create_client(db, key, country_map.get(key))
-        stats["clients"] += 1
-        # One PO per client for now (the sheets don't carry PO numbers); use the key.
-        order = _get_or_create_order(db, client, f"{key}-PO")
+#     for key, cp in preview.clients.items():
+#         client = _get_or_create_client(db, key, country_map.get(key))
+#         stats["clients"] += 1
+#         # One PO per client for now (the sheets don't carry PO numbers); use the key.
+#         order = _get_or_create_order(db, client, f"{key}-PO")
 
-        if replace:
-            # Clear this client's prior order data so a re-import replaces, not adds.
-            old_styles = db.scalars(select(Style).where(
-                Style.client_order_id == order.id)).all()
-            for st in old_styles:
-                for sk in db.scalars(select(SKU).where(SKU.style_id == st.id)).all():
-                    for ol in db.scalars(                                                # <-- ADD
-                    select(SkuOrderLine).where(SkuOrderLine.sku_id == sk.id)).all():
-                        db.delete(ol)
-                    db.delete(sk)
-                for rt in db.scalars(select(Rate).where(Rate.style_id == st.id)).all():
-                    db.delete(rt)
-                db.delete(st)
-            db.flush()
+#         if replace:
+#             # Clear this client's prior order data so a re-import replaces, not adds.
+#             old_styles = db.scalars(select(Style).where(
+#                 Style.client_order_id == order.id)).all()
+#             for st in old_styles:
+#                 for sk in db.scalars(select(SKU).where(SKU.style_id == st.id)).all():
+#                     for ol in db.scalars(                                                # <-- ADD
+#                     select(SkuOrderLine).where(SkuOrderLine.sku_id == sk.id)).all():
+#                         db.delete(ol)
+#                     db.delete(sk)
+#                 for rt in db.scalars(select(Rate).where(Rate.style_id == st.id)).all():
+#                     db.delete(rt)
+#                 db.delete(st)
+#             db.flush()
 
-        # styles + skus from order lines
-        styles_seen = set()
-        for line in cp.order_lines:
-            style = _get_or_create_style(db, order, line.style, line.article)
-            if style.id not in styles_seen:
-                styles_seen.add(style.id); stats["styles"] += 1
-            for size, qty in line.sizes.items():
-                sku, res = _upsert_sku(db, order, style, line.color, size, qty)
-                if res == "created": stats["skus_created"] += 1
-                elif res == "updated": stats["skus_updated"] += 1
-                db.add(SkuOrderLine(                                             
-                   sku_id=sku.id, order_date=line.order_date,
-                   qty=qty, source_row=line.source_row))
+#         # styles + skus from order lines
+#         styles_seen = set()
+#         for line in cp.order_lines:
+#             style = _get_or_create_style(db, order, line.style, line.article)
+#             if style.id not in styles_seen:
+#                 styles_seen.add(style.id); stats["styles"] += 1
+#             for size, qty in line.sizes.items():
+#                 sku, res = _upsert_sku(db, order, style, line.color, size, qty)
+#                 if res == "created": stats["skus_created"] += 1
+#                 elif res == "updated": stats["skus_updated"] += 1
+#                 db.add(SkuOrderLine(                                             
+#                    sku_id=sku.id, order_date=line.order_date,
+#                    qty=qty, source_row=line.source_row))
 
-        # operations + rates from production cards
-        for card in cp.production_cards:
-            for opcode in card.operations:
-                if opcode not in op_cache:
-                    op = _get_or_create_operation(db, opcode, OP_SEQ.get(opcode, 99))
-                    op_cache[opcode] = op
-                    stats["operations"] += 1
-            # rates: attach to the matching style if we can find it by title prefix
-            ref_style = None
-            tprefix = card.title.split("-")[0].strip().upper()
-            for st in db.scalars(select(Style).where(Style.client_order_id == order.id)):
-                if st.name.upper() in card.title.upper() or tprefix in st.name.upper():
-                    ref_style = st; break
-            if ref_style:
-                for opcode, rate_val in card.rate.items():
-                    if not rate_val:
-                        continue
-                    op = op_cache[opcode]
-                    rate_key = (ref_style.id, op.id)
-                    if rate_key in seen_rates:
-                        continue          # already inserted for this style+op this run
-                    existing = db.scalar(select(Rate).where(
-                        Rate.style_id == ref_style.id, Rate.operation_id == op.id,
-                        Rate.effective_from == date(2026, 1, 1)))
-                    if not existing:
-                        db.add(Rate(style_id=ref_style.id, operation_id=op.id,
-                                    rate=rate_val, effective_from=date(2026, 1, 1)))
-                        db.flush()        # make it visible to the next get-or-create
-                        stats["rates"] += 1
-                    seen_rates.add(rate_key)
+#         # operations + rates from production cards
+#         for card in cp.production_cards:
+#             for opcode in card.operations:
+#                 if opcode not in op_cache:
+#                     op = _get_or_create_operation(db, opcode, OP_SEQ.get(opcode, 99))
+#                     op_cache[opcode] = op
+#                     stats["operations"] += 1
+#             # rates: attach to the matching style if we can find it by title prefix
+#             ref_style = None
+#             tprefix = card.title.split("-")[0].strip().upper()
+#             for st in db.scalars(select(Style).where(Style.client_order_id == order.id)):
+#                 if st.name.upper() in card.title.upper() or tprefix in st.name.upper():
+#                     ref_style = st; break
+#             if ref_style:
+#                 for opcode, rate_val in card.rate.items():
+#                     if not rate_val:
+#                         continue
+#                     op = op_cache[opcode]
+#                     rate_key = (ref_style.id, op.id)
+#                     if rate_key in seen_rates:
+#                         continue          # already inserted for this style+op this run
+#                     existing = db.scalar(select(Rate).where(
+#                         Rate.style_id == ref_style.id, Rate.operation_id == op.id,
+#                         Rate.effective_from == date(2026, 1, 1)))
+#                     if not existing:
+#                         db.add(Rate(style_id=ref_style.id, operation_id=op.id,
+#                                     rate=rate_val, effective_from=date(2026, 1, 1)))
+#                         db.flush()        # make it visible to the next get-or-create
+#                         stats["rates"] += 1
+#                     seen_rates.add(rate_key)
 
-    db.commit()
-    return stats
+#     db.commit()
+#     return stats
 
 def _assert_no_production_history(db: Session, order: ClientOrder) -> None:
     """Guard for the replace-on-commit path: refuse to touch an order whose
@@ -198,6 +198,8 @@ def load_preview_into_order(db, preview, *, order_number: str,
     order_number (created at client-creation). SKU codes use that order_number,
     so every SKU traces back to the client + order. Idempotent: replace=True
     clears this order's prior styles/SKUs first."""
+    
+    from app.modules.production.models import ProductionEvent
     from fastapi import HTTPException          # local import: keep loader fastapi-light
     order_number = (order_number or "").strip()
     order = db.scalar(select(ClientOrder).where(
@@ -214,7 +216,24 @@ def load_preview_into_order(db, preview, *, order_number: str,
     seen_rates: set = set()
 
     if replace:
-        _assert_no_production_history(db, order)
+        # Guard: never destroy an order that already has production logged against it.
+        sku_ids_subq = (
+            select(SKU.id)
+            .join(Style, SKU.style_id == Style.id)
+            .where(Style.client_order_id == order.id)
+        )
+        has_production = db.scalar(
+            select(ProductionEvent.id)
+            .where(ProductionEvent.sku_id.in_(sku_ids_subq))
+            .limit(1)
+        )
+        if has_production:
+            raise HTTPException(
+                409,
+                "This order already has production events logged. "
+                "Re-importing would delete SKUs still referenced by production history. "
+                "Void or amend the existing import instead of re-uploading.",
+            )
         for st in db.scalars(select(Style).where(
                 Style.client_order_id == order.id)).all():
             for sk in db.scalars(select(SKU).where(SKU.style_id == st.id)).all():
@@ -267,6 +286,9 @@ def load_preview_into_order(db, preview, *, order_number: str,
                                     rate=rate_val, effective_from=date(2026, 1, 1)))
                         db.flush(); stats["rates"] += 1
                     seen_rates.add((ref_style.id, op.id))
+                    
+    from app.modules.imports.premint import premint_order
+    stats.update(premint_order(db, order))
 
     db.commit()
     return stats

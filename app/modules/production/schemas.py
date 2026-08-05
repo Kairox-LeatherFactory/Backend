@@ -130,3 +130,63 @@ class StyleStageProgress(BaseModel):
     style_name: str
     qty_ordered: int
     stages: dict[str, int]    # {"CUTTING": 152, "FUSING": 152, "PASTING": 150, ...}
+    
+class ScanResult(BaseModel):
+    operation: str
+    count_logged: int
+    logged: list[str] = Field(default_factory=list)
+    rework: list[str] = Field(default_factory=list)
+    not_found: list[str] = Field(default_factory=list)
+    sequence_blocked: list[str] = Field(default_factory=list)
+    skill_blocked: list[str] = Field(default_factory=list)
+    
+class Actor(BaseModel):
+    employee_barcode: str | None = None
+    employee_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def _one(self):
+        if not self.employee_barcode and not self.employee_id:
+            raise ValueError("Provide employee_barcode or employee_id.")
+        return self
+
+
+class Targets(BaseModel):
+    piece_barcodes: list[str] | None = None
+    sku_id: uuid.UUID | None = None
+    piece_seqs: list[int] | None = None
+
+    @model_validator(mode="after")
+    def _one(self):
+        if not self.piece_barcodes and not (self.sku_id and self.piece_seqs):
+            raise ValueError("Provide piece_barcodes OR (sku_id + piece_seqs).")
+        return self
+
+
+class Consumption(BaseModel):
+    leather_lot_id: uuid.UUID | None = None
+    lining_lot_id: uuid.UUID | None = None
+    dcm: float | None = None
+
+
+class LogRequest(BaseModel):
+    screen_context: str | None = None       # (item 5) role-derived if omitted
+    actor: Actor
+    targets: Targets
+    work_date: date
+    consumption: Consumption | None = None
+    preview: bool = False                    # NEW: dry-run, compute buckets, write nothing
+
+
+class LogResult(BaseModel):
+    stage: str | None
+    count_logged: int
+    logged: list[str]
+    rework: list[str]
+    not_found: list[str]
+    sequence_blocked: list[str]
+    skill_blocked: list[str]
+    merge_blocked: list[str]
+    screen_role_warning: str | None = None
+    consumption_recorded: dict | None = None
+    preview: bool = False                    # NEW: echoes whether this was a dry-run
