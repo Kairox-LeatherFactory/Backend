@@ -34,11 +34,20 @@ async def list_employees(
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "The employee roster is internal.")
-    rows = await EmployeeService(db).list_all(active_only)
+    svc = EmployeeService(db)
+    rows = await svc.list_all(active_only)
+    # The card code every row is scanned/clicked through by. One extra query for
+    # the whole page, not one per employee.
+    codes = await svc.barcodes_for([r.id for r in rows])
     pay_roles = {UserRole.HR, UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR}
-    if user.role in pay_roles:
-        return [schemas.EmployeeReadWithPay.model_validate(r) for r in rows]
-    return [schemas.EmployeeRead.model_validate(r) for r in rows]
+    model = (schemas.EmployeeReadWithPay if user.role in pay_roles
+             else schemas.EmployeeRead)
+    out = []
+    for r in rows:
+        row = model.model_validate(r)
+        row.employee_barcode = codes.get(r.id)
+        out.append(row)
+    return out
 
 
 @router.post("", response_model=schemas.EmployeeCreateRead, status_code=201)
@@ -48,11 +57,14 @@ async def create_employee(
     actor: User = Depends(require_roles(
         UserRole.DIRECT_MANAGER, UserRole.HR, UserRole.MANAGING_DIRECTOR)),
 ):
-    """Create an employee (and, for a staff role or MONTHLY wage, a linked login).
-    Managers/HR are created HERE now (except DM/MD)."""
+    """Create an employee. A linked login is minted ONLY when `role` names a
+    staff role (managers/HR/security are created HERE now, except DM/MD).
+
+    A plain worker needs name + designation + wage_type and nothing else: no
+    phone, no email, no password, no app_user row. They get an employee barcode
+    back so their card can be printed and scanned at the gate."""
     return await EmployeeService(db).create(body, actor=actor)
- 
- 
+
 @router.patch("/{employee_id}", response_model=schemas.EmployeeRead)
 async def update_employee(
     employee_id: uuid.UUID,
@@ -63,8 +75,12 @@ async def update_employee(
 ):
     """Edit an employee (name/designation/wage_type/salary/contact/active).
     Reaches the existing service.update() (was unreachable — F89)."""
-    emp = await EmployeeService(db).update(employee_id, body)
-    return schemas.EmployeeRead.model_validate(emp)
+    svc = EmployeeService(db)
+    emp = await svc.update(employee_id, body)
+    out = schemas.EmployeeRead.model_validate(emp)
+    # Same shape as the list row — the edit screen keeps showing the card code.
+    out.employee_barcode = (await svc.barcodes_for([emp.id])).get(emp.id)
+    return out
  
  
 @router.delete("/{employee_id}", status_code=200)

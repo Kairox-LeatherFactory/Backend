@@ -12,9 +12,6 @@ class GpsPoint(BaseModel):
     lon: float = Field(..., ge=-180, le=180)
 
 class ScanCheckIn(BaseModel):
-    """Barcode door. lat/lon stay optional because an indoor floor can genuinely
-    lack a fix — but H6 requires `reason` when they are omitted, so an
-    unverified row is always a deliberate, reviewable act."""
     employee_barcode: str
     direction: str = Field(..., pattern="^(in|out)$")
     lat: float | None = None
@@ -22,7 +19,7 @@ class ScanCheckIn(BaseModel):
     direction: str = Field(..., pattern="^(in|out)$")
     proxy: bool = False
     reason: str | None = Field(None, max_length=200)
-
+    
 class CheckInRequest(GpsPoint):
     """SELF check-in by the worker themselves (Flow A).
 
@@ -47,10 +44,13 @@ class ProxyMarkRequest(BaseModel):
 
 
 class AddDailyWorkerRequest(BaseModel):
-    """Supervisor onboards a new daily-wage worker on the floor (Flow C)."""
+    """Onboard a new daily-wage worker on the floor (Flow C).
+
+    `phone` is optional: the worker gets no login, so there is nothing to
+    authenticate with it — it is contact detail only."""
     name: str
-    phone: str
     designation: str
+    phone: str | None = None
     daily_rate: float | None = None
 
 
@@ -118,7 +118,7 @@ class ShiftConfigUpdate(BaseModel):
         None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")          # HH:MM 24h
     shift_length_hours: float | None = Field(None, gt=0, le=24)
     late_grace_minutes: int | None = Field(None, ge=0, le=240)
-    timezone: str | None = Nonejniinin
+    timezone: str | None = None
     factory_lat: float | None = Field(None, ge=-90, le=90)
     factory_lon: float | None = Field(None, ge=-180, le=180)
     radius_m: int | None = Field(None, ge=10, le=5000)

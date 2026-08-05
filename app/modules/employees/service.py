@@ -2,7 +2,16 @@
 ================================================================================
 modules/employees/service.py — Employee business logic (async)
 ================================================================================
-TWO INVARIANTS THIS FILE OWNS:
+THREE INVARIANTS THIS FILE OWNS:
+
+  0. A SHOP-FLOOR WORKER GETS NO LOGIN.
+     Creating an employee does NOT write app_user, and needs no phone, email or
+     password. A login is minted here only when the caller passes an explicit
+     STAFF role (schemas._EMPLOYEE_LOGIN_ROLES). Attendance for a worker is
+     recorded by an operator (SECURITY / HR / MD / DM) scanning their card, so
+     wage_type no longer implies system access — a MONTHLY worker used to be
+     auto-given an EMPLOYEE login, and that is exactly what was removed.
+
 
   1. DESIGNATION IS ALWAYS UPPERCASE, normalised.
      'shell tailor' / 'Shell-Tailor' / ' SHELL TAILOR ' all become SHELL_TAILOR.
@@ -24,7 +33,7 @@ import uuid
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import Designation, UserRole, WageType
+from app.core.enums import Designation, WageType
 from app.modules.employees import schemas
 from app.modules.employees.models import Employee
 from app.modules.employees.repository import EmployeeRepository
@@ -41,8 +50,30 @@ class EmployeeService:
         self.db = db
         self.repo = EmployeeRepository(db)
 
+    # employees/service.py — add near list_all
+    async def names_for(self, ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+        """id → name for a set of employees (payroll warning display)."""
+        if not ids:
+            return {}
+        rows = await self.repo.list_all(active_only=False)
+        return {e.id: e.name for e in rows if e.id in set(ids)}
+
     async def list_all(self, active_only: bool = True) -> list[Employee]:
         return await self.repo.list_all(active_only)
+
+    async def barcodes_for(self, ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+        """id → ACTIVE card code, for a whole roster in one query.
+
+        The roster screen is also the barcode screen: clicking a row goes to
+        PATCH /employees/{employee_id}/barcode (reissue / deactivate), so the
+        card code has to be on screen for the user to know WHICH card they are
+        retiring. Kept off list_all so the wage run — which reads the same
+        roster every payroll — does not pay for a query it never uses.
+        """
+        if not ids:
+            return {}
+        from app.modules.barcode.service import BarcodeService
+        return await BarcodeService(self.db).employee_codes(ids)
 
     # ── name disambiguation ─────────────────────────────────────────────────
     async def _unique_name(self, raw_name: str) -> str:
@@ -87,27 +118,28 @@ class EmployeeService:
     # ── create ──────────────────────────────────────────────────────────────
     async def create(self, body: schemas.EmployeeCreate,
                      actor=None) -> schemas.EmployeeCreateRead:
-        """Create an employee. If `role` is a staff login role (manager/HR/etc.)
-        OR wage_type is MONTHLY, provision a linked login in the SAME transaction.
- 
+        """Create an employee, plus a login ONLY when `role` is a staff role.
+
+        WORKERS GET NO LOGIN — no app_user row, no phone/email needed. wage_type
+        is a payroll fact and no longer implies system access: a MONTHLY worker
+        used to be auto-given an EMPLOYEE login here, and that is exactly what we
+        removed. Every employee still gets an employee barcode, which is how
+        SECURITY / HR / MD / DM check them in and out.
+
         `actor` (the creating User) is used to enforce grant authority: the actor
         may only create a login whose role they are permitted to grant."""
         from app.modules.employees.schemas import _EMPLOYEE_LOGIN_ROLES
- 
+
         data = body.model_dump(exclude={"password", "role"})
         data["name"] = await self._unique_name(body.name)
         data["designation"] = Designation.normalise(body.designation)
         data["wage_type"] = WageType(body.wage_type)
- 
+
         emp = await self.repo.create(**data)   # flush only, no commit
- 
-        # decide whether (and as what role) to mint a login
-        login_role = None
-        if body.role in _EMPLOYEE_LOGIN_ROLES:
-            login_role = body.role
-        elif data["wage_type"] is WageType.MONTHLY:
-            login_role = UserRole.EMPLOYEE
- 
+
+        # A login is minted ONLY for an explicit staff role. No fallback.
+        login_role = body.role if body.role in _EMPLOYEE_LOGIN_ROLES else None
+
         user_created = False
         if login_role is not None:
             # grant-authority check: actor may only create roles they can grant.

@@ -216,6 +216,13 @@ class BarcodeService:
         await self.db.flush()
         return row.code
 
+    async def employee_codes(self, employee_ids: list[uuid.UUID],
+                             active_only: bool = True) -> dict[uuid.UUID, str]:
+        """employee_id → active card code, batched. Used by the roster read so
+        each row can carry the code the user scans / clicks through to
+        PATCH /employees/{id}/barcode with."""
+        return await self.repo.codes_for_employees(employee_ids, active_only)
+
     async def reissue_employee_barcode(self, employee_id: uuid.UUID,
                                        actor_id: uuid.UUID | None) -> dict:
         """Retire the old card, mint a new one. History untouched."""

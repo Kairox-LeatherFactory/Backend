@@ -111,6 +111,8 @@ class ClientService:
     # Public interface other modules rely on:
     async def get_sku(self, sku_id: uuid.UUID) -> SKU | None:
         return await self.repo.get_sku(sku_id)
+    async def get_sku_by_code(self, sku_code: str) -> SKU | None:
+        return await self.repo.get_sku_by_code(sku_code)
 
     async def is_sku_visible_to_client(self, sku_id: uuid.UUID,
                                        client_id: uuid.UUID) -> bool:

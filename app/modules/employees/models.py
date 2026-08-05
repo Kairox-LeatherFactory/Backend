@@ -5,17 +5,24 @@ modules/employees/models.py — Shop-floor employee records
 
 PURPOSE
     The people who physically make garments. Distinct from `app_user` (logins):
-    an Employee is a payroll/production identity; a User is a credential. A user
-    of role EMPLOYEE links to one Employee via User.employee_id.
+    an Employee is a payroll/production identity; a User is a credential.
+
+    A SHOP-FLOOR WORKER HAS NO USER ROW. Workers are not given system access, so
+    there is nothing to authenticate them with and nothing for them to log into.
+    They are identified on the floor by their employee barcode, which an operator
+    (SECURITY / HR / MD / DM) scans to record attendance. Only STAFF — managers,
+    HR, security — carry both an Employee row and a linked User (User.employee_id).
 
 WAGE TYPE drives the payroll fork and is a property of the PERSON, set
     explicitly — NOT inferred from designation. The source file proves it:
     'TAILOR' and 'CUTTER' appear in BOTH the monthly and piece-rate blocks.
 
 phone / email
-    Added so a login can be provisioned for each worker. The real files have no
-    contact details yet, so the seed script MOCKS them deterministically
-    (e.g. phone = 90000000NN). Replace with real data when available.
+    OPTIONAL contact details, nothing more. They were once required in order to
+    provision a login per worker; now that workers get no login, an employee can
+    be created with a name and a designation alone. They stay on the model (and
+    are still mocked by the seed script) because STAFF created through the
+    employee door do need a phone to log in with.
 ================================================================================
 """
 from sqlalchemy import Boolean, Enum, Numeric, String

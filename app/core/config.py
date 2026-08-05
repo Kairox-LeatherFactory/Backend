@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
-    
+        
     # PDF "is this scanned?" threshold. A page with fewer than this many extracted
     # text characters routes to the vision LLM instead of the text LLM. 40 chars per
     # page reliably distinguishes a real text-layer PDF from one with noise leak.
@@ -127,7 +127,7 @@ class Settings(BaseSettings):
 
     # Login rate-limit (defends the login endpoint from brute force).
     login_max_attempts: int = 10
-    login_window_seconds: int = 60                 # 10 minutes
+    login_window_seconds: int = 60                 # 1 minute
 
     # ── Stage 1: upload, storage & virus scan (BOM Procurement Workflow) ─────
     # Pluggable storage backend so the repo keeps NO hard Supabase dependency and
@@ -235,13 +235,13 @@ class Settings(BaseSettings):
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
 
-     # ── F32 / H5: never sign production tokens with a well-known key ──────────
+    # ── F32 / H5: never sign production tokens with a well-known key ──────────
     # H5: the original guard keyed ONLY on `environment`, which defaults to
     # "local" (config.py:50) — so DEBUG=false with ENVIRONMENT unset booted on
     # the shipped key. It also matched one prefix, while .env.example:19 ships
     # "change-me-to-a-long-random-string", which that prefix does not catch.
     _INSECURE_SECRET_PREFIXES = ("dev-only", "change-me", "changeme", "secret",
-                                 "test", "please-change")
+                                "test", "please-change")
     _MIN_SECRET_LEN = 32
 
     @model_validator(mode="after")

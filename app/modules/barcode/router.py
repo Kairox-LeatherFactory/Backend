@@ -8,8 +8,10 @@ PATCH /employees/{id}/barcode          reissue / deactivate (lives here, employe
                                        barcodes are a barcode concern)
 
 resolve is available to any authenticated staff INCLUDING the attendance path —
-a worker scanning their own card to check in must resolve it. So resolve is NOT
-behind block_employees; the write endpoints are.
+the gate operator (SECURITY / HR / MD / DM) resolves a worker's card before
+checking them in. Workers themselves hold no login. resolve stays off
+block_employees so a legacy employee token cannot 403 the attendance screen; the
+write endpoints are locked.
 ================================================================================
 """
 from datetime import datetime

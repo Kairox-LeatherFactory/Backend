@@ -24,8 +24,15 @@ ROLE MODEL (maps directly onto the factory's org chart)
                        draft BOMs, manages users/clients, runs payroll. During the
                        MD transition still bypasses role gates (see users/deps.py).
     CUTTING_MANAGER    Logs cutting-side production operations.
+    LINING_MANAGER     Logs the lining-cut path.
     STITCHING_MANAGER  Logs fusing -> lining-stitch -> final-finish operations.
-    EMPLOYEE           A shop-floor worker. Can view their own work / wages.
+    SECURITY           Gate operator. Scans employee cards in and out.
+    MERCHANDISER       Client-facing order/sample coordinator. NOTE: no route
+                       grants this role anything yet — it can log in, but every
+                       require_roles gate will 403 until access is decided.
+    EMPLOYEE           LEGACY — no longer minted. A shop-floor worker has NO
+                       login at all: they are a payroll/production identity with
+                       a scannable card, nothing more. See login_roles().
     CLIENT             An external client logging in to track their own orders.
     HR                 Reads employees / wages / attendance + inventory checks.
     VIEWER             Read-only office staff (accountant) — no data entry.
@@ -41,17 +48,45 @@ class UserRole(str, enum.Enum):
     CUTTING_MANAGER = "cutting_manager"
     LINING_MANAGER = "lining_manager"
     STITCHING_MANAGER = "stitching_manager"
-    EMPLOYEE = "employee"
+    EMPLOYEE = "employee"          # LEGACY — never minted any more, see login_roles()
     CLIENT = "client"
     VIEWER = "viewer"
     SUPERVISOR = "supervisor"      # may PROXY check-in daily-wage workers + add them
     HR = "hr" # HR / accounts: reads people, wages, attendance
     SECURITY = "security"
+    MERCHANDISER = "merchandiser"  # client-facing order/sample coordinator
 
     @classmethod
     def manager_roles(cls) -> set["UserRole"]:
         """Roles allowed to enter production data (besides the superuser)."""
         return {cls.CUTTING_MANAGER, cls.STITCHING_MANAGER}
+
+    @classmethod
+    def login_roles(cls) -> set["UserRole"]:
+        """The roles that may hold a row in `app_user` — i.e. can log in.
+
+        EMPLOYEE IS DELIBERATELY ABSENT. Shop-floor workers are NOT given system
+        access: no login, no app_user row, and therefore no phone/email needed to
+        create one. Their attendance is entered FOR them by an operator
+        (see ATTENDANCE_OPERATOR_ROLES) scanning their employee card.
+
+        The EMPLOYEE value stays in the enum because `app_user.role` is a NATIVE
+        PG enum (values cannot be dropped) and historical rows may still carry
+        it — but nothing in the app may MINT it any more.
+        """
+        return {cls.MANAGING_DIRECTOR, cls.DIRECT_MANAGER, cls.CUTTING_MANAGER,
+                cls.LINING_MANAGER, cls.STITCHING_MANAGER, cls.HR,
+                cls.SECURITY, cls.MERCHANDISER, cls.CLIENT, cls.SUPERVISOR,
+                cls.VIEWER}
+
+
+# The ONLY logins permitted to write attendance — for themselves or, far more
+# commonly, for a worker whose card they scan. Workers hold no login, so every
+# check-in/check-out on the floor passes through one of these four.
+ATTENDANCE_OPERATOR_ROLES = frozenset({
+    UserRole.SECURITY, UserRole.HR,
+    UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER,
+})
 
 
 class WageType(str, enum.Enum):

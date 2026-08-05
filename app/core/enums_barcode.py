@@ -229,7 +229,6 @@ class Designation(str, enum.Enum):
     CONTROLLED VOCABULARY, not free text: the moment it is free text, 'Cutter',
     'cutter ' and 'CUTTTER' become three skills and the gate is decorative.
     """
-
     CUTTER = "CUTTER"
     LINING_CUTTER = "LINING_CUTTER"
     FUSER = "FUSER"
@@ -242,6 +241,13 @@ class Designation(str, enum.Enum):
     TAILOR = "TAILOR"        # general stitching hand — multi-station
     HELPER = "HELPER"
     SUPERVISOR = "SUPERVISOR"
+    TRIMMER = "TRIMMER"
+    CHEMICAL_TECHNICIAN = "CHEMICAL_TECHNICIAN"
+    SECURITY = "SECURITY"
+    MERCHANDISER = "MERCHANDISER"
+    STITCHING_INSTRUCTOR = "STITCHING_INSTRUCTOR"
+    QC_INSPECTOR = "QC_INSPECTOR"
+
 
     @classmethod
     def normalise(cls, raw: str | None) -> str | None:
