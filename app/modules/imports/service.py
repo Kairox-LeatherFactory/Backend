@@ -5,15 +5,16 @@ modules/imports/service.py — Import module facade (kept for API stability)
 
 PURPOSE
     A thin, documented facade over the import pipeline. The real work lives in:
-      import_engine.build_preview()  — classify + parse a workbook into a preview
-      load_to_db.load_preview()      — write a validated preview (idempotent)
+      import_engine.build_preview()          — classify + parse a workbook
+      load_to_db.load_preview_into_order()    — write a validated preview into a
+                                                named client order (idempotent)
 
 HISTORY / MIGRATION NOTE
-    An earlier version exposed import_client_workbook() for a single flat
-    spreadsheet (clinet1.xlsx). That layout is now handled by the same
-    build_preview/load_preview path used for every workbook, so the bespoke
-    function was removed. The router and seed script call the engine directly;
-    this module remains as the documented public entry point for the module.
+    The old non-order-scoped load_preview() was retired (F00/F83): every commit
+    now targets a specific client order via load_preview_into_order(), so the
+    facade requires an order_number. The router calls the engine + loader
+    directly today (documented D2 layering debt, CLAUDE.md §13.8); this module
+    remains the importable public entry point.
 ================================================================================
 """
 from __future__ import annotations
@@ -21,7 +22,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from app.modules.imports.import_engine import build_preview
-from app.modules.imports.load_to_db import load_preview
+from app.modules.imports.load_to_db import load_preview_into_order
 
 
 def preview_workbook(path: str) -> dict:
@@ -29,8 +30,14 @@ def preview_workbook(path: str) -> dict:
     return build_preview(path).summary()
 
 
-def commit_workbook(db: Session, path: str, country_map: dict | None = None) -> dict:
-    """Parse then write a workbook to the DB (idempotent). Returns load stats."""
+def commit_workbook(db: Session, path: str, *, order_number: str,
+                    replace: bool = True) -> dict:
+    """Parse then write a workbook into the given client order (idempotent).
+
+    Returns a {"summary", "written"} stats dict.
+    """
     preview = build_preview(path)
-    return {"summary": preview.summary(),
-            "written": load_preview(db, preview, country_map=country_map)}
+    written = load_preview_into_order(
+        db, preview, order_number=order_number, replace=replace,
+    )
+    return {"summary": preview.summary(), "written": written}

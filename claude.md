@@ -1,353 +1,380 @@
-# CLAUDE.md — Kairox Leather Intelligence Platform
+# CLAUDE.md — KairoX ERP (Phase 1)
 
-> **Audience:** Claude Code (and any AI coding assistant) + new engineers.
-> **Purpose:** Single source of truth for *how this codebase is shaped, why, and what NOT to break.*
-> **Pair with:** `backend/README.md` (run instructions), `backend/FRONTEND_HANDOFF.md` (contract for FE), `Leather_Factory_Workflow.docx` (domain spec / RAG source).
+> **Scope of this file.** Everything the system does **up to and including production tracking**:
+> materials → barcode → breakdown upload → production stages → attendance → wages → analytics,
+> plus `main.py`, Alembic migrations, and the test suite.
+>
+> **Out of scope here** (Phase 2, the Aug-20 deadline): `bom`, `procurement`, `inventory`,
+> `supplier_po`. Those are the auto-generation pipeline and are documented separately.
+> See the **"Material vs Inventory"** section for why the Phase-1 `material` module is
+> *deliberately separate* from the Phase-2 `inventory` module — they are not duplicates.
 
 ---
 
-## 1. What this is
+## 1. What KairoX is
 
-Real-time production tracking + piece-rate / monthly / daily-wage payroll + AI assistant for a make-to-order **leather garment factory**. Replaces a paper-and-WhatsApp workflow.
+A production-management ERP for a **leather garment factory**. It manages the order-to-production
+lifecycle and gives **per-piece traceability**: every individual garment carries a barcode from
+the moment the breakdown sheet is uploaded, and every action on it (cutting, stitching, storage,
+inspection, export) is scanned and logged against that barcode.
 
-End users: **Direct Manager (superuser)**, Cutting Manager, Stitching Manager, Supervisor (daily-wage proxy), shop-floor Employees, external Clients (read-only on their own orders), Viewers (HR/accounts).
+**The real-world business flow the app models:**
 
-Single shipped repo:
+1. Client sends an **order sheet + spec sheet**.
+2. The **Direct Manager (designer)** creates a **breakdown sheet** from those inputs.
+3. **BOM costing** is finalised by the **MD** (by hand, in Phase 1).
+4. BOM goes to the client; production starts **only after client approval**.
+5. Production runs against the **breakdown sheet**, not the raw spec.
+
+**Phase 1 (this document) = the system of record + tracking layer.** Humans still drive BOM and
+costing. The app tracks materials, mints per-piece barcodes at breakdown upload, and records every
+production event, attendance, and wage.
+
+---
+
+## 2. Tech stack
+
+- **Backend:** FastAPI (async), Python, SQLAlchemy (async `asyncpg`; sync `psycopg2` for Alembic), Pydantic v2
+- **DB:** PostgreSQL (Supabase). `app_user.role` is a **native PG enum** (`user_role`) — see §11.
+- **Migrations:** Alembic (deterministic constraint naming)
+- **Auth:** self-issued JWT; roles enforced per-route
+- **Frontend:** Next.js / Expo (2 devs) — coordinate API contracts
+- **Tests:** pytest + pytest-asyncio over in-memory async SQLite (`aiosqlite`); httpx for HTTP layer
+
+---
+
+## 3. Roles (`UserRole`) and who does what
+
+| Role | Value | Phase-1 responsibility |
+|---|---|---|
+| Managing Director | `managing_director` | Superuser; finalises costing; bypasses stage gates |
+| Direct Manager | `direct_manager` | Designer; uploads breakdown; drawer RECEIVED/SENDED; bypasses stage gates |
+| Cutting Manager | `cutting_manager` | Logs leather cutting + fusing; creates material lots |
+| **Lining Manager** | `lining_manager` | **NEW in Phase 1** — logs the lining-cut path |
+| Stitching Manager | `stitching_manager` | Logs pasting, line-stitching, shell-stitching |
+| Supervisor | `supervisor` | Reads the floor roster (no attendance writes, no user creation) |
+| HR | `hr` | Employees, wages visibility, designation backfill, attendance operator |
+| **Security** | `security` | **Gate operator** — scans employee cards in and out |
+| Client | `client` | (read-only order views — not core to Phase 1 floor) |
+| Viewer | `viewer` | Read-only |
+| ~~Employee~~ | ~~`employee`~~ | **LEGACY — never minted. Workers get no login.** |
+
+**Rule: SHOP-FLOOR WORKERS ARE NOT GIVEN SYSTEM ACCESS.** A worker has no login and no
+`app_user` row, so creating one needs no phone, email or password — just a name, a designation
+and a wage type. They are identified on the floor by their **employee barcode**, and their
+attendance is entered *for* them by an **operator: SECURITY / HR / MD / DM**
+(`core.enums.ATTENDANCE_OPERATOR_ROLES`). `UserRole.login_roles()` is the authority on who may
+hold a login; `UserService._reject_non_login_role` is the single choke point that enforces it,
+so neither the users API nor the employee-create path can put a worker in `app_user`.
+
+The `employee` value stays in the enum only because `app_user.role` is a **native PG enum**
+(values cannot be dropped) and pre-change rows may still carry it. The `block_employees`
+dependency now guards those legacy tokens only.
+
+---
+
+## 4. The data hierarchy
 
 ```
-leather_factory_backend_with_attendance/
-├── backend/        FastAPI modular monolith (the source of truth)
-└── frontend/       Next.js + JavaScript (consumes /api/v1, mocks via openapi.json)
+Client
+ └── ClientOrder            (order_number)
+      └── Style             (name, article — e.g. "CLERMONT")
+           └── SKU          (colour + size + qty_ordered; code = order·style·colour·size)
+                └── Piece   (ONE physical garment; seq 1..N within the SKU)
 ```
 
----
-
-## 2. Tech stack — exact pins matter
-
-**Backend** (FastAPI modular monolith, microservice-ready):
-- Python 3.12, FastAPI 0.115.0, Uvicorn
-- SQLAlchemy 2.0 async + **asyncpg** (live API)
-- SQLAlchemy sync + **psycopg2-binary** (Alembic + `scripts/seed.py` only)
-- aiosqlite for tests (in-memory)
-- Alembic 1.13.2, Pydantic 2.9.2, pydantic-settings
-- **Auth:** self-issued **HS256 JWT** via `python-jose` + `passlib[bcrypt]` (bcrypt pinned at 4.0.1 — passlib 1.7.4 breaks on bcrypt ≥4.1; do not bump without testing)
-- openpyxl 3.1.5 for Excel ingestion
-- pytest 8.3.3 + pytest-asyncio 0.24.0 + httpx 0.27.2
-
-**AI / Intelligence** (verified 2026 set, see `requirements.txt`):
-- LangGraph ≥1.2, LangChain ≥1.2, LangChain-core ≥1.4, LangSmith ≥0.8
-- langchain-huggingface + sentence-transformers (embeddings)
-- langchain-community + faiss-cpu (RAG)
-- python-docx (reads the workflow doc)
-- Chat model: pluggable via `CHAT_MODEL` env. Default = deterministic router (no LLM). Recommended local = `ollama:qwen2.5:3b-instruct`.
-
-**Frontend:** Next.js + JavaScript. Auth = OAuth2 password flow (form-encoded), Bearer token on every call.
-
-**Database:** PostgreSQL 16 in Docker. SQLite (in-memory) used only for tests. **We migrated OFF Supabase** — we mint our own JWTs now. Do not reintroduce Supabase.
+- **`Piece` is the tracked unit.** Its `code` (STYLE-COLOUR-SIZE-seq) **is** the parent barcode.
+- A piece also carries `needs_lining` (from the breakdown) and `drawer_id` (its assigned drawer).
+- Pieces are minted at **breakdown upload**, not at cutting (see §6).
 
 ---
 
-## 3. Architecture — the rules that keep this maintainable
+## 5. Stage 0 — Materials & inventory (Phase 1, human-driven)
 
-### 3.1 Modular monolith, microservice-ready
+Three categories, all with the same flow: **Leather**, **Lining**, **Accessories** (buttons, zips,
+thread, other). This is the `material` module — **not** the Phase-2 `inventory` module (§12).
 
-One deployable app, internally split into self-contained domain modules. Each module follows:
+### Stock check → order
+- DM picks a category, filters by the fields that apply to it (see table below).
+- Clicks CHECK → system shows **on-hand / reserved / available** (`available = on-hand − reserved`).
+- DM enters the required quantity; if short, clicks ORDER → system **suggests a supplier** from the article.
+- Supplier order status: **ORDERED → ARRIVED**.
 
+### Receiving / approval
+- DM records **APPROVED** and **REJECTED** quantities separately.
+- Rejected qty is **logged** (supplier quality history).
+- Approved qty is **added to stock**; the requirement is **RESERVED** so it can't be spent elsewhere.
+
+### Adding new material — STRICT per-category fields
+Every lot must carry exactly its category's fields, else the API rejects it (422). Creating a lot
+**mints a child barcode** — that is how material formally enters inventory.
+
+| Category / subtype | Required fields | Quantity field (uom) | Filters |
+|---|---|---|---|
+| Leather | thickness, dcm | dcm (dcm) | article, colour, thickness |
+| Lining / plain | thickness, mtrs | mtrs (mtrs) | article, colour, thickness |
+| Lining / ribs | kg | kg (kg) | article, colour |
+| Lining / knit | pcs | pcs (pcs) | article, colour |
+| Accessory / button | size, count | count (pcs) | article, colour, size |
+| Accessory / zip | size, count | count (pcs) | article, colour, size |
+| Accessory / thread | thickness, mtrs | mtrs (mtrs) | article, colour, thickness |
+| Accessory / other | description, count | count (pcs) | article, colour |
+
+`article` + `colour` are required for every material. `GET /materials/spec?category=&subtype=`
+returns this list at runtime so the frontend renders the right form + filter boxes.
+
+**Three stored numbers per material:** `on_hand` (real column), `reserved` (a reservation ledger,
+never mutates on_hand), `available` (derived — never stored, so the two can't drift).
+
+---
+
+## 6. The barcode system (the spine of Phase 1)
+
+### One registry, one front door
+`BarcodeRegistry` is the single table every scan resolves through. Each printed code — a piece, a
+material lot, a drawer, an employee card — has exactly one row, carrying its `type`, `status`, and a
+nullable FK to the domain row it names.
+
+**`resolve(code)`** is one indexed lookup:
+- unknown code → **404**
+- retired employee card → **410 Gone** (distinct from "never existed")
+- otherwise → the code's `type` + a live payload for that type
+
+### Barcode types
+| Type | Minted when | Editable? |
+|---|---|---|
+| `PIECE` | breakdown upload | No — permanent garment identity |
+| `LEATHER_LOT` / `LINING_LOT` / `ACCESSORY_LOT` | material lot created | No |
+| `DRAWER` | breakdown upload (one per piece) | No — static code, recycling state |
+| `EMPLOYEE` | employee created | **Yes** — reissue / deactivate |
+
+### Employee barcode lifecycle (history is sacred)
+- **Reissue** (lost/damaged card): retire the old code, mint a new one. History untouched.
+- **Deactivate** (worker leaves): flip the registry `status` to RETIRED → resolve returns 410.
+  **The employee row, all production events, and all wage lines stay intact.** You delete the
+  scannable code, never the person or their record.
+
+---
+
+## 7. The pre-mint inversion (breakdown upload)
+
+**Before:** pieces were created at cutting.
+**Now:** pieces are minted at **breakdown upload** — a garment has a barcode identity and a drawer
+*before* it is ever cut.
+
+At upload, for every ordered unit of every SKU, the importer (`imports/premint.py`, runs **sync**
+inside the importer's transaction) creates: the **Piece**, its **parent barcode**, a **Drawer**, and
+the **drawer barcode** — atomically. It sets `needs_lining` from the breakdown and merges the piece
+to its drawer. It is **idempotent** (re-running tops up, never duplicates).
+
+---
+
+## 8. Production — the two-door log & four gates
+
+### One endpoint, two doors, NO stage buttons
+`POST /production/log` is the whole floor's logging surface. The caller sends an **actor** (employee,
+by barcode or id) and **targets** (pieces, by barcode or sku+seqs). The caller **never sends a stage**:
+
+- a **cut screen** (LEATHER_CUT / LINING_CUT) fixes the cut stage
+- otherwise the stage is **inferred** from each piece's own history (the next stage on the chain)
+
+Barcode door and manual door POST the same shape; the router resolves barcodes → ids, then the
+service sees ids only.
+
+### The pipeline
 ```
-modules/<domain>/
-├── models.py       SQLAlchemy ORM tables
-├── repository.py   Async data access (only place that talks to the DB for this module)
-├── service.py      Business rules, RBAC, cross-module orchestration
-├── router.py       FastAPI endpoints (HTTP shell, no business logic here)
-├── schemas.py      Pydantic API contracts
-└── __init__.py     Module docstring
-```
-
-### 3.2 The ONE non-negotiable rule
-
-**Cross-module access goes through `service.py` — NEVER another module's `repository`, `models`, or `router`.**
-
-Enforced in CI by **import-linter** (`.importlinter`). To later split a module into its own service: lift the folder, replace the in-process service call with an HTTP call. *Nothing else changes.* Do not bypass this for "just one quick call."
-
-### 3.3 Async-first
-
-The live API is fully async (asyncpg + SQLAlchemy async). The **only** sync contexts are:
-1. Alembic migrations
-2. `scripts/seed.py`
-3. The Excel importer + load_to_db (run via `starlette.concurrency.run_in_threadpool` from async routes — do not rewrite as async without measuring)
-
-Both engines live in `app/core/database.py`. Don't create engines anywhere else.
-
-### 3.4 Layering inside a module
-
-`router → service → repository → models`. Enforced by import-linter. Router never imports a repository. Service never imports another module's repository.
-
-### 3.5 What lives in `app/core/` (and what doesn't)
-
-```
-app/core/
-├── config.py     pydantic-settings; reads .env, exposes `settings` singleton
-├── database.py   async_engine + AsyncSessionLocal + get_db(); sync engine + SessionLocal
-├── enums.py      UserRole, WageType, RunStatus, ShipMode  (str-Enums)
-├── models.py     UUIDMixin, TimestampMixin, GUID (portable UUID for Postgres + SQLite)
-└── security.py   JWT mint/verify, bcrypt, get_current_user, require_roles, rate limiter
-```
-
-`app/core/` **never** imports from `app/modules/`. Acyclic dependency graph.
-
----
-
-## 4. Module map — what each domain owns
-
-| Module          | Owns                                                                                                                          | Public service interface (what others may call)                          |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| **users**       | The ONE login table (`app_user`), self-issued JWT, RBAC. Provisions client + employee logins.                                  | `authenticate`, `create_user`, `create_client_user`, `change_password`    |
-| **clients**     | `Client → PurchaseOrder → Style → SKU` hierarchy. A CLIENT-role user scoped to their own data.                                 | `get_sku`, `get_skus_for_style`, `get_style`, `list_clients`              |
-| **employees**   | Shop-floor workers. `wage_type` is a property of the PERSON, set explicitly.                                                   | `get`, `monthly_employees`, `create`                                      |
-| **production**  | Operations, `operation_access` (role→op config), `production_event` (the central event stream). Enforces RBAC + attendance-today gate. | `log_event`, `piece_counts`, `style_progress`, `list_operations`          |
-| **attendance**  | `ShiftConfig` singleton (HR-editable), `AttendanceLog` (one row per employee per day). Haversine geofence (100m default). Three flows: self, supervisor proxy, daily-worker onboard. | `is_present_today`, `days_present`, `today_roster`, `history`             |
-| **wages**       | Effective-dated `Rate` table, **FROZEN** `WageRun`/`WageLine` snapshots. Three pay forks: piece_rate, monthly, daily_wage.       | `compute_run`, `get_run`, `set_rate`                                      |
-| **analytics**   | Read-only cross-module aggregates: dashboard, stage-spread bottleneck alerts, sea-freight risk predictor.                       | `factory_overview`, `stage_spread_alerts`, `freight_risk`                 |
-| **imports**     | Idempotent Excel ingestion (preview + commit). Handles messy real workbooks.                                                    | `preview_workbook`, `commit_workbook`                                     |
-| **intelligence**| LangGraph ReAct agent + deterministic fallback + RAG over workflow doc. Math lives in tools, never in the LLM.                  | `IntelligenceService.ask(question, use_llm)`                              |
-| **procurement** | RESERVED — no models yet. Boundary established for Stage 4 of workflow.                                                         | —                                                                          |
-
----
-
-## 5. Data model in one paragraph
-
-`Client → PurchaseOrder → Style → SKU(style + colour + size)`. Production is one event stream: each `production_event` row = one employee did N pieces of one operation on one SKU on one day. Weekly cards, wages, dashboards, freight alerts — all **DERIVED** from that stream. **Pieces are NOT assumed to conserve across stages** (rework/recuts happen; Carnaby: Cutting 152, Pasting 155 is normal). The spread is *surfaced as a metric* in analytics, **never rejected** at write time.
-
-`AttendanceLog` is one row per `(employee_id, work_date)` — UniqueConstraint enforces this at the DB level, not in code.
-
----
-
-## 6. Auth model
-
-- **One central `app_user` table** logs in everyone (managers, employees, supervisors, clients, viewers).
-- **Login id = phone number.** OAuth2 password flow at `POST /api/v1/auth/login` (the `username` field carries phone).
-- **Self-issued HS256 JWT** signed with `settings.secret_key`. Token payload: `{sub, role, name, exp}`. No network call to verify.
-- Seeded password = phone number (bcrypt-hashed), `must_change_password=True`. **Phone-as-password is v1 mocked-data convenience only — rotate before real production use.**
-- `require_roles(*allowed)` dependency restricts endpoints. **`DIRECT_MANAGER` always bypasses** role gates (superuser).
-- Rate limit: 5 login attempts / 10 min per phone. In-process counter — **move to Redis if you scale to >1 API replica.**
-
-### Roles (`UserRole` enum)
-`DIRECT_MANAGER`, `CUTTING_MANAGER`, `STITCHING_MANAGER`, `SUPERVISOR`, `EMPLOYEE`, `CLIENT`, `VIEWER`.
-
-Adding a role = add a line to `app/core/enums.py`. The rest of the app picks it up.
-
----
-
-## 7. Critical conventions — DO and DO NOT
-
-### DO
-
-- **Idempotent on re-run.** The seed script and the importer both replace-on-key. Any new ingestion must be safe to re-run.
-- **Server-side timestamps for attendance** (`datetime.now(timezone.utc)`). Client-side clocks are not trusted (spec).
-- **Compute flags at write time** (is_late, is_short, is_overtime) — dashboards must never recompute on read.
-- **Use `GUID` from `app/core/models.py`** for UUID columns. Storing native UUID on Postgres, CHAR(32) on SQLite — keeps tests portable.
-- **Use `selectinload`** for eager-loading nested trees (e.g. PO → Style → SKU) — lazy loads are unsafe under async.
-- **Validate against the source.** The importer checks computed totals against the workbook's own printed totals (GRAND TOTAL, QTY row). Preserve that pattern.
-- **Verify, don't stub.** Run the code, see the output. If it's not executed, it's not done.
-
-### DO NOT
-
-- ❌ **Do not reject piece-count differences across operations.** Pieces don't conserve; the spread is a metric, not an error.
-- ❌ **Do not recompute a CLOSED wage run.** `WageLine` rows are a frozen snapshot. Editing an old production event must never silently rewrite past payroll.
-- ❌ **Do not infer `wage_type` from designation.** TAILOR and CUTTER appear in both monthly and piece-rate blocks in the source files. It's a property of the PERSON, set explicitly.
-- ❌ **Do not bypass `service.py` from `router.py`.** The router is a thin HTTP shell. No business logic, no direct repository calls.
-- ❌ **Do not import `os.environ` in modules.** Read `settings` from `app/core/config.py`.
-- ❌ **Do not create new engines.** Use `get_db()` (async) or `SessionLocal` (sync only for scripts).
-- ❌ **Do not let the LLM do arithmetic.** The intelligence module's tools compute exact numbers; the model only routes and phrases. This is what keeps it cheap AND accurate.
-- ❌ **Do not put migrations in `if settings.debug: create_all()`.** Production schema is owned by Alembic. The `create_all` path is dev convenience only.
-- ❌ **Do not reintroduce Supabase.** We mint our own tokens now.
-
----
-
-## 8. Project layout
-
-```
-backend/
-├── app/
-│   ├── core/                  config, db, enums, models, security
-│   ├── modules/
-│   │   ├── users/             central login, JWT auth, RBAC
-│   │   ├── clients/           Client → PO → Style → SKU
-│   │   ├── employees/         shop-floor workers
-│   │   ├── production/        operations + production_event log
-│   │   ├── attendance/        geofence + check-in/out + proxy + daily workers
-│   │   ├── wages/             rates + frozen wage runs
-│   │   ├── analytics/         read-only dashboards + alerts
-│   │   ├── imports/           Excel preview/commit (sync, run in threadpool)
-│   │   ├── intelligence/      LangGraph agent + RAG + forecast tools
-│   │   └── procurement/       RESERVED (no models yet)
-│   └── main.py                FastAPI entrypoint, lifespan, CORS, router wiring
-├── alembic/                   migrations
-├── scripts/
-│   ├── seed.py                idempotent seed from real spreadsheets
-│   ├── smoke_test.py          end-to-end against in-memory SQLite (no DB needed)
-│   └── export_openapi.py      writes openapi.json for FE mocks
-├── tests/                     pytest-asyncio, conftest provides async db fixture
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml         postgres:16 + api (runs alembic + seed + uvicorn)
-├── alembic.ini
-├── .importlinter              CI guard: layering + cross-module rules
-├── .env.example
-└── README.md
+LEATHER_CUTTING ┐
+                ├─(parallel cut paths, per piece)
+LINING_CUTTING  ┘
+   → FUSING → PASTING → [MERGE GATE] → LINE_STITCHING → SHELL_STITCHING
+   → FINAL_FINISH → FINAL_INSPECTION → PACKAGE_EXPORT
 ```
 
-Source data files live at `/mnt/project/`:
-- `employees_detail.xlsx` (24 monthly + 22 piece-rate workers)
-- `GARMENT_ORDERPRODUCTION_DETAILS.xlsx` (6 clients: KJ, GGZ, NIPAL, RICANO, JP, NIPAL-NEW)
-- `johnpeter.xlsx` (a 7th flat-format client)
-- `Leather_Factory_Workflow.docx` (the domain spec — also the RAG corpus)
+### The four gates (cheapest / most-likely-to-fail first)
+1. **ROLE** — may this manager's role log this stage? → **403 for the whole request** if not.
+2. **SKILL** — may this employee's designation work this stage? → **per-piece warning** (partial accept).
+3. **SEQUENCE** — has the piece completed the previous chain stage? → **per-piece** (`sequence_blocked`).
+4. **MERGE (completeness)** — for LINE_STITCHING only: is the piece's drawer **SENDED**
+   (leather + lining both stored and DM-released)? → **per-piece** (`merge_blocked`).
+
+Gate 1 is whole-request because the role is wrong for the whole batch. Gates 2–4 are per-piece so
+**one bad piece never loses the good ones a manager scanned with it.** MD/DM bypass the role gate.
+
+### Consumption
+The **two cut stages only** capture material consumption per piece and **decrement stock once per
+batch**, in the same transaction as the events. The lot link lives on the **event** (the act of
+cutting), never on the piece.
 
 ---
 
-## 9. How to run
+## 9. Drawers & the merge gate
 
-### Docker (recommended)
+A drawer is a physical storage slot. It has a **static code** but a **recycling state**:
+```
+WAITING → MERGED (at upload) → HOLDING_LEATHER → HOLDING_BOTH
+        → RECEIVED (DM) → SENDED (DM) → (piece ships) → WAITING
+```
+- **Store-scan:** scan the **drawer first**, then the piece. The merge map is the authority — a piece
+  scanned into the wrong drawer is a **409**.
+- **Completeness, not sequence:** a lined jacket needs leather **and** lining before it's complete;
+  a leather-only piece (`needs_lining=False`) is complete on leather alone.
+- **RECEIVED** requires completeness; **SENDED** requires RECEIVED. Line-stitching is blocked until
+  SENDED. When PACKAGE_EXPORT logs, the drawer **recycles** back to WAITING.
+
+---
+
+## 10. Attendance, Employees, Users, Wages, Analytics
+
+### Attendance
+- **Every attendance write comes from an operator login — SECURITY / HR / MD / DM.** Nobody else
+  can punch, because nobody else on the floor has a login. Both doors share one dependency
+  (`require_operator`) so the barcode door and the manual door can never drift apart.
+- **Barcode door (primary):** `POST /attendance/scan-check-in` — the operator resolves the worker's
+  card and calls the existing `_open_or_reject` / `_close` primitives, so it behaves identically to
+  the manual flow (same geofence, same late/short flags, same idempotent re-tap).
+- **Manual door (fallback):** `POST /attendance/proxy/check-in|check-out` when a card fails or is
+  forgotten. Any wage type.
+- `/attendance/check-in|check-out` is now an operator recording **their own** arrival/departure.
+- `work_date` uniqueness is enforced at the DB level; check-in is idempotent (re-tap = no-op).
+- Production logging requires the employee to be **present today**.
+
+### Employees
+- **Designations are always UPPERCASE** (`Designation.normalise`) — a controlled vocabulary that
+  drives the skill gate. Unknown designations fail-open (HR backfills).
+- **Names are unique**; a collision is prefixed `IN-CHAL`.
+- On create: **every** new employee gets an **employee barcode** (issued in the same transaction;
+  the code is returned so the card can be printed). **No login is minted for a worker** — wage_type
+  is a payroll fact and does not imply system access (a MONTHLY worker used to be auto-given an
+  `employee` login; that was removed).
+- A login *is* minted alongside the employee row when the caller passes an explicit **staff** role
+  (`schemas._EMPLOYEE_LOGIN_ROLES`: HR, SUPERVISOR, CUTTING/LINING/STITCHING_MANAGER, SECURITY) —
+  that path does need phone + password. DM/MD are created via user-creation, not here.
+
+### Users
+- Self-issued JWT. `provision_user` creates the login for monthly employees.
+- `role` is a **native PG enum** — see §11 for the migration implication.
+
+### Wages
+- **One line per employee per run.** PIECE_RATE and MONTHLY are **mutually exclusive** — never both.
+- Rates are **date-effective**: a mid-period rate change prices each day at the rate effective that day.
+- Wage runs support **recomputation with a full audit trail**.
+- A **closed run is a frozen snapshot** — never recomputed.
+- Wages visible only to **HR / DM / MD**.
+
+### Analytics (read-only — never writes, owns no tables)
+- Factory overview, order/style explorer, stage spread, freight-risk alerts.
+- **Piece life story** (barcode feature): every stage a piece passed — who, when, rework flag,
+  leather consumption at cutting, current stage + what it's waiting on.
+- **Consumption vs stock**: leather consumed per style, summed from cut events.
+- Analytics is a **live** view; payroll of record stays the frozen wage run — they legitimately
+  differ mid-period.
+
+---
+
+## 11. main.py (app assembly)
+
+- Modular **monolith**: one deployable app, many internal modules; cross-module calls go through
+  services (so a module can later be lifted out).
+- **All model modules must be imported** so `Base.metadata` sees every table (a missed import makes
+  Alembic autogenerate try to DROP the table — the schema-drift trap). `barcode.models` holds the
+  barcode + material + drawer + supplier tables.
+- **Router locking:** manager-only routers are wrapped with `block_employees`; **auth, users,
+  attendance and `/barcode/resolve` stay open** at the router level — the attendance write routes
+  do their own operator gate (`require_operator`), and resolve must stay reachable from the
+  attendance screen. `block_employees` now shuts out legacy `employee` tokens only.
+- **One `lifespan`** (deps check + optional sweepers + dev `create_all`). Do not define two.
+- Register routers under `/api/v1`.
+
+**Known traps that were fixed (don't reintroduce):** importing `api` from `sqlalchemy.event` (wrong
+object — use `app.include_router`); defining `lifespan` twice (the second silently overrides);
+importing `block_employees` before it exists in `users/deps.py`.
+
+---
+
+## 12. Material vs Inventory — do NOT merge them
+
+**These are two different systems for two different phases. Keep them separate.**
+
+| | `material` (Phase 1, this doc) | `inventory` (Phase 2, Aug-20) |
+|---|---|---|
+| Driven by | a human typing a lot in | a **BOM** + a spreadsheet upload |
+| Keyed to | category / subtype / article | a **`bom_id`** |
+| Has | lot barcodes, 3 floor categories, per-type fields, on-hand/reserved/available | `MaterialAlias`, `UomConversion`, BOM-keyed checks & reservations |
+| Core ops | `create_lot`, `stock`, `receive`, supplier orders | `run_inventory_check(bom_id)`, `release_reservations(bom_id)`, alias matching |
+
+**Why not reuse `inventory`?** Its every operation is keyed to a `bom_id`, it ingests spreadsheets,
+and it carries alias/UOM machinery for matching messy BOM text — none of which the human floor flow
+has or wants. In Phase 1 **there is no BOM** (humans do costing by hand), so there is nothing to key
+`inventory` to.
+
+**Why not overwrite `inventory` with `material`?** The BOM module (Aug-20) *depends on* the inventory
+service — `run_inventory_check`, `release_reservations`, the alias matcher. Replacing it breaks the
+BOM pipeline before it ships.
+
+**The future bridge (Phase 2, when BOM is proven):** the plan is to *connect* them, not replace one.
+The BOM's `inventory_check` will read stock; the physical stock it reads against **is** the material
+lots. The manual "manager checks stock and places order" step gets replaced by the BOM system doing
+it automatically — but the storage layer (material lots, on-hand/reserved/available) stays. Keeping
+them separate now is exactly what makes that connection a bridge instead of a rewrite.
+
+---
+
+## 13. Alembic migrations
+
+- **`app_user.role` is a native PG enum** (`Enum(UserRole, name="user_role")`). Adding
+  `LINING_MANAGER` to the Python enum is **not enough** — Postgres needs the value added to the DB
+  type. The barcode migration's **first statement**:
+  ```python
+  if op.get_bind().dialect.name == "postgresql":
+      op.execute("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'lining_manager'")
+  ```
+  (Guarded so it's a no-op on SQLite, where there is no native enum.)
+- The barcode migration adds: `barcode_registry`, `drawer`, `material_lot`,
+  `material_reservation`, `material_receipt`, `supplier`, `supplier_order`, plus the 5 columns on
+  `piece` / `production_event`.
+- Set the migration's `down_revision` to your current head (`alembic heads`) before running.
+- **Portability watch (future Oracle):** ids come from the app (`uuid4`), not `gen_random_uuid()`;
+  no `JSONB` operators or `ON CONFLICT` in the feature — keep it that way.
+
+---
+
+## 14. Tests (five layers, money-paths-first)
+
+Priority: **money paths > data-integrity paths > read paths.**
+
+| Layer | Location | What it proves | Runs on |
+|---|---|---|---|
+| 1 · Unit | `tests/unit/` | pure gate/stage/designation predicates | no DB (ran: 49/49 pass) |
+| 2 · Integration | `tests/integration/` | two-door log, 4 gates, consumption + single decrement, merge gate, barcode lifecycle, strict materials, pre-mint | SQLite |
+| 3 · Functional | `tests/functional/` | one garment cut→export + drawer recycle | SQLite |
+| 4 · System/E2E | `tests/system/` | through the FastAPI routers (status codes, role guards) | httpx |
+| 5 · UAT | `tests/uat/` | 7 business scenarios (upload→pieces, cut→stock, skill block, no-skip, merge gate, leaver history-safe, shortfall→receive) | SQLite |
+
 ```bash
-cd backend
-docker compose up --build
-# API:        http://localhost:8000
-# Swagger UI: http://localhost:8000/docs
-# Login:      9000000001 / 9000000001  (seeded direct manager)
-```
-The api container runs migrations, seeds from the real spreadsheets, and starts uvicorn.
-
-### Local (no Docker)
-```bash
-pip install -r requirements.txt
-cp .env.example .env                # point DATABASE_URL at your Postgres
-alembic upgrade head                # (or rely on DEBUG auto-create for dev)
-python -m scripts.seed              # loads employees, 7 clients, rates, logins
-uvicorn app.main:app --reload
+pip install pytest pytest-asyncio aiosqlite httpx
+pytest tests/ -v                    # all layers
+python verify/run_logic_checks.py   # pure logic, no deps -> PASSED 49 FAILED 0
 ```
 
-### Tests
-```bash
-pytest -q                           # async tests, in-memory SQLite via conftest
-python -m scripts.smoke_test        # end-to-end ASGI check (no Postgres needed)
-```
-
-### Frontend mocks
-```bash
-python -m scripts.export_openapi    # -> openapi.json
-npx @stoplight/prism-cli mock openapi.json
-```
-
-### Turning on a real chat model (optional)
-```bash
-export CHAT_MODEL=ollama:qwen2.5:3b-instruct      # local, free
-# or: anthropic:claude-3-5-haiku-latest / openai:gpt-4o-mini
-export LANGCHAIN_TRACING_V2=true                  # optional LangSmith tracing
-```
-Then `POST /api/v1/chat` with `{"question": "...", "use_llm": true}`. No model configured → deterministic router (still exact).
+- **SQLite proves logic; add a Postgres CI job** to prove the migration + native-enum path.
+- `GUID()` degrades to CHAR(32) and `JSON` off Postgres — the feature uses nothing Postgres-only, so
+  SQLite is a faithful stand-in for the tests.
 
 ---
 
-## 10. API surface (every route under `/api/v1`)
+## 15. Working principles (how to build in this repo)
 
-| Prefix         | Endpoints                                                                                                  |
-| -------------- | ---------------------------------------------------------------------------------------------------------- |
-| `/auth`        | `POST /login`, `GET /me`, `POST /change-password`                                                          |
-| `/users`       | `GET /`, `POST /`, `POST /clients` (direct manager creates client login)                                   |
-| `/clients`     | `GET /`, `POST /`, `GET /{id}/orders`                                                                      |
-| `/employees`   | `GET /`, `POST /`                                                                                          |
-| `/production`  | `GET /operations`, `POST /events`, `GET /events`, `GET /styles/{id}/progress`                              |
-| `/attendance`  | `POST /check-in`, `POST /check-out`, `POST /proxy/check-in`, `POST /proxy/check-out`, `POST /daily-workers`, `GET /me`, `GET /today`, `GET /config`, `PATCH /config` |
-| `/wages`       | rates CRUD, `POST /runs` (compute + freeze), `GET /runs/{id}`                                              |
-| `/analytics`   | `GET /overview`, `GET /alerts/stage-spread`, `GET /alerts/freight-risk?today=`                             |
-| `/imports`     | `POST /preview` (dry-run), `POST /commit` (idempotent write) — both direct-manager only                    |
-| `/chat`        | `POST /` (full JSON answer), `POST /stream` (SSE for typing UI)                                            |
-
-`GET /health` and `GET /` exposed at root for liveness checks.
-
----
-
-## 11. The intelligence module — design rules
-
-- **Math in tools, not in the model.** Each tool pulls real rows from the DB, runs deterministic forecast math, returns a structured result. The LLM only chooses the tool and phrases the result. Keeps answers exact AND cheap.
-- **Two backends, same response shape `{answer, tool, data}`:**
-  - `DeterministicRouter` — keyword/entity routing. Default. No model. Zero cost. Already correct for the killer questions.
-  - `LangGraph ReAct agent` (`langgraph_agent.py`) — real model bound to the same tools via `@tool`. Activated when `CHAT_MODEL` is set. Falls back to deterministic on any error — never returns a 500.
-- **RAG only for free-text** (the workflow `.docx`). Numeric questions never go through RAG. See `rag.py` — chunk → embed → FAISS → top-k → post-filter on similarity threshold.
-- **Tools currently bound:** `schedule_status`, `bottleneck`, `plan_production`, `factory_overview`, `search_workflow_docs`.
-- **Models catalogue:** `models_catalog.py` documents embedding picks (default `all-MiniLM-L6-v2`, multilingual option `bge-m3`) and chat picks. **Note:** `MiniMaxAI/MiniMax-M2` is a chat LLM, NOT an embedding model — don't wire it as embeddings.
-
----
-
-## 12. Testing approach
-
-- **Async fixtures** in `tests/conftest.py` — in-memory SQLite via `StaticPool`, schema created fresh per test.
-- **Real-file integration tests** for the importer (skip if `/mnt/project/GARMENT_ORDERPRODUCTION_DETAILS.xlsx` is missing) — verify known totals: GGZ=146, NIPAL=259, RICANO=150 pieces ordered.
-- **Determinism check:** parsing the same workbook three times must produce identical signatures.
-- **Smoke test** (`scripts/smoke_test.py`) — full ASGI loop against in-memory SQLite, exercises auth + RBAC + analytics. Run after any change.
-- **No mocks of the SQLAlchemy layer.** Tests run real queries against SQLite.
-
----
-
-## 13. Outstanding work / known improvements
-
-These are tracked. If you touch nearby code, fix them in the same PR:
-
-1. **Unique DB constraint on `Client.name`** — currently relies on get-or-create logic; concurrent imports could race.
-2. **Dead `if False` branch** in `parse_production.py` — remove.
-3. **`ProductionEvent` cleanup on re-import** — replace-mode for production events appears incomplete; verify before next prod import.
-4. **File-size guard** in the imports upload handler — currently unbounded.
-5. **N+1 delete loops** in the importer — replace with bulk deletes.
-6. **Fuzzy worker-tag detection** in `parse_production.py` — tighten the regex; some weekly-period rows are misclassified as worker rows.
-7. **Style-matching logic** — currently fragile string matching; replace with explicit parsed fields.
-8. **Imports HTTP layer bypasses `service.py`** — router calls `build_preview` + `load_preview` directly. Route through `imports.service` for consistency with every other module.
-9. **Login rate limiter is in-process** — move to Redis when scaling beyond 1 replica.
-
----
-
-## 14. Workflow expectations when contributing
-
-- **Show working code, not stubs.** "Done" means it was executed and the output verified. Untested code is not done.
-- **Multi-level explanations on request.** When asked to teach, give beginner / intermediate / advanced views simultaneously — that's the explicit ask.
-- **"Continue" means resume current task**, not start something new.
-- **When a decision is yours to make** (architectural choice, naming, default value) and the user is silent → make the call, document it inline, move on. Do not block.
-- **Push back on incompleteness.** If a previous step looks stubbed, over-cautious, or deferred, call it out explicitly rather than papering over it.
-- **Format preference:** dense prose, abbreviated where unambiguous, run-on sentences fine. Skip bullet bloat for casual answers.
-- **Documentation deliverables.** Technical manuals + CEO-facing overviews + developer-flow docs are produced as Word documents via the `docx` skill when requested.
-
----
-
-## 15. Environment variables (`.env`)
-
-```
-ENVIRONMENT=local                # local | staging | production
-DEBUG=true                       # auto-create tables on startup (dev only)
-
-DATABASE_URL=postgresql+psycopg2://factory:factory@localhost:5432/factory
-ASYNC_DATABASE_URL=              # blank = auto-derive (psycopg2 → asyncpg)
-
-SECRET_KEY=change-me-to-a-long-random-string
-ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=1440
-
-LOGIN_MAX_ATTEMPTS=5
-LOGIN_WINDOW_SECONDS=600
-
-SEA_CUTOFF_WARNING_DAYS=7
-
-CHAT_MODEL=                      # blank = deterministic; or ollama:qwen2.5:3b-instruct
-LANGCHAIN_TRACING_V2=            # optional LangSmith
-LANGCHAIN_API_KEY=
-```
-
----
-
-## 16. Quick reference — first 5 minutes in this codebase
-
-1. `app/main.py` — see how every module's router gets wired under `/api/v1`.
-2. `app/core/enums.py` — the role + wage-type vocabulary the whole app shares.
-3. `app/modules/production/service.py` — the cleanest example of the layering + the attendance-gate pattern.
-4. `app/modules/wages/service.py` — see how a frozen run is computed across three pay forks.
-5. `app/modules/intelligence/langgraph_agent.py` — see how tools are bound and how the deterministic fallback keeps the chat endpoint from ever 500-ing.
-
-If something is unclear: the docstring at the top of each file is the design rationale. Read that before changing the code.
+- **Repository = all DB access. Service = business logic. Router = HTTP only.** Commits belong in the
+  service (batch the whole scan into one transaction), never scattered.
+- **Approval gates are hard, audited state transitions** (drawer RECEIVED/SENDED, costing/client
+  approval), never soft booleans — write an `audit_log` row.
+- **The breakdown sheet is the production source of truth** — production events reference the
+  breakdown, not the raw spec.
+- **Lazy imports** keep the module graph acyclic: `production.service → materials.service` and
+  `→ drawers.service`, and `drawers.service → production.models`, are imported **inside the method**
+  that uses them. Don't hoist them.
+- **Designations UPPERCASE, names unique, wages one-line-per-employee-per-run, closed runs frozen** —
+  these are invariants, not preferences.
+- **Phase-1 manual paths must converge with Phase-2 auto-generation on ONE contract**, not two — build
+  the seam now (e.g. breakdown ingestion is shaped so an auto-generated breakdown flows through the
+  same validation/storage/approval surface).

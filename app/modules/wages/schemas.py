@@ -21,7 +21,7 @@ TWO RUN SHAPES, DELIBERATELY DIFFERENT.
 ================================================================================
 """
 import uuid
-from datetime import date
+from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -130,6 +130,17 @@ class UnratedOperation(BaseModel):
     unpaid_pieces: int
 
 
+class WageLineBreakdown(BaseModel):
+    """One (style x operation) contribution to an employee's payroll line."""
+    style_code: str
+    style_name: str
+    operation_code: str
+    operation_label: str
+    pieces: int
+    rate: float          # rupees per piece applied to these pieces
+    amount: float
+
+
 class WageLineDetail(BaseModel):
     id: uuid.UUID
     employee_id: uuid.UUID
@@ -138,6 +149,11 @@ class WageLineDetail(BaseModel):
     wage_type: str
     pieces: int
     amount: float
+    # Null when the employee worked more than one style/operation — read
+    # `breakdown` instead of averaging, which would be a number nobody was paid.
+    rate: float | None = None
+    style_codes: list[str] = Field(default_factory=list)
+    breakdown: list[WageLineBreakdown] = Field(default_factory=list)
 
 
 class WageRunSummary(BaseModel):
@@ -150,11 +166,12 @@ class WageRunSummary(BaseModel):
     employee_count: int
     unrated_operations: list[UnratedOperation] = Field(default_factory=list)
     lines: list[WageLineDetail] = Field(default_factory=list)
-    # Days between the last closed run's end and this run's start. Non-zero means a
-    # stretch of work was never covered by any payroll. Informational — hand-typed
-    # periods make gaps possible and nothing else would catch them.
     gap_days: int = 0
+    recomputed: bool = False
+    recompute_count: int = 0
 
 
 class WageRunDetail(WageRunSummary):
     lines: list[WageLineDetail]
+    last_recomputed_at: datetime | None = None
+    last_recomputed_by: str | None = None

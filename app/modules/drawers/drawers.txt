@@ -1,0 +1,336 @@
+
+====================================================================================================
+FILE: init.py
+====================================================================================================
+
+"""drawers-feature module."""
+
+
+====================================================================================================
+FILE: router.py
+====================================================================================================
+
+"""
+================================================================================
+modules/drawers/router.py — Drawers & merge-gate HTTP API (async)
+================================================================================
+POST /drawers/store-scan         scan drawer, then piece → record a part in
+POST /drawers/{id}/receive       DM sets RECEIVED → SENDED (the gate release)
+
+store-scan resolves the barcode door (drawer_barcode / piece_barcode) or the
+manual door (drawer_id / piece_id) to ids, then delegates. receive is DM/MD only.
+================================================================================
+"""
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
+from app.core.enums import DrawerPart, UserRole
+from app.modules.barcode.service import BarcodeService
+from app.modules.drawers import schemas
+from app.modules.drawers.service import DrawerService
+from app.modules.users.deps import get_current_user, require_roles
+from app.modules.users.models import User
+
+router = APIRouter(prefix="/drawers", tags=["Drawers"])
+
+
+@router.post("/store-scan", response_model=schemas.StoreScanResult)
+async def store_scan(
+    body: schemas.StoreScanRequest,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(
+        UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER,
+        UserRole.CUTTING_MANAGER, UserRole.LINING_MANAGER,
+        UserRole.STITCHING_MANAGER, UserRole.SUPERVISOR)),
+):
+    """Record a leather or lining part arriving in its drawer. Scan the drawer
+    first (the merge map is the authority), then the piece.
+
+    H2: floor staff only. This write feeds the merge gate that releases a piece
+    into line-stitching — CLIENT and VIEWER tokens must not reach it."""
+    """Record a leather or lining part arriving in its drawer. Scan the drawer
+    first (the merge map is the authority), then the piece."""
+    barcodes = BarcodeService(db)
+    drawers = DrawerService(db)
+
+    if body.drawer_id:
+        drawer_id = body.drawer_id
+    elif body.drawer_barcode:
+        drawer_id = await barcodes.resolve_drawer_id(body.drawer_barcode)
+    else:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "Provide drawer_barcode or drawer_id.")
+
+    if body.piece_id:
+        piece_id = body.piece_id
+    elif body.piece_barcode:
+        piece_id = await barcodes.resolve_piece_id(body.piece_barcode)
+    else:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "Provide piece_barcode or piece_id.")
+
+    return await drawers.store_scan(
+        drawer_id=drawer_id, piece_id=piece_id, part=DrawerPart(body.part))
+
+
+@router.post("/{drawer_id}/receive", response_model=schemas.DrawerTransitionResult)
+async def transition(
+    drawer_id: uuid.UUID,
+    body: schemas.DrawerTransition,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(
+        UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR)),
+):
+    """DM/MD sets RECEIVED (completeness confirmed) then SENDED (release to
+    line-stitching). No line-stitching event logs for a piece until SENDED."""
+    return await DrawerService(db).transition(
+        drawer_id, body.transition, actor_id=user.id)
+
+
+====================================================================================================
+FILE: schemas.py
+====================================================================================================
+
+"""modules/drawers/schemas.py — API contract for drawers & the merge gate."""
+import uuid
+
+from pydantic import BaseModel, Field
+
+
+class StoreScanRequest(BaseModel):
+    # Either code or id for each — barcode door sends codes, manual sends ids.
+    drawer_barcode: str | None = None
+    drawer_id: uuid.UUID | None = None
+    piece_barcode: str | None = None
+    piece_id: uuid.UUID | None = None
+    part: str = Field(pattern="^(LEATHER|LINING)$")
+
+
+class StoreScanResult(BaseModel):
+    drawer_code: str
+    piece_code: str
+    state: str
+    needs_lining: bool
+    awaiting: list[str]
+    ready_for_received: bool
+
+
+class DrawerTransition(BaseModel):
+    transition: str = Field(pattern="^(RECEIVED|SENDED)$")
+
+
+class DrawerTransitionResult(BaseModel):
+    drawer_code: str
+    piece_code: str | None
+    state: str
+
+
+====================================================================================================
+FILE: service.py
+====================================================================================================
+
+"""
+================================================================================
+modules/drawers/service.py — Drawers & the COMPLETENESS (merge) gate
+================================================================================
+
+THE NEW GATE CLASS.
+    Earlier stages gate on SEQUENCE (no pasting before fusing). Storage gates on
+    COMPLETENESS: no line-stitching until a piece's leather AND its lining are
+    both confirmed in its drawer. The breakdown's material column set
+    Piece.needs_lining at upload, so a leather-only piece (needs_lining=False) is
+    complete on leather alone and passes the gate immediately.
+
+STORE = SCAN THE DRAWER FIRST, THEN THE PIECE.
+    The drawer scan confirms the piece is going where the upload's merge says it
+    should. A piece scanned into the wrong drawer is a 409 — the merge map is the
+    authority, not the worker's memory.
+
+DRAWERS RECYCLE.
+    waiting → merged (at upload) → holding_leather → holding_both → received →
+    sended → (piece ships) → waiting. `code`/`seq` never change; `current_piece_id`
+    and `state` move over the drawer's life. When PACKAGE_EXPORT logs, production
+    calls release() and the drawer returns to WAITING for the next piece.
+================================================================================
+"""
+import uuid
+from datetime import datetime, timezone
+
+from fastapi import HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.enums import BarcodeAuditAction, DrawerPart, DrawerState
+from app.modules.barcode.models import Drawer
+from app.modules.production.models import Piece
+
+
+class DrawerService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def repo_commit(self) -> None:
+        """Single commit seam for this module (F71). The drawers module has no
+        repository yet (F105 — D2), so this method localises the one place the
+        session is committed. Callers that COMPOSE drawer mutations into a larger
+        unit of work should use the *_nocommit variants instead and own the
+        boundary (production already does this via release_nocommit)."""
+        await self.db.commit()
+
+    # ── lookups ──────────────────────────────────────────────────────────────
+    async def get(self, drawer_id: uuid.UUID) -> Drawer | None:
+        return await self.db.get(Drawer, drawer_id)
+
+    async def get_by_code(self, code: str) -> Drawer | None:
+        res = await self.db.execute(
+            select(Drawer).where(Drawer.code == (code or "").strip().upper()))
+        return res.scalar_one_or_none()
+
+    async def drawer_for_piece(self, piece_id: uuid.UUID) -> Drawer | None:
+        res = await self.db.execute(
+            select(Drawer).where(Drawer.current_piece_id == piece_id))
+        return res.scalar_one_or_none()
+
+    # ── store-scan ───────────────────────────────────────────────────────────
+    async def store_scan(self, *, drawer_id: uuid.UUID, piece_id: uuid.UUID,
+                         part: DrawerPart) -> dict:
+        drawer = await self.get(drawer_id)
+        if not drawer:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Drawer not found.")
+        piece = await self.db.get(Piece, piece_id)
+        if not piece:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Piece not found.")
+
+        # The merge map is the authority: the piece must belong to THIS drawer.
+        if drawer.current_piece_id != piece.id:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"{piece.code} is not merged to drawer {drawer.code}. "
+                "Scan the drawer the upload assigned to this piece.")
+
+        # F08: a part scan is only valid while the drawer is still accumulating.
+        # A drawer already RECEIVED or SENDED must not be dragged backwards by a
+        # new scan — that would silently revoke a merge gate production may have
+        # already passed.
+        if drawer.state in (DrawerState.RECEIVED.value, DrawerState.SENDED.value):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Drawer {drawer.code} is already {drawer.state} and cannot accept "
+                "another part scan. Its pieces have been released for the next stage.")
+
+        if part is DrawerPart.LEATHER:
+            drawer.leather_in = True
+        else:
+            drawer.lining_in = True
+
+        needs_lining = bool(getattr(piece, "needs_lining", True))
+        complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
+        # F07: name what is ACTUALLY in the drawer. A lining-first scan must not
+        # report HOLDING_LEATHER.
+        if complete:
+            drawer.state = DrawerState.HOLDING_BOTH.value
+        elif drawer.leather_in:
+            drawer.state = DrawerState.HOLDING_LEATHER.value
+        elif drawer.lining_in:
+            drawer.state = DrawerState.HOLDING_LINING.value
+        else:
+            drawer.state = DrawerState.WAITING.value
+
+        await self.repo_commit()   # F71: commit via a single seam (see below)
+        await self.db.refresh(drawer)
+
+        awaiting = []
+        if not drawer.leather_in:
+            awaiting.append("LEATHER")
+        if needs_lining and not drawer.lining_in:
+            awaiting.append("LINING")
+        return {
+            "drawer_code": drawer.code, "piece_code": piece.code,
+            "state": drawer.state, "needs_lining": needs_lining,
+            "awaiting": awaiting, "ready_for_received": complete,
+        }
+
+    # ── received / sended ────────────────────────────────────────────────────
+    async def transition(self, drawer_id: uuid.UUID, transition: str,
+                         actor_id: uuid.UUID | None) -> dict:
+        drawer = await self.get(drawer_id)
+        if not drawer:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Drawer not found.")
+        piece = await self.db.get(Piece, drawer.current_piece_id) if drawer.current_piece_id else None
+        needs_lining = bool(getattr(piece, "needs_lining", True)) if piece else True
+        t = transition.upper()
+
+        if t == "RECEIVED":
+            # F09: RECEIVED must validate the source state too — a drawer already
+            # SENDED must not move back to RECEIVED (the machine is a forward
+            # cycle; the SENDED branch already guards its direction).
+            if drawer.state == DrawerState.SENDED.value:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    f"Drawer {drawer.code} is already SENDED — cannot move back to "
+                    "RECEIVED.")
+            complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
+            if not complete:
+                missing = "lining" if needs_lining and not drawer.lining_in else "leather"
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    f"Cannot RECEIVE: still awaiting {missing} in drawer {drawer.code}.")
+            drawer.state = DrawerState.RECEIVED.value
+            drawer.received_at = datetime.now(timezone.utc)
+            action = BarcodeAuditAction.DRAWER_RECEIVED.value
+
+        elif t == "SENDED":
+            if drawer.state != DrawerState.RECEIVED.value:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    "Cannot SEND before RECEIVED. Set RECEIVED first.")
+            drawer.state = DrawerState.SENDED.value
+            drawer.sended_at = datetime.now(timezone.utc)
+            action = BarcodeAuditAction.DRAWER_SENDED.value
+        else:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "transition must be RECEIVED or SENDED.")
+
+        await self._audit(actor_id, action, drawer.id,
+                          {"piece": piece.code if piece else None, "state": drawer.state})
+        await self.repo_commit()
+        await self.db.refresh(drawer)
+        return {
+            "drawer_code": drawer.code,
+            "piece_code": piece.code if piece else None,
+            "state": drawer.state,
+        }
+
+    # ── the merge gate check (called by production before LINE_STITCHING) ─────
+    async def is_sended(self, piece_id: uuid.UUID) -> bool:
+        drawer = await self.drawer_for_piece(piece_id)
+        return bool(drawer and drawer.state == DrawerState.SENDED.value)
+
+    # ── recycle (called when PACKAGE_EXPORT logs) ────────────────────────────
+    async def release_nocommit(self, piece_id: uuid.UUID) -> None:
+        drawer = await self.drawer_for_piece(piece_id)
+        if drawer:
+            drawer.state = DrawerState.WAITING.value
+            drawer.current_piece_id = None
+            drawer.leather_in = False
+            drawer.lining_in = False
+            drawer.received_at = None
+            drawer.sended_at = None
+        # F11: clear BOTH sides of the piece↔drawer link. Previously only
+        # drawer.current_piece_id was nulled, so after release the piece still
+        # pointed at a drawer that no longer claimed it — the barcode payload and
+        # the piece life-story disagreed permanently.
+        piece = await self.db.get(Piece, piece_id)
+        if piece is not None and getattr(piece, "drawer_id", None) is not None:
+            piece.drawer_id = None
+
+    async def _audit(self, actor_id, action, entity_id, after: dict) -> None:
+        from app.core.models import AuditLog
+        self.db.add(AuditLog(
+            actor_user_id=actor_id, action=action, entity_type="drawer",
+            entity_id=entity_id, after=after, at=datetime.now(timezone.utc)))
+
+

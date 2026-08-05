@@ -1,15 +1,11 @@
 """add attribution axis to bom_item + workflow columns to fabric_role
 
-Revision ID: add_attribution_axis
-Revises: <SET_TO_CURRENT_HEAD>          # TODO: `alembic heads` — set before running.
+Revision ID: fiber_role_bom_item
+Revises: add_material_rate
 Create Date: 2026-07-09
 
-NOTE (per your standing preference, Alembic is applied last): this migration is
-additive and safe to batch with the config-to-DB work. BEFORE running ANY new
-migration, resolve the two-root problem first — migration b7d4f1a9c2e0 has
-down_revision=None, creating a second root; `alembic upgrade head` will fail
-with "multiple heads" until that is chained. Set `down_revision` below to the
-real current head once the roots are merged.
+The revision chain is now a single linear root→head line (verified with
+`alembic history` / `alembic heads`). This migration is additive.
 
 Two SEPARATE axes on bom_item (do not conflate):
   dcm_source / dcm_confidence         -> yield axis (already present; unchanged)
@@ -21,7 +17,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID as GUID
 
 revision = "fiber_role_bom_item"
-down_revision = "add_material_rate"          # TODO: set to current head (see note above)
+down_revision = "add_material_rate"
 branch_labels = None
 depends_on = None
 

@@ -11,7 +11,14 @@ class GpsPoint(BaseModel):
     lat: float = Field(..., ge=-90, le=90)
     lon: float = Field(..., ge=-180, le=180)
 
-
+class ScanCheckIn(BaseModel):
+    employee_barcode: str
+    direction: str = Field(..., pattern="^(in|out)$")
+    lat: float | None = None
+    lon: float | None = None
+    proxy: bool = False
+    reason: str | None = Field(None, max_length=200)
+    
 class CheckInRequest(GpsPoint):
     """SELF check-in by the worker themselves (Flow A).
 
@@ -36,10 +43,13 @@ class ProxyMarkRequest(BaseModel):
 
 
 class AddDailyWorkerRequest(BaseModel):
-    """Supervisor onboards a new daily-wage worker on the floor (Flow C)."""
+    """Onboard a new daily-wage worker on the floor (Flow C).
+
+    `phone` is optional: the worker gets no login, so there is nothing to
+    authenticate with it — it is contact detail only."""
     name: str
-    phone: str
     designation: str
+    phone: str | None = None
     daily_rate: float | None = None
 
 
@@ -76,6 +86,7 @@ class ShiftStatus(BaseModel):
 
 
 class ShiftConfigRead(BaseModel):
+    """Full config — INCLUDES fence geometry. Return only to HR/managers (F44)."""
     model_config = ConfigDict(from_attributes=True)
     shift_start: str
     shift_length_hours: float
@@ -86,11 +97,27 @@ class ShiftConfigRead(BaseModel):
     radius_m: int
 
 
+class ShiftConfigPublicRead(BaseModel):
+    """F44: config WITHOUT the geofence geometry. Handing factory_lat/lon/radius
+    to every authenticated user gives an attacker exactly what they need to forge
+    a plausible in-fence coordinate. Non-privileged callers get times only."""
+    model_config = ConfigDict(from_attributes=True)
+    shift_start: str
+    shift_length_hours: float
+    late_grace_minutes: int
+    timezone: str
+
+
 class ShiftConfigUpdate(BaseModel):
-    shift_start: str | None = None
-    shift_length_hours: float | None = None
-    late_grace_minutes: int | None = None
+    # F48/F109: these are applied to the config by a setattr loop and then parsed
+    # on every check-in. An unvalidated shift_start like "9am" is accepted,
+    # persisted, and then raises on EVERY subsequent check-in — one bad PATCH
+    # bricks attendance factory-wide. Constrain them at the schema boundary.
+    shift_start: str | None = Field(
+        None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")          # HH:MM 24h
+    shift_length_hours: float | None = Field(None, gt=0, le=24)
+    late_grace_minutes: int | None = Field(None, ge=0, le=240)
     timezone: str | None = None
-    factory_lat: float | None = None
-    factory_lon: float | None = None
-    radius_m: int | None = None
+    factory_lat: float | None = Field(None, ge=-90, le=90)
+    factory_lon: float | None = Field(None, ge=-180, le=180)
+    radius_m: int | None = Field(None, ge=10, le=5000)

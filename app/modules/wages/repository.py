@@ -14,14 +14,14 @@ TRANSACTION OWNERSHIP
 ================================================================================
 """
 import uuid
-from datetime import date
+from datetime import date, timezone, datetime
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.enums import RunStatus
-from app.modules.wages.models import Rate, WageLine, WageRun
+from app.modules.wages.models import Rate, WageLine, WageLineDetailRow, WageRun
 
 
 class WageRepository:
@@ -178,33 +178,71 @@ class WageRepository:
         await self.db.flush()
         return r
 
-    # ── runs ────────────────────────────────────────────────────────────────
-    async def overlapping_closed_run(self, start: date, end: date) -> WageRun | None:
-        """Any CLOSED run whose window intersects [start, end].
+    async def overlapping_closed_run(self, start: date, end: date,
+                                     *, exclude_run_id: uuid.UUID | None = None):
+        """Any run — CLOSED **or OPEN** — whose window intersects [start, end].
 
-        Two inclusive ranges overlap iff a.start <= b.end AND a.end >= b.start.
-        This is the guard that makes hand-typed periods safe: without it, running
-        Apr 1-30 and then Apr 15-May 15 pays the same fortnight twice, closes both
-        runs, and nothing in the system ever notices.
+        B7: this used to filter status == CLOSED. create_run() commits the run as
+        OPEN before a single line is written, and add_lines() commits separately,
+        so a run that died mid-population left committed money sitting in an OPEN
+        run that this guard could not see. The same fortnight could then be run
+        again with no 409, and with no UNIQUE(wage_run_id, employee_id) (B5) to
+        catch it downstream. An OPEN run in the window is either in progress or
+        wreckage; either way a second run over the same days must not start.
+
+        Name kept for call-site compatibility (service._validate_window).
         """
-        return await self.db.scalar(
-            select(WageRun)
-            .where(
-                WageRun.status == RunStatus.CLOSED,
-                WageRun.period_start <= end,
-                WageRun.period_end >= start,
-            )
-            .limit(1)
+        stmt = select(WageRun).where(
+            WageRun.period_start <= end,
+            WageRun.period_end >= start,
         )
+        if exclude_run_id:
+            stmt = stmt.where(WageRun.id != exclude_run_id)
+        return await self.db.scalar(
+            stmt.order_by(WageRun.status.desc()).limit(1))
 
-    async def last_closed_run(self) -> WageRun | None:
-        """Most recently ENDING closed run — the reference for gap detection."""
-        return await self.db.scalar(
-            select(WageRun)
-            .where(WageRun.status == RunStatus.CLOSED)
-            .order_by(WageRun.period_end.desc())
-            .limit(1)
-        )
+    async def last_closed_run(self, *, exclude_run_id: uuid.UUID | None = None):
+        """Latest CLOSED run — genuinely CLOSED-only: this feeds the gap_days
+        calculation, which must measure from the last run that actually paid."""
+        stmt = select(WageRun).where(WageRun.status == RunStatus.CLOSED)
+        if exclude_run_id:
+            stmt = stmt.where(WageRun.id != exclude_run_id)
+        return await self.db.scalar(stmt.order_by(WageRun.period_end.desc()).limit(1))
+
+    async def clear_lines(self, run_id: uuid.UUID) -> int:
+        """Delete every frozen line + breakdown row of a run. ONE transaction.
+
+        Bulk DELETE, not ORM cascade: loading 300 WageLine objects to delete them
+        is three round trips and a lot of identity-map churn for an operation
+        whose entire semantic is 'make these rows not exist'.
+        """
+        d1 = await self.db.execute(
+            delete(WageLineDetailRow).where(WageLineDetailRow.wage_run_id == run_id))
+        d2 = await self.db.execute(
+            delete(WageLine).where(WageLine.wage_run_id == run_id))
+        await self.db.commit()
+        return int(d2.rowcount or 0) + int(d1.rowcount or 0)
+    
+    async def persist_breakdown(self, run_id: uuid.UUID, breakdown: dict) -> None:
+        """Freeze the per-(employee, style, operation) rows. Commits once."""
+        rows = [
+            WageLineDetailRow(
+                wage_run_id=run_id, employee_id=emp_id, style_id=style_id,
+                operation_id=op_id, pieces=v["pieces"],
+                rate=round(v["rate"] or 0, 2), amount=round(v["amount"], 2),
+            )
+            for (emp_id, style_id, op_id), v in breakdown.items()
+        ]
+        if not rows:
+            return
+        self.db.add_all(rows)
+        await self.db.commit()
+        
+    async def stamp_recompute(self, run: WageRun, *, by: str) -> None:
+        run.recompute_count = (run.recompute_count or 0) + 1
+        run.last_recomputed_at = datetime.now(timezone.utc)
+        run.last_recomputed_by = by
+        await self.db.commit()
 
     async def create_run(self, period_start: date, period_end: date) -> WageRun:
         """Opens a run. Callers MUST validate the window before calling this —
@@ -275,34 +313,118 @@ class WageRepository:
         ]
 
     async def run_lines_detailed(self, run_id: uuid.UUID) -> list[dict]:
-        """Lines joined to the employee. WageLine has no Employee relationship, so
-        the name is joined explicitly — lazy-loading it would raise MissingGreenlet
-        on the async session."""
-        from app.modules.employees.models import Employee
+        """Lines joined to the employee, each carrying its style/operation
+        breakdown.
 
-        stmt = (
-            select(
-                WageLine.id,
-                WageLine.employee_id,
-                Employee.name,
-                Employee.designation,
-                WageLine.wage_type,
-                WageLine.pieces,
-                WageLine.amount,
-            )
+        TWO queries, not N+1: one for the lines, one for every breakdown row of
+        the run, grouped in Python. A 300-employee run would otherwise issue 301
+        queries to render one payslip screen.
+        """
+        from app.modules.clients.models import Style
+        from app.modules.employees.models import Employee
+        from app.modules.production.models import Operation
+
+        line_stmt = (
+            select(WageLine.id, WageLine.employee_id, Employee.name,
+                   Employee.designation, WageLine.wage_type,
+                   WageLine.pieces, WageLine.amount)
             .join(Employee, Employee.id == WageLine.employee_id)
             .where(WageLine.wage_run_id == run_id)
             .order_by(WageLine.wage_type, Employee.name)
         )
-        return [
-            {
+        detail_stmt = (
+            select(WageLineDetailRow.employee_id, Style.code, Style.name,
+                   Operation.code, Operation.label,
+                   WageLineDetailRow.pieces, WageLineDetailRow.rate,
+                   WageLineDetailRow.amount)
+            .join(Style, Style.id == WageLineDetailRow.style_id)
+            .join(Operation, Operation.id == WageLineDetailRow.operation_id)
+            .where(WageLineDetailRow.wage_run_id == run_id)
+            .order_by(Style.code, Operation.code)
+        )
+
+        details: dict[uuid.UUID, list[dict]] = {}
+        for emp_id, scode, sname, ocode, olabel, pieces, rate, amount in (
+            await self.db.execute(detail_stmt)
+        ).all():
+            details.setdefault(emp_id, []).append({
+                "style_code": scode,
+                "style_name": sname,
+                "operation_code": ocode,
+                "operation_label": olabel,
+                "pieces": int(pieces),
+                "rate": float(rate),
+                "amount": float(amount),
+            })
+
+        out = []
+        for r in (await self.db.execute(line_stmt)).all():
+            emp_id = r[1]
+            rows = details.get(emp_id, [])
+            out.append({
                 "id": r[0],
-                "employee_id": r[1],
+                "employee_id": emp_id,
                 "employee_name": r[2],
                 "designation": r[3],
                 "wage_type": r[4],
                 "pieces": int(r[5]),
                 "amount": float(r[6]),
-            }
-            for r in (await self.db.execute(stmt)).all()
+                # Per-piece rate for the line as a whole. Only meaningful when the
+                # employee worked a single style x operation; null otherwise, so
+                # the UI shows the breakdown rows instead of an average that is
+                # true of nothing.
+                "rate": rows[0]["rate"] if len(rows) == 1 else None,
+                "style_codes": sorted({x["style_code"] for x in rows}),
+                "breakdown": rows,
+            })
+        return out
+    
+    # ── H8: one run, one transaction ─────────────────────────────────────────
+    # The committing variants above stay for now so existing callers keep
+    # working. New payroll paths use these and let the SERVICE commit once, so a
+    # run is never durable in a half-built state (which is what makes B6 and B7
+    # possible in the first place).
+
+    async def create_run_nocommit(self, period_start: date,
+                                  period_end: date) -> WageRun:
+        run = WageRun(period_start=period_start, period_end=period_end)
+        self.db.add(run)
+        await self.db.flush()          # assigns run.id, stays in-transaction
+        return run
+    
+    async def add_lines_nocommit(self, lines: list[WageLine]) -> None:
+        self.db.add_all(lines)
+        await self.db.flush()
+
+    async def persist_breakdown_nocommit(self, run_id: uuid.UUID,
+                                         breakdown: dict) -> None:
+        rows = [
+            WageLineDetailRow(
+                wage_run_id=run_id, employee_id=emp_id, style_id=style_id,
+                operation_id=op_id, pieces=v["pieces"],
+                rate=round(v["rate"] or 0, 2), amount=round(v["amount"], 2),
+            )
+            for (emp_id, style_id, op_id), v in breakdown.items()
         ]
+        if not rows:
+            return
+        self.db.add_all(rows)
+        await self.db.flush()
+
+    async def clear_lines_nocommit(self, run_id: uuid.UUID) -> int:
+        d1 = await self.db.execute(
+            delete(WageLineDetailRow).where(WageLineDetailRow.wage_run_id == run_id))
+        d2 = await self.db.execute(
+            delete(WageLine).where(WageLine.wage_run_id == run_id))
+        await self.db.flush()
+        return int(d2.rowcount or 0) + int(d1.rowcount or 0)
+
+    def close_run_nocommit(self, run: WageRun) -> None:
+        run.status = RunStatus.CLOSED
+
+    async def commit(self) -> None:
+        """The single commit for a whole payroll run."""
+        await self.db.commit()
+
+    async def rollback(self) -> None:
+        await self.db.rollback()
