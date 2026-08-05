@@ -40,6 +40,7 @@ returning to a stage it already passed is legitimate, flagged, never blocked.
 import re
 import uuid
 from datetime import date
+from decimal import Decimal
 
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -233,18 +234,39 @@ class ProductionService:
                     status.HTTP_500_INTERNAL_SERVER_ERROR,
                     f"Stage '{stage.value}' has no configured operation.")
             op_by_stage[stage] = op
- 
-        # GATE 1 — ROLE (403, whole request) — runs in preview too, so the user
-        # sees the same 403 they'd hit on commit.
-        for stage, op in op_by_stage.items():
-            await self._assert_role(user, stage, op)
- 
+
         cut_stages = {s for s in op_by_stage if s.requires_consumption}
         is_cut = bool(cut_stages)
         if is_cut and len(op_by_stage) > 1:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 "A cutting scan may not be mixed with other stages in one batch.")
+ 
+        # GATE 1 — ROLE (403, whole request) — runs in preview too, so the user
+        # sees the same 403 they'd hit on commit.
+        for stage, op in op_by_stage.items():
+            await self._assert_role(user, stage, op)
+
+        consumption_value = None
+        if is_cut:
+            if consumption_qty is None:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    "Consumption quantity is required for cut stages.")
+            try:
+                consumption_value = Decimal(str(consumption_qty))
+            except Exception as exc:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    "Consumption quantity must be numeric.") from exc
+            if consumption_value <= 0:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    "Consumption quantity must be > 0 at cutting.")
+            if not (leather_lot_id or lining_lot_id):
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    "A cut stage requires a material lot.")
  
         screen_role_warning = None
         if screen in SCREEN_EXPECTED_ROLE and user.role not in _STAGE_BYPASS_ROLES:
@@ -255,6 +277,7 @@ class ProductionService:
                     f"{screen.value} screen.")
  
         logged, rework, sequence_blocked, skill_blocked, merge_blocked =  [], [], [], [], []
+        fresh_cut_count = 0
  
         # GATES 2-4 per piece + (write, IF NOT preview)
         for pid, piece in pieces.items():
@@ -288,20 +311,29 @@ class ProductionService:
                 await self.repo.add_event_nocommit(
                     sku_id=piece.sku_id, operation_id=op.id, employee_id=employee_id,
                     work_date=work_date, qty=1, piece_id=piece.id,
-                    entered_by=user.name)
+                    entered_by=user.name,
+                    leather_lot_id=leather_lot_id if is_cut and leather_lot_id is not None else None,
+                    lining_lot_id=lining_lot_id if is_cut and lining_lot_id is not None else None,
+                    consumption_qty=consumption_value if is_cut else None)
                 # advance the piece's current operation pointer
                 piece.current_operation_id = op.id
+                if is_cut:
+                    fresh_cut_count += 1
  
         consumption_recorded = None
-        if is_cut and not preview:
-            # consumption captured only on a REAL cut log (unchanged logic)
-            if consumption_qty and (leather_lot_id or lining_lot_id):
-                lot_id = leather_lot_id or lining_lot_id
-                from app.modules.materials.service import MaterialService
-                avail = await MaterialService(self.db).decrement_for_cut_nocommit(
-                    lot_id, consumption_qty)
-                consumption_recorded = {"lot_id": str(lot_id),
-                                        "qty": consumption_qty, "available_after": avail}
+        if is_cut and not preview and fresh_cut_count > 0:
+            lot_id = leather_lot_id or lining_lot_id
+            from app.modules.materials.service import MaterialService
+            total_consumption = consumption_value * fresh_cut_count
+            avail = await MaterialService(self.db).decrement_for_cut_nocommit(
+                lot_id, float(total_consumption))
+            consumption_recorded = {
+                "lot_id": str(lot_id),
+                "pieces_consuming": fresh_cut_count,
+                "qty": float(total_consumption),
+                "dcm": float(total_consumption),
+                "available_after": avail,
+            }
  
         rep_stage = screen_stage or (next(iter(op_by_stage)) if op_by_stage else None)
  

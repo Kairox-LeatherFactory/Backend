@@ -157,6 +157,15 @@ class ProductionRepository:
         await self.db.commit()
 
     # --- events ---
+    async def add_event_nocommit(self, **kw) -> ProductionEvent:
+        """Create a production event and keep it in the current transaction.
+
+        The caller commits later, typically after a whole batch of work is done.
+        """
+        ev = ProductionEvent(**kw)
+        self.db.add(ev)
+        return ev
+
     async def add_event(self, **kw) -> ProductionEvent:
         ev = ProductionEvent(**kw)
         self.db.add(ev)
