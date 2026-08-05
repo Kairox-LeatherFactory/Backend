@@ -141,3 +141,39 @@ class _Op:
 ])
 def test_stage_of(code, expected):
     assert ProductionService._stage_of(_Op(code)) is expected
+    
+@pytest.mark.asyncio
+async def test_preview_writes_nothing(db, cutting_mgr, cutter, pieces, leather_lot):
+    from app.core.enums import ScreenContext
+    from sqlalchemy import select, func
+    from app.modules.production.models import ProductionEvent
+ 
+    before = await db.scalar(select(func.count(ProductionEvent.id)))
+    res = await ProductionService(db).log_batch(
+        user=cutting_mgr, employee_id=cutter[0].id,
+        piece_ids=[pieces[0][0].id], work_date=datetime.date.today(),
+        screen=ScreenContext.LEATHER_CUT, leather_lot_id=leather_lot.id,
+        consumption_qty=10.0, preview=True)
+    after = await db.scalar(select(func.count(ProductionEvent.id)))
+ 
+    assert res["preview"] is True
+    assert pieces[0][0].code in res["logged"]     # would-be logged
+    assert before == after                        # NOTHING written
+    # material not decremented in preview
+    assert res["consumption_recorded"] is None
+ 
+@pytest.mark.asyncio
+async def test_commit_after_preview_writes(db, cutting_mgr, cutter, pieces, leather_lot):
+    from app.core.enums import ScreenContext
+    from sqlalchemy import select, func
+    from app.modules.production.models import ProductionEvent
+ 
+    # commit for real
+    res = await ProductionService(db).log_batch(
+        user=cutting_mgr, employee_id=cutter[0].id,
+        piece_ids=[pieces[0][0].id], work_date=datetime.date.today(),
+        screen=ScreenContext.LEATHER_CUT, leather_lot_id=leather_lot.id,
+        consumption_qty=10.0, preview=False)
+    assert res["preview"] is False and res["count_logged"] == 1
+    cnt = await db.scalar(select(func.count(ProductionEvent.id)))
+    assert cnt >= 1

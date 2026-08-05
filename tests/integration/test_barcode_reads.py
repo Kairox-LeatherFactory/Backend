@@ -131,3 +131,11 @@ async def test_client_tenancy_scope_hides_other_orders(db, jp_order):
     assert all(o["order_number"] != "JP-READS" for o in orders)
     with pytest.raises(Exception):
         await svc.order_analytics(jp_order["order_id"], client_scope=other_client)
+        
+@pytest.mark.asyncio
+async def test_piece_label_encodes_business_code(db):
+    out = await BarcodeService(db).print_payload(codes=["ORD_1011-CARNABY-PINE_GREEN-S-002"])
+    lbl = out["labels"][0]
+    assert lbl["code"] == "ORD_1011-CARNABY-PINE_GREEN-S-002"      # bars = business code
+    assert lbl["caption"] == "ORD_1011-CARNABY-PINE_GREEN-S-002"   # text = business code
+    assert lbl["symbology"] == "code128"                            # format only     

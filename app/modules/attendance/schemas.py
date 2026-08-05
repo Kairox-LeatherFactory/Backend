@@ -118,7 +118,7 @@ class ShiftConfigUpdate(BaseModel):
         None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")          # HH:MM 24h
     shift_length_hours: float | None = Field(None, gt=0, le=24)
     late_grace_minutes: int | None = Field(None, ge=0, le=240)
-    timezone: str | None = None
+    timezone: str | None = Nonejniinin
     factory_lat: float | None = Field(None, ge=-90, le=90)
     factory_lon: float | None = Field(None, ge=-180, le=180)
     radius_m: int | None = Field(None, ge=10, le=5000)

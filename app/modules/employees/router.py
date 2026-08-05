@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette import status
 from fastapi import HTTPException
+import uuid
 
 from app.core.database import get_db
 from app.core.enums import UserRole
@@ -44,6 +45,35 @@ async def list_employees(
 async def create_employee(
     body: schemas.EmployeeCreate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR)),
+    actor: User = Depends(require_roles(
+        UserRole.DIRECT_MANAGER, UserRole.HR, UserRole.MANAGING_DIRECTOR)),
 ):
-    return await EmployeeService(db).create(body)
+    """Create an employee (and, for a staff role or MONTHLY wage, a linked login).
+    Managers/HR are created HERE now (except DM/MD)."""
+    return await EmployeeService(db).create(body, actor=actor)
+ 
+ 
+@router.patch("/{employee_id}", response_model=schemas.EmployeeRead)
+async def update_employee(
+    employee_id: uuid.UUID,
+    body: schemas.EmployeeUpdate,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(
+        UserRole.DIRECT_MANAGER, UserRole.HR, UserRole.MANAGING_DIRECTOR)),
+):
+    """Edit an employee (name/designation/wage_type/salary/contact/active).
+    Reaches the existing service.update() (was unreachable — F89)."""
+    emp = await EmployeeService(db).update(employee_id, body)
+    return schemas.EmployeeRead.model_validate(emp)
+ 
+ 
+@router.delete("/{employee_id}", status_code=200)
+async def delete_employee(
+    employee_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(
+        UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR)),
+):
+    """SOFT-delete an employee (is_active=False) + retire their barcode. DM/MD
+    only — HR can edit but not remove. History is preserved."""
+    return await EmployeeService(db).delete(employee_id, actor_id=user.id)

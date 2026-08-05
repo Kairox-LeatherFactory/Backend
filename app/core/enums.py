@@ -45,7 +45,8 @@ class UserRole(str, enum.Enum):
     CLIENT = "client"
     VIEWER = "viewer"
     SUPERVISOR = "supervisor"      # may PROXY check-in daily-wage workers + add them
-    HR = "hr"                      # HR / accounts: reads people, wages, attendance
+    HR = "hr" # HR / accounts: reads people, wages, attendance
+    SECURITY = "security"
 
     @classmethod
     def manager_roles(cls) -> set["UserRole"]:
@@ -152,4 +153,6 @@ from app.core.enums_barcode import (  # noqa: E402
     MATERIAL_SPEC,
     uom_for,
     resolve_spec,
+    ROLE_TO_SCREEN,
+    screen_for_role,
 )

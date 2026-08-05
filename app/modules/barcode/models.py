@@ -182,6 +182,8 @@ class SupplierOrder(Base, UUIDMixin, TimestampMixin):
     category: Mapped[str] = mapped_column(String(20))
     article: Mapped[str] = mapped_column(String(120), index=True)
     colour: Mapped[str | None] = mapped_column(String(80))
+    thickness: Mapped[str | None] = mapped_column(String(40))          # NEW
+    dcm: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))        # NEW
     qty: Mapped[Decimal] = mapped_column(Numeric(14, 3))
     uom: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(15), default="ordered", index=True)

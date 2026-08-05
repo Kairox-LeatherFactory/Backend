@@ -308,3 +308,47 @@ async def test_days_present_counts_only_days_inside_the_window(db):
     got = await AttendanceService(db).days_present(
         emp.id, base - timedelta(days=2), base)
     assert got == 3
+@pytest.mark.asyncio
+async def test_security_scans_monthly_employee(db, security_user, monthly_card):
+    from app.modules.attendance.service import AttendanceService
+    res = await AttendanceService(db).barcode_scan(
+        employee_id=monthly_card.employee_id, actor=security_user,
+        direction="in", lat=12.9, lon=80.2, proxy=False, reason=None)
+    assert res["present_today"] is True
+ 
+@pytest.mark.asyncio
+async def test_manual_checkin_works_for_monthly_worker(db, security_user, monthly_emp):
+    """A MONTHLY worker forgot their card → SECURITY manual check-in. This used to
+    raise 400 ('not a piece-rate worker'); now it must succeed."""
+    from app.modules.attendance.service import AttendanceService
+    from app.modules.attendance.schemas import ProxyMarkRequest
+    out = await AttendanceService(db).proxy_mark_present(
+        security_user, ProxyMarkRequest(
+            employee_ids=[monthly_emp.id], lat=12.9, lon=80.2))
+    assert len(out) == 1
+ 
+@pytest.mark.asyncio
+async def test_hr_md_dm_can_manual_checkin(client, hr_token, md_token, dm_token, emp_id):
+    for tok in (hr_token, md_token, dm_token):
+        r = await client.post("/api/v1/attendance/proxy/check-in",
+            headers={"Authorization": f"Bearer {tok}"},
+            json={"employee_ids": [str(emp_id)], "lat": 12.9, "lon": 80.2})
+        assert r.status_code in (200, 201)
+ 
+@pytest.mark.asyncio
+async def test_employee_cannot_manual_checkin(client, employee_token, other_emp_id):
+    r = await client.post("/api/v1/attendance/proxy/check-in",
+        headers={"Authorization": f"Bearer {employee_token}"},
+        json={"employee_ids": [str(other_emp_id)], "lat": 12.9, "lon": 80.2})
+    assert r.status_code == 403
+ 
+@pytest.mark.asyncio
+async def test_security_cannot_create_employee(client, security_token):
+    r = await client.post("/api/v1/employees",
+        headers={"Authorization": f"Bearer {security_token}"},
+        json={"name": "X", "wage_type": "piece_rate"})
+    assert r.status_code == 403
+    
+if __name__ == "__main__":
+    print("Item 1 FINAL — unified: everyone has a card; SECURITY/HR/MD/DM scan or "
+          "manual-check-in anyone, any wage type; employee creation stays HR/MD/DM.")

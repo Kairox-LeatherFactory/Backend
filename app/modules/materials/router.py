@@ -78,15 +78,19 @@ async def stock(
         thickness=thickness, size=size, required=required)
 
 
+# create_order + receive: pass the actor's ROLE so receive can gate the
+# mismatch-approval to DM/MD and create_order is consistent.
+ 
 @router.post("/receive", response_model=schemas.ReceiveResult)
 async def receive(
     body: schemas.ReceiveRequest,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(_DM),
 ):
-    """Record receiving: approved adds to stock, the requirement is reserved,
-    rejected is logged for supplier quality history."""
-    return await MaterialService(db).receive(body, actor_id=user.id)
+    """approved adds to stock; a PO-mismatch is rejected (409) unless a DM/MD
+    sends approve_mismatch=true, which receives it into a new substitute lot."""
+    return await MaterialService(db).receive(
+        body, actor_id=user.id, actor_role=user.role)
 
 
 @sup_router.post("/orders", response_model=schemas.SupplierOrderResult, status_code=201)
@@ -95,9 +99,10 @@ async def create_order(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(_DM),
 ):
-    """Raise a manual supplier order (status ORDERED). Suggests a supplier from
-    the article when none is given."""
-    return await MaterialService(db).create_order(body, actor_id=user.id)
+    """Raise a manual supplier order (ORDERED). Validates the requested article
+    against the chosen/suggested supplier's catalog."""
+    return await MaterialService(db).create_order(
+        body, actor_id=user.id, actor_role=user.role)
 
 
 @sup_router.patch("/orders/{order_id}", response_model=schemas.SupplierOrderPatchResult)
@@ -109,3 +114,16 @@ async def mark_arrived(
 ):
     """Flip ORDERED → ARRIVED. Cues the receiving screen. Idempotent."""
     return await MaterialService(db).mark_arrived(order_id)
+
+@sup_router.patch("/orders/{order_id}/spec", response_model=schemas.SupplierOrderPatchResult)
+async def edit_order_spec(
+    order_id: uuid.UUID,
+    body: schemas.OrderSpecPatch,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_DM),     # _DM already = DM + MD; DM/MD only
+):
+    """Edit an ORDERED order's spec (article/colour/thickness/dcm/qty). DM/MD."""
+    res = await MaterialService(db).edit_order_spec(order_id, body, actor_id=user.id)
+    order = await MaterialService(db).repo.get_order(order_id)
+    return {"order_id": order.id, "status": order.status,
+            "arrived_at": order.arrived_at.isoformat() if order.arrived_at else None}
