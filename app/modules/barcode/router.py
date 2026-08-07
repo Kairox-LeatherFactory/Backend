@@ -90,7 +90,6 @@ async def list_barcode_orders(
     Shows minted count + generated date range so the user picks the right order."""
     return await BarcodeService(db).list_orders(scope)
  
- 
 @router.get("/orders/{order_id}/skus", response_model=list[schemas.OrderSkuOption])
 async def list_order_sku_options(
     order_id: uuid.UUID,

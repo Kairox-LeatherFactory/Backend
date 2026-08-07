@@ -84,7 +84,7 @@ class Base(DeclarativeBase):
 def _engine_kwargs(url: str) -> dict:
     """Pooling args only make sense for Postgres; SQLite rejects them."""
     if url.startswith("postgresql"):
-        return dict(pool_pre_ping=True, pool_size=160, max_overflow=40)
+        return dict(pool_pre_ping=True, pool_size=3, max_overflow=5)
     # SQLite (tests/local): a single shared connection, no pool sizing.
     return dict()
 

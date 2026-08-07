@@ -5,7 +5,7 @@ modules/employees/repository.py — Async data access for employees
 """
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import WageType
@@ -48,6 +48,31 @@ class EmployeeRepository:
             select(Employee.id).where(func.lower(Employee.name) == name.strip().lower()).limit(1)
         )
         return found is not None
+
+    async def colliding_names(self, name: str, prefix: str) -> set[str]:
+        """Every taken name that could collide with `name` or a prefixed variant
+        of it, lower-cased, in ONE query.
+
+        The service's disambiguation walk used to issue one name_exists() per
+        candidate — up to 100 sequential round trips for a colliding name. It
+        now tests membership against this set in memory.
+
+        The LIKE is a deliberate SUPERSET ('IN-CHAL% ramesh' also catches
+        'IN-CHALKY ramesh'): the service compares exact candidate strings, so an
+        over-broad match costs nothing and a missed one would be a duplicate.
+        """
+        lowered = name.strip().lower()
+        pattern = (lowered.replace("\\", r"\\")
+                          .replace("%", r"\%")
+                          .replace("_", r"\_"))
+        lname = func.lower(Employee.name)
+        res = await self.db.execute(
+            select(lname).where(or_(
+                lname == lowered,
+                lname.like(f"{prefix.lower()}% {pattern}", escape="\\"),
+            ))
+        )
+        return set(res.scalars())
 
     async def save(self, emp: Employee) -> Employee:
         await self.db.commit()

@@ -162,7 +162,7 @@ MERGE_GATE_ENTRY = ProductionStage.LINE_STITCHING
 # stage never means remembering to grant them.
 STAGE_ROLE_ACCESS: dict[ProductionStage, set] = {
     ProductionStage.LEATHER_CUTTING:  {UserRole.CUTTING_MANAGER},
-    ProductionStage.LINING_CUTTING:   {LINING_MANAGER},
+    ProductionStage.LINING_CUTTING:   {UserRole.LINING_MANAGER},
     ProductionStage.FUSING:           {UserRole.STITCHING_MANAGER},
     ProductionStage.PASTING:          {UserRole.STITCHING_MANAGER},
     ProductionStage.LINE_STITCHING:   {UserRole.STITCHING_MANAGER},
