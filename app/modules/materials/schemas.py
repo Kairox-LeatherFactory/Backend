@@ -25,6 +25,41 @@ class LotCreate(BaseModel):
     supplier_id: uuid.UUID | None = None
 
 
+class LotRead(BaseModel):
+    """One row of the lot picker — everything a cut screen needs to choose."""
+    lot_id: uuid.UUID
+    barcode: str | None          # the printed label; None = never registered
+    category: str
+    subtype: str | None
+    article: str
+    colour: str | None
+    thickness: str | None
+    size: str | None
+    uom: str
+    on_hand: float
+    reserved: float
+    available: float             # on_hand − reserved
+    last_used_for_sku: bool = False   # pre-select this one, but SHOW that you did
+    covers_required: bool | None = None   # null unless `required` was passed
+
+
+class LotOptions(BaseModel):
+    """Distinct values across the matched lots — fills the cascading dropdowns.
+    `/materials/spec` says WHICH boxes to render; this says what goes in them."""
+    article: list[str] = Field(default_factory=list)
+    colour: list[str] = Field(default_factory=list)
+    thickness: list[str] = Field(default_factory=list)
+    size: list[str] = Field(default_factory=list)
+
+
+class LotListResult(BaseModel):
+    count: int
+    lots: list[LotRead]
+    options: LotOptions
+    suggested_lot_id: uuid.UUID | None = None   # derived last-used for the SKU
+    required: float | None = None
+
+
 class LotCreateResult(BaseModel):
     lot_id: uuid.UUID
     lot_barcode: str

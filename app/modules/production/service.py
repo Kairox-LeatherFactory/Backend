@@ -430,18 +430,26 @@ class ProductionService:
                     await DrawerService(self.db).release_nocommit(piece.id)
  
         consumption_recorded = None
+        stock_warning = None
         if is_cut and not preview and fresh_cut_count > 0:
             lot_id = leather_lot_id or lining_lot_id
             from app.modules.materials.service import MaterialService
             total_consumption = consumption_value * fresh_cut_count
-            avail = await MaterialService(self.db).decrement_for_cut_nocommit(
+            # Hold the instance: the shortfall warning comes back on it, not in
+            # the return value (which stays a float for existing callers).
+            materials = MaterialService(self.db)
+            avail = await materials.decrement_for_cut_nocommit(
                 lot_id, float(total_consumption))
+            stock_warning = materials.last_decrement_warning
             consumption_recorded = {
                 "lot_id": str(lot_id),
                 "pieces_consuming": fresh_cut_count,
                 "qty": float(total_consumption),
                 "dcm": float(total_consumption),
                 "available_after": avail,
+                # True when the ledger went short. The cut is still recorded —
+                # see decrement_for_cut_nocommit for why this warns, not blocks.
+                "stock_short": stock_warning is not None,
             }
  
         # ── the reported stage ────────────────────────────────────────────────
@@ -481,6 +489,7 @@ class ProductionService:
                 blocked=blocked, not_found=not_found),
             "screen_role_warning": screen_role_warning,
             "consumption_recorded": None,
+            "stock_warning": None,
             "preview": bool(preview),
             "skill_warnings": skill_warnings,
         }
@@ -491,6 +500,7 @@ class ProductionService:
 
         await self.db.commit()
         result["consumption_recorded"] = consumption_recorded
+        result["stock_warning"] = stock_warning
         return result
 
     @staticmethod
