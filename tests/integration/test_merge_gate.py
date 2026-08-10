@@ -86,54 +86,93 @@ async def test_store_scan_and_full_merge_then_line_stitch(db, operations, pieces
     assert not res["merge_blocked"]
 
 
+def _seed_events(db, cutter, *pairs):
+    for piece, op in pairs:
+        db.add(ProductionEvent(
+            sku_id=piece.sku_id, operation_id=op.id, employee_id=cutter.id,
+            work_date=datetime.date.today(), qty=1, entered_by="test",
+            piece_id=piece.id))
+
+
 @pytest.mark.asyncio
-async def test_role_gate_checks_every_distinct_stage_in_batch(db, operations, pieces,
-                                                               cutter, cutting_mgr):
-    """GATE 1 is whole-request: if ANY stage in the batch is closed to the role,
-    the entire request 403s — no piece is logged.
+async def test_role_gate_rejects_only_the_pieces_it_owns_in_a_mixed_batch(
+        db, operations, pieces, cutter, cutting_mgr):
+    """GATE 1 on a MIXED batch: the denied pieces are rejected, the rest LOG.
+
+    CHANGED CONTRACT (was: whole-request 403 if ANY stage is closed to the role).
+    A PIPELINE batch infers a stage PER PIECE, so one straggler a stage behind
+    gives the batch a second stage. Failing the whole request on it meant one bad
+    piece lost every good piece scanned with it — the exact outcome gates 2-4 are
+    per-piece to prevent. An ALL-denied batch is still a 403; see the test below.
 
     Stage pair matters here. CUTTING_MANAGER owns BOTH LEATHER_CUTTING and FUSING
     (app/core/enums_barcode.py:165,167), so a cut+fuse batch does not exercise the
     gate — and because LEATHER_CUTTING requires consumption, such a batch is
-    rejected 422 by the cut-mixing rule (service.py:248-252) before the role gate
-    is even interesting. The pair below is FUSING (owned) + PASTING (not owned,
-    it belongs to STITCHING_MANAGER at :168), and neither is a cut stage.
+    rejected 422 by the cut-mixing rule before the role gate is even interesting.
+    The pair below is FUSING (owned) + PASTING (not owned, it belongs to
+    STITCHING_MANAGER at :168), and neither is a cut stage.
     """
     piece1, _ = pieces[0]
     piece2, _ = pieces[1]
 
-    def _ev(piece, op):
-        return ProductionEvent(
-            sku_id=piece.sku_id, operation_id=op.id, employee_id=cutter[0].id,
-            work_date=datetime.date.today(), qty=1, entered_by="test",
-            piece_id=piece.id)
-
     # piece1: completed LEATHER_CUTTING          -> next stage is FUSING  (allowed)
     # piece2: completed LEATHER_CUTTING + FUSING -> next stage is PASTING (denied)
-    db.add(_ev(piece1, operations["LEATHER_CUTTING"]))
-    db.add(_ev(piece2, operations["LEATHER_CUTTING"]))
-    db.add(_ev(piece2, operations["FUSING"]))
+    _seed_events(db, cutter[0],
+                 (piece1, operations["LEATHER_CUTTING"]),
+                 (piece2, operations["LEATHER_CUTTING"]),
+                 (piece2, operations["FUSING"]))
+    await db.commit()
+
+    res = await ProductionService(db).log_batch(
+        user=cutting_mgr, employee_id=cutter[0].id,
+        piece_ids=[piece1.id, piece2.id],
+        work_date=datetime.date.today(), screen=ScreenContext.PIPELINE)
+
+    # the piece whose stage this role DOES own was logged
+    assert res["logged"] == [piece1.code]
+    assert res["stage_by_piece"][piece1.code] == "FUSING"
+
+    # the piece whose stage it does NOT own was rejected, alone, with the reason
+    assert res["role_blocked"] == [piece2.code]
+    reason = next(b for b in res["blocked"] if b["gate"] == "role")
+    assert reason["piece"] == piece2.code and reason["stage"] == "PASTING"
+    assert "stitching_manager" in reason["reason"].lower()
+
+    # and PASTING was genuinely not written
+    from sqlalchemy import func, select
+    n = await db.scalar(select(func.count(ProductionEvent.id))
+                        .where(ProductionEvent.operation_id == operations["PASTING"].id))
+    assert n == 0
+
+
+@pytest.mark.asyncio
+async def test_role_gate_is_still_a_403_when_no_stage_in_the_batch_is_owned(
+        db, operations, pieces, cutter, cutting_mgr):
+    """The documented whole-request 403 survives for the case it was written for:
+    every stage in the batch is closed to this role, so the ROLE is what's wrong
+    and there is nothing to salvage."""
+    piece1, _ = pieces[0]
+    piece2, _ = pieces[1]
+
+    # both pieces are past FUSING -> both infer PASTING, which cutting_mgr lacks
+    for p in (piece1, piece2):
+        _seed_events(db, cutter[0],
+                     (p, operations["LEATHER_CUTTING"]), (p, operations["FUSING"]))
     await db.commit()
 
     with pytest.raises(HTTPException) as exc:
         await ProductionService(db).log_batch(
-            user=cutting_mgr,
-            employee_id=cutter[0].id,
+            user=cutting_mgr, employee_id=cutter[0].id,
             piece_ids=[piece1.id, piece2.id],
-            work_date=datetime.date.today(),
-            screen=ScreenContext.PIPELINE,
-        )
+            work_date=datetime.date.today(), screen=ScreenContext.PIPELINE)
 
     assert exc.value.status_code == 403
-    # the 403 names the stage and the role that owns it
     detail = str(exc.value.detail).lower()
     assert "pasting" in detail and "stitching_manager" in detail
 
-    # and nothing was logged — the whole request was refused, not just piece2
     from sqlalchemy import func, select
-    pasting = operations["PASTING"]
     n = await db.scalar(select(func.count(ProductionEvent.id))
-                        .where(ProductionEvent.operation_id == pasting.id))
+                        .where(ProductionEvent.operation_id == operations["PASTING"].id))
     assert n == 0
 
 

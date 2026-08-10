@@ -68,17 +68,58 @@ INITIAL_DRAWER_POOL = 200
 # ──────────────────────────────────────────────────────────────────────────────
 # needs_lining detection (unchanged from the shipped build)
 # ──────────────────────────────────────────────────────────────────────────────
-def _sku_needs_lining(sku: SKU) -> bool:
-    """Lining detection from the SKU's parsed dimensions.
+# Style-name tokens that are positive evidence of a lining/second component.
+# KNIT and WOOL are lining materials in their own right (MaterialSubtype.KNIT,
+# CLAUDE.md §5 "Lining / knit"); FUR and the DETACH/VEST companion pieces are a
+# second component that must be merged in the drawer before line-stitching.
+# EDIT THIS LIST, not the function — it is the whole vocabulary.
+LINING_NAME_MARKERS: tuple[str, ...] = (
+    "KNIT", "WOOL", "FUR", "LINING", "NYLON", "QUILT", "DETACH", "VEST", "MIX",
+)
 
-    Positive evidence only: a lining colour on the SKU means lined; no signal
-    means not lined (a DM who knows better corrects the piece). Defaulting to
-    True would wedge a leather-only piece's drawer at the completeness gate
-    forever, blocking line-stitching for the order.
+
+def _blank(val) -> bool:
+    return not val or str(val).strip().upper() in {"", "NA", "N/A", "NONE", "-"}
+
+
+def _sku_needs_lining(sku: SKU, db: Session | None = None) -> bool:
+    """Lining detection for one SKU.
+
+    POSITIVE EVIDENCE ONLY, and that is deliberate: no signal means NOT lined.
+    Defaulting to True would wedge a leather-only piece's drawer at the
+    completeness gate forever, blocking line-stitching for the whole order.
+
+    TWO SOURCES, checked in order:
+
+      1. An explicit lining colour on the SKU (knit_color / nylon_color). This
+         is the intended source — but NOTHING POPULATES IT TODAY. The order
+         sheet this importer reads (data/johnpeter.xlsx) has columns
+         Date / Style / SUEDE COLOUR / ARTICLE / sizes / TOTAL QTY and no lining
+         column at all, and _upsert_sku never writes either field. (lining_color
+         and lining_type are not SKU columns at all; the getattr keeps them
+         harmless and forward-compatible if they are ever added.)
+
+      2. THE STYLE NAME — the only lining signal the real sheet actually
+         carries. 8 of its 17 styles are named ADELE KNIT, FLAVIO KNIT + FUR
+         DETACH, FRANCIS KNIT, SHINOBI KNIT, REESE WOOL … and a KNIT style has a
+         knit lining by definition.
+
+    WHY THIS MATTERS: on source 1 alone, needs_lining came back False for ALL
+    1425 pieces of the real order. Every drawer was then complete on leather
+    alone, HOLDING_BOTH was unreachable, and the lining half of the merge gate —
+    the whole reason the completeness gate exists — never fired once in
+    production. Source 2 is what makes it fire.
     """
     for attr in ("knit_color", "nylon_color", "lining_color", "lining_type"):
-        val = getattr(sku, attr, None)
-        if val and str(val).strip().upper() not in {"", "NA", "N/A", "NONE", "-"}:
+        if not _blank(getattr(sku, attr, None)):
+            return True
+
+    # `db` is optional so source 1 stays a pure, session-free predicate (see
+    # tests/unit/test_premint_lining_pure.py). Source 2 needs the style row.
+    style = db.get(Style, sku.style_id) if db is not None and sku.style_id else None
+    if style is not None:
+        haystack = f"{style.name or ''} {style.article or ''}".upper()
+        if any(marker in haystack for marker in LINING_NAME_MARKERS):
             return True
     return False
 
@@ -94,13 +135,50 @@ def _drawer_count(db: Session) -> int:
     return int(db.scalar(select(func.count(Drawer.id))) or 0)
 
 
-def _mint_drawer(db: Session, seq: int) -> Drawer:
-    """Create ONE permanent, barcoded drawer in WAITING state. Static code."""
+# ──────────────────────────────────────────────────────────────────────────────
+# INSERT ORDER IS LOAD-BEARING — read this before touching the flushes below.
+#
+# barcode_registry.drawer_id → drawer.id and piece.drawer_id → drawer.id are RAW
+# ForeignKey COLUMNS with NO relationship() on the mapper. SQLAlchemy's unit of
+# work orders INSERTs from mapper RELATIONSHIPS, not from raw FK columns, so it
+# has no idea drawers must land before the rows that reference them and is free
+# to emit barcode_registry first. Every FK in this schema is NON-DEFERRABLE
+# (checked per row), so wrong order is an immediate ForeignKeyViolation:
+#
+#     insert or update on table "barcode_registry" violates foreign key
+#     constraint "fk_barcode_registry_drawer_id_drawer"
+#
+# piece.drawer_id → drawer.id and drawer.current_piece_id → piece.id also form a
+# MUTUAL CYCLE, so no single insert order satisfies both — the link has to be an
+# UPDATE after both rows exist.
+#
+# The order below is therefore explicit and phased:
+#     1. INSERT drawers      (current_piece_id still NULL)
+#     2. INSERT pieces       (drawer_id now resolves)
+#     3. UPDATE drawers      (current_piece_id now resolves)
+#     4. INSERT barcodes     (both parents now resolve)
+#
+# That is FOUR flushes for a whole import, not one per row — which is the point:
+# the per-row db.flush() this replaced was what made a 1400-piece upload ~11,700
+# round trips. Do not "simplify" these into a single flush.
+#
+# NOTE FOR TESTS: SQLite does not enforce foreign keys unless
+# `PRAGMA foreign_keys=ON` is set, so this ordering bug is INVISIBLE on the
+# default test harness. tests/integration/test_premint_insert_order.py turns the
+# pragma on precisely so it cannot regress unnoticed again.
+# ──────────────────────────────────────────────────────────────────────────────
+def _build_drawer(seq: int, barcode_sink: list) -> Drawer:
+    """Build ONE permanent drawer + its barcode row. Adds NOTHING to the session.
+
+    The id is assigned here rather than discovered by a flush: `UUIDMixin.id` is
+    a PYTHON-side default (core/models.py:68-71) that SQLAlchemy only fills AT
+    flush time, which is why this used to flush just to learn drawer.id. Matches
+    the project rule that ids come from the app (CLAUDE.md §13).
+    """
     code = f"DRW-{seq:04d}"
-    drawer = Drawer(code=code, seq=seq, state=DrawerState.WAITING.value)
-    db.add(drawer)
-    db.flush()  # drawer.id
-    db.add(BarcodeRegistry(
+    drawer = Drawer(id=uuid.uuid4(), code=code, seq=seq,
+                    state=DrawerState.WAITING.value)
+    barcode_sink.append(BarcodeRegistry(
         code=code, type=BarcodeType.DRAWER.value,
         status=BarcodeStatus.ACTIVE.value, drawer_id=drawer.id,
         caption=f"Drawer {seq}"))
@@ -118,10 +196,13 @@ def bootstrap_drawer_pool(db: Session, size: int = INITIAL_DRAWER_POOL) -> dict:
     if have >= size:
         return {"drawers_bootstrapped": 0, "pool_size": have}
     start = _max_drawer_seq(db) + 1
-    minted = 0
-    for seq in range(start, size + 1):
-        _mint_drawer(db, seq)
-        minted += 1
+    barcodes: list = []
+    drawers = [_build_drawer(seq, barcodes) for seq in range(start, size + 1)]
+    # Drawers first, then their barcodes — see the INSERT ORDER note above.
+    db.add_all(drawers)
+    db.flush()
+    db.add_all(barcodes)
+    minted = len(drawers)
     return {"drawers_bootstrapped": minted, "pool_size": max(have + minted, size)}
 
 
@@ -131,6 +212,10 @@ class _PoolAllocator:
     Loads the current WAITING drawers ONCE (oldest seq first) and serves them
     in order. When they run out it mints new permanent drawers on demand,
     continuing the seq. All within the caller's transaction.
+
+    Nothing is added to the session here. Newly minted drawers land in
+    `self.new_drawers` and their barcodes in `self.barcodes`, so premint_order
+    can insert them in the right phase — see the INSERT ORDER note above.
     """
 
     def __init__(self, db: Session):
@@ -145,13 +230,16 @@ class _PoolAllocator:
         self._next_seq = _max_drawer_seq(db) + 1
         self.reused = 0
         self.minted = 0
+        self.new_drawers: list[Drawer] = []
+        self.barcodes: list[BarcodeRegistry] = []
 
     def take(self) -> Drawer:
         if self._free:
             drawer = self._free.pop(0)
             self.reused += 1
         else:
-            drawer = _mint_drawer(self.db, self._next_seq)
+            drawer = _build_drawer(self._next_seq, self.barcodes)
+            self.new_drawers.append(drawer)
             self._next_seq += 1
             self.minted += 1
         return drawer
@@ -181,6 +269,9 @@ def premint_order(db: Session, order) -> dict:
     ).all()
 
     allocator = _PoolAllocator(db)
+    new_pieces: list[Piece] = []          # phase 2
+    links: list[tuple] = []               # phase 3: (drawer, piece) to wire up
+    piece_barcodes: list[BarcodeRegistry] = []   # phase 4
 
     for sku in sku_rows:
         qty = int(sku.qty_ordered or 0)
@@ -198,24 +289,31 @@ def premint_order(db: Session, order) -> dict:
         if to_mint <= 0:
             continue
 
-        needs_lining = _sku_needs_lining(sku)
+        needs_lining = _sku_needs_lining(sku, db)
+        # Style/colour/size are constant for the whole SKU, so the caption prefix
+        # is resolved ONCE here rather than re-read per piece (it was a db.get
+        # inside the loop — 1425 lookups for 223 distinct answers).
+        caption_prefix = _caption_prefix(db, sku)
 
         for i in range(1, to_mint + 1):
             seq = base + i
             code = f"{(sku.code or 'NA').upper()}-{seq:03d}"
 
-            # 1) the piece (not yet cut)
-            piece = Piece(code=code, seq=seq, sku_id=sku.id,
+            # 1) the piece (not yet cut). Explicit id, buffered — not added to
+            #    the session here, so phase 1 can flush drawers on their own.
+            piece = Piece(id=uuid.uuid4(), code=code, seq=seq, sku_id=sku.id,
                           current_operation_id=None)
             if hasattr(piece, "needs_lining"):
                 piece.needs_lining = needs_lining
-            db.add(piece)
-            db.flush()  # piece.id
+            new_pieces.append(piece)
 
             # 2) allocate a drawer from the pool (reuse empty, else mint)
             drawer = allocator.take()
             drawer.state = DrawerState.MERGED.value
-            drawer.current_piece_id = piece.id
+            # current_piece_id is NOT set yet — piece.id does not exist in the
+            # DB until phase 2, and fk_drawer_current_piece_id_piece is checked
+            # immediately. Deferred to phase 3.
+            links.append((drawer, piece))
             # A fresh merge starts with neither part in.
             drawer.leather_in = False
             drawer.lining_in = False
@@ -225,11 +323,12 @@ def premint_order(db: Session, order) -> dict:
                 piece.drawer_id = drawer.id
 
             # 3) register the parent barcode (drawer barcode already exists — it
-            #    is permanent and static; we do NOT re-register it on reuse)
-            db.add(BarcodeRegistry(
+            #    is permanent and static; we do NOT re-register it on reuse).
+            #    Buffered for phase 4: piece.id is not in the DB until phase 2.
+            piece_barcodes.append(BarcodeRegistry(
                 code=code, type=BarcodeType.PIECE.value,
                 status=BarcodeStatus.ACTIVE.value, piece_id=piece.id,
-                caption=_piece_caption(db, sku, seq),
+                caption=f"{caption_prefix} · #{seq}",
                 order_id=order.id,
                 sku_id=sku.id,
                 style_id=sku.style_id,
@@ -241,13 +340,37 @@ def premint_order(db: Session, order) -> dict:
             if len(stats["sample_barcodes"]) < 5:
                 stats["sample_barcodes"].append(code)
 
+    # ── the four ordered phases (see the INSERT ORDER note at the top) ────────
+    # PHASE 1 — drawers land first, with current_piece_id still NULL. This flush
+    # also carries the UPDATEs to reused drawers (state/leather_in/…), which is
+    # safe for the same reason: none of them points at a piece yet.
+    db.add_all(allocator.new_drawers)
+    db.flush()
+
+    # PHASE 2 — pieces. piece.drawer_id now resolves against a real drawer row.
+    db.add_all(new_pieces)
+    db.flush()
+
+    # PHASE 3 — close the cycle. Both rows exist, so this is a plain UPDATE.
+    for drawer, piece in links:
+        drawer.current_piece_id = piece.id
+    db.flush()
+
+    # PHASE 4 — barcodes last; every parent they name is now committed-in-txn.
+    # Left pending for the caller's commit to flush.
+    db.add_all(allocator.barcodes)
+    db.add_all(piece_barcodes)
+
     stats["drawers_reused"] = allocator.reused
     stats["drawers_minted"] = allocator.minted
     return stats
 
 
-def _piece_caption(db: Session, sku: SKU, seq: int) -> str:
+def _caption_prefix(db: Session, sku: SKU) -> str:
+    """'CLERMONT · PINE GREEN · M' — the part of a piece caption that is the same
+    for every piece of a SKU. Resolved once per SKU; the seq is appended at the
+    call site."""
     style = db.get(Style, sku.style_id)
     colour = sku.color_name or sku.color_code or "NA"
-    parts = [style.name if style else "NA", colour, sku.size or "NA", f"#{seq}"]
-    return " · ".join(str(p) for p in parts)
+    return " · ".join(str(p) for p in
+                      [style.name if style else "NA", colour, sku.size or "NA"])

@@ -21,6 +21,39 @@ from app.modules.wages.models import Rate
 from app.modules.clients.utlis import make_style_code
 
 
+def _order_lock_key(order_number: str) -> int:
+    """A stable signed 64-bit advisory-lock key for one order number.
+
+    Hashed in Python rather than with Postgres `hashtext` so the key is
+    reproducible from the application side (and greppable in pg_locks when
+    someone is debugging a stuck import).
+    """
+    import hashlib
+    digest = hashlib.blake2b(order_number.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big", signed=True)
+
+
+def _acquire_order_import_lock(db: Session, order_number: str) -> None:
+    """Take the transaction-scoped import lock for this order, or 409.
+
+    No-op off Postgres: SQLite has no advisory locks and the test suite is
+    single-threaded, so there is no concurrency to guard against there.
+    """
+    from fastapi import HTTPException
+    from sqlalchemy import func
+
+    if db.bind is None or db.bind.dialect.name != "postgresql":
+        return
+    got = db.scalar(select(func.pg_try_advisory_xact_lock(
+        _order_lock_key(order_number))))
+    if not got:
+        raise HTTPException(
+            409,
+            f"Order {order_number} is already being imported by another request. "
+            "A large breakdown sheet takes a few minutes — wait for it to finish "
+            "before uploading again. Nothing has been written by this attempt.")
+
+
 def _get_or_create_client(db: Session, name: str, country: str | None) -> Client:
     c = db.scalar(select(Client).where(Client.name == name))
     if not c:
@@ -207,6 +240,23 @@ def load_preview_into_order(db, preview, *, order_number: str,
     if not order:                              # backstop; endpoint already checked
         raise HTTPException(
             404, "Order number not found. Please verify with the client record.")
+
+    # ── CONCURRENCY GUARD ────────────────────────────────────────────────────
+    # An import of a 1400-piece order is thousands of statements in ONE
+    # transaction and takes minutes against a remote pooler. If a second commit
+    # for the SAME order starts while the first is still running, it blocks on
+    # the first uncommitted unique key (style.code, via ix_style_code) and simply
+    # WAITS — until Supabase's statement_timeout (2 min) cancels it and the
+    # caller gets an opaque 500:
+    #     QueryCanceled: canceling statement due to statement timeout
+    #     CONTEXT: while inserting index tuple in relation "ix_style_code"
+    # which reads like a performance problem and is actually a lock queue. A
+    # client that times out and retries produces this every time.
+    #
+    # The advisory lock turns that 2-minute hang into an immediate, honest 409.
+    # It is TRANSACTION-scoped, so it releases on commit AND on rollback — there
+    # is nothing to leak and nothing to clean up.
+    _acquire_order_import_lock(db, order_number)
 
     OP_SEQ = {"CUTTING":1,"FUSING":2,"PASTING":3,"SHELL":4,"L/A":5,
               "LINING STICH":6,"FF":7,"FF-SAMPLE":8,"FF-SMS":9,"FF-SAMPLE ":8}
