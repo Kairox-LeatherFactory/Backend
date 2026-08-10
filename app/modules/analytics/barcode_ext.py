@@ -35,6 +35,7 @@ class BarcodeAnalyticsMixin:
                                *, client_scope: uuid.UUID | None = None) -> dict:
         """F1 — the garment's whole life: every stage, who did it, when, entered
         by, rework flag, leather consumption at cutting, current stage + wait."""
+        
         from fastapi import HTTPException, status
         from sqlalchemy import func, select
 
@@ -148,3 +149,4 @@ class BarcodeAnalyticsMixin:
             "styles": styles,
             "total_consumed_dcm": round(sum(s["leather_consumed_dcm"] for s in styles), 3),
         }
+
