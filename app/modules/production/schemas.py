@@ -204,6 +204,12 @@ class LogResult(BaseModel):
     blocked: list[dict] = Field(default_factory=list)
     message: str = ""                        # one sentence for the scan screen
     screen_role_warning: str | None = None
+    # Set when a cut consumed more than the lot had available. The cut IS still
+    # recorded — stock drifts and the garment is physically cut — but the
+    # shortfall is surfaced instead of silently driving on_hand negative.
+    # {lot_id, article, colour, uom, requested, available_before, short_by,
+    #  on_hand_after, note}
+    stock_warning: dict | None = None
     consumption_recorded: dict | None = None
     preview: bool = False                    # NEW: echoes whether this was a dry-run
     # GATE 2 is a WARNING, not a block: the piece is logged and the anomaly is

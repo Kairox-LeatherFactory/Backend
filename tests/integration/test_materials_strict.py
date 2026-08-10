@@ -120,15 +120,32 @@ async def test_zero_quantity_rejected(db):
 # ── STOCK: on-hand / reserved / available across lots of same article ────────
 @pytest.mark.asyncio
 async def test_stock_aggregates_and_reserves(db):
+    """stock() sums every lot the FILTER matches.
+
+    UPDATED FOR OPTION A (one lot per material spec). This used to create the
+    same article+colour+thickness twice, which create_lot now refuses with a 409
+    — re-supply tops the existing lot up via /materials/receive instead. The
+    aggregation being tested is still real and still matters: a filter broader
+    than the full spec (here article only, no colour) legitimately spans several
+    lots, and that is exactly the "how much SUEDE-A32 do we have in total?"
+    question the stock screen asks.
+    """
     svc = MaterialService(db)
     await _make(db, category="LEATHER", article="SUEDE-A32", colour="PINE",
                 attributes={"thickness": "1.2mm", "dcm": 300})
-    await _make(db, category="LEATHER", article="SUEDE-A32", colour="PINE",
+    await _make(db, category="LEATHER", article="SUEDE-A32", colour="FOREST",
                 attributes={"thickness": "1.2mm", "dcm": 200})
     stock = await svc.stock(category="LEATHER", article="SUEDE-A32", required=600)
     assert stock["on_hand"] == 500.0
     assert stock["available"] == 500.0
+    assert stock["lot_count"] == 2
     assert stock["short_by"] == 100.0      # 600 - 500
+
+    # …and narrowing to the full spec resolves to exactly one lot — the promise
+    # the cut-screen picker depends on.
+    one = await svc.stock(category="LEATHER", article="SUEDE-A32",
+                          colour="PINE", thickness="1.2mm")
+    assert one["lot_count"] == 1 and one["on_hand"] == 300.0
 
 
 # ── FILTER SPEC: the UI hint matches the spec ────────────────────────────────
