@@ -355,7 +355,24 @@ class AttendanceService:
         return await self.repo.for_employee(employee_id, start, end)
 
     async def today_roster(self) -> list[schemas.AttendanceRead]:
-        return [schemas.AttendanceRead.model_validate(log) for log in await self.repo.by_day(await self._local_today())]
+        rows = await self.repo.by_day(await self._local_today())
+
+        return [
+            schemas.AttendanceRead(
+                id=log.id,
+                employee_id=log.employee_id,
+                name=name,  # 👈 IMPORTANT (comes from join)
+                work_date=log.work_date,
+                check_in_at=log.check_in_at,
+                check_out_at=log.check_out_at,
+                source=log.source,
+                is_late=log.is_late,
+                is_short=log.is_short,
+                is_overtime=log.is_overtime,
+                distance_m=log.distance_m,
+            )
+            for log, name in rows
+        ]
 
     async def my_status(self, user: User) -> schemas.ShiftStatus:
         """Server-anchored data for the frontend live countdown.

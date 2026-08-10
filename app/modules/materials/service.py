@@ -56,6 +56,12 @@ class MaterialService:
         self.db = db
         self.repo = MaterialRepository(db)
         self.barcodes = BarcodeRepository(db)
+        # Set by decrement_for_cut_nocommit when a cut consumed more than was
+        # available. Kept off the return value so the float signature (and its
+        # existing callers) is unchanged; the caller reads it from the instance
+        # it already holds. Always defined, so reading it before a decrement is
+        # None rather than an AttributeError.
+        self.last_decrement_warning: dict | None = None
 
     # ── create lot (+ child barcode + stock) ─────────────────────────────────
     async def create_lot(self, body) -> dict:
@@ -113,6 +119,32 @@ class MaterialService:
                 f"{spec['qty_field']} (quantity) must be > 0.")
 
         uom = spec["qty_uom"]
+
+        # ── OPTION A: ONE LOT PER MATERIAL SPEC ──────────────────────────────
+        # A lot identifies WHAT the material is, not when it was bought. Buying
+        # the same article/colour/thickness again is a TOP-UP of the existing
+        # lot (POST /materials/receive), not a second row.
+        #
+        # Without this the picker's promise breaks: "filter article + colour +
+        # thickness" would return two rows with no way for a cutting manager to
+        # tell them apart, and the stock for one material would be split across
+        # lots so neither shows the true on-hand. `receive` was already built to
+        # top up an existing lot by id, so this makes the two halves agree.
+        dup = await self.repo.find_duplicate_lot(
+            category=cat, subtype=subtype, article=body.article,
+            colour=body.colour, thickness=attrs.get("thickness"),
+            size=attrs.get("size"))
+        if dup is not None:
+            spec_desc = " · ".join(str(v) for v in
+                                   [body.article, body.colour,
+                                    attrs.get("thickness"), attrs.get("size")] if v)
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"A lot for {spec_desc} already exists ({float(dup.on_hand)} "
+                f"{dup.uom} on hand). Material is one lot per spec — add this "
+                f"delivery to it with POST /materials/receive using "
+                f"lot_id={dup.id}, rather than creating a second lot.")
+
         lot = self.repo.add_lot_nocommit(
             category=cat, subtype=subtype, article=body.article,
             colour=body.colour, thickness=attrs.get("thickness"),
@@ -169,6 +201,85 @@ class MaterialService:
             "required_to_add": sorted(spec["required"]) if spec else [],
             "quantity_field": spec["qty_field"] if spec else None,
             "uom": spec["qty_uom"] if spec else None,
+        }
+
+    async def list_lots(self, *, category=None, subtype=None, article=None,
+                        colour=None, thickness=None, size=None,
+                        sku_id: uuid.UUID | None = None,
+                        required: float | None = None) -> dict:
+        """THE LOT PICKER — filter article/colour/thickness, get the lot to cut from.
+
+        This is what `/materials/spec` and `/materials/stock` could not give you:
+        spec returns the FORM (which boxes to render), stock returns the TOTALS
+        (and throws the lot ids away). Neither hands the frontend a
+        leather_lot_id, so there was no way to build a cut screen.
+
+        AUTO-FILL (`sku_id`): flags the lot this SKU was last cut from, derived
+        live from production_event — see repo.last_lot_for_sku for why it is
+        derived rather than remembered, and why the key is the SKU (which
+        carries colour) and not the style.
+
+        `required` (the batch's total dcm/mtrs) marks which lots can actually
+        cover this cut, so the UI can grey out ones that cannot.
+
+        THREE queries regardless of how many lots match — the lots, their
+        reservations, their barcodes — because this screen opens on every scan.
+        """
+        lots = await self.repo.find_lots(
+            category=category, subtype=subtype, article=article,
+            colour=colour, thickness=thickness, size=size)
+        lot_ids = [lot.id for lot in lots]
+        reserved_map = await self.repo.reserved_by_lot(lot_ids)
+        barcode_map = await self.repo.barcodes_by_lot(lot_ids)
+
+        last_used_id = None
+        if sku_id is not None:
+            # LINING lots suggest against the lining column, everything else
+            # against leather — matching which cut screen will consume them.
+            is_lining = (category or "").upper() == "LINING"
+            last_used_id = await self.repo.last_lot_for_sku(sku_id, lining=is_lining)
+
+        need = Decimal(str(required)) if required is not None else None
+        items = []
+        for lot in lots:
+            reserved = reserved_map.get(lot.id, Decimal(0))
+            available = (lot.on_hand or Decimal(0)) - reserved
+            items.append({
+                "lot_id": lot.id,
+                "barcode": barcode_map.get(lot.id),
+                "category": lot.category, "subtype": lot.subtype,
+                "article": lot.article, "colour": lot.colour,
+                "thickness": lot.thickness, "size": lot.size,
+                "uom": lot.uom,
+                "on_hand": float(lot.on_hand or 0),
+                "reserved": float(reserved),
+                "available": float(available),
+                # Pre-select this one in the UI, but SHOW it — never silently.
+                "last_used_for_sku": lot.id == last_used_id,
+                # None when the caller did not say how much it needs.
+                "covers_required": None if need is None else bool(available >= need),
+            })
+
+        # Oldest first = FIFO, the order find_lots already returns. Then surface
+        # the suggested lot at the top so the common case is the first row.
+        items.sort(key=lambda i: (not i["last_used_for_sku"],))
+
+        def _distinct(field: str) -> list:
+            return sorted({i[field] for i in items if i[field] is not None})
+
+        return {
+            "count": len(items),
+            "lots": items,
+            # Drives the cascading dropdowns. `/materials/spec` says WHICH boxes
+            # to show; this says what goes IN them, from the stock that exists.
+            "options": {
+                "article": _distinct("article"),
+                "colour": _distinct("colour"),
+                "thickness": _distinct("thickness"),
+                "size": _distinct("size"),
+            },
+            "suggested_lot_id": last_used_id,
+            "required": required,
         }
 
     async def stock(self, *, category=None, subtype=None, article=None,
@@ -321,8 +432,44 @@ class MaterialService:
         if d <= 0:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 "Consumption must be > 0 at cutting.")
-        lot.on_hand = (lot.on_hand or 0) - d
+
+        # ── STOCK VALIDATION: warn, never block ──────────────────────────────
+        # Cutting more than the ledger says is on hand is a REAL and legitimate
+        # event: stock drifts, a roll gets counted wrong, an offcut gets used.
+        # The garment is physically on the table and already cut — refusing the
+        # log would lose the production record to protect a number, and the floor
+        # would work around it. So the cut is always recorded.
+        #
+        # What is NOT acceptable is doing it silently, which is what this did
+        # before: `on_hand = on_hand - d` with no check, so a stale or wrong lot
+        # quietly drove stock negative and nobody found out. Now the shortfall is
+        # measured, returned, and surfaced in the /production/log response.
         reserved = await self.repo.active_reserved(lot_id)
+        before = lot.on_hand or Decimal(0)
+        available_before = before - reserved
+        shortfall = d - available_before
+
+        lot.on_hand = before - d
+
+        self.last_decrement_warning = None
+        if shortfall > 0:
+            self.last_decrement_warning = {
+                "lot_id": str(lot_id),
+                "article": lot.article,
+                "colour": lot.colour,
+                "uom": lot.uom,
+                "requested": float(d),
+                "available_before": float(available_before),
+                "short_by": float(shortfall),
+                "on_hand_after": float(lot.on_hand),
+                "note": (
+                    f"Cut {float(d)} {lot.uom} of {lot.article}"
+                    f"{' · ' + lot.colour if lot.colour else ''} but only "
+                    f"{float(available_before)} {lot.uom} was available — short by "
+                    f"{float(shortfall)}. The cut WAS recorded; stock now reads "
+                    f"{float(lot.on_hand)} {lot.uom}. Check the physical count or "
+                    f"whether the wrong lot was selected."),
+            }
         return float(lot.on_hand - reserved)
 
     # ── supplier orders ──────────────────────────────────────────────────────
