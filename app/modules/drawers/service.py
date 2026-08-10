@@ -26,11 +26,12 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import BarcodeAuditAction, DrawerPart, DrawerState
-from app.modules.barcode.models import Drawer
+from app.core.enums import (BarcodeAuditAction, BarcodeType, DrawerPart,
+                            DrawerState)
+from app.modules.barcode.models import BarcodeRegistry, Drawer
 from app.modules.production.models import Piece
 
 
@@ -59,6 +60,59 @@ class DrawerService:
         res = await self.db.execute(
             select(Drawer).where(Drawer.current_piece_id == piece_id))
         return res.scalar_one_or_none()
+
+    # ── the label sheet (print) ──────────────────────────────────────────────
+    async def list_labels(self, *, state: str | None = None,
+                          seq_from: int | None = None, seq_to: int | None = None,
+                          limit: int = 500, offset: int = 0) -> dict:
+        """Drawers + their DRAWER-type barcode, seq order — the print sheet.
+
+        OUTER join on purpose. A drawer whose registry row is missing is a drawer
+        nobody can scan; it must appear in the sheet with a null barcode so the
+        gap is visible, not vanish from a list that claims to be every drawer.
+        The join is pinned to type=DRAWER so a stale row of another type can
+        never supply the code, and drawer codes are unique in the registry
+        (uq_barcode_code) so one drawer yields at most one row.
+        """
+        def _filtered(stmt):
+            if state:
+                stmt = stmt.where(Drawer.state == state)
+            if seq_from is not None:
+                stmt = stmt.where(Drawer.seq >= seq_from)
+            if seq_to is not None:
+                stmt = stmt.where(Drawer.seq <= seq_to)
+            return stmt
+
+        total = int(await self.db.scalar(
+            _filtered(select(func.count(Drawer.id)))) or 0)
+
+        rows = (await self.db.execute(
+            _filtered(
+                select(Drawer, BarcodeRegistry.id, BarcodeRegistry.code,
+                       BarcodeRegistry.caption, BarcodeRegistry.status)
+                .outerjoin(
+                    BarcodeRegistry,
+                    and_(BarcodeRegistry.drawer_id == Drawer.id,
+                         BarcodeRegistry.type == BarcodeType.DRAWER.value))
+            )
+            .order_by(Drawer.seq.asc())
+            .limit(limit).offset(offset)
+        )).all()
+
+        items = [
+            {
+                "drawer_id": drawer.id,
+                "seq": drawer.seq,
+                "code": drawer.code,
+                "state": drawer.state,
+                "barcode_id": bc_id,
+                "barcode": bc_code,
+                "caption": caption,
+                "barcode_status": bc_status,
+            }
+            for drawer, bc_id, bc_code, caption, bc_status in rows
+        ]
+        return {"total": total, "count": len(items), "items": items}
 
     # ── store-scan ───────────────────────────────────────────────────────────
     async def store_scan(self, *, drawer_id: uuid.UUID, piece_id: uuid.UUID,
@@ -94,9 +148,17 @@ class DrawerService:
 
         needs_lining = bool(getattr(piece, "needs_lining", True))
         complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
-        # F07: name what is ACTUALLY in the drawer. A lining-first scan must not
-        # report HOLDING_LEATHER.
-        if complete:
+        # THE STATE NAMES WHAT IS PHYSICALLY IN THE DRAWER — nothing else.
+        #   leather only            → HOLDING_LEATHER
+        #   lining only             → HOLDING_LINING   (F07: a lining-first scan
+        #                             must not report HOLDING_LEATHER)
+        #   both                    → HOLDING_BOTH
+        # COMPLETENESS is a separate question, answered by `complete` /
+        # `ready_for_received`: a leather-only piece (needs_lining=False) is
+        # ready on leather alone, but its drawer still holds LEATHER — calling
+        # that HOLDING_BOTH (as it did) named a lining that is not in there and
+        # was never coming.
+        if drawer.leather_in and drawer.lining_in:
             drawer.state = DrawerState.HOLDING_BOTH.value
         elif drawer.leather_in:
             drawer.state = DrawerState.HOLDING_LEATHER.value

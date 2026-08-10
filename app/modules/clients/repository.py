@@ -167,6 +167,19 @@ class ClientRepository:
             for r in rows
         ]
         
+    async def is_style_visible_to_client(self, style_id: uuid.UUID,
+                                         client_id: uuid.UUID) -> bool:
+        """The style-level twin of is_sku_visible_to_client. A CLIENT login must
+        not learn that another client's style exists, so the caller turns False
+        into a 404, never a 403."""
+        res = await self.db.execute(
+            select(Style.id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .where(Style.id == style_id, ClientOrder.client_id == client_id)
+            .limit(1)
+        )
+        return res.scalar_one_or_none() is not None
+
     async def is_sku_visible_to_client(self, sku_id: uuid.UUID,
                                        client_id: uuid.UUID) -> bool:
         res = await self.db.execute(

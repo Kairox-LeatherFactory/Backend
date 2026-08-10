@@ -102,7 +102,9 @@ class UserService:
             UserRole.SECURITY, UserRole.MERCHANDISER,
             UserRole.CLIENT, UserRole.VIEWER,
         },
-        UserRole.HR: {UserRole.SUPERVISOR, UserRole.VIEWER},
+        UserRole.HR: {UserRole.SUPERVISOR, UserRole.VIEWER, 
+                      UserRole.SECURITY, UserRole.MERCHANDISER,UserRole.CUTTING_MANAGER,
+                      UserRole.LINING_MANAGER, UserRole.STITCHING_MANAGER,},
     }
 
     @staticmethod

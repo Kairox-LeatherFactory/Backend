@@ -143,6 +143,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.attendance.models import AttendanceLog, ShiftConfig
+from app.modules.attendance import schemas
 
 
 class AttendanceRepository:
@@ -187,10 +188,14 @@ class AttendanceRepository:
         )
         return list(res.scalars())
 
-    async def by_day(self, work_date: date) -> list[AttendanceLog]:
+    async def by_day(self, work_date: date) -> list[schemas.AttendanceRead]:
+        from app.modules.employees.models import Employee
         res = await self.db.execute(
-            select(AttendanceLog).where(AttendanceLog.work_date == work_date))
-        return list(res.scalars())
+            select(AttendanceLog, Employee.name)
+            .join(Employee, AttendanceLog.employee_id == Employee.id)
+            .where(AttendanceLog.work_date == work_date)
+        )
+        return res.all()
 
 
 ====================================================================================================
@@ -201,12 +206,19 @@ FILE: router.py
 ================================================================================
 modules/attendance/router.py — Attendance HTTP API
 ================================================================================
+WHO MAY WRITE ATTENDANCE
+  ONLY an operator login: SECURITY / HR / MANAGING_DIRECTOR / DIRECT_MANAGER
+  (core.enums.ATTENDANCE_OPERATOR_ROLES). Shop-floor workers have NO login at
+  all any more, so there is no such thing as a worker checking themselves in:
+  an operator scans the worker's card (or types them in when the card fails).
+
 Endpoints (all mounted under /api/v1):
-  POST   /attendance/check-in            Flow A: self check-in (GPS required)
-  POST   /attendance/check-out           Flow A: self check-out
-  POST   /attendance/proxy/check-in      Flow B: supervisor marks daily workers
-  POST   /attendance/proxy/check-out     Flow B: supervisor closes them
-  POST   /attendance/daily-workers       Flow C: supervisor onboards a daily worker
+  POST   /attendance/scan-check-in       Barcode door: operator scans a card, in|out
+  POST   /attendance/check-in            Operator's OWN check-in (GPS required)
+  POST   /attendance/check-out           Operator's OWN check-out
+  POST   /attendance/proxy/check-in      Manual door: operator types employees in
+  POST   /attendance/proxy/check-out     Manual door: operator closes them
+  POST   /attendance/daily-workers       Onboard a daily worker (DM/HR/MD)
   GET    /attendance/me                  Own attendance history (calendar view)
   GET    /attendance/me/status           Live shift status (server-anchored countdown)
   GET    /attendance/today               Today's roster (manager/HR view)
@@ -221,7 +233,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.enums import UserRole
+from app.core.enums import ATTENDANCE_OPERATOR_ROLES, UserRole
 from app.modules.attendance import schemas
 from app.modules.attendance.service import AttendanceService
 from app.modules.barcode.service import BarcodeService
@@ -231,65 +243,75 @@ from app.modules.attendance.schemas import ScanCheckIn
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
 
+# One dependency, used by every attendance WRITE route, so the rule cannot drift
+# between the barcode door and the manual door.
+require_operator = require_roles(*ATTENDANCE_OPERATOR_ROLES)
+
+# Roles that may read OTHER people's attendance (the floor leads need the roster
+# even though they may not write punches).
+_ATTENDANCE_READERS = {
+    *ATTENDANCE_OPERATOR_ROLES, UserRole.SUPERVISOR,
+    UserRole.CUTTING_MANAGER, UserRole.STITCHING_MANAGER, UserRole.LINING_MANAGER,
+}
+
 
 @router.post("/scan-check-in")
 async def scan_check_in(
     body: ScanCheckIn,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator),
 ):
-    """Check in/out by scanning an employee barcode. A worker may scan only their
-    own card; proxy mode is supervisor/manager only (daily-wage workers)."""
-    from app.modules.attendance.service import AttendanceService
- 
+    """Check in/out by scanning an employee barcode (direction = "in" | "out").
+
+    THE primary attendance door. Every employee has a card and no employee has a
+    login, so the operator standing at the gate — SECURITY / HR / MD / DM — scans
+    every card, monthly or daily, including their own colleagues'.
+    `proxy=True` marks the MANUAL fallback (card won't scan / forgotten)."""
     employee_id = await BarcodeService(db).resolve_employee_id(body.employee_barcode)
- 
-    proxy_roles = {UserRole.SUPERVISOR, UserRole.DIRECT_MANAGER,
-                   UserRole.MANAGING_DIRECTOR, UserRole.HR}
-    if user.role == UserRole.EMPLOYEE:
-        if getattr(user, "employee_id", None) != employee_id:
-            raise HTTPException(status.HTTP_403_FORBIDDEN,
-                                "You can only check in with your own barcode.")
-        if body.proxy:
-            raise HTTPException(status.HTTP_403_FORBIDDEN,
-                                "Workers cannot proxy for others.")
-    elif body.proxy and user.role not in proxy_roles:
-        raise HTTPException(status.HTTP_403_FORBIDDEN,
-                            "Proxy check-in is limited to supervisors and managers.")
- 
     return await AttendanceService(db).barcode_scan(
         employee_id=employee_id, actor=user, direction=body.direction,
         lat=body.lat, lon=body.lon, proxy=body.proxy, reason=body.reason)
 
+
 @router.post("/check-in", response_model=schemas.AttendanceRead, status_code=201)
 async def check_in(body: schemas.CheckInRequest,
             db: AsyncSession = Depends(get_db),
-            user: User = Depends(get_current_user)):
+            user: User = Depends(require_operator)):
+    """An OPERATOR records their own arrival (their login is linked to an
+    employee row). Workers never reach this — they have no login."""
     return await AttendanceService(db).self_check_in(user, body)
 
 
 @router.post("/check-out", response_model=schemas.AttendanceRead)
 async def check_out(body: schemas.CheckOutRequest,
                     db: AsyncSession = Depends(get_db),
-                    user: User = Depends(get_current_user)):
+                    user: User = Depends(require_operator)):
+    """An OPERATOR records their own departure. See check_in."""
     return await AttendanceService(db).self_check_out(user, body)
 
 
+# Manual check-in fallback (no card scan — operator types the employee in).
+# Reuses ProxyMarkRequest (employee_ids + gps). Same four operators as the
+# barcode door, any wage type. Direction handled by the two routes below.
+
 @router.post("/proxy/check-in", response_model=list[schemas.AttendanceRead], status_code=201)
-async def proxy_check_in(body: schemas.ProxyMarkRequest,
-                        db: AsyncSession = Depends(get_db),
-                        user: User = Depends(require_roles(UserRole.SUPERVISOR,UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR))):
-    """Spec Flow B. F50: SUPERVISOR is the PRIMARY actor here (daily-wage workers
-    carry no phone, so the supervisor marks them present) and must not be locked
-    out by the router. The router is now the single authorization decision — the
-    service no longer re-checks the role."""
+async def proxy_check_in(
+    body: schemas.ProxyMarkRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator),
+):
+    """Manual check-in fallback for one or more employees (card failed / forgotten).
+    SECURITY / HR / MD / DM. Works for ANY wage type."""
     return await AttendanceService(db).proxy_mark_present(user, body)
 
 
 @router.post("/proxy/check-out", response_model=list[schemas.AttendanceRead])
-async def proxy_check_out(body: schemas.ProxyMarkRequest,
-                        db: AsyncSession = Depends(get_db),
-                        user: User = Depends(require_roles(UserRole.SUPERVISOR,UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR))):
+async def proxy_check_out(
+    body: schemas.ProxyMarkRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator),
+):
+    """Manual check-out fallback. Same four operators, any wage type."""
     return await AttendanceService(db).proxy_check_out(user, body)
 
 
@@ -297,9 +319,10 @@ async def proxy_check_out(body: schemas.ProxyMarkRequest,
 async def add_daily_worker(body: schemas.AddDailyWorkerRequest,
                         db: AsyncSession = Depends(get_db),
                         user: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR))):
-    """F51: onboarding a daily worker CREATES a login, so this stays at DM/HR/MD
-    (NOT widened to SUPERVISOR — granting user-creation to the shop floor is a
-    deliberate decision, not a bug fix). The service gate is aligned to match."""
+    """Onboard a daily-wage worker on the floor. No login is created any more —
+    the worker gets an employee record and a printable card, nothing else. Stays
+    at DM/HR/MD (NOT widened to SUPERVISOR): adding people to the payroll is a
+    deliberate authority. The service gate is aligned to match."""
     emp = await AttendanceService(db).add_daily_worker(user, body)
     return {"id": str(emp.id), "name": emp.name, "wage_type": emp.wage_type.value}
 
@@ -337,12 +360,7 @@ async def get_config(
     a client/employee login cannot read the coordinates needed to forge an
     in-fence check-in."""
     cfg = await AttendanceService(db).get_config()
-    privileged = {
-        UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.HR,
-        UserRole.SUPERVISOR, UserRole.CUTTING_MANAGER, UserRole.STITCHING_MANAGER,
-        UserRole.LINING_MANAGER,
-    }
-    if user.role in privileged:
+    if user.role in _ATTENDANCE_READERS:
         return schemas.ShiftConfigRead.model_validate(cfg)
     return schemas.ShiftConfigPublicRead.model_validate(cfg)
 
@@ -362,22 +380,15 @@ async def history(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Attendance history. An EMPLOYEE can only ever read their own — the
-    employee_id parameter is ignored for them rather than 403'd, so the same
-    frontend call works for every role. F36: only HR/managers/superusers may
-    read ANOTHER employee's history; CLIENT and VIEWER cannot reach it."""
-    if user.role is UserRole.EMPLOYEE:
-        if user.employee_id is None:
-            raise HTTPException(400, "This login is not linked to an employee record.")
-        employee_id = user.employee_id
-    elif user.role not in (
-        UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.HR,
-        UserRole.SUPERVISOR, UserRole.CUTTING_MANAGER, UserRole.STITCHING_MANAGER,
-        UserRole.LINING_MANAGER,
-    ):
-        # CLIENT, VIEWER, or any future role: no access to workers' attendance.
+    """Attendance history for one employee.
+
+    F36: only operators / floor leads may read a worker's history; CLIENT and
+    VIEWER cannot reach it. (The self-service branch is gone with the employee
+    login — a worker's own history is read by whoever is helping them, and
+    /attendance/me still serves a staff login's own record.)"""
+    if user.role not in _ATTENDANCE_READERS:
         raise HTTPException(403, "Not permitted to read attendance history.")
-    elif employee_id is None:
+    if employee_id is None:
         raise HTTPException(422, "employee_id is required")
     return await AttendanceService(db).history(employee_id, start, end)
 
@@ -385,11 +396,9 @@ async def history(
 @router.get("/today", response_model=list[schemas.AttendanceRead])
 async def today_roster(
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(
-        UserRole.SUPERVISOR, UserRole.HR, UserRole.CUTTING_MANAGER,
-        UserRole.STITCHING_MANAGER, UserRole.LINING_MANAGER)),
+    _: User = Depends(require_roles(*_ATTENDANCE_READERS)),
 ):
-    """Whole-floor roster. Never visible to an EMPLOYEE."""
+    """Whole-floor roster. Operators + floor leads only."""
     return await AttendanceService(db).today_roster()
 
 
@@ -411,16 +420,13 @@ class GpsPoint(BaseModel):
     lon: float = Field(..., ge=-180, le=180)
 
 class ScanCheckIn(BaseModel):
-    """Barcode door. lat/lon stay optional because an indoor floor can genuinely
-    lack a fix — but H6 requires `reason` when they are omitted, so an
-    unverified row is always a deliberate, reviewable act."""
     employee_barcode: str
     direction: str = Field(..., pattern="^(in|out)$")
     lat: float | None = None
     lon: float | None = None
     proxy: bool = False
     reason: str | None = Field(None, max_length=200)
-
+    
 class CheckInRequest(GpsPoint):
     """SELF check-in by the worker themselves (Flow A).
 
@@ -445,10 +451,13 @@ class ProxyMarkRequest(BaseModel):
 
 
 class AddDailyWorkerRequest(BaseModel):
-    """Supervisor onboards a new daily-wage worker on the floor (Flow C)."""
+    """Onboard a new daily-wage worker on the floor (Flow C).
+
+    `phone` is optional: the worker gets no login, so there is nothing to
+    authenticate with it — it is contact detail only."""
     name: str
-    phone: str
     designation: str
+    phone: str | None = None
     daily_rate: float | None = None
 
 
@@ -456,6 +465,7 @@ class AttendanceRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     employee_id: uuid.UUID
+    name: str
     work_date: date
     check_in_at: datetime
     check_out_at: datetime | None
@@ -681,7 +691,9 @@ class AttendanceService:
     # Flow A — Self-service check-in / check-out
     # ══════════════════════════════════════════════════════════════════
     async def self_check_in(self, user: User, body: schemas.CheckInRequest) -> AttendanceLog:
-        """The acting user IS the worker (manager / HR / permanent worker)."""
+        """The acting user IS the person being marked — an OPERATOR (SECURITY /
+        HR / MD / DM) recording their own arrival. Shop-floor workers hold no
+        login, so they never take this path; they are scanned in instead."""
         if user.employee_id is None:
             raise HTTPException(400, "This login is not linked to an employee record.")
         dist = await self._enforce_geofence(body.lat, body.lon)
@@ -702,8 +714,8 @@ class AttendanceService:
                            lon: float | None, proxy: bool, reason: str | None = None):
         """Barcode check in/out. Reuses _open_or_reject / _close.
 
-        A worker (EMPLOYEE role) may only scan their own card — enforced in the
-        router before this is called. Proxy is supervisor/manager only.
+        `actor` is always an operator (SECURITY / HR / MD / DM) — enforced in the
+        router before this is called. Workers have no login and cannot reach it.
         """
         emp = await self.employees.get(employee_id)
         if not emp:
@@ -753,38 +765,35 @@ class AttendanceService:
     # ══════════════════════════════════════════════════════════════════
     # Flow B — Supervisor proxy-marks daily-wage workers
     # ══════════════════════════════════════════════════════════════════
-    async def proxy_mark_present(self, supervisor: User,
+    async def proxy_mark_present(self, operator: User,
                                 body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
-        # Permission: SUPERVISOR (and DIRECT_MANAGER as superuser) only.
-        # F50: authorization is decided once, in the router (now includes
-        # SUPERVISOR). No duplicate role check here — two gates that disagree is
-        # exactly what locked supervisors out of a flow built for them.
+        """Manual check-in fallback (card failed / forgotten). Authorised in the
+        router (SECURITY / HR / MD / DM). Works for ANY wage type — every employee
+        has a card, and any of them can forget it.
+ 
+        The GPS pinged is the OPERATOR's device (they are standing at the gate)."""
         dist = await self._enforce_geofence(body.lat, body.lon)
-
+ 
         out: list[AttendanceLog] = []
         for emp_id in body.employee_ids:
             emp = await self.employees.get(emp_id)
             if not emp:
                 raise HTTPException(
-                    status_code=404,
-                    detail=f"Employee {emp_id} not found."
-                )                                    # silently skip unknown ids
-            # Spec restricts PROXY to piece-rate workers.
-            if emp.wage_type != WageType.PIECE_RATE:
-                raise HTTPException(
-                    400, f"{emp.name} is not a piece-rate worker — proxy not allowed.")
+                    status_code=404, detail=f"Employee {emp_id} not found.")
+            # REMOVED: the "not a piece-rate worker — proxy not allowed" refusal.
+            # A monthly worker who forgot their card must still get a manual
+            # check-in. Manual attendance is a fallback for EVERYONE now.
             log = await self._open_or_reject(
                 employee_id=emp.id, source=AttendanceSource.PROXY,
-                recorded_by=supervisor.id, distance_m=dist,
-            )
+                recorded_by=operator.id, distance_m=dist)
             out.append(log)
         return out
 
-    async def proxy_check_out(self, supervisor: User,
+    async def proxy_check_out(self, operator: User,
                               body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
-        # F50: role decided in the router.
+        """Manual check-out fallback. Authorised in the router. Any wage type."""
         await self._enforce_geofence(body.lat, body.lon)
-        out = []
+        out: list[AttendanceLog] = []
         for emp_id in body.employee_ids:
             out.append(await self._close(employee_id=emp_id))
         return out
@@ -792,11 +801,13 @@ class AttendanceService:
     # ══════════════════════════════════════════════════════════════════
     # Flow C — Onboard a new daily-wage worker on the floor
     # ══════════════════════════════════════════════════════════════════
-    async def add_daily_worker(self, supervisor: User,
+    async def add_daily_worker(self, operator: User,
                                body: schemas.AddDailyWorkerRequest) -> Employee:
-        # F51: onboarding creates a LOGIN, so this stays DM/HR/MD (aligned with
-        # the router). SUPERVISOR is deliberately NOT permitted to create users.
-        if supervisor.role not in (
+        """Put a daily-wage worker on the payroll. NO login is created — they get
+        an employee record and an employee barcode, and an operator scans them in
+        from then on. Stays DM/HR/MD (aligned with the router); SUPERVISOR is
+        deliberately not permitted to add people to the payroll."""
+        if operator.role not in (
             UserRole.DIRECT_MANAGER, UserRole.HR, UserRole.MANAGING_DIRECTOR):
             raise HTTPException(
                 403, "Only a manager or HR may onboard a daily worker.")
@@ -806,7 +817,7 @@ class AttendanceService:
             name=body.name,
             designation=body.designation,
             wage_type=WageType.PIECE_RATE,
-            phone=body.phone,
+            phone=body.phone,     # contact detail only; may be None
             email=None,
         )
         return await self.employees.create(emp_create)
@@ -881,8 +892,8 @@ class AttendanceService:
     async def history(self, employee_id: uuid.UUID, start: date, end: date) -> list[AttendanceLog]:
         return await self.repo.for_employee(employee_id, start, end)
 
-    async def today_roster(self) -> list[AttendanceLog]:
-        return await self.repo.by_day(await self._local_today())
+    async def today_roster(self) -> list[schemas.AttendanceRead]:
+        return [schemas.AttendanceRead.model_validate(log) for log in await self.repo.by_day(await self._local_today())]
 
     async def my_status(self, user: User) -> schemas.ShiftStatus:
         """Server-anchored data for the frontend live countdown.

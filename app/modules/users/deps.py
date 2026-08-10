@@ -96,7 +96,6 @@ async def block_employees(user: "User" = Depends(get_current_user)) -> "User":
         )
     return user
 
-
 def require_roles(*allowed: UserRole):
     async def checker(user: User = Depends(get_current_user)) -> User:
         if user.role in SUPERUSER_ROLES:

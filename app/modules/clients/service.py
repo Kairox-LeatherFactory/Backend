@@ -118,6 +118,10 @@ class ClientService:
                                        client_id: uuid.UUID) -> bool:
         return await self.repo.is_sku_visible_to_client(sku_id, client_id)
 
+    async def is_style_visible_to_client(self, style_id: uuid.UUID,
+                                         client_id: uuid.UUID) -> bool:
+        return await self.repo.is_style_visible_to_client(style_id, client_id)
+
     async def get_skus_for_style(self, style_id: uuid.UUID) -> list[SKU]:
         return await self.repo.get_skus_for_style(style_id)
 

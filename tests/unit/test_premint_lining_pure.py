@@ -72,3 +72,63 @@ def test_a_sku_missing_the_columns_entirely_does_not_crash():
 
 def test_whitespace_around_a_real_colour_still_counts():
     assert _sku_needs_lining(FakeSKU(lining_color="  KNIT BLACK  ")) is True
+
+
+# ═══════════════════════════════════ source 2: the STYLE NAME (the live signal)
+#
+# Source 1 above is the INTENDED signal and nothing populates it: the real order
+# sheet (data/johnpeter.xlsx) has no lining column, and _upsert_sku never writes
+# knit_color/nylon_color. Importing it gave needs_lining=False on ALL 1425
+# pieces — every drawer complete on leather alone, HOLDING_BOTH unreachable, and
+# the lining half of the merge gate silently dead. The style name is the only
+# lining evidence that sheet actually carries.
+class FakeStyle:
+    def __init__(self, name, article=None):
+        self.name, self.article = name, article
+
+
+class FakeDB:
+    """Stands in for the sync Session's identity-map `get`."""
+    def __init__(self, style):
+        self._style = style
+
+    def get(self, _model, _pk):
+        return self._style
+
+
+def _with_style(name, article=None, **sku_kw):
+    sku = FakeSKU(style_id="sid", **sku_kw)
+    return _sku_needs_lining(sku, FakeDB(FakeStyle(name, article)))
+
+
+@pytest.mark.parametrize("style_name", [
+    "ADELE KNIT", "FLAVIO KNIT + FUR DETACH", "FRANCIS KNIT + DETACH",
+    "SHINOBI KNIT", "REESE WOOL", "CLERMONT + VEST", "VIRGILIO MIX",
+])
+def test_a_lining_marker_in_the_style_name_marks_the_piece_as_lined(style_name):
+    """Every one of these is a real style from data/johnpeter.xlsx. A KNIT style
+    has a knit lining by definition (MaterialSubtype.KNIT, CLAUDE.md §5)."""
+    assert _with_style(style_name) is True
+
+
+@pytest.mark.parametrize("style_name", ["CARNABY", "CLERMONT", "ISLAY",
+                                        "SANDY", "TOWER"])
+def test_an_unmarked_style_name_is_still_leather_only(style_name):
+    """Positive evidence only survives: these real styles carry no marker, so
+    they stay leather-only and their drawers complete on leather alone."""
+    assert _with_style(style_name) is False
+
+
+def test_the_marker_is_matched_on_the_article_too():
+    assert _with_style("CARNABY", article="GOAT SUEDE KNIT") is True
+
+
+def test_a_style_name_marker_does_not_need_the_colour_columns():
+    """The two signals are independent — source 2 must fire on its own, which is
+    the entire point of adding it."""
+    assert _with_style("ADELE KNIT", knit_color="NA") is True
+
+
+def test_without_a_session_only_the_colour_columns_are_consulted():
+    """`db=None` keeps source 1 pure; it must not raise reaching for a style."""
+    assert _sku_needs_lining(FakeSKU(style_id="sid")) is False

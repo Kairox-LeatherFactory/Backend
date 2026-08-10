@@ -322,13 +322,22 @@ them separate now is exactly what makes that connection a bridge instead of a re
 ## 13. Alembic migrations
 
 - **`app_user.role` is a native PG enum** (`Enum(UserRole, name="user_role")`). Adding
-  `LINING_MANAGER` to the Python enum is **not enough** — Postgres needs the value added to the DB
-  type. The barcode migration's **first statement**:
+  `LINING_MANAGER` to the Python enum is **not enough** — Postgres needs the label added to the DB
+  type:
   ```python
   if op.get_bind().dialect.name == "postgresql":
-      op.execute("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'lining_manager'")
+      op.execute("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'LINING_MANAGER'")
   ```
   (Guarded so it's a no-op on SQLite, where there is no native enum.)
+- **ADD THE MEMBER *NAME*, UPPERCASE — NOT THE VALUE.** `Enum(UserRole, ...)` persists the enum
+  **member name**, because this project never passes `values_callable`. For
+  `SECURITY = "security"` the driver sends `'SECURITY'`. Adding the lowercase `'security'` creates a
+  label the ORM will never emit, and the role stays unusable — the INSERT still dies with
+  `invalid input value for enum user_role: "SECURITY"` even though `'security'` is on the type.
+  This bit `lining_manager`, `security` and `merchandiser`; `20260810_role_case` repairs all three.
+  Write the name exactly as it appears left of the `=` in `core/enums.py`.
+  The schema's other native enums (`attendance_source`, `wage_type`, `run_status`) are all
+  uppercase names — match them.
 - The barcode migration adds: `barcode_registry`, `drawer`, `material_lot`,
   `material_reservation`, `material_receipt`, `supplier`, `supplier_order`, plus the 5 columns on
   `piece` / `production_event`.

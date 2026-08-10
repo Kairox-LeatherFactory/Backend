@@ -354,8 +354,8 @@ class AttendanceService:
     async def history(self, employee_id: uuid.UUID, start: date, end: date) -> list[AttendanceLog]:
         return await self.repo.for_employee(employee_id, start, end)
 
-    async def today_roster(self) -> list[AttendanceLog]:
-        return await self.repo.by_day(await self._local_today())
+    async def today_roster(self) -> list[schemas.AttendanceRead]:
+        return [schemas.AttendanceRead.model_validate(log) for log in await self.repo.by_day(await self._local_today())]
 
     async def my_status(self, user: User) -> schemas.ShiftStatus:
         """Server-anchored data for the frontend live countdown.
