@@ -292,16 +292,15 @@ class BarcodeService:
         return {"labels": labels}
     
     # ── order picker ────────────────────────────────────────────────────────
-    async def list_orders(self, client_scope: uuid.UUID | None) -> list[dict]:
-        """Orders that have barcodes. client_scope = caller's client_id for a
-        CLIENT login (scopes the list), None for staff (all orders)."""
-        return await self.repo.list_orders_with_barcodes(client_id=client_scope)
+    async def list_orders(self) -> list[dict]:
+        """All orders that have barcodes. No client scoping (Hamthan #6)."""
+        return await self.repo.list_orders_with_barcodes()
  
     # ── analytics: order totals + per-style breakdown ───────────────────────
     async def order_analytics(
         self, order_id: uuid.UUID, client_scope: uuid.UUID | None
     ) -> dict:
-        await self._assert_order_visible(order_id, client_scope)
+        await self._assert_order_exists(order_id)
  
         planned = await self.repo.order_planned_total(order_id)
         minted = await self.repo.order_minted_total(order_id)
@@ -344,7 +343,7 @@ class BarcodeService:
         page: int = 1,
         page_size: int = 50,
     ) -> dict:
-        await self._assert_order_visible(order_id, client_scope)
+        await self._assert_order_exists(order_id)
         page = max(page, 1)
         page_size = min(max(page_size, 1), 200)   # hard ceiling; JP is ~1273 rows
  
@@ -369,28 +368,39 @@ class BarcodeService:
         return await self.repo.list_order_skus(order_id)
  
     # ── detail on click (reuses existing _piece_payload) ────────────────────
-    async def barcode_detail(self, code: str, client_scope: uuid.UUID | None) -> dict:
-        """Full detail for a scanned/clicked code. For a PIECE this is the same
-        rich payload resolve() returns — reused, not re-implemented. Tenancy is
-        applied for piece codes (a CLIENT must not read another client's piece)."""
-        row = await self._get_active_or_410(code)   # 404 unknown / 410 retired
-        if client_scope is not None and row.order_id is not None \
-                and row.order_id != client_scope:
-            # existence itself is information — 404, not 403
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown barcode '{code}'.")
+    async def barcode_detail(self, code: str) -> dict:
+        """Full detail for a scanned/clicked code. No client tenancy (Hamthan #6)."""
+        await self._get_active_or_410(code)   # 404 unknown / 410 retired
         return await self.resolve(code)
  
-    # ── tenancy helper ──────────────────────────────────────────────────────
-    async def _assert_order_visible(
-        self, order_id: uuid.UUID, client_scope: uuid.UUID | None
-    ) -> None:
-        """Staff (client_scope None) see everything. A CLIENT login may only touch
-        its own order; anything else 404s (never reveal another client's order)."""
-        from sqlalchemy import select
+    # ── order existence + order_number resolution (no client tenancy) ────────
+    async def _assert_order_exists(self, order_id: uuid.UUID) -> None:
+        """Order must exist. No client scoping (Hamthan #6): staff see all."""
         from app.modules.clients.models import ClientOrder
- 
-        row = await self.db.get(ClientOrder, order_id)
+        if await self.db.get(ClientOrder, order_id) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found.")
+
+    async def resolve_order_id(self, order_ref: str | uuid.UUID) -> uuid.UUID:
+        """Accept an order UUID OR the human order_number and return the id.
+
+        The four /orders* routes take an id in the path today; this lets the
+        picker resolve the human order_number a user types/scans to that id.
+        """
+        if isinstance(order_ref, uuid.UUID):
+            await self._assert_order_exists(order_ref)
+            return order_ref
+        from app.modules.clients.models import ClientOrder
+        # try UUID string first, else treat as order_number
+        try:
+            oid = uuid.UUID(str(order_ref))
+            await self._assert_order_exists(oid)
+            return oid
+        except ValueError:
+            pass
+        row = await self.db.scalar(
+            select(ClientOrder.id).where(
+                ClientOrder.order_number == str(order_ref).strip()))
         if row is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found.")
-        if client_scope is not None and row.client_id != client_scope:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found.")
+            raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                f"No order with number '{order_ref}'.")
+        return row

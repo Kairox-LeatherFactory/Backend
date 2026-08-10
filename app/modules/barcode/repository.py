@@ -188,8 +188,6 @@ class BarcodeRepository:
             .group_by(ClientOrder.id, ClientOrder.order_number, Client.name)
             .order_by(func.max(BarcodeRegistry.created_at).desc())
         )
-        if client_id is not None:
-            stmt = stmt.where(ClientOrder.client_id == client_id)
 
         rows = (await self.db.execute(stmt)).all()
         return [

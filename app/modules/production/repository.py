@@ -243,15 +243,34 @@ class ProductionRepository:
 
     async def list_pieces_for_sku(
         self, sku_id: uuid.UUID
-    ) -> list[tuple[Piece, str | None, str | None]]:
-        """Every active piece of a SKU + its current stage (code, label)."""
+    ) -> list[tuple[Piece, str | None, str | None, uuid.UUID]]:
+        """Every active piece of a SKU + stage and client order id."""
         res = await self.db.execute(
-            select(Piece, Operation.code, Operation.label)
+            select(Piece, Operation.code, Operation.label, Style.client_order_id)
             .outerjoin(Operation, Operation.id == Piece.current_operation_id)
+            .join(SKU, SKU.id == Piece.sku_id)
+            .join(Style, Style.id == SKU.style_id)
             .where(Piece.sku_id == sku_id, Piece.is_active.is_(True))
             .order_by(Piece.seq)
         )
-        return [(p, c, l) for p, c, l in res.all()]
+        return [(p, c, l, order_id) for p, c, l, order_id in res.all()]
+    
+    async def drawer_states_for_pieces(
+        self, piece_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, str]:
+        """piece_id -> its drawer's state, in ONE query (no N+1 on the checklist).
+
+        Reads the drawer by current_piece_id so it reflects the LIVE holding
+        state, not a stale Piece.drawer_id snapshot.
+        """
+        if not piece_ids:
+            return {}
+        from app.modules.barcode.models import Drawer
+        res = await self.db.execute(
+            select(Drawer.current_piece_id, Drawer.state)
+            .where(Drawer.current_piece_id.in_(piece_ids))
+        )
+        return {pid: st for pid, st in res.all() if pid is not None}
 
     async def piece_ids_done_at_op(
         self, piece_ids: list[uuid.UUID], operation_id: uuid.UUID
