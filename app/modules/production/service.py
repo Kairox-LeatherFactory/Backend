@@ -150,6 +150,14 @@ class ProductionService:
                 f"work {stage.value}. Allowed: {allowed}.")
 
     # ══════════════════════════════════════════════════════ GATE 3: sequence
+    @staticmethod
+    def _cut_screen_hint(stage: ProductionStage) -> str:
+        """Which screen logs a cut entry — the actionable half of a 'not cut yet'
+        rejection. Without it the floor is told 'blocked' and nothing else."""
+        if stage is ProductionStage.LINING_CUTTING:
+            return "the LINING_CUT screen (lining manager)"
+        return "the LEATHER_CUT screen (cutting manager)"
+
     async def _sequence_ok(self, piece: Piece,
                            stage: ProductionStage) -> tuple[bool, str | None]:
         prev = stage.predecessor()
@@ -219,14 +227,36 @@ class ProductionService:
                 pieces[pid] = p
  
         screen_stage = SCREEN_TO_STAGE.get(screen)
- 
-        # resolve each piece's stage (unchanged)
+
+        # Every per-piece rejection is recorded here as {piece, stage, gate,
+        # reason}. The flat buckets below stay for back-compat, but they carry a
+        # bare code and no cause — which is how a caller ends up staring at
+        # `{"stage": null, "sequence_blocked": ["…-001"]}` with nothing to act on.
+        blocked: list[dict] = []
+
+        def _block(piece_code: str, gate: str, reason: str,
+                   stage: ProductionStage | None = None) -> None:
+            blocked.append({
+                "piece": piece_code, "gate": gate, "reason": reason,
+                "stage": stage.value if stage is not None else None,
+            })
+
+        # resolve each piece's stage
         stage_by_piece: dict = {}
         uncut_on_pipeline: list[str] = []
+        completed: list[str] = []
         for pid, piece in pieces.items():
             stage = screen_stage or await self._infer_stage_for_piece(piece, screen)
             if stage is None:
-                not_found.append(f"{piece.code} (no next stage — already complete?)")
+                # The piece is past the END of the chain. It is emphatically NOT
+                # "not found" — its barcode resolved, its history is complete —
+                # so reporting it in not_found was a lie the floor could not
+                # interpret. Its own bucket, with the reason attached.
+                completed.append(piece.code)
+                _block(piece.code, "completed",
+                       f"{piece.code} has already completed the final stage "
+                       f"({ProductionStage.PACKAGE_EXPORT.value}) — nothing left "
+                       f"to log.")
                 continue
             # PIPELINE + a piece with no cut event yet: its "next stage" is a cut
             # entry, but cutting is logged on a CUT SCREEN (that is the whole
@@ -237,6 +267,11 @@ class ProductionService:
             # is blocked PER PIECE, like any other out-of-sequence piece.
             if screen_stage is None and stage.is_cut_entry:
                 uncut_on_pipeline.append(piece.code)
+                _block(piece.code, "not_cut",
+                       f"{piece.code} has not been cut yet, so it has no next "
+                       f"pipeline stage. Log {stage.value} first, on "
+                       f"{self._cut_screen_hint(stage)} — cutting is never logged "
+                       f"from the pipeline screen.", stage)
                 continue
             stage_by_piece[pid] = stage
 
@@ -256,10 +291,32 @@ class ProductionService:
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 "A cutting scan may not be mixed with other stages in one batch.")
  
-        # GATE 1 — ROLE (403, whole request) — runs in preview too, so the user
-        # sees the same 403 they'd hit on commit.
+        # GATE 1 — ROLE. Runs in preview too, so the user sees the same verdict
+        # they'd hit on commit.
+        #
+        # STILL A WHOLE-REQUEST 403 when the role is wrong for EVERY stage in the
+        # batch. That is the documented contract (CLAUDE.md §8) and it is right:
+        # what's wrong is the ROLE, not any particular piece, so there is nothing
+        # to salvage and the caller needs one unambiguous error.
+        #
+        # BUT that rationale — "the role is wrong for the whole batch" — only
+        # holds when the batch HAS one stage. A cut screen fixes one; a PIPELINE
+        # screen infers a stage PER PIECE, so one straggler a stage behind gives
+        # the batch a second stage. Raising on the first denial then 403'd a scan
+        # of 40 legitimately-PASTING pieces because one piece was still at
+        # FUSING: one bad piece losing the 39 good ones, precisely the outcome
+        # gates 2-4 are per-piece to prevent. So when the batch is MIXED and at
+        # least one stage IS permitted, the denied stages degrade to a per-piece
+        # bucket — the good pieces log, the bad ones come back with the same 403
+        # text as their reason.
+        denied: dict = {}
         for stage, op in op_by_stage.items():
-            await self._assert_role(user, stage, op)
+            try:
+                await self._assert_role(user, stage, op)
+            except HTTPException as exc:
+                denied[stage] = exc
+        if denied and len(denied) == len(op_by_stage):
+            raise next(iter(denied.values()))
 
         consumption_value = None
         if is_cut:
@@ -291,17 +348,31 @@ class ProductionService:
                     f"{screen.value} screen.")
  
         logged, rework, sequence_blocked, skill_blocked, merge_blocked =  [], [], [], [], []
+        role_blocked: list[str] = []
         sequence_blocked += uncut_on_pipeline   # never cut → can't be past cutting
         skill_warnings: list[dict] = []   # GATE 2 anomalies (non-blocking now)
         fresh_cut_count = 0
- 
+        # The stage each piece was ACTUALLY resolved to. The single top-level
+        # `stage` cannot describe a mixed pipeline batch, and guessing one from
+        # dict order reported a stage no piece was written at — see below.
+        stage_by_code: dict[str, str] = {}
+
         # GATES 2-4 per piece + (write, IF NOT preview)
         for pid, piece in pieces.items():
             stage = stage_by_piece.get(pid)
             if stage is None:
                 continue
             op = op_by_stage[stage]
- 
+            stage_by_code[piece.code] = stage.value
+
+            # GATE 1 (per-piece remainder) — only reachable on a MIXED batch in
+            # which some other stage was permitted; an all-denied batch already
+            # raised the 403 above.
+            if stage in denied:
+                role_blocked.append(piece.code)
+                _block(piece.code, "role", str(denied[stage].detail), stage)
+                continue
+
             # GATE 2 — SKILL
             # GATE 2 — SKILL: DEMOTED to a recorded warning (drawer-redesign
             # build). Any employee may be recorded at any stage; the anomaly is
@@ -317,15 +388,19 @@ class ProductionService:
                 })
                 # NB: no `continue` — the piece proceeds through the remaining
                 # gates and is logged.
-            # GATE 3 — SEQUENCE (no-skip)
-            ok_seq, _ = await self._sequence_ok(piece, stage)
+            # GATE 3 — SEQUENCE (no-skip). The reason string _sequence_ok has
+            # always built was being discarded into `_`; it is the only thing
+            # that tells the floor WHICH stage is missing.
+            ok_seq, why_seq = await self._sequence_ok(piece, stage)
             if not ok_seq:
                 sequence_blocked.append(piece.code)
+                _block(piece.code, "sequence", why_seq or "", stage)
                 continue
             # GATE 4 — MERGE (line-stitch entry)
-            ok_merge, _ = await self._merge_ok(piece, stage)
+            ok_merge, why_merge = await self._merge_ok(piece, stage)
             if not ok_merge:
                 merge_blocked.append(piece.code)
+                _block(piece.code, "merge", why_merge or "", stage)
                 continue
             # already logged at this op? → rework
             if await self.repo.has_event_at_op(piece.id, op.id):
@@ -369,34 +444,90 @@ class ProductionService:
                 "available_after": avail,
             }
  
-        rep_stage = screen_stage or (next(iter(op_by_stage)) if op_by_stage else None)
- 
-        if preview:
-            # SHORT-CIRCUIT: nothing written, nothing committed.
-            return {
-                "stage": rep_stage.value if rep_stage else None,
-                "count_logged": len(logged),
-                "logged": logged, "rework": rework, "not_found": not_found,
-                "sequence_blocked": sequence_blocked, "skill_blocked": skill_blocked,
-                "merge_blocked": merge_blocked,
-                "screen_role_warning": screen_role_warning,
-                "consumption_recorded": None,
-                "preview": True,
-                "skill_warnings": skill_warnings,
-            }
- 
-        await self.db.commit()
-        return {
-            "stage": rep_stage.value if rep_stage else None,
+        # ── the reported stage ────────────────────────────────────────────────
+        # A cut SCREEN fixes one stage for the whole batch, so it answers for
+        # itself. PIPELINE does not: it infers a stage PER PIECE, so a batch can
+        # legitimately span several. `next(iter(op_by_stage))` picked whichever
+        # stage happened to be inserted first — i.e. the first PIECE's stage —
+        # and reported it for the whole response, so a batch that wrote FUSING
+        # could answer `"stage": "LINE_STITCHING"` because an unrelated, merge-
+        # blocked piece was scanned first. That is a wrong answer, not a vague
+        # one. Now: one resolved stage → name it; several → "MIXED", with the
+        # per-piece truth in stage_by_piece; none resolved → null, and `message`
+        # says why (that null is what a caller sees when every piece was blocked
+        # before a stage could be resolved at all).
+        stages_seen = [s.value for s in dict.fromkeys(stage_by_piece.values())]
+        if screen_stage is not None:
+            rep_stage = screen_stage.value
+        elif len(stages_seen) == 1:
+            rep_stage = stages_seen[0]
+        elif stages_seen:
+            rep_stage = "MIXED"
+        else:
+            rep_stage = None
+
+        result = {
+            "stage": rep_stage,
+            "stages": stages_seen,
+            "stage_by_piece": stage_by_code,
             "count_logged": len(logged),
             "logged": logged, "rework": rework, "not_found": not_found,
+            "completed": completed,
             "sequence_blocked": sequence_blocked, "skill_blocked": skill_blocked,
-            "merge_blocked": merge_blocked,
+            "merge_blocked": merge_blocked, "role_blocked": role_blocked,
+            "blocked": blocked,
+            "message": self._log_message(
+                rep_stage=rep_stage, logged=logged, rework=rework,
+                blocked=blocked, not_found=not_found),
             "screen_role_warning": screen_role_warning,
-            "consumption_recorded": consumption_recorded,
-            "preview": False,
+            "consumption_recorded": None,
+            "preview": bool(preview),
             "skill_warnings": skill_warnings,
         }
+
+        if preview:
+            # SHORT-CIRCUIT: nothing written, nothing committed.
+            return result
+
+        await self.db.commit()
+        result["consumption_recorded"] = consumption_recorded
+        return result
+
+    @staticmethod
+    def _log_message(*, rep_stage: str | None, logged: list, rework: list,
+                     blocked: list, not_found: list) -> str:
+        """One human sentence for the scan screen.
+
+        Exists because the old response could come back with `stage: null`,
+        `count_logged: 0` and a bare piece code in `sequence_blocked` — every
+        field technically correct and the operator still unable to tell whether
+        the system was broken or the piece was.
+        """
+        if logged:
+            head = f"Logged {len(logged)} piece(s)"
+            head += f" at {rep_stage}." if rep_stage and rep_stage != "MIXED" \
+                else " across several stages (see stage_by_piece)."
+        elif rework:
+            head = f"Nothing new logged — {len(rework)} piece(s) already recorded " \
+                   f"at this stage (rework)."
+        elif not_found and not blocked:
+            head = f"Nothing logged — {len(not_found)} code(s) did not resolve."
+        elif blocked:
+            gates = {b["gate"] for b in blocked}
+            if gates == {"not_cut"}:
+                head = (f"Nothing logged — none of these pieces has been cut yet, "
+                        f"so there is no next pipeline stage to infer. Cut them on "
+                        f"the {ScreenContext.LEATHER_CUT.value} / "
+                        f"{ScreenContext.LINING_CUT.value} screen first.")
+            elif gates == {"completed"}:
+                head = "Nothing logged — these pieces have already finished the line."
+            else:
+                head = (f"Nothing logged — {len(blocked)} piece(s) were blocked "
+                        f"({', '.join(sorted(gates))}). See `blocked` for the reason "
+                        f"on each.")
+        else:
+            head = "Nothing logged."
+        return head
     # ══════════════════════════════════════════════════════════════ readers
     async def list_pieces_for_sku(self, *, sku_id: uuid.UUID | None = None,
                                   sku_code: str | None = None,

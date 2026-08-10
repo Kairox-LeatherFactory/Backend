@@ -180,14 +180,29 @@ class LogRequest(BaseModel):
 
 
 class LogResult(BaseModel):
+    # A cut screen fixes one stage. PIPELINE infers a stage PER PIECE, so a batch
+    # can span several: `stage` is then "MIXED" and `stage_by_piece` carries the
+    # truth. `stage` is null ONLY when no piece resolved to a loggable stage at
+    # all — `message` and `blocked` say why.
     stage: str | None
+    stages: list[str] = Field(default_factory=list)
+    stage_by_piece: dict[str, str] = Field(default_factory=dict)
     count_logged: int
     logged: list[str]
     rework: list[str]
-    not_found: list[str]
+    not_found: list[str]                     # codes/ids that did not resolve
+    completed: list[str] = Field(default_factory=list)   # past the final stage
     sequence_blocked: list[str]
     skill_blocked: list[str]
     merge_blocked: list[str]
+    # Pieces whose inferred stage this role may not log, in a MIXED batch where
+    # other stages WERE permitted. An all-denied batch is still a 403.
+    role_blocked: list[str] = Field(default_factory=list)
+    # Every per-piece rejection WITH its cause: {piece, stage, gate, reason}.
+    # gate ∈ {role, sequence, merge, not_cut, completed}. The flat lists above
+    # carry the same pieces but no reason, and are kept for existing callers.
+    blocked: list[dict] = Field(default_factory=list)
+    message: str = ""                        # one sentence for the scan screen
     screen_role_warning: str | None = None
     consumption_recorded: dict | None = None
     preview: bool = False                    # NEW: echoes whether this was a dry-run
