@@ -13,16 +13,17 @@ INTEGRITY, NOT GUESSING.
     existed' from 'retired', so the UI can say "this card was deactivated" rather
     than "invalid"). A guess is never returned.
 
-CROSS-MODULE READS GO THROUGH SERVICES, NEVER REPOSITORIES.
+NO SQL LIVES HERE. EVERY READ IS A REPOSITORY CALL.
     For a PIECE code we need the piece's SKU/style/order + current stage + drawer
-    + consumption. Those live in production/clients/drawers. We read them via
-    their services so barcode stays liftable into its own process later.
+    + consumption. That is one column-scoped join in BarcodeRepository.piece_card;
+    this service only shapes the row into the response dict. The repository selects
+    the ~12 scalars the payload prints rather than hydrating Piece/SKU/Style/Drawer
+    entities — a scan reads columns, it does not need mapped objects.
 ================================================================================
 """
 import uuid
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import BarcodeStatus, BarcodeType
@@ -52,18 +53,14 @@ class BarcodeService:
         return row
 
     async def resolve(self, code: str) -> dict:
-        row = await self.repo.get_by_code(code)
-        if not row:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown barcode '{code}'.")
+        # 404 unknown / 410 retired — F18: retirement applies to every barcode
+        # type, not only EMPLOYEE.
+        row = await self._get_active_or_410(code)
+        return await self._payload_for(row)
 
-        # F18: retirement applies to every barcode type, not only EMPLOYEE.
-        if row.status == BarcodeStatus.RETIRED.value:
-            raise HTTPException(
-                status.HTTP_410_GONE,
-                "This barcode was deactivated. The underlying record and history "
-                "are intact; issue a new label to scan again.",
-            )
-
+    async def _payload_for(self, row) -> dict:
+        """Compose the response from an already-resolved registry row, so callers
+        that have the row (barcode_detail) don't re-read it."""
         out = {
             "code": row.code,
             "type": row.type,
@@ -111,99 +108,61 @@ class BarcodeService:
                                 f"'{code}' is not a known drawer barcode.")
         return row.drawer_id
 
-    # ── payloads (read via ORM directly here to avoid a service import cycle) ─
+    # ── payloads (shape only; the repository owns every query) ───────────────
     async def _piece_payload(self, piece_id: uuid.UUID) -> dict:
-        from app.modules.clients.models import SKU, Client, ClientOrder, Style
-        from app.modules.production.models import Operation, Piece
-
-        row = (await self.db.execute(
-            select(Piece, SKU, Style, ClientOrder.order_number, Client.name,
-                   Operation.code)
-            .join(SKU, SKU.id == Piece.sku_id)
-            .join(Style, Style.id == SKU.style_id)
-            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
-            .join(Client, Client.id == ClientOrder.client_id)
-            .outerjoin(Operation, Operation.id == Piece.current_operation_id)
-            .where(Piece.id == piece_id)
-        )).first()
-        if not row:
+        r = await self.repo.piece_card(piece_id)
+        if not r:
             return {"piece_id": str(piece_id)}
-        piece, sku, style, order_number, client, stage = row
-
-        # drawer + consumption (best-effort; may be null pre-cut / pre-merge)
-        drawer_code = None
-        drawer_id = getattr(piece, "drawer_id", None)
-        if drawer_id:
-            from app.modules.barcode.models import Drawer
-            drawer = await self.db.get(Drawer, drawer_id)
-            drawer_code = drawer.code if drawer else None
-
-        consumption = await self._piece_consumption(piece_id)
         return {
-            "piece_id": str(piece.id),
-            "code": piece.code,
-            "sku_code": sku.code,
-            "style_name": style.name,
-            "colour": sku.color_name or sku.color_code,
-            "size": sku.size,
-            "seq": piece.seq,
-            "order_number": order_number,
-            "client": client,
-            "current_stage": stage,
-            "drawer_code": drawer_code,
-            "leather_consumption_dcm": consumption,
-            "needs_lining": bool(getattr(piece, "needs_lining", True)),
+            "piece_id": str(r.id),
+            "code": r.code,
+            "sku_code": r.sku_code,
+            "style_name": r.style_name,
+            "colour": r.color_name or r.color_code,
+            "size": r.size,
+            "seq": r.seq,
+            "order_number": r.order_number,
+            "client": r.client_name,
+            "current_stage": r.current_stage,
+            # null pre-merge / pre-cut — both are LEFT joins, not errors.
+            "drawer_code": r.drawer_code,
+            "leather_consumption_dcm": (
+                float(r.consumption_qty) if r.consumption_qty is not None else None),
+            "needs_lining": bool(r.needs_lining),
         }
 
-    async def _piece_consumption(self, piece_id: uuid.UUID):
-        from app.modules.production.models import ProductionEvent
-        # The leather-cut event's consumption for this piece, if recorded.
-        val = await self.db.scalar(
-            select(ProductionEvent.consumption_qty)
-            .where(ProductionEvent.piece_id == piece_id,
-                   ProductionEvent.consumption_qty.isnot(None))
-            .order_by(ProductionEvent.created_at)
-            .limit(1)
-        )
-        return float(val) if val is not None else None
-
     async def _employee_payload(self, employee_id: uuid.UUID) -> dict:
-        from app.modules.employees.models import Employee
-        emp = await self.db.get(Employee, employee_id)
-        if not emp:
+        r = await self.repo.employee_card(employee_id)
+        if not r:
             return {"employee_id": str(employee_id)}
         return {
-            "employee_id": str(emp.id),
-            "name": emp.name,
-            "designation": emp.designation,
-            "wage_type": getattr(emp.wage_type, "value", str(emp.wage_type)),
-            "is_active": emp.is_active,
+            "employee_id": str(r.id),
+            "name": r.name,
+            "designation": r.designation,
+            "wage_type": getattr(r.wage_type, "value", str(r.wage_type)),
+            "is_active": r.is_active,
         }
 
     async def _drawer_payload(self, drawer_id: uuid.UUID) -> dict:
-        from app.modules.barcode.models import Drawer
-        d = await self.db.get(Drawer, drawer_id)
-        if not d:
+        r = await self.repo.drawer_card(drawer_id)
+        if not r:
             return {"drawer_id": str(drawer_id)}
         return {
-            "drawer_id": str(d.id), "drawer_code": d.code, "seq": d.seq,
-            "state": d.state, "current_piece_id": str(d.current_piece_id) if d.current_piece_id else None,
-            "leather_in": d.leather_in, "lining_in": d.lining_in,
+            "drawer_id": str(r.id), "drawer_code": r.code, "seq": r.seq,
+            "state": r.state,
+            "current_piece_id": str(r.current_piece_id) if r.current_piece_id else None,
+            "leather_in": r.leather_in, "lining_in": r.lining_in,
         }
 
     async def _lot_payload(self, lot_id: uuid.UUID) -> dict:
-        from app.modules.barcode.models import MaterialLot
-        lot = await self.db.get(MaterialLot, lot_id)
-        if not lot:
+        r = await self.repo.lot_card(lot_id)
+        if not r:
             return {"lot_id": str(lot_id)}
-        # available needs the reservation sum — delegate to MaterialService lazily.
-        from app.modules.materials.service import MaterialService
-        avail = await MaterialService(self.db).available_for_lot(lot.id)
         return {
-            "lot_id": str(lot.id), "category": lot.category, "subtype": lot.subtype,
-            "article": lot.article, "colour": lot.colour, "thickness": lot.thickness,
-            "size": lot.size, "uom": lot.uom,
-            "on_hand": float(lot.on_hand), "available": avail,
+            "lot_id": str(r.id), "category": r.category, "subtype": r.subtype,
+            "article": r.article, "colour": r.colour, "thickness": r.thickness,
+            "size": r.size, "uom": r.uom,
+            "on_hand": float(r.on_hand), "available": float(r.available),
         }
 
     # ── employee barcode lifecycle ──────────────────────────────────────────
@@ -213,7 +172,7 @@ class BarcodeService:
         wraps it in the employee transaction so a worker never exists without a
         code)."""
         row = await self.repo.mint_employee_code_nocommit(employee_id, caption)
-        await self.db.flush()
+        await self.repo.flush()
         return row.code
 
     async def employee_codes(self, employee_ids: list[uuid.UUID],
@@ -253,11 +212,10 @@ class BarcodeService:
                 "active": False, "history_preserved": True}
 
     async def _audit(self, actor_id, action, entity_id, after: dict) -> None:
-        from datetime import datetime, timezone
-        from app.core.models import AuditLog
-        self.db.add(AuditLog(
-            actor_user_id=actor_id, action=action, entity_type="employee_barcode",
-            entity_id=entity_id, after=after, at=datetime.now(timezone.utc)))
+        """The transition is audited in the SAME transaction as the retire/mint —
+        the repo stages the row, repo.commit() lands both or neither."""
+        self.repo.add_audit_nocommit(
+            actor_id=actor_id, action=action, entity_id=entity_id, after=after)
 
     # ── print payload ────────────────────────────────────────────────────────
     async def print_payload(self, *, codes: list[str] | None = None,
@@ -266,28 +224,20 @@ class BarcodeService:
         """Return {code, symbology, caption} for a set of codes so the frontend
         can render Code128 labels. Backend renders no images."""
         resolved_codes: list[str] = list(codes or [])
-
         if sku_id or order_id:
-            from app.modules.clients.models import SKU, Style
-            from app.modules.production.models import Piece
-            stmt = select(Piece.code).join(SKU, SKU.id == Piece.sku_id)
-            if sku_id:
-                stmt = stmt.where(Piece.sku_id == sku_id)
-            if order_id:
-                stmt = stmt.join(Style, Style.id == SKU.style_id).where(
-                    Style.client_order_id == order_id)
-            resolved_codes += [c for (c,) in (await self.db.execute(stmt)).all()]
+            resolved_codes += await self.repo.piece_codes_for(
+                sku_id=sku_id, order_id=order_id)
 
-        rows = await self.repo.get_many(resolved_codes)
-        found = {r.code: r for r in rows}
+        captions = await self.repo.captions_for_codes(resolved_codes)
         labels = []
         for c in resolved_codes:
-            r = found.get((c or "").strip().upper())
+            norm = (c or "").strip().upper()
+            known = norm in captions
             labels.append({
-                "code": r.code if r else (c or "").strip().upper(),
+                "code": norm,
                 "symbology": "code128",
-                "caption": (r.caption if r else None) or (c or ""),
-                "known": r is not None,
+                "caption": captions.get(norm) or (c or ""),
+                "known": known,
             })
         return {"labels": labels}
     
@@ -297,9 +247,7 @@ class BarcodeService:
         return await self.repo.list_orders_with_barcodes()
  
     # ── analytics: order totals + per-style breakdown ───────────────────────
-    async def order_analytics(
-        self, order_id: uuid.UUID, client_scope: uuid.UUID | None
-    ) -> dict:
+    async def order_analytics(self, order_id: uuid.UUID) -> dict:
         await self._assert_order_exists(order_id)
  
         planned = await self.repo.order_planned_total(order_id)
@@ -332,7 +280,6 @@ class BarcodeService:
     async def list_history(
         self,
         order_id: uuid.UUID,
-        client_scope: uuid.UUID | None,
         *,
         sku_id: uuid.UUID | None = None,
         style_id: uuid.UUID | None = None,
@@ -361,23 +308,23 @@ class BarcodeService:
             "items": items,
         }
  
-    async def list_order_skus(
-        self, order_id: uuid.UUID, client_scope: uuid.UUID | None
-    ) -> list[dict]:
-        await self._assert_order_visible(order_id, client_scope)
+    async def list_order_skus(self, order_id: uuid.UUID) -> list[dict]:
+        await self._assert_order_exists(order_id)
         return await self.repo.list_order_skus(order_id)
- 
+
     # ── detail on click (reuses existing _piece_payload) ────────────────────
     async def barcode_detail(self, code: str) -> dict:
-        """Full detail for a scanned/clicked code. No client tenancy (Hamthan #6)."""
-        await self._get_active_or_410(code)   # 404 unknown / 410 retired
-        return await self.resolve(code)
- 
+        """Full detail for a scanned/clicked code. No client tenancy (Hamthan #6).
+
+        Same payload as resolve(); the registry row is read ONCE and handed to the
+        composer (this used to resolve the code, then resolve it again)."""
+        row = await self._get_active_or_410(code)   # 404 unknown / 410 retired
+        return await self._payload_for(row)
+
     # ── order existence + order_number resolution (no client tenancy) ────────
     async def _assert_order_exists(self, order_id: uuid.UUID) -> None:
         """Order must exist. No client scoping (Hamthan #6): staff see all."""
-        from app.modules.clients.models import ClientOrder
-        if await self.db.get(ClientOrder, order_id) is None:
+        if not await self.repo.order_exists(order_id):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found.")
 
     async def resolve_order_id(self, order_ref: str | uuid.UUID) -> uuid.UUID:
@@ -389,18 +336,16 @@ class BarcodeService:
         if isinstance(order_ref, uuid.UUID):
             await self._assert_order_exists(order_ref)
             return order_ref
-        from app.modules.clients.models import ClientOrder
         # try UUID string first, else treat as order_number
         try:
             oid = uuid.UUID(str(order_ref))
-            await self._assert_order_exists(oid)
-            return oid
         except ValueError:
             pass
-        row = await self.db.scalar(
-            select(ClientOrder.id).where(
-                ClientOrder.order_number == str(order_ref).strip()))
-        if row is None:
+        else:
+            await self._assert_order_exists(oid)
+            return oid
+        order_id = await self.repo.order_id_by_number(str(order_ref))
+        if order_id is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND,
                                 f"No order with number '{order_ref}'.")
-        return row
+        return order_id

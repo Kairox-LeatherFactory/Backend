@@ -19,7 +19,7 @@ from app.modules.users.models import User
 router = APIRouter(prefix="/employees", tags=["Employees"])
 
 
-@router.get("", response_model=list[schemas.EmployeeReadWithPay|schemas.EmployeeRead], status_code=201)
+@router.get("", response_model=list[schemas.EmployeeReadWithPay|schemas.EmployeeRead])
 async def list_employees(
     active_only: bool = True,
     db: AsyncSession = Depends(get_db),

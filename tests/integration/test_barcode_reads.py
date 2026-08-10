@@ -35,11 +35,11 @@ async def jp_order(db):
     stB = Style(client_order_id=o.id, name="VEST", code="JPR-VEST")
     db.add_all([stA, stB]); await db.flush()
 
-    skA1 = SKU(style_id=stA.id, code="JPR-CLERMONT-PINE-M", color_name="PINE",
+    skA1 = SKU(style_id=stA.id, code="JPR-CLERMONT-PINE-M", color_code="PINE", color_name="PINE",
                size="M", qty_ordered=3)
-    skA2 = SKU(style_id=stA.id, code="JPR-CLERMONT-PINE-L", color_name="PINE",
+    skA2 = SKU(style_id=stA.id, code="JPR-CLERMONT-PINE-L", color_code="PINE", color_name="PINE",
                size="L", qty_ordered=2)
-    skB1 = SKU(style_id=stB.id, code="JPR-VEST-TABAC-M", color_name="TABAC",
+    skB1 = SKU(style_id=stB.id, code="JPR-VEST-TABAC-M", color_code="TABAC", color_name="TABAC",
                size="M", qty_ordered=4)
     db.add_all([skA1, skA2, skB1]); await db.flush()
 
@@ -68,7 +68,7 @@ async def jp_order(db):
 @pytest.mark.asyncio
 async def test_order_analytics_totals_and_balance(db, jp_order):
     svc = BarcodeService(db)
-    a = await svc.order_analytics(jp_order["order_id"], client_scope=None)
+    a = await svc.order_analytics(jp_order["order_id"])
     tot = a["order_total"]
     assert tot["planned"] == 9
     assert tot["generated"] == 7
@@ -82,7 +82,7 @@ async def test_order_analytics_totals_and_balance(db, jp_order):
 @pytest.mark.asyncio
 async def test_per_style_breakdown(db, jp_order):
     svc = BarcodeService(db)
-    a = await svc.order_analytics(jp_order["order_id"], client_scope=None)
+    a = await svc.order_analytics(jp_order["order_id"])
     by = {r["style_name"]: r for r in a["by_style"]}
     assert by["CLERMONT"]["planned"] == 5 and by["CLERMONT"]["balance"] == 0
     assert by["VEST"]["planned"] == 4 and by["VEST"]["minted"] == 2
@@ -93,11 +93,11 @@ async def test_per_style_breakdown(db, jp_order):
 async def test_history_style_and_size_filter(db, jp_order):
     svc = BarcodeService(db)
     # style filter
-    page = await svc.list_history(jp_order["order_id"], None,
+    page = await svc.list_history(jp_order["order_id"],
                                   style_id=jp_order["styleB"])
     assert page["total"] == 2
     # style + size filter (CLERMONT / L)
-    page = await svc.list_history(jp_order["order_id"], None,
+    page = await svc.list_history(jp_order["order_id"],
                                   style_id=jp_order["styleA"], size="L")
     assert page["total"] == 2
 
@@ -105,17 +105,17 @@ async def test_history_style_and_size_filter(db, jp_order):
 @pytest.mark.asyncio
 async def test_history_status_filter_and_pagination(db, jp_order):
     svc = BarcodeService(db)
-    retired = await svc.list_history(jp_order["order_id"], None,
+    retired = await svc.list_history(jp_order["order_id"],
                                      status_filter="retired")
     assert retired["total"] == 1
-    p1 = await svc.list_history(jp_order["order_id"], None, page=1, page_size=3)
+    p1 = await svc.list_history(jp_order["order_id"], page=1, page_size=3)
     assert p1["total"] == 7 and len(p1["items"]) == 3 and p1["pages"] == 3
 
 
 @pytest.mark.asyncio
 async def test_order_picker_lists_only_orders_with_barcodes(db, jp_order):
     svc = BarcodeService(db)
-    orders = await svc.list_orders(client_scope=None)
+    orders = await svc.list_orders()
     nums = {o["order_number"]: o for o in orders}
     assert "JP-READS" in nums
     assert nums["JP-READS"]["minted"] == 7
@@ -123,15 +123,29 @@ async def test_order_picker_lists_only_orders_with_barcodes(db, jp_order):
 
 
 @pytest.mark.asyncio
-async def test_client_tenancy_scope_hides_other_orders(db, jp_order):
-    """A CLIENT login scoped to a DIFFERENT client cannot see or read this order."""
+async def test_barcode_reads_are_staff_wide_and_guarded_by_ROLE(db, jp_order):
+    """The barcode screens carry NO client scoping (Hamthan #6): staff see every
+    order, because a floor manager scanning a code must be told what it is
+    regardless of whose order it belongs to.
+
+    Tenancy is enforced one level up instead — the /barcode/orders* routes are
+    gated on _SCREEN_READERS (MD/DM/HR/SUPERVISOR/cutting/lining/stitching), and
+    CLIENT is not in that set, so a client login never reaches these reads at
+    all. This test pins BOTH halves: the service is unscoped, and the router
+    role gate is what keeps clients out.
+    """
+    from app.core.enums import UserRole
+    from app.modules.barcode.router import _SCREEN_READERS
+
     svc = BarcodeService(db)
-    other_client = uuid.uuid4()
-    orders = await svc.list_orders(client_scope=other_client)
-    assert all(o["order_number"] != "JP-READS" for o in orders)
-    with pytest.raises(Exception):
-        await svc.order_analytics(jp_order["order_id"], client_scope=other_client)
-        
+    orders = await svc.list_orders()
+    assert any(o["order_number"] == "JP-READS" for o in orders)
+    assert (await svc.order_analytics(jp_order["order_id"]))["order_total"]["generated"] == 7
+
+    allowed = _SCREEN_READERS.__closure__[0].cell_contents
+    assert UserRole.CLIENT not in allowed and UserRole.VIEWER not in allowed
+
+
 @pytest.mark.asyncio
 async def test_piece_label_encodes_business_code(db):
     out = await BarcodeService(db).print_payload(codes=["ORD_1011-CARNABY-PINE_GREEN-S-002"])

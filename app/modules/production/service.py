@@ -222,13 +222,24 @@ class ProductionService:
  
         # resolve each piece's stage (unchanged)
         stage_by_piece: dict = {}
+        uncut_on_pipeline: list[str] = []
         for pid, piece in pieces.items():
             stage = screen_stage or await self._infer_stage_for_piece(piece, screen)
             if stage is None:
                 not_found.append(f"{piece.code} (no next stage — already complete?)")
                 continue
+            # PIPELINE + a piece with no cut event yet: its "next stage" is a cut
+            # entry, but cutting is logged on a CUT SCREEN (that is the whole
+            # no-stage-buttons rule). Treated as a stage here it would drag a
+            # consumption requirement into a pipeline batch and 422 the WHOLE
+            # request — one un-cut piece losing every good piece scanned with it,
+            # which is exactly what the per-piece gates exist to prevent. So it
+            # is blocked PER PIECE, like any other out-of-sequence piece.
+            if screen_stage is None and stage.is_cut_entry:
+                uncut_on_pipeline.append(piece.code)
+                continue
             stage_by_piece[pid] = stage
- 
+
         op_by_stage: dict = {}
         for stage in dict.fromkeys(stage_by_piece.values()):
             op = await self.repo.get_operation_by_code(stage.value)
@@ -280,6 +291,7 @@ class ProductionService:
                     f"{screen.value} screen.")
  
         logged, rework, sequence_blocked, skill_blocked, merge_blocked =  [], [], [], [], []
+        sequence_blocked += uncut_on_pipeline   # never cut → can't be past cutting
         skill_warnings: list[dict] = []   # GATE 2 anomalies (non-blocking now)
         fresh_cut_count = 0
  
@@ -385,15 +397,6 @@ class ProductionService:
             "preview": False,
             "skill_warnings": skill_warnings,
         }
-    @staticmethod
-    def _empty_result(stage, *, skill, screen_warning):
-        return {
-            "stage": stage.value if stage else None, "count_logged": 0,
-            "logged": [], "rework": [], "not_found": [],
-            "sequence_blocked": [], "skill_blocked": skill, "merge_blocked": [],
-            "screen_role_warning": screen_warning, "consumption_recorded": None,
-        }
-
     # ══════════════════════════════════════════════════════════════ readers
     async def list_pieces_for_sku(self, *, sku_id: uuid.UUID | None = None,
                                   sku_code: str | None = None,
@@ -416,8 +419,9 @@ class ProductionService:
             if not op:
                 raise HTTPException(status.HTTP_404_NOT_FOUND, "Operation not found")
 
+        # rows are 4-tuples: (piece, stage_code, stage_label, client_order_id).
         rows = await self.repo.list_pieces_for_sku(sku_id)
-        piece_ids = [p.id for p, _, _ in rows]
+        piece_ids = [p.id for p, _, _, _ in rows]
 
         done_ids: set[uuid.UUID] = set()
         prev_done_ids: set[uuid.UUID] = set()
@@ -433,16 +437,14 @@ class ProductionService:
                 else:
                     prev_stage = None
 
-        pieces = []
         order_id = rows[0][3] if rows else None
         # Live drawer state per piece → drives the STORE overlay.
-        drawer_states = await self.repo.drawer_states_for_pieces(
-            [p.id for p, _, _ in rows])
+        drawer_states = await self.repo.drawer_states_for_pieces(piece_ids)
 
         from app.core.store_display import display_stage
 
         pieces = []
-        for p, scode, slabel in rows:
+        for p, scode, slabel, _ in rows:
             done = p.id in done_ids
             eligible, reason = True, None
             if op and prev_stage and not done and p.id not in prev_done_ids:
@@ -469,11 +471,40 @@ class ProductionService:
                 "done_at_op": done, "eligible": eligible, "blocked_reason": reason,
             })
 
+        # The ENVELOPE, not a bare list. Restored after the STORE-overlay edit
+        # dropped it (the checklist screen reads total/done/pending/blocked from
+        # here; without the return the endpoint answered `null`).
+        done_count = sum(1 for x in pieces if x["done_at_op"])
+        return {
+            "sku_id": sku_id, "sku_code": sku.code,
+            "colour": sku.color_name or sku.color_code, "size": sku.size,
+            "order_id": order_id,
+            "operation_id": op.id if op else None,
+            "operation_code": op.code if op else None,
+            "total": len(pieces), "done": done_count,
+            "pending": len(pieces) - done_count,
+            "blocked": sum(1 for x in pieces if not x["eligible"]),
+            "pieces": pieces,
+        }
+
     async def list_events(self, **filters) -> list[ProductionEvent]:
         return await self.repo.list_events(**filters)
 
     async def style_progress(self, style_id: uuid.UUID,
                              client_scope: uuid.UUID | None = None) -> dict[str, int]:
+        """Per-stage completed counts for a style.
+
+        TENANCY: the scoped WHERE alone is not enough. A client asking for
+        another client's style used to get 200 + {} — indistinguishable from
+        "your style, no work logged yet", and still a confirmation the id is
+        real. Existence itself is information, so an invisible (or unknown)
+        style is a 404, matching list_pieces_for_sku."""
+        if not await self.clients.get_style(style_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Style not found")
+        if client_scope is not None and not await self.clients.is_style_visible_to_client(
+            style_id, client_scope
+        ):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Style not found")
         return await self.repo.stage_totals_for_style(style_id, client_scope=client_scope)
 
     async def list_sku_options(self, *, order_id=None, style_id=None,

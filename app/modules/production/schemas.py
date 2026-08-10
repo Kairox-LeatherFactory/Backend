@@ -191,3 +191,8 @@ class LogResult(BaseModel):
     screen_role_warning: str | None = None
     consumption_recorded: dict | None = None
     preview: bool = False                    # NEW: echoes whether this was a dry-run
+    # GATE 2 is a WARNING, not a block: the piece is logged and the anomaly is
+    # reported here ({piece, employee, designation, stage, note}). The service
+    # has always returned these; without the field the response model dropped
+    # them, so the floor never saw the warning it was told it would get.
+    skill_warnings: list[dict] = Field(default_factory=list)
