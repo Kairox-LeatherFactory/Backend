@@ -17,16 +17,17 @@ CODE GENERATION IS DETERMINISTIC AND COLLISION-SAFE.
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, literal, select
+from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import BarcodeStatus, BarcodeType
-from app.modules.barcode.models import BarcodeRegistry
-
-from datetime import datetime
-from sqlalchemy import and_, func, select
+from app.modules.barcode.models import (
+    BarcodeRegistry, Drawer, MaterialLot, MaterialReservation,
+)
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
-from app.modules.production.models import Operation, Piece
+from app.modules.employees.models import Employee
+from app.modules.production.models import Operation, Piece, ProductionEvent
 
 
 def _norm(code: str | None) -> str:
@@ -76,6 +77,102 @@ class BarcodeRepository:
         res = await self.db.execute(stmt.order_by(BarcodeRegistry.created_at.asc()))
         # asc + overwrite == newest wins, without a window function.
         return {emp_id: code for emp_id, code in res.all() if emp_id is not None}
+
+    # ── resolve payload reads ────────────────────────────────────────────────
+    # One method per barcode type, each ONE query selecting ONLY the columns the
+    # payload prints. No entity is hydrated: resolve() reads ~12 scalars off a
+    # piece and never touches the other 6 columns, so loading Piece + SKU + Style
+    # objects (and paying identity-map + attribute-instrumentation cost on every
+    # scan) buys nothing. The service composes the response dict from these rows.
+
+    async def piece_card(self, piece_id: uuid.UUID) -> Row | None:
+        """Everything the PIECE payload shows, in one query.
+
+        This was 3 round-trips in the service (piece+joins, then a drawer get, then
+        a consumption select). The drawer is a LEFT JOIN (null before merge) and the
+        consumption is a correlated scalar subquery (null before cutting), so the
+        whole card is one statement — one scan, one query."""
+        consumption = (
+            select(ProductionEvent.consumption_qty)
+            .where(ProductionEvent.piece_id == Piece.id,
+                   ProductionEvent.consumption_qty.isnot(None))
+            .order_by(ProductionEvent.created_at)
+            .limit(1)
+            .correlate(Piece)
+            .scalar_subquery()
+        )
+        return (await self.db.execute(
+            select(
+                Piece.id, Piece.code, Piece.seq, Piece.needs_lining,
+                SKU.code.label("sku_code"),
+                SKU.color_name, SKU.color_code, SKU.size,
+                Style.name.label("style_name"),
+                ClientOrder.order_number,
+                Client.name.label("client_name"),
+                Operation.code.label("current_stage"),
+                Drawer.code.label("drawer_code"),
+                consumption.label("consumption_qty"),
+            )
+            .join(SKU, SKU.id == Piece.sku_id)
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .join(Client, Client.id == ClientOrder.client_id)
+            .outerjoin(Operation, Operation.id == Piece.current_operation_id)
+            .outerjoin(Drawer, Drawer.id == Piece.drawer_id)
+            .where(Piece.id == piece_id)
+        )).first()
+
+    async def employee_card(self, employee_id: uuid.UUID) -> Row | None:
+        return (await self.db.execute(
+            select(Employee.id, Employee.name, Employee.designation,
+                   Employee.wage_type, Employee.is_active)
+            .where(Employee.id == employee_id)
+        )).first()
+
+    async def drawer_card(self, drawer_id: uuid.UUID) -> Row | None:
+        return (await self.db.execute(
+            select(Drawer.id, Drawer.code, Drawer.seq, Drawer.state,
+                   Drawer.current_piece_id, Drawer.leather_in, Drawer.lining_in)
+            .where(Drawer.id == drawer_id)
+        )).first()
+
+    async def lot_card(self, lot_id: uuid.UUID) -> Row | None:
+        """Lot columns + `available`, derived in SQL.
+
+        available = on_hand − Σ active reservations — the same rule
+        MaterialService.available_for_lot applies (that service stays the authority
+        for the material module). Doing it as a correlated subquery here turns a
+        3-query payload (lot get + lot get again inside the service + reservation
+        sum) into one. `reserved` is never stored, so the two cannot drift."""
+        reserved = (
+            select(func.coalesce(func.sum(MaterialReservation.qty), 0))
+            .where(MaterialReservation.material_lot_id == MaterialLot.id,
+                   MaterialReservation.status == "active")
+            .correlate(MaterialLot)
+            .scalar_subquery()
+        )
+        return (await self.db.execute(
+            select(
+                MaterialLot.id, MaterialLot.category, MaterialLot.subtype,
+                MaterialLot.article, MaterialLot.colour, MaterialLot.thickness,
+                MaterialLot.size, MaterialLot.uom, MaterialLot.on_hand,
+                (MaterialLot.on_hand - reserved).label("available"),
+            )
+            .where(MaterialLot.id == lot_id)
+        )).first()
+
+    # ── order existence / lookup ─────────────────────────────────────────────
+    async def order_exists(self, order_id: uuid.UUID) -> bool:
+        """EXISTS, not a row load — the callers only branch on it (404 or not)."""
+        return bool(await self.db.scalar(
+            select(literal(1)).where(ClientOrder.id == order_id).limit(1)
+        ))
+
+    async def order_id_by_number(self, order_number: str) -> uuid.UUID | None:
+        return await self.db.scalar(
+            select(ClientOrder.id)
+            .where(ClientOrder.order_number == order_number.strip())
+        )
 
     # ── code minting ─────────────────────────────────────────────────────────
     async def _next_code(self, prefix: str, width: int = 6) -> str:
@@ -148,27 +245,60 @@ class BarcodeRepository:
         row.retired_reason = reason
 
     # ── batch fetch for print ────────────────────────────────────────────────
-    async def get_many(self, codes: list[str]) -> list[BarcodeRegistry]:
+    async def captions_for_codes(self, codes: list[str]) -> dict[str, str | None]:
+        """{normalised code → caption} for the codes that exist.
+
+        A label needs the code and the caption, nothing else — so this selects two
+        columns instead of hydrating whole BarcodeRegistry entities (a print run is
+        hundreds of codes). Membership in the dict IS the 'known' flag; a known code
+        with no caption is present with a None value, so `in` and `.get()` differ
+        meaningfully."""
         if not codes:
-            return []
-        norm = [_norm(c) for c in codes]
-        res = await self.db.execute(
-            select(BarcodeRegistry).where(BarcodeRegistry.code.in_(norm))
+            return {}
+        norm = {_norm(c) for c in codes}
+        rows = await self.db.execute(
+            select(BarcodeRegistry.code, BarcodeRegistry.caption)
+            .where(BarcodeRegistry.code.in_(norm))
         )
-        return list(res.scalars())
+        return {code: caption for code, caption in rows.all()}
+
+    async def piece_codes_for(self, *, sku_id: uuid.UUID | None = None,
+                              order_id: uuid.UUID | None = None) -> list[str]:
+        """Every piece code under a SKU and/or an order — the print run's expansion
+        of 'print all labels for this SKU/order'."""
+        stmt = select(Piece.code).join(SKU, SKU.id == Piece.sku_id)
+        if sku_id:
+            stmt = stmt.where(Piece.sku_id == sku_id)
+        if order_id:
+            stmt = stmt.join(Style, Style.id == SKU.style_id).where(
+                Style.client_order_id == order_id)
+        return list((await self.db.scalars(stmt)).all())
+
+    def add_audit_nocommit(self, *, actor_id: uuid.UUID | None, action: str,
+                           entity_id: uuid.UUID, after: dict) -> None:
+        """Stage an audit row for an employee-barcode transition. Staged, not
+        committed: it lands in the same transaction as the retire/mint."""
+        from app.core.models import AuditLog
+        self.db.add(AuditLog(
+            actor_user_id=actor_id, action=action, entity_type="employee_barcode",
+            entity_id=entity_id, after=after, at=datetime.now(timezone.utc)))
+
+    async def flush(self) -> None:
+        await self.db.flush()
 
     async def commit(self) -> None:
         await self.db.commit()
 
     # ── order picker ────────────────────────────────────────────────────────
-    async def list_orders_with_barcodes(
-        self, client_id: uuid.UUID | None = None
-    ) -> list[dict]:
+    async def list_orders_with_barcodes(self) -> list[dict]:
         """Every order that has at least one PIECE barcode, with its minted count
-        and the generated-at date range. `client_id` (a CLIENT login) scopes to
-        that client's orders only; None = staff, all orders."""
-        from app.modules.barcode.models import BarcodeRegistry
-        from app.modules.clients.models import Client, ClientOrder
+        and the generated-at date range.
+
+        NOT client-scoped (Hamthan #6): the barcode screens are staff-wide, and
+        the /barcode/orders* routes keep CLIENT/VIEWER out at the router's role
+        gate instead. The old `client_id` parameter was never applied to the
+        query — it promised a filter that did not exist, so it is gone rather
+        than left as a scoping trap."""
 
         stmt = (
             select(
@@ -183,7 +313,7 @@ class BarcodeRepository:
             .join(
                 BarcodeRegistry,
                 and_(BarcodeRegistry.order_id == ClientOrder.id,
-                        BarcodeRegistry.type == "piece"),
+                        BarcodeRegistry.type == BarcodeType.PIECE.value),
             )
             .group_by(ClientOrder.id, ClientOrder.order_number, Client.name)
             .order_by(func.max(BarcodeRegistry.created_at).desc())
@@ -204,7 +334,6 @@ class BarcodeRepository:
 
     # ── planned totals (SKU.qty_ordered) ────────────────────────────────────
     async def order_planned_total(self, order_id: uuid.UUID) -> int:
-        from app.modules.clients.models import SKU, Style
         total = await self.db.scalar(
             select(func.coalesce(func.sum(SKU.qty_ordered), 0))
             .select_from(SKU)
@@ -214,33 +343,30 @@ class BarcodeRepository:
         return int(total or 0)
 
     async def order_minted_total(self, order_id: uuid.UUID) -> int:
-        from app.modules.barcode.models import BarcodeRegistry
         total = await self.db.scalar(
             select(func.count(BarcodeRegistry.id))
             .where(BarcodeRegistry.order_id == order_id,
-                    BarcodeRegistry.type == "piece")
+                    BarcodeRegistry.type == BarcodeType.PIECE.value)
         )
         return int(total or 0)
 
     async def order_active_total(self, order_id: uuid.UUID) -> int:
         """Minted AND still active (a retired label is minted but not scannable)."""
-        from app.modules.barcode.models import BarcodeRegistry
         total = await self.db.scalar(
             select(func.count(BarcodeRegistry.id))
             .where(BarcodeRegistry.order_id == order_id,
-                    BarcodeRegistry.type == "piece",
-                    BarcodeRegistry.status == "active")
+                    BarcodeRegistry.type == BarcodeType.PIECE.value,
+                    BarcodeRegistry.status == BarcodeStatus.ACTIVE.value)
         )
         return int(total or 0)
 
     async def order_distinct_code_total(self, order_id: uuid.UUID) -> int:
         """DISTINCT codes — if this ever differs from minted, a duplicate slipped
         past the unique index. Lets analytics PROVE uniqueness (duplicates=0)."""
-        from app.modules.barcode.models import BarcodeRegistry
         total = await self.db.scalar(
             select(func.count(func.distinct(BarcodeRegistry.code)))
             .where(BarcodeRegistry.order_id == order_id,
-                    BarcodeRegistry.type == "piece")
+                    BarcodeRegistry.type == BarcodeType.PIECE.value)
         )
         return int(total or 0)
 
@@ -249,8 +375,6 @@ class BarcodeRepository:
         """Per-style planned (SUM qty_ordered) vs minted (count of piece barcodes)
         vs balance. Two independent aggregates joined on style_id in Python so a
         style with 0 minted still appears (LEFT side = planned)."""
-        from app.modules.barcode.models import BarcodeRegistry
-        from app.modules.clients.models import SKU, Style
 
         planned_rows = (await self.db.execute(
             select(Style.id, Style.name, Style.code,
@@ -265,7 +389,7 @@ class BarcodeRepository:
             select(BarcodeRegistry.style_id,
                     func.count(BarcodeRegistry.id).label("minted"))
             .where(BarcodeRegistry.order_id == order_id,
-                    BarcodeRegistry.type == "piece")
+                    BarcodeRegistry.type == BarcodeType.PIECE.value)
             .group_by(BarcodeRegistry.style_id)
         )).all()
         minted_by_style = {r.style_id: int(r.minted) for r in minted_rows}
@@ -301,13 +425,10 @@ class BarcodeRepository:
     ) -> tuple[list[dict], int]:
         """Return (rows, total_count). Filters: style, sku, style+size, status,
         generated-date range. size filters via SKU.size (join only when needed)."""
-        from app.modules.barcode.models import BarcodeRegistry
-        from app.modules.clients.models import SKU, Style
-        from app.modules.production.models import Operation, Piece
 
         # Base filter on the indexed denormalised columns.
         conds = [BarcodeRegistry.order_id == order_id,
-                    BarcodeRegistry.type == "piece"]
+                    BarcodeRegistry.type == BarcodeType.PIECE.value]
         if sku_id:
             conds.append(BarcodeRegistry.sku_id == sku_id)
         if style_id:
@@ -370,7 +491,6 @@ class BarcodeRepository:
 
     # ── SKU picker for the filter dropdowns (scoped to one order) ────────────
     async def list_order_skus(self, order_id: uuid.UUID) -> list[dict]:
-        from app.modules.clients.models import SKU, Style
         rows = (await self.db.execute(
             select(SKU.id, SKU.code, SKU.color_name, SKU.color_code, SKU.size,
                     Style.id.label("style_id"), Style.name.label("style_name"))

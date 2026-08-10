@@ -125,7 +125,9 @@ async def test_role_gate_checks_every_distinct_stage_in_batch(db, operations, pi
         )
 
     assert exc.value.status_code == 403
-    assert "may not log" in str(exc.value.detail).lower()
+    # the 403 names the stage and the role that owns it
+    detail = str(exc.value.detail).lower()
+    assert "pasting" in detail and "stitching_manager" in detail
 
     # and nothing was logged — the whole request was refused, not just piece2
     from sqlalchemy import func, select

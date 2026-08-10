@@ -10,6 +10,8 @@ All 49 of these mirror the assertions proven in verify/run_logic_checks.py, now
 as parametrised pytest.
 ================================================================================
 """
+import datetime
+
 import pytest
 
 from app.core.enums import (
@@ -62,7 +64,14 @@ def _role_ok(role, stage):
     (UserRole.CUTTING_MANAGER, PS.PASTING, False),
     (UserRole.MANAGING_DIRECTOR, PS.FINAL_FINISH, True),   # bypass
     (UserRole.DIRECT_MANAGER, PS.LINING_CUTTING, True),    # bypass
-    (UserRole.STITCHING_MANAGER, PS.FINAL_FINISH, False),
+    # FINAL_FINISH is floor finishing work (STAGE_DESIGNATIONS: FINISHER,
+    # TAILOR), so the stitching manager owns it. FINAL_INSPECTION and
+    # PACKAGE_EXPORT are the DM/MD-only approval stages.
+    (UserRole.STITCHING_MANAGER, PS.FINAL_FINISH, True),
+    (UserRole.STITCHING_MANAGER, PS.FINAL_INSPECTION, False),
+    (UserRole.STITCHING_MANAGER, PS.PACKAGE_EXPORT, False),
+    (UserRole.CUTTING_MANAGER, PS.FUSING, True),      # CLAUDE.md §3
+    (UserRole.STITCHING_MANAGER, PS.FUSING, False),
 ])
 def test_role_gate(role, stage, ok):
     assert _role_ok(role, stage) is ok
@@ -143,7 +152,7 @@ def test_stage_of(code, expected):
     assert ProductionService._stage_of(_Op(code)) is expected
     
 @pytest.mark.asyncio
-async def test_preview_writes_nothing(db, cutting_mgr, cutter, pieces, leather_lot):
+async def test_preview_writes_nothing(db, operations, cutting_mgr, cutter, pieces, leather_lot):
     from app.core.enums import ScreenContext
     from sqlalchemy import select, func
     from app.modules.production.models import ProductionEvent
@@ -163,7 +172,7 @@ async def test_preview_writes_nothing(db, cutting_mgr, cutter, pieces, leather_l
     assert res["consumption_recorded"] is None
  
 @pytest.mark.asyncio
-async def test_commit_after_preview_writes(db, cutting_mgr, cutter, pieces, leather_lot):
+async def test_commit_after_preview_writes(db, operations, cutting_mgr, cutter, pieces, leather_lot):
     from app.core.enums import ScreenContext
     from sqlalchemy import select, func
     from app.modules.production.models import ProductionEvent

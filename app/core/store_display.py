@@ -145,13 +145,20 @@ def display_stage(
     # it's waiting for its other part to be scanned in.
     cleared_cut_side = ev in _CUT_SIDE_TERMINALS
     if ds in holding_states or (ds == _D_MERGED and cleared_cut_side):
-        if ds == _D_MERGED:
-            ds = _D_MERGED  # keep sub-label "awaiting parts"
+        # A leather-only piece is COMPLETE on leather alone, so its drawer sits
+        # at HOLDING_LEATHER for good. The generic caption ("awaiting lining")
+        # would promise a part that is never coming — `needs_lining` is what
+        # tells the two apart, which is why this function takes it.
+        label = _STORE_SUBLABEL.get(ds, "In store")
+        if not needs_lining and ds == _D_HOLDING_LEATHER:
+            label = "In store · holding leather · awaiting DM receive"
+        elif not needs_lining and ds == _D_MERGED:
+            label = "In store · awaiting leather"
         return {
             "display_stage": STORE,
             "in_store": True,
             "store_status": ds,
-            "label": _STORE_SUBLABEL.get(ds, "In store"),
+            "label": label,
         }
 
     # 3) Still mid cut-side work (e.g. leather cut done, fusing/pasting pending)

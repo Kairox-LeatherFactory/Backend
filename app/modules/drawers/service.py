@@ -148,9 +148,17 @@ class DrawerService:
 
         needs_lining = bool(getattr(piece, "needs_lining", True))
         complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
-        # F07: name what is ACTUALLY in the drawer. A lining-first scan must not
-        # report HOLDING_LEATHER.
-        if complete:
+        # THE STATE NAMES WHAT IS PHYSICALLY IN THE DRAWER — nothing else.
+        #   leather only            → HOLDING_LEATHER
+        #   lining only             → HOLDING_LINING   (F07: a lining-first scan
+        #                             must not report HOLDING_LEATHER)
+        #   both                    → HOLDING_BOTH
+        # COMPLETENESS is a separate question, answered by `complete` /
+        # `ready_for_received`: a leather-only piece (needs_lining=False) is
+        # ready on leather alone, but its drawer still holds LEATHER — calling
+        # that HOLDING_BOTH (as it did) named a lining that is not in there and
+        # was never coming.
+        if drawer.leather_in and drawer.lining_in:
             drawer.state = DrawerState.HOLDING_BOTH.value
         elif drawer.leather_in:
             drawer.state = DrawerState.HOLDING_LEATHER.value

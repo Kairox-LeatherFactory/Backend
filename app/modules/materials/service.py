@@ -401,23 +401,31 @@ class MaterialService:
     @staticmethod
     def _match_order_to_lot(order, lot) -> list:
         """Return the list of fields that DIFFER between the ordered spec and the
-        delivered lot. Empty list = exact match. Compares article, colour,
-        thickness, and dcm (dcm read from lot.attributes)."""
+        delivered lot. Empty list = match. Compares article, colour, thickness
+        and dcm (dcm read from lot.attributes).
+
+        A FIELD THE ORDER DID NOT SPECIFY IS NOT A MISMATCH. colour, thickness
+        and dcm are all optional on SupplierOrderCreate: ordering "400 dcm of
+        SUEDE-A32" without naming a colour means any colour of that article is
+        acceptable. Comparing a null spec against the delivered lot's real
+        attributes flagged every such order as a 3-field conflict and 409'd a
+        perfectly good delivery — the DM could then only get it into stock by
+        declaring it a substitution. Only what was actually ordered is checked;
+        a wrong colour against an order that DID name one still conflicts."""
         diffs = []
         def norm(x):
             return (str(x).strip().upper() if x is not None else None)
         if norm(order.article) != norm(lot.article):
             diffs.append("article")
-        if norm(order.colour) != norm(lot.colour):
+        if order.colour is not None and norm(order.colour) != norm(lot.colour):
             diffs.append("colour")
-        if norm(order.thickness) != norm(lot.thickness):
+        if order.thickness is not None and norm(order.thickness) != norm(lot.thickness):
             diffs.append("thickness")
         # dcm: order.dcm (Decimal) vs lot.attributes["dcm"]
-        lot_dcm = (lot.attributes or {}).get("dcm") if lot.attributes else None
-        o_dcm = float(order.dcm) if order.dcm is not None else None
-        l_dcm = float(lot_dcm) if lot_dcm is not None else None
-        if o_dcm != l_dcm:
-            diffs.append("dcm")
+        if order.dcm is not None:
+            lot_dcm = (lot.attributes or {}).get("dcm") if lot.attributes else None
+            if float(order.dcm) != (float(lot_dcm) if lot_dcm is not None else None):
+                diffs.append("dcm")
         return diffs
 
     async def mark_arrived(self, order_id: uuid.UUID) -> dict:

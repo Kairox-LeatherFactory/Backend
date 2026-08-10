@@ -163,7 +163,10 @@ MERGE_GATE_ENTRY = ProductionStage.LINE_STITCHING
 STAGE_ROLE_ACCESS: dict[ProductionStage, set] = {
     ProductionStage.LEATHER_CUTTING:  {UserRole.CUTTING_MANAGER},
     ProductionStage.LINING_CUTTING:   {UserRole.LINING_MANAGER},
-    ProductionStage.FUSING:           {UserRole.STITCHING_MANAGER},
+    # FUSING belongs to the CUTTING manager (CLAUDE.md §3: "Logs leather cutting
+    # + fusing"). It was mis-assigned to STITCHING_MANAGER, which 403'd the
+    # cutting manager out of the stage immediately after their own cut.
+    ProductionStage.FUSING:           {UserRole.CUTTING_MANAGER},
     ProductionStage.PASTING:          {UserRole.STITCHING_MANAGER},
     ProductionStage.LINE_STITCHING:   {UserRole.STITCHING_MANAGER},
     ProductionStage.SHELL_STITCHING:  {UserRole.STITCHING_MANAGER},
