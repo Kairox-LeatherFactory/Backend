@@ -84,7 +84,7 @@ class Base(DeclarativeBase):
 def _engine_kwargs(url: str) -> dict:
     """Pooling args only make sense for Postgres; SQLite rejects them."""
     if url.startswith("postgresql"):
-        return dict(pool_pre_ping=True, pool_size=5, max_overflow=10)
+        return dict(pool_pre_ping=True, pool_size=3, max_overflow=5)
     # SQLite (tests/local): a single shared connection, no pool sizing.
     return dict()
 
@@ -113,7 +113,6 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             yield session
         finally:
             await session.close()
-
 
 # ──────────────────────────────────────────────────────────────────────────
 # SYNC engine + session  (Alembic migrations + scripts/seed.py)

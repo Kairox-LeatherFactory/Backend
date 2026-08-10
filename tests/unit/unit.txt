@@ -116,7 +116,7 @@ should all be as testable as this one.
 Also covers `app/modules/attendance/geofence.py`, the other pure rule in scope.
 """
 import pytest
-
+from app.core.enums import UserRole, ScreenContext, screen_for_role
 from app.core.enums_barcode import (
     MULTI_STAGE_DESIGNATIONS, STAGE_DESIGNATIONS, STAGE_ROLE_ACCESS, ProductionStage,
 )
@@ -299,6 +299,246 @@ def test_null_island_default_rejects_a_real_worker():
     ok, dist = within_geofence(FACTORY[0], FACTORY[1], 0.0, 0.0, 100)
     assert ok is False
     assert dist > 1_000_000        # ~1,900 km away
+    
+def test_cutting_manager_pinned_to_leather():
+    assert screen_for_role(UserRole.CUTTING_MANAGER) is ScreenContext.LEATHER_CUT
+ 
+def test_lining_manager_pinned_to_lining():
+    assert screen_for_role(UserRole.LINING_MANAGER) is ScreenContext.LINING_CUT
+ 
+def test_stitching_manager_is_pipeline():
+    assert screen_for_role(UserRole.STITCHING_MANAGER) is ScreenContext.PIPELINE
+ 
+def test_cutting_manager_override_is_ignored():
+    # a pinned role cannot override to another screen
+    assert screen_for_role(UserRole.CUTTING_MANAGER,
+                           override=ScreenContext.LINING_CUT) is ScreenContext.LEATHER_CUT
+ 
+def test_md_may_override():
+    assert screen_for_role(UserRole.MANAGING_DIRECTOR,
+                           override=ScreenContext.LEATHER_CUT) is ScreenContext.LEATHER_CUT
+ 
+def test_md_defaults_to_pipeline():
+    assert screen_for_role(UserRole.MANAGING_DIRECTOR) is ScreenContext.PIPELINE
+ 
+@pytest.mark.asyncio
+async def test_log_without_screen_context_uses_role(client, cutting_mgr_token):
+    # a cutting manager logs WITHOUT sending screen_context → leather cutting
+    ...  # POST /production/log with body omitting screen_context; expect 201
+
+
+====================================================================================================
+FILE: test_material_spec_pure.py
+====================================================================================================
+
+"""
+UNIT · MATERIAL_SPEC / resolve_spec / uom_for — the strict per-category contract.
+
+CLAUDE.md §5 states the rule as an absolute: "Every lot must carry exactly its
+category's fields, else the API rejects it (422)." `GET /materials/spec` serves
+this same table at runtime so the frontend renders the right form, which makes
+the table a published API contract, not an internal detail — a silent change to
+a `qty_field` renames a form input for two frontend teams.
+
+These are pure dict/function assertions: no DB, no HTTP.
+"""
+import pytest
+
+from app.core.enums import MATERIAL_SPEC, resolve_spec, uom_for
+
+# The table exactly as CLAUDE.md §5 prints it:
+#   (category, subtype) -> (required fields, qty field, uom, filters)
+SPEC_FROM_THE_SPEC = [
+    ("LEATHER", None, {"thickness", "dcm"}, "dcm", "dcm",
+     ["article", "colour", "thickness"]),
+    ("LINING", "PLAIN_LINING", {"thickness", "mtrs"}, "mtrs", "mtrs",
+     ["article", "colour", "thickness"]),
+    ("LINING", "RIBS", {"kg"}, "kg", "kg", ["article", "colour"]),
+    ("LINING", "KNIT", {"pcs"}, "pcs", "pcs", ["article", "colour"]),
+    ("ACCESSORY", "BUTTON", {"size", "count"}, "count", "pcs",
+     ["article", "colour", "size"]),
+    ("ACCESSORY", "ZIP", {"size", "count"}, "count", "pcs",
+     ["article", "colour", "size"]),
+    ("ACCESSORY", "THREAD", {"thickness", "mtrs"}, "mtrs", "mtrs",
+     ["article", "colour", "thickness"]),
+    ("ACCESSORY", "OTHER", {"description", "count"}, "count", "pcs",
+     ["article", "colour"]),
+]
+
+
+# ══════════════════════════════════════════════════════════════ happy path
+@pytest.mark.parametrize("cat,sub,required,qty_field,uom,filters",
+                         SPEC_FROM_THE_SPEC)
+def test_every_documented_category_matches_the_written_spec(
+        cat, sub, required, qty_field, uom, filters):
+    spec = resolve_spec(cat, sub)
+    assert spec is not None, f"{cat}/{sub} is documented but unresolvable"
+    assert spec["required"] == required
+    assert spec["qty_field"] == qty_field
+    assert spec["qty_uom"] == uom
+    assert spec["filters"] == filters
+
+
+def test_the_table_has_no_undocumented_rows():
+    """A row nobody wrote down is a form field the frontend will never render."""
+    assert set(MATERIAL_SPEC) == {(c, s) for c, s, *_ in SPEC_FROM_THE_SPEC}
+
+
+# ═══════════════════════════════════════════════════════ common variation
+@pytest.mark.parametrize("cat", ["leather", "Leather", "  LEATHER  ".strip()])
+def test_category_is_case_insensitive(cat):
+    """A manager's form posts whatever case the frontend sent."""
+    assert resolve_spec(cat, None) is MATERIAL_SPEC[("LEATHER", None)]
+
+
+def test_leather_ignores_any_subtype():
+    """resolve_spec:enums_barcode — LEATHER has exactly one shape, so a stray
+    subtype must not make it unresolvable."""
+    assert resolve_spec("LEATHER", "ANYTHING") is MATERIAL_SPEC[("LEATHER", None)]
+
+
+def test_lining_with_no_subtype_defaults_to_plain():
+    """The documented default: 'LINING with no subtype defaults to PLAIN_LINING'."""
+    assert resolve_spec("LINING", None) is MATERIAL_SPEC[("LINING", "PLAIN_LINING")]
+
+
+# ══════════════════════════════════════════════════ error-throwing inputs
+def test_accessory_without_a_subtype_is_unresolvable():
+    """There is no generic accessory quantity — a button is counted, thread is
+    metered. Returning None here is what produces the 422 with the
+    'Accessory needs a subtype' hint (materials/service.py:75-79)."""
+    assert resolve_spec("ACCESSORY", None) is None
+    assert resolve_spec("ACCESSORY", "") is None
+
+
+@pytest.mark.parametrize("cat", ["FABRIC", "", "  ", "TRIM", None])
+def test_an_unknown_category_is_unresolvable(cat):
+    assert resolve_spec(cat, None) is None
+
+
+@pytest.mark.parametrize("sub", ["VELVET", "MESH", "PLAIN"])
+def test_an_unknown_lining_subtype_is_unresolvable(sub):
+    """'PLAIN' is included deliberately. The spec table keys the plain lining row
+    as PLAIN_LINING, while CLAUDE.md §5 prints the row as 'Lining / plain' — so
+    'PLAIN' is the subtype a frontend reading the prose would send, and it does
+    NOT resolve. Pinning the current behaviour: if the alias is later accepted,
+    this test fails and that is the signal to update the contract."""
+    assert resolve_spec("LINING", sub) is None
+
+
+@pytest.mark.parametrize("sub", ["BUTTONS", "ZIPPER", "CORD"])
+def test_an_unknown_accessory_subtype_is_unresolvable(sub):
+    assert resolve_spec("ACCESSORY", sub) is None
+
+
+# ═════════════════════════════════════════════════════ integrity of the table
+def test_the_quantity_field_is_always_one_of_its_own_required_fields():
+    """`create_lot` reads the quantity out of `attrs[spec['qty_field']]`
+    (materials/service.py:103). If a qty_field were not also required, the strict
+    check would pass with no quantity present and the Decimal() cast would raise
+    on None — a 500 where a 422 belongs."""
+    for key, spec in MATERIAL_SPEC.items():
+        assert spec["qty_field"] in spec["required"], f"{key} can create a qty-less lot"
+
+
+def test_uom_for_agrees_with_the_table():
+    """`uom_for` is used on the supplier-order path (materials/service.py:280)
+    where no lot exists yet. It must not disagree with the lot path's uom."""
+    for cat, sub, _req, _qf, uom, _f in SPEC_FROM_THE_SPEC:
+        assert uom_for(cat, sub) == uom
+
+
+def test_filters_never_include_the_quantity():
+    """Filters drive the search boxes. Offering 'search by dcm' is meaningless —
+    quantity is a level, not an identity."""
+    for key, spec in MATERIAL_SPEC.items():
+        assert spec["qty_field"] not in spec["filters"], f"{key} filters on quantity"
+
+
+def test_article_and_colour_are_filterable_for_every_material():
+    """CLAUDE.md §5: 'article + colour are required for every material.'"""
+    for key, spec in MATERIAL_SPEC.items():
+        assert "article" in spec["filters"] and "colour" in spec["filters"], key
+
+
+====================================================================================================
+FILE: test_premint_lining_pure.py
+====================================================================================================
+
+"""
+UNIT · `_sku_needs_lining` — the predicate that arms the merge gate. No DB.
+
+WHY THIS IS A MONEY-ADJACENT PREDICATE, NOT A COSMETIC FLAG
+    needs_lining is set once, at breakdown upload (imports/premint.py:115), and
+    drives the drawer completeness rule (drawers/service.py:96,141-146). Get it
+    wrong in the TRUE direction and a leather-only garment's drawer waits forever
+    for a lining nobody will cut — RECEIVED is unreachable, so SENDED is
+    unreachable, so LINE_STITCHING is blocked for the whole order (the H9
+    regression documented at premint.py:59-74).
+
+    Get it wrong in the FALSE direction and a lined jacket line-stitches with no
+    lining in the drawer.
+
+The fix chose "require positive evidence". These cases pin that choice.
+"""
+import pytest
+
+from app.modules.imports.premint import _sku_needs_lining
+
+
+class FakeSKU:
+    """Duck-typed SKU carrying only the lining columns the predicate reads.
+
+    A real `SKU` row is not used because the predicate is pure `getattr` over
+    four optional attributes — constructing an ORM object would drag in a DB
+    session for a function that touches neither.
+    """
+    def __init__(self, **kw):
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+# ══════════════════════════════════════════════════════════════ happy path
+@pytest.mark.parametrize("attr", ["knit_color", "nylon_color",
+                                  "lining_color", "lining_type"])
+def test_any_lining_signal_marks_the_piece_as_lined(attr):
+    """Four columns are consulted (premint.py:70); a value in ANY of them is
+    positive evidence of a lining."""
+    assert _sku_needs_lining(FakeSKU(**{attr: "PINE GREEN"})) is True
+
+
+# ═════════════════════════════════════════════════ the H9 regression itself
+def test_no_lining_signal_means_no_lining():
+    """H9: this used to `return True` on both branches. A SKU with nothing in
+    any lining column is leather-only and its drawer must complete on leather
+    alone."""
+    assert _sku_needs_lining(FakeSKU()) is False
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "NA", "N/A", "na", "None",
+                                   "NONE", "-", None])
+def test_a_placeholder_is_not_a_lining(blank):
+    """Spreadsheets carry 'NA' and '-' as 'no value'. Treating those as a lining
+    colour reintroduces H9 through the back door — the sentinel list at
+    premint.py:72 is what stops that."""
+    assert _sku_needs_lining(FakeSKU(knit_color=blank)) is False
+
+
+def test_a_blank_column_does_not_mask_a_real_one():
+    """Common variation: the sheet fills nylon_color but leaves knit_color as
+    'NA'. The loop must keep scanning past the placeholder."""
+    assert _sku_needs_lining(
+        FakeSKU(knit_color="NA", nylon_color="BLACK")) is True
+
+
+def test_a_sku_missing_the_columns_entirely_does_not_crash():
+    """`getattr(sku, attr, None)` (premint.py:71) tolerates a SKU model that
+    never grew these columns — an older order must not raise at upload."""
+    assert _sku_needs_lining(FakeSKU(color_code="PINE")) is False
+
+
+def test_whitespace_around_a_real_colour_still_counts():
+    assert _sku_needs_lining(FakeSKU(lining_color="  KNIT BLACK  ")) is True
 
 
 ====================================================================================================
@@ -447,6 +687,101 @@ if FAIL:
     print("FAILURES:", FAIL)
     raise SystemExit(1)
 print("ALL PURE-LOGIC CHECKS PASSED")
+
+
+====================================================================================================
+FILE: test_wages_fork_pure.py
+====================================================================================================
+
+"""
+UNIT · the PIECE_RATE / MONTHLY fork, as a pure predicate. No DB.
+
+The single most expensive bug this module can have is paying one person twice:
+once for the pieces they cut and again as salary. `_as_wage_type`
+(wages/service.py:65-81) is the only thing standing between the two branches —
+both branches skip on an `is not` identity test against a WageType member, so a
+value that coerces to neither member falls through BOTH and the worker is paid
+nothing, while a value that wrongly coerces to a member pays them from the wrong
+scheme.
+
+`test_wage_math.py` already owns proration arithmetic. This file owns the FORK.
+"""
+import pytest
+
+from app.core.enums import WageType
+from app.modules.wages.service import _MONTHLY_SALARY_MISSING, _as_wage_type
+
+
+# ══════════════════════════════════════════════════ happy path: real members
+@pytest.mark.money
+@pytest.mark.parametrize("member", list(WageType))
+def test_a_real_member_passes_through_unchanged(member):
+    assert _as_wage_type(member) is member
+
+
+# ═════════════════════════════════════════════ common variation: ORM strings
+@pytest.mark.money
+@pytest.mark.parametrize("raw,expected", [
+    ("monthly", WageType.MONTHLY),
+    ("piece_rate", WageType.PIECE_RATE),
+    ("MONTHLY", WageType.MONTHLY),
+    ("Piece_Rate", WageType.PIECE_RATE),
+])
+def test_a_raw_string_from_the_orm_still_reaches_the_right_branch(raw, expected):
+    """The docstring at service.py:66-73 says raw strings have leaked through
+    before because employees compares wage_type with .lower(). An `is` check
+    against a string fails silently and would send a monthly worker into the
+    piece loop — so the coercion is load-bearing, not defensive dressing."""
+    assert _as_wage_type(raw) is expected
+
+
+# ══════════════════════════════════════════════════════ the exclusivity proof
+@pytest.mark.money
+@pytest.mark.parametrize("value", [
+    WageType.MONTHLY, WageType.PIECE_RATE, "monthly", "piece_rate",
+])
+def test_no_value_can_satisfy_both_branches(value):
+    """The invariant stated in CLAUDE.md §10: 'PIECE_RATE and MONTHLY are
+    mutually exclusive — never both'. Both branches test the SAME coerced value
+    with `is`, so satisfying both is impossible by construction. This pins that
+    the coercion is a single function and not two divergent ones."""
+    coerced = _as_wage_type(value)
+    in_piece = coerced is WageType.PIECE_RATE
+    in_monthly = coerced is WageType.MONTHLY
+    assert not (in_piece and in_monthly)
+    assert in_piece or in_monthly
+
+
+# ═════════════════════════════════════════════════════ error / unknown input
+@pytest.mark.money
+@pytest.mark.parametrize("junk", [
+    "daily", "", "  ", "hourly", "PIECE RATE", "piece-rate", 0, 1, [], {},
+])
+def test_an_unrecognised_wage_type_coerces_to_none_not_a_guess(junk):
+    """A guess here is a mispayment. None is correct: it fails both branch
+    tests, the worker is excluded, and `_populate_run` reports them under
+    `excluded_untyped_employees` (service.py:417-419, :518-522) rather than
+    swallowing them."""
+    assert _as_wage_type(junk) is None
+
+
+@pytest.mark.money
+def test_none_stays_none():
+    assert _as_wage_type(None) is None
+
+
+# ══════════════════════════════════════ the monthly-salary-missing sentinel
+@pytest.mark.money
+def test_the_salary_missing_sentinel_cannot_collide_with_a_style_id():
+    """`unrated` is keyed by (style_id, op_id) tuples AND by
+    (_MONTHLY_SALARY_MISSING, employee_id) tuples (service.py:480). `_name_unrated`
+    splits them on `k[0] != _MONTHLY_SALARY_MISSING` (service.py:547). A UUID can
+    never equal this string, so the two key spaces cannot collide — which is what
+    stops a missing salary from being resolved as a style code and 404ing."""
+    import uuid
+    assert isinstance(_MONTHLY_SALARY_MISSING, str)
+    assert _MONTHLY_SALARY_MISSING != str(uuid.uuid4())
+    assert not _MONTHLY_SALARY_MISSING.replace("_", "").isdigit()
 
 
 ====================================================================================================

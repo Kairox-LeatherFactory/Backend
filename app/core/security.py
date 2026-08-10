@@ -90,12 +90,9 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     except (ValueError, TypeError):
         return False
 
-
 def get_password_hash(password: str) -> str:
     pw = password.encode("utf-8")[:72]
     return bcrypt.hashpw(pw, bcrypt.gensalt()).decode("utf-8")
-
-
 
 # ══════════════════════════════════════════════════════════════════════════
 # JWT helpers

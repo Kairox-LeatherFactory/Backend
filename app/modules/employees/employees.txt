@@ -10,17 +10,24 @@ modules/employees/models.py — Shop-floor employee records
 
 PURPOSE
     The people who physically make garments. Distinct from `app_user` (logins):
-    an Employee is a payroll/production identity; a User is a credential. A user
-    of role EMPLOYEE links to one Employee via User.employee_id.
+    an Employee is a payroll/production identity; a User is a credential.
+
+    A SHOP-FLOOR WORKER HAS NO USER ROW. Workers are not given system access, so
+    there is nothing to authenticate them with and nothing for them to log into.
+    They are identified on the floor by their employee barcode, which an operator
+    (SECURITY / HR / MD / DM) scans to record attendance. Only STAFF — managers,
+    HR, security — carry both an Employee row and a linked User (User.employee_id).
 
 WAGE TYPE drives the payroll fork and is a property of the PERSON, set
     explicitly — NOT inferred from designation. The source file proves it:
     'TAILOR' and 'CUTTER' appear in BOTH the monthly and piece-rate blocks.
 
 phone / email
-    Added so a login can be provisioned for each worker. The real files have no
-    contact details yet, so the seed script MOCKS them deterministically
-    (e.g. phone = 90000000NN). Replace with real data when available.
+    OPTIONAL contact details, nothing more. They were once required in order to
+    provision a login per worker; now that workers get no login, an employee can
+    be created with a name and a designation alone. They stay on the model (and
+    are still mocked by the seed script) because STAFF created through the
+    employee door do need a phone to log in with.
 ================================================================================
 """
 from sqlalchemy import Boolean, Enum, Numeric, String
@@ -61,7 +68,7 @@ modules/employees/repository.py — Async data access for employees
 """
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import WageType
@@ -105,6 +112,31 @@ class EmployeeRepository:
         )
         return found is not None
 
+    async def colliding_names(self, name: str, prefix: str) -> set[str]:
+        """Every taken name that could collide with `name` or a prefixed variant
+        of it, lower-cased, in ONE query.
+
+        The service's disambiguation walk used to issue one name_exists() per
+        candidate — up to 100 sequential round trips for a colliding name. It
+        now tests membership against this set in memory.
+
+        The LIKE is a deliberate SUPERSET ('IN-CHAL% ramesh' also catches
+        'IN-CHALKY ramesh'): the service compares exact candidate strings, so an
+        over-broad match costs nothing and a missed one would be a duplicate.
+        """
+        lowered = name.strip().lower()
+        pattern = (lowered.replace("\\", r"\\")
+                          .replace("%", r"\%")
+                          .replace("_", r"\_"))
+        lname = func.lower(Employee.name)
+        res = await self.db.execute(
+            select(lname).where(or_(
+                lname == lowered,
+                lname.like(f"{prefix.lower()}% {pattern}", escape="\\"),
+            ))
+        )
+        return set(res.scalars())
+
     async def save(self, emp: Employee) -> Employee:
         await self.db.commit()
         await self.db.refresh(emp)
@@ -124,6 +156,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette import status
 from fastapi import HTTPException
+import uuid
 
 from app.core.database import get_db
 from app.core.enums import UserRole
@@ -135,7 +168,7 @@ from app.modules.users.models import User
 router = APIRouter(prefix="/employees", tags=["Employees"])
 
 
-@router.get("")
+@router.get("", response_model=list[schemas.EmployeeReadWithPay|schemas.EmployeeRead], status_code=201)
 async def list_employees(
     active_only: bool = True,
     db: AsyncSession = Depends(get_db),
@@ -150,20 +183,65 @@ async def list_employees(
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "The employee roster is internal.")
-    rows = await EmployeeService(db).list_all(active_only)
+    svc = EmployeeService(db)
+    rows = await svc.list_all(active_only)
+    # The card code every row is scanned/clicked through by. One extra query for
+    # the whole page, not one per employee.
+    codes = await svc.barcodes_for([r.id for r in rows])
     pay_roles = {UserRole.HR, UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR}
-    if user.role in pay_roles:
-        return [schemas.EmployeeReadWithPay.model_validate(r) for r in rows]
-    return [schemas.EmployeeRead.model_validate(r) for r in rows]
+    model = (schemas.EmployeeReadWithPay if user.role in pay_roles
+             else schemas.EmployeeRead)
+    out = []
+    for r in rows:
+        row = model.model_validate(r)
+        row.employee_barcode = codes.get(r.id)
+        out.append(row)
+    return out
 
 
 @router.post("", response_model=schemas.EmployeeCreateRead, status_code=201)
 async def create_employee(
     body: schemas.EmployeeCreate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR)),
+    actor: User = Depends(require_roles(
+        UserRole.DIRECT_MANAGER, UserRole.HR, UserRole.MANAGING_DIRECTOR)),
 ):
-    return await EmployeeService(db).create(body)
+    """Create an employee. A linked login is minted ONLY when `role` names a
+    staff role (managers/HR/security are created HERE now, except DM/MD).
+
+    A plain worker needs name + designation + wage_type and nothing else: no
+    phone, no email, no password, no app_user row. They get an employee barcode
+    back so their card can be printed and scanned at the gate."""
+    return await EmployeeService(db).create(body, actor=actor)
+
+@router.patch("/{employee_id}", response_model=schemas.EmployeeRead)
+async def update_employee(
+    employee_id: uuid.UUID,
+    body: schemas.EmployeeUpdate,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(
+        UserRole.DIRECT_MANAGER, UserRole.HR, UserRole.MANAGING_DIRECTOR)),
+):
+    """Edit an employee (name/designation/wage_type/salary/contact/active).
+    Reaches the existing service.update() (was unreachable — F89)."""
+    svc = EmployeeService(db)
+    emp = await svc.update(employee_id, body)
+    out = schemas.EmployeeRead.model_validate(emp)
+    # Same shape as the list row — the edit screen keeps showing the card code.
+    out.employee_barcode = (await svc.barcodes_for([emp.id])).get(emp.id)
+    return out
+ 
+ 
+@router.delete("/{employee_id}", status_code=200)
+async def delete_employee(
+    employee_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(
+        UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR)),
+):
+    """SOFT-delete an employee (is_active=False) + retire their barcode. DM/MD
+    only — HR can edit but not remove. History is preserved."""
+    return await EmployeeService(db).delete(employee_id, actor_id=user.id)
 
 
 ====================================================================================================
@@ -174,16 +252,30 @@ FILE: schemas.py
 ================================================================================
 modules/employees/schemas.py — API contract for the employees module
 ================================================================================
-phone/email are MOCKED at seed time (the source files carry no contact data);
-they are surfaced here so a manager can provision logins and contact workers.
+WORKERS GET NO LOGIN. A shop-floor employee is a payroll/production identity
+only — there is no app_user row, so phone and email are genuinely optional and
+a password is never accepted. Their attendance is entered by an operator
+(SECURITY / HR / MD / DM) scanning their employee card.
+
+The ONLY people created here who also get a login are STAFF: pass an explicit
+`role` from _EMPLOYEE_LOGIN_ROLES and the login is minted in the same
+transaction (that path does need phone + password).
 ================================================================================
 """
 import uuid
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from app.core.enums import WageType
+from app.core.enums import UserRole, WageType
 
+# Staff roles that may be created through the employee door (they are real
+# people on the payroll AND hold a login). DM/MD are excluded — they belong to
+# user-creation. EMPLOYEE is excluded because workers get no login at all.
+_EMPLOYEE_LOGIN_ROLES = {
+    UserRole.HR, UserRole.SUPERVISOR, UserRole.CUTTING_MANAGER,
+    UserRole.LINING_MANAGER, UserRole.STITCHING_MANAGER, UserRole.SECURITY,
+    UserRole.MERCHANDISER,
+}
 
 
 class EmployeeRead(BaseModel):
@@ -198,6 +290,11 @@ class EmployeeRead(BaseModel):
     is_active: bool
     phone: str | None = None
     email: str | None = None
+    role: UserRole | None = None
+    # The worker's ACTIVE card code (EMP-000123). None when the card was
+    # retired (leaver) or never issued — a retired code is not scannable, so
+    # showing it would invite a scan that resolves 410 Gone.
+    employee_barcode: str | None = None
 
 
 class EmployeeReadWithPay(EmployeeRead):
@@ -206,30 +303,63 @@ class EmployeeReadWithPay(EmployeeRead):
 
 
 class EmployeeCreate(BaseModel):
+    """Create a person on the payroll.
+
+    Plain worker (the common case): name + designation + wage_type is enough.
+    NO phone, NO email, NO password, NO role — they get no system access, only
+    an employee barcode so their card can be scanned.
+
+    Staff: pass `role` (one of _EMPLOYEE_LOGIN_ROLES) and a login is minted
+    alongside the employee record; that path needs phone + password.
+    """
     name: str
     designation: str | None = None
     wage_type: WageType = WageType.PIECE_RATE
     monthly_salary: float | None = None
-    phone: str | None = None
-    email: str | None = None
-    password: str | None = None
+    phone: str | None = None        # optional contact; required only for staff
+    email: str | None = None        # optional contact
+    password: str | None = None     # staff logins only
+    role: UserRole | None = None    # staff login role; omit for a worker
 
     @model_validator(mode="after")
     def _login_fields(self):
-        if self.wage_type is WageType.MONTHLY:
+        # WORKERS GET NO LOGIN. wage_type no longer decides this — a MONTHLY
+        # worker is still just a worker, paid differently. Only an explicit
+        # STAFF role mints a login, and only that path needs credentials.
+        if self.role is UserRole.EMPLOYEE:
+            raise ValueError(
+                "The 'employee' role is not assignable — shop-floor workers "
+                "have no login. Omit `role` to create a worker.")
+        # DM/MD may not be minted here — they belong to user-creation.
+        if self.role in (UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER):
+            raise ValueError(
+                "DIRECT_MANAGER and MANAGING_DIRECTOR logins are created via "
+                "user-creation, not the employee service.")
+        if self.role is not None and self.role not in _EMPLOYEE_LOGIN_ROLES:
+            raise ValueError(
+                f"Role '{self.role.value}' cannot be created here. Permitted: "
+                f"{', '.join(sorted(r.value for r in _EMPLOYEE_LOGIN_ROLES))}.")
+
+        if self.role in _EMPLOYEE_LOGIN_ROLES:
             missing = [f for f in ("phone", "password") if not getattr(self, f)]
             if missing:
-                raise ValueError(f"{', '.join(missing)} required for MONTHLY employees")
+                raise ValueError(
+                    f"{', '.join(missing)} required when creating a staff login")
         elif self.password:
-            raise ValueError("password is only accepted for MONTHLY employees")
+            raise ValueError(
+                "password is only accepted when a staff login is created — "
+                "workers do not log in")
         return self
 
 
 class EmployeeCreateRead(EmployeeRead):
+    # employee_barcode is inherited from EmployeeRead — create sets it to the
+    # code minted in the same transaction so the card can be printed.
     user_created: bool = False
     login_phone: str | None = None
-    employee_barcode: str | None = None
-    
+
+
+
 class EmployeeUpdate(BaseModel):
     name: str | None = None
     designation: str | None = None
@@ -248,7 +378,16 @@ FILE: service.py
 ================================================================================
 modules/employees/service.py — Employee business logic (async)
 ================================================================================
-TWO INVARIANTS THIS FILE OWNS:
+THREE INVARIANTS THIS FILE OWNS:
+
+  0. A SHOP-FLOOR WORKER GETS NO LOGIN.
+     Creating an employee does NOT write app_user, and needs no phone, email or
+     password. A login is minted here only when the caller passes an explicit
+     STAFF role (schemas._EMPLOYEE_LOGIN_ROLES). Attendance for a worker is
+     recorded by an operator (SECURITY / HR / MD / DM) scanning their card, so
+     wage_type no longer implies system access — a MONTHLY worker used to be
+     auto-given an EMPLOYEE login, and that is exactly what was removed.
+
 
   1. DESIGNATION IS ALWAYS UPPERCASE, normalised.
      'shell tailor' / 'Shell-Tailor' / ' SHELL TAILOR ' all become SHELL_TAILOR.
@@ -270,7 +409,7 @@ import uuid
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import Designation, UserRole, WageType
+from app.core.enums import Designation, WageType
 from app.modules.employees import schemas
 from app.modules.employees.models import Employee
 from app.modules.employees.repository import EmployeeRepository
@@ -287,8 +426,30 @@ class EmployeeService:
         self.db = db
         self.repo = EmployeeRepository(db)
 
+    # employees/service.py — add near list_all
+    async def names_for(self, ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+        """id → name for a set of employees (payroll warning display)."""
+        if not ids:
+            return {}
+        rows = await self.repo.list_all(active_only=False)
+        return {e.id: e.name for e in rows if e.id in set(ids)}
+
     async def list_all(self, active_only: bool = True) -> list[Employee]:
         return await self.repo.list_all(active_only)
+
+    async def barcodes_for(self, ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+        """id → ACTIVE card code, for a whole roster in one query.
+
+        The roster screen is also the barcode screen: clicking a row goes to
+        PATCH /employees/{employee_id}/barcode (reissue / deactivate), so the
+        card code has to be on screen for the user to know WHICH card they are
+        retiring. Kept off list_all so the wage run — which reads the same
+        roster every payroll — does not pay for a query it never uses.
+        """
+        if not ids:
+            return {}
+        from app.modules.barcode.service import BarcodeService
+        return await BarcodeService(self.db).employee_codes(ids)
 
     # ── name disambiguation ─────────────────────────────────────────────────
     async def _unique_name(self, raw_name: str) -> str:
@@ -302,8 +463,13 @@ class EmployeeService:
         Comparison is case-insensitive and whitespace-collapsed, because 'ramesh'
         and 'Ramesh ' are the same person to everyone except a database.
 
+        ONE QUERY: colliding_names() returns every taken name this one could
+        collide with — the bare name and all its IN-CHAL variants — so the walk
+        below is in-memory string work. It used to run a SELECT per candidate,
+        up to 100 sequential round trips for a name that collided.
+
         RACE NOTE: two concurrent creates of the same name can both see 'free'
-        here. The DB unique index on lower(name) is the real guard — this loop
+        here. The DB unique index on lower(name) is the real guard — this walk
         makes the common case produce a MEANINGFUL name instead of a 409. On
         IntegrityError the caller retries; at this factory's create rate
         (a few per week) that path will effectively never fire.
@@ -312,60 +478,104 @@ class EmployeeService:
         if not name:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 "Employee name is required")
-        if not await self.repo.name_exists(name):
+
+        taken = await self.repo.colliding_names(name, IN_CHAL_PREFIX)
+        if name.lower() not in taken:
             return name
 
         candidate = f"{IN_CHAL_PREFIX} {name}"
-        if not await self.repo.name_exists(candidate):
+        if candidate.lower() not in taken:
             return candidate
 
-        n = 2
-        while n < 100:
+        for n in range(2, 100):
             candidate = f"{IN_CHAL_PREFIX}-{n} {name}"
-            if not await self.repo.name_exists(candidate):
+            if candidate.lower() not in taken:
                 return candidate
-            n += 1
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             f"Too many employees named '{name}' — assign a distinct name manually.",
         )
 
     # ── create ──────────────────────────────────────────────────────────────
-    async def create(self, body: schemas.EmployeeCreate) -> schemas.EmployeeCreateRead:
-        data = body.model_dump(exclude={"password"})
+    async def create(self, body: schemas.EmployeeCreate,
+                     actor=None) -> schemas.EmployeeCreateRead:
+        """Create an employee, plus a login ONLY when `role` is a staff role.
+
+        WORKERS GET NO LOGIN — no app_user row, no phone/email needed. wage_type
+        is a payroll fact and no longer implies system access: a MONTHLY worker
+        used to be auto-given an EMPLOYEE login here, and that is exactly what we
+        removed. Every employee still gets an employee barcode, which is how
+        SECURITY / HR / MD / DM check them in and out.
+
+        `actor` (the creating User) is used to enforce grant authority: the actor
+        may only create a login whose role they are permitted to grant."""
+        from app.modules.employees.schemas import _EMPLOYEE_LOGIN_ROLES
+
+        data = body.model_dump(exclude={"password", "role"})
         data["name"] = await self._unique_name(body.name)
         data["designation"] = Designation.normalise(body.designation)
         data["wage_type"] = WageType(body.wage_type)
- 
+
         emp = await self.repo.create(**data)   # flush only, no commit
- 
+
+        # A login is minted ONLY for an explicit staff role. No fallback.
+        login_role = body.role if body.role in _EMPLOYEE_LOGIN_ROLES else None
+
         user_created = False
-        if data["wage_type"] is WageType.MONTHLY:
+        if login_role is not None:
+            # grant-authority check: actor may only create roles they can grant.
+            if actor is not None:
+                allowed = UserService(self.db)._GRANTABLE.get(actor.role, set())
+                if login_role not in allowed:
+                    raise HTTPException(
+                        status.HTTP_403_FORBIDDEN,
+                        f"Role '{actor.role.value}' may not create a "
+                        f"'{login_role.value}' login.")
             await UserService(self.db).provision_user(
                 UserCreate(
                     name=data["name"], phone=body.phone, email=body.email,
-                    role=UserRole.EMPLOYEE, password=body.password,
-                    employee_id=emp.id,
+                    role=login_role, password=body.password, employee_id=emp.id,
                 ),
                 must_change_password=True,
             )
             user_created = True
  
-        # issue the scannable card (nocommit — same transaction as the employee)
         from app.modules.barcode.service import BarcodeService
-        code = await BarcodeService(self.db).issue_employee_barcode_nocommit(
-            emp.id, emp.name)
+        code = await BarcodeService(self.db).issue_employee_barcode_nocommit(emp.id, emp.name)
  
-        await self.db.commit()
-        await self.db.refresh(emp)
-        logger.info("Created employee %s (%s) barcode=%s", emp.name, emp.designation, code)
- 
-        # return the read model WITH the barcode so the UI can print the card
+        await self.repo.save(emp)  # commit the employee + barcode + user in one txn
+        logger.info("Created employee %s (%s) role=%s barcode=%s",
+                    emp.name, emp.designation, login_role, code)
+
         out = schemas.EmployeeCreateRead.model_validate(emp)
         out.user_created = user_created
         out.login_phone = body.phone if user_created else None
         out.employee_barcode = code
         return out
+
+    # ── delete (NEW — soft) ──────────────────────────────────────────────────
+    async def delete(self, employee_id: uuid.UUID, actor_id=None) -> dict:
+        """SOFT delete. is_active=False (preserves ProductionEvent + wage history)
+        and retires the scannable barcode in the same transaction. A hard delete
+        is refused by design — it would orphan closed wage lines."""
+        emp = await self.repo.get(employee_id)
+        if not emp:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Employee not found")
+        if not emp.is_active:
+            return {"employee_id": str(employee_id), "active": False,
+                    "already_inactive": True}
+        emp.is_active = False
+        # retire the card (nocommit — same txn)
+        from app.modules.barcode.service import BarcodeService
+        try:
+            await BarcodeService(self.db).deactivate_employee_barcode(
+                employee_id, actor_id=actor_id)
+        except HTTPException:
+            # no active card is fine — the employee may never have had one
+            pass
+        await self.repo.save(emp)
+        return {"employee_id": str(employee_id), "active": False,
+                "history_preserved": True}
 
     async def update(self, employee_id: uuid.UUID,
                      body: schemas.EmployeeUpdate) -> Employee:

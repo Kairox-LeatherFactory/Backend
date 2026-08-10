@@ -237,14 +237,18 @@ async def test_an_unknown_lot_is_a_404_and_nothing_is_logged(
 
 
 @pytest.mark.asyncio
-async def test_a_cut_may_not_be_mixed_with_other_stages_in_one_batch(
+async def test_an_uncut_piece_on_the_pipeline_screen_is_blocked_per_piece(
         db, operations, pieces, cutter, cutting_mgr, leather_lot):
-    """service.py:248-252. Consumption is one number for the request; if the
-    batch spanned CUTTING and FUSING there is no honest way to say which pieces
-    the hide went into.
+    """Consumption is ONE number for the request, so a batch that spanned
+    CUTTING and FUSING could not honestly say which pieces the hide went into.
 
-    Reaching the mixed state needs pieces at different points on the chain, so
-    one piece is advanced past cutting first.
+    That state is now unreachable rather than rejected. A never-cut piece
+    scanned on the PIPELINE screen used to infer LEATHER_CUTTING, drag a
+    consumption requirement into a pipeline batch, and 422 the WHOLE request —
+    one un-cut piece losing every good piece scanned with it. Cutting is logged
+    on a CUT SCREEN (the no-stage-buttons rule), so on PIPELINE that piece is
+    simply out of sequence: blocked PER PIECE, and the rest of the batch logs.
+    (The mixed-batch guard stays in the service as a belt-and-braces invariant.)
     """
     svc = ProductionService(db)
     advanced, _ = pieces[0]
@@ -254,15 +258,16 @@ async def test_a_cut_may_not_be_mixed_with_other_stages_in_one_batch(
         work_date=TODAY, screen=ScreenContext.LEATHER_CUT,
         leather_lot_id=leather_lot.id, consumption_qty=10.0)
 
-    # PIPELINE now infers FUSING for `advanced` and LEATHER_CUTTING for `fresh`.
-    with pytest.raises(HTTPException) as exc:
-        await ProductionService(db).log_batch(
-            user=cutting_mgr, employee_id=cutter[0].id,
-            piece_ids=[advanced.id, fresh.id], work_date=TODAY,
-            screen=ScreenContext.PIPELINE,
-            leather_lot_id=leather_lot.id, consumption_qty=10.0)
-    assert exc.value.status_code == 422
-    assert "cutting scan may not be mixed" in str(exc.value.detail).lower()
+    # PIPELINE infers FUSING for `advanced`; `fresh` has never been cut.
+    res = await ProductionService(db).log_batch(
+        user=cutting_mgr, employee_id=cutter[0].id,
+        piece_ids=[advanced.id, fresh.id], work_date=TODAY,
+        screen=ScreenContext.PIPELINE)
+
+    assert res["stage"] == "FUSING"
+    assert res["logged"] == [advanced.code]          # the good piece survives
+    assert res["sequence_blocked"] == [fresh.code]
+    assert res["consumption_recorded"] is None       # FUSING consumes nothing
 
 
 # ═══════════════════════════════════════════════════════ crash / integrity

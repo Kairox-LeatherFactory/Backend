@@ -57,6 +57,7 @@ class AttendanceRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     employee_id: uuid.UUID
+    name: str
     work_date: date
     check_in_at: datetime
     check_out_at: datetime | None

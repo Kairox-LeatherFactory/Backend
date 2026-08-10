@@ -85,13 +85,24 @@ async def test_uat2_cutting_logs_consumption_and_drops_stock(
 async def test_uat3_worker_cannot_work_unskilled_stage(
         db, operations, pieces, paster, cutting_mgr, leather_lot):
     """AS the system, WHEN a PASTER is scanned on the cutting screen, THEN the
-    log is refused with a clear skill warning — the cutter's money is protected."""
+    log IS recorded but the mismatch is reported as a skill warning.
+
+    GATE 2 is deliberately a warning, not a block (CLAUDE.md §8 / production
+    service GATE 2): the floor must never lose a scan because HR has not
+    backfilled a designation, so the manager-role gate (GATE 1) stays the hard
+    authority and the anomaly is surfaced for audit instead."""
     res = await ProductionService(db).log_batch(
         user=cutting_mgr, employee_id=paster[0].id, piece_ids=[pieces[0][0].id],
         work_date=datetime.date.today(), screen=ScreenContext.LEATHER_CUT,
         leather_lot_id=leather_lot.id, consumption_qty=10.0)
-    assert res["count_logged"] == 0
-    assert res["skill_blocked"]
+    assert res["count_logged"] == 1
+    assert not res["skill_blocked"]          # nothing is BLOCKED on skill
+
+    warning = res["skill_warnings"][0]
+    assert warning["piece"] == pieces[0][0].code
+    assert warning["designation"] == "PASTER"
+    assert warning["stage"] == "LEATHER_CUTTING"
+    assert "may not work" in warning["note"]
 
 
 # ── UAT-4: Sequence gate ─────────────────────────────────────────────────────

@@ -48,7 +48,6 @@ async def test_extra_fields_on_employee_create_are_ignored_not_applied(
         "id": str(hostile_id),
         "is_active": False,
         "monthly_salary_override": 999999,
-        "role": "managing_director",
     })
     assert r.status_code == 201, r.text
 
@@ -57,6 +56,22 @@ async def test_extra_fields_on_employee_create_are_ignored_not_applied(
     assert emp is not None
     assert emp.id != hostile_id, "caller-supplied primary key was accepted"
     assert emp.is_active is True, "caller overrode a field the schema does not expose"
+
+
+@pytest.mark.asyncio
+async def test_hr_cannot_mint_a_managing_director_through_employee_create(
+        api_client, as_role):
+    """`role` IS a declared field now — it mints the linked login for STAFF
+    (HR/supervisor/managers/security). DM and MD are deliberately NOT in that
+    set: they are created through user-creation, so asking for one here is
+    refused outright rather than silently downgraded."""
+    as_role(UserRole.HR)
+    r = await api_client.post(f"{API}/employees", json={
+        "name": "ESCALATE", "designation": "cutter", "wage_type": "piece_rate",
+        "role": "managing_director",
+    })
+    assert r.status_code == 422, r.text
+    assert "user-creation" in r.text
 
 
 @pytest.mark.asyncio
@@ -229,20 +244,32 @@ async def test_a_404_does_not_echo_the_database_error(api_client, as_role):
 
 # ═══════════════════════════════════════════════════ unsafe delete / retirement
 @pytest.mark.asyncio
-async def test_there_is_no_employee_delete_route(api_client, as_role, cutter):
+async def test_employee_delete_is_soft_and_keeps_the_person(
+    api_client, as_role, cutter, db
+):
     """CLAUDE.md §6: "You delete the scannable code, never the person or their
-    record." A DELETE that removed an employee would orphan closed wage lines —
+    record." A DELETE that REMOVED an employee would orphan closed wage lines —
     documents the factory already paid against.
 
-    Asserted as 404/405 (no such route) rather than 403, because the correct
-    design is that the verb does not exist, not that it is guarded.
+    The route exists and is DM/MD-only, but it is a soft retire: is_active flips
+    to False and the barcode is retired, while the employee row (and therefore
+    every production event and wage line pointing at it) stays. This test pins
+    that semantic — the row surviving is the whole point, not the verb.
     """
+    from app.modules.employees.models import Employee
+
     emp, _ = cutter
+    emp_id = emp.id                       # read BEFORE expiring the identity map
     as_role(UserRole.MANAGING_DIRECTOR)
-    r = await api_client.delete(f"{API}/employees/{emp.id}")
-    assert r.status_code in (404, 405), (
-        f"an employee delete route exists (HTTP {r.status_code}) — retirement "
-        "must go through barcode deactivation, which preserves history")
+    r = await api_client.delete(f"{API}/employees/{emp_id}")
+    assert r.status_code == 200, r.text
+
+    db.expire_all()
+    still_there = await db.get(Employee, emp_id)
+    assert still_there is not None, (
+        "DELETE removed the employee row — closed wage lines now point at "
+        "nothing. Retirement must preserve history.")
+    assert still_there.is_active is False
 
 
 @pytest.mark.asyncio
