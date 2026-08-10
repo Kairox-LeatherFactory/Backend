@@ -94,6 +94,7 @@ class PieceOption(BaseModel):
 class SkuPieceList(BaseModel):
     sku_id: uuid.UUID
     sku_code: str | None
+    order_id: uuid.UUID | None
     colour: str | None
     size: str | None
     operation_id: uuid.UUID | None

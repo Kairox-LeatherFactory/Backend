@@ -87,8 +87,13 @@ class EmployeeService:
         Comparison is case-insensitive and whitespace-collapsed, because 'ramesh'
         and 'Ramesh ' are the same person to everyone except a database.
 
+        ONE QUERY: colliding_names() returns every taken name this one could
+        collide with — the bare name and all its IN-CHAL variants — so the walk
+        below is in-memory string work. It used to run a SELECT per candidate,
+        up to 100 sequential round trips for a name that collided.
+
         RACE NOTE: two concurrent creates of the same name can both see 'free'
-        here. The DB unique index on lower(name) is the real guard — this loop
+        here. The DB unique index on lower(name) is the real guard — this walk
         makes the common case produce a MEANINGFUL name instead of a 409. On
         IntegrityError the caller retries; at this factory's create rate
         (a few per week) that path will effectively never fire.
@@ -97,19 +102,19 @@ class EmployeeService:
         if not name:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 "Employee name is required")
-        if not await self.repo.name_exists(name):
+
+        taken = await self.repo.colliding_names(name, IN_CHAL_PREFIX)
+        if name.lower() not in taken:
             return name
 
         candidate = f"{IN_CHAL_PREFIX} {name}"
-        if not await self.repo.name_exists(candidate):
+        if candidate.lower() not in taken:
             return candidate
 
-        n = 2
-        while n < 100:
+        for n in range(2, 100):
             candidate = f"{IN_CHAL_PREFIX}-{n} {name}"
-            if not await self.repo.name_exists(candidate):
+            if candidate.lower() not in taken:
                 return candidate
-            n += 1
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             f"Too many employees named '{name}' — assign a distinct name manually.",
@@ -160,20 +165,18 @@ class EmployeeService:
             user_created = True
  
         from app.modules.barcode.service import BarcodeService
-        code = await BarcodeService(self.db).issue_employee_barcode_nocommit(
-            emp.id, emp.name)
+        code = await BarcodeService(self.db).issue_employee_barcode_nocommit(emp.id, emp.name)
  
-        await self.db.commit()
-        await self.db.refresh(emp)
+        await self.repo.save(emp)  # commit the employee + barcode + user in one txn
         logger.info("Created employee %s (%s) role=%s barcode=%s",
                     emp.name, emp.designation, login_role, code)
- 
+
         out = schemas.EmployeeCreateRead.model_validate(emp)
         out.user_created = user_created
         out.login_phone = body.phone if user_created else None
         out.employee_barcode = code
         return out
- 
+
     # ── delete (NEW — soft) ──────────────────────────────────────────────────
     async def delete(self, employee_id: uuid.UUID, actor_id=None) -> dict:
         """SOFT delete. is_active=False (preserves ProductionEvent + wage history)

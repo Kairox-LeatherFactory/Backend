@@ -1,5 +1,471 @@
 
 ====================================================================================================
+FILE: test_api_security.py
+====================================================================================================
+
+"""
+SYSTEM · the security properties of the wire contract itself.
+
+Not "can role X reach endpoint Y" — `test_role_guards.py` owns that. This file
+asks what the API does with HOSTILE INPUT once the caller is already through the
+door: extra fields, ids where codes belong, junk in path parameters, and what
+leaks back out in an error body.
+
+WHY THESE ARE SYSTEM-LAYER AND NOT UNIT
+    Every one of them is a property of the request/response boundary. Mass
+    assignment is invisible to a service test because the service is handed a
+    validated model; a stack trace in a 500 body is invisible to anything that
+    does not read the raw HTTP response.
+"""
+import uuid
+
+import pytest
+
+from app.core.enums import UserRole
+from app.modules.employees.models import Employee
+
+API = "/api/v1"
+
+pytestmark = pytest.mark.security
+
+
+# ══════════════════════════════════════════════════════════ mass assignment
+@pytest.mark.asyncio
+async def test_extra_fields_on_employee_create_are_ignored_not_applied(
+        api_client, as_role, db):
+    """The classic privilege-escalation shape: post fields the schema never
+    declared and see whether they reach the row.
+
+    `EmployeeCreate` (employees/schemas.py:36-44) declares seven fields. Pydantic
+    v2's default is to IGNORE unknown keys, so `id` and `is_active` below should
+    vanish at the boundary. If they did not, a caller could pin an employee's
+    primary key — and a chosen id is a foothold for overwriting an existing
+    worker's wage lines by reference.
+    """
+    from sqlalchemy import select
+
+    hostile_id = uuid.uuid4()
+    as_role(UserRole.HR)
+    r = await api_client.post(f"{API}/employees", json={
+        "name": "MASSASSIGN", "designation": "cutter",
+        "wage_type": "piece_rate",
+        # none of these are on the schema:
+        "id": str(hostile_id),
+        "is_active": False,
+        "monthly_salary_override": 999999,
+        "role": "managing_director",
+    })
+    assert r.status_code == 201, r.text
+
+    emp = (await db.execute(
+        select(Employee).where(Employee.name == "MASSASSIGN"))).scalars().first()
+    assert emp is not None
+    assert emp.id != hostile_id, "caller-supplied primary key was accepted"
+    assert emp.is_active is True, "caller overrode a field the schema does not expose"
+
+
+@pytest.mark.asyncio
+async def test_a_client_cannot_set_its_own_id_on_create(api_client, as_role, db):
+    """Same shape on the tenancy root. A caller-chosen client id would let a
+    later request claim an id that a real client will one day be issued."""
+    from sqlalchemy import select
+    from app.modules.clients.models import Client
+
+    hostile_id = uuid.uuid4()
+    as_role(UserRole.DIRECT_MANAGER)
+    # `ClientCreate` (clients/schemas.py:85-88) bundles the first order, so
+    # order_number is mandatory — a client never exists without one.
+    r = await api_client.post(f"{API}/clients", json={
+        "name": "IDPICKER", "country": "IT", "order_number": "IDPICK-PO",
+        "id": str(hostile_id)})
+    assert r.status_code in (200, 201), r.text
+
+    row = (await db.execute(
+        select(Client).where(Client.name == "IDPICKER"))).scalars().first()
+    assert row is not None and row.id != hostile_id
+
+
+# ═══════════════════════════════════════════════ codes on the wire, not UUIDs
+@pytest.mark.asyncio
+async def test_the_rate_sheet_refuses_a_uuid_where_a_style_code_belongs(
+        api_client, as_role, order_tree):
+    """CLAUDE.md / wages/service.py:23-28: "CODES IN, IDS NEVER OUT." The rate
+    screens take `style_code`, and `_resolve_style` upper-cases and looks it up
+    (service.py:100-117).
+
+    Posting a raw UUID must 404 with the code echoed back, not silently resolve.
+    If a UUID were accepted here, the whole "no id is ever typed on a rate
+    screen" contract would be advisory — and the frontend teams would start
+    sending ids, which is how the next id-enumeration bug gets written.
+    """
+    as_role(UserRole.DIRECT_MANAGER)
+    r = await api_client.get(f"{API}/wages/rate-sheet",
+                             params={"style_code": str(order_tree["style"].id)})
+    assert r.status_code == 404
+    assert "no style with code" in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_operation_code_names_the_known_ones(
+        api_client, as_role, db, operations):
+    """A 404 that lists the valid vocabulary (wages/service.py:134-139) is the
+    difference between a frontend dev fixing a typo in a minute and filing a
+    ticket. Asserted because it is easy to "tidy" such a message away.
+
+    A style is created here rather than reusing `order_tree`, because
+    `_resolve_style` looks up `Style.code` and the shared fixture sets only
+    `name`/`article` — so order_tree's style is unreachable by code and would
+    404 on the STYLE before the operation code was ever examined.
+    """
+    from app.modules.clients.models import Client, ClientOrder, Style
+
+    client = Client(name="OPCODE CO", country="IT")
+    db.add(client)
+    await db.flush()
+    order = ClientOrder(client_id=client.id, order_number="OPCODE-PO")
+    db.add(order)
+    await db.flush()
+    db.add(Style(client_order_id=order.id, name="OPSTYLE", article="OP1",
+                 code="OPSTYLE"))
+    await db.commit()
+
+    as_role(UserRole.DIRECT_MANAGER)
+    r = await api_client.get(f"{API}/wages/rate-history", params={
+        "style_code": "OPSTYLE", "operation_code": "SEWING"})
+    assert r.status_code == 404
+    assert "LEATHER_CUTTING" in r.text, "the error does not name the real operations"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_style_code_is_a_422_not_a_500(api_client, as_role):
+    """wages/service.py:108-111. A blank query parameter is a user error."""
+    as_role(UserRole.DIRECT_MANAGER)
+    r = await api_client.get(f"{API}/wages/rate-sheet", params={"style_code": "   "})
+    assert r.status_code == 422
+
+
+# ═════════════════════════════════════════════════ input validation on the wire
+@pytest.mark.asyncio
+@pytest.mark.parametrize("junk", [
+    "not-a-uuid",
+    "1 OR 1=1",
+    "<script>alert(1)</script>",
+    "00000000-0000-0000-0000-00000000000",          # one digit short
+    "%00",
+])
+async def test_junk_in_a_uuid_path_parameter_is_rejected_cleanly(
+        api_client, as_role, junk):
+    """FastAPI coerces path params before the handler runs, so a non-UUID should
+    never reach a query.
+
+    422 (bad shape for this route) and 404 (matched no route at all) are both
+    clean refusals; 500 is not, because it would mean the string got far enough
+    to break something. The reflection check is the second half: an error body
+    that echoed the payload back verbatim would make this endpoint a reflected-
+    XSS vector for anything rendering the message.
+    """
+    as_role(UserRole.DIRECT_MANAGER)
+    r = await api_client.get(f"{API}/production/styles/{junk}/progress")
+    assert r.status_code in (404, 422), f"{junk!r} produced HTTP {r.status_code}"
+    assert "<script>" not in r.text, "the error body reflected raw markup"
+
+
+@pytest.mark.asyncio
+async def test_a_traversal_style_path_parameter_matches_no_route(api_client,
+                                                                 as_role):
+    """`../../etc/passwd` contains slashes, so it changes the PATH SHAPE rather
+    than the parameter value — the request reaches no route and 404s before any
+    handler exists to be confused. Separated from the case above because the
+    mechanism is different, and asserting 422 here would be asserting the wrong
+    thing."""
+    as_role(UserRole.DIRECT_MANAGER)
+    r = await api_client.get(f"{API}/production/styles/../../etc/passwd/progress")
+    assert r.status_code == 404
+    assert "passwd" not in r.text.lower() or "detail" in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_a_payroll_window_typed_backwards_is_refused_at_the_api(
+        api_client, as_role):
+    """The money guard, through the router rather than the service
+    (wages/service.py:285-289)."""
+    as_role(UserRole.DIRECT_MANAGER)
+    r = await api_client.post(f"{API}/wages/runs", json={
+        "period_start": "2026-07-14", "period_end": "2026-07-01"})
+    assert r.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_a_future_payroll_window_is_refused_at_the_api(api_client, as_role):
+    as_role(UserRole.DIRECT_MANAGER)
+    r = await api_client.post(f"{API}/wages/runs", json={
+        "period_start": "2030-01-01", "period_end": "2030-01-14"})
+    assert r.status_code == 422
+    assert "future" in r.text.lower()
+
+
+# ══════════════════════════════════════════════ no internals in an error body
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path,payload", [
+    (f"{API}/wages/runs", {"period_start": "2026-07-14", "period_end": "2026-07-01"}),
+    (f"{API}/materials/lots", {"category": "FABRIC", "article": "A", "colour": "B"}),
+])
+async def test_an_error_body_never_carries_a_traceback(api_client, as_role,
+                                                       path, payload):
+    """A 4xx body is shown to the operator. It must carry the business reason and
+    nothing about the machine: a file path or a frame tells an attacker the
+    library versions and the layout on disk."""
+    as_role(UserRole.DIRECT_MANAGER)
+    r = await api_client.post(path, json=payload)
+    assert r.status_code >= 400
+    body = r.text.lower()
+    for leak in ("traceback", "site-packages", "sqlalchemy.exc",
+                 "\\app\\modules", "/app/modules", ".py\", line"):
+        assert leak not in body, f"{path} leaked {leak!r} in its error body"
+
+
+@pytest.mark.asyncio
+async def test_a_404_does_not_echo_the_database_error(api_client, as_role):
+    as_role(UserRole.DIRECT_MANAGER)
+    r = await api_client.get(f"{API}/wages/runs/{uuid.uuid4()}")
+    assert r.status_code == 404
+    assert "select" not in r.text.lower(), "a SQL statement reached the client"
+
+
+# ═══════════════════════════════════════════════════ unsafe delete / retirement
+@pytest.mark.asyncio
+async def test_there_is_no_employee_delete_route(api_client, as_role, cutter):
+    """CLAUDE.md §6: "You delete the scannable code, never the person or their
+    record." A DELETE that removed an employee would orphan closed wage lines —
+    documents the factory already paid against.
+
+    Asserted as 404/405 (no such route) rather than 403, because the correct
+    design is that the verb does not exist, not that it is guarded.
+    """
+    emp, _ = cutter
+    as_role(UserRole.MANAGING_DIRECTOR)
+    r = await api_client.delete(f"{API}/employees/{emp.id}")
+    assert r.status_code in (404, 405), (
+        f"an employee delete route exists (HTTP {r.status_code}) — retirement "
+        "must go through barcode deactivation, which preserves history")
+
+
+@pytest.mark.asyncio
+async def test_there_is_no_wage_run_delete_route(api_client, as_role):
+    """A closed run is a frozen snapshot (CLAUDE.md §10). Deleting one erases the
+    record of money that left the building."""
+    as_role(UserRole.MANAGING_DIRECTOR)
+    r = await api_client.delete(f"{API}/wages/runs/{uuid.uuid4()}")
+    assert r.status_code in (404, 405)
+
+
+# ══════════════════════════════════════════════════ authentication is required
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", [
+    f"{API}/production/skus",
+    f"{API}/production/operations",
+    f"{API}/analytics/explorer",
+    f"{API}/wages/rate-sheet?style_code=X",
+])
+async def test_the_tenancy_scoped_reads_still_demand_a_token(api_client, path):
+    """`client_scope` depends on `get_current_user`, so these endpoints are
+    authenticated even though they carry no `require_roles`. Pinning that: if the
+    dependency were ever swapped for an optional one to "make the picker work",
+    these would open to the public."""
+    from app.main import app
+    from app.modules.users.deps import get_current_user
+    app.dependency_overrides.pop(get_current_user, None)
+
+    r = await api_client.get(path)
+    assert r.status_code == 401, f"{path} served an anonymous caller"
+
+
+====================================================================================================
+FILE: test_production_tenancy.py
+====================================================================================================
+
+"""
+SYSTEM · cross-tenant data leakage on the production read endpoints.
+
+THE SHAPE OF THE BUG THIS FILE LOOKS FOR
+    `client_scope` (production/router.py:37-41) is the tenancy filter: it returns
+    the caller's own client_id for a CLIENT login and None for staff. The router
+    threads it into three service calls (:71, :98, :110). Analytics does exactly
+    the same thing (analytics/router.py:23-32) and its service APPLIES the
+    predicate — `order_tree` adds `.where(ClientOrder.client_id == client_scope)`
+    (analytics/service.py:169-170) so a substituted competitor id resolves to 404.
+
+    Production's service accepts the kwarg and never reads it. So the filter is
+    present at every layer a reviewer would look at, and enforced at none.
+
+    That is why these tests are written against TWO clients with real rows: a
+    signature check would pass, and only data can show the leak.
+
+Layer note: F140 fixed the TypeError by ADDING the parameter. These tests are
+what F140 should have been — they fail until the predicate is applied.
+"""
+import uuid
+
+import pytest
+
+from app.core.enums import UserRole
+from app.modules.clients.models import SKU, Client, ClientOrder, Style
+from app.modules.production.models import Piece
+
+API = "/api/v1"
+
+
+@pytest.fixture
+async def two_clients(db):
+    """Two competitors in one factory, each with an order, style, SKU and piece.
+
+    This is the only shape in which a tenancy bug is visible: with one client,
+    an unfiltered query and a correctly filtered one return the same rows.
+    """
+    out = {}
+    for tag in ("ACME", "RIVAL"):
+        client = Client(name=f"{tag} LEATHER", country="IT")
+        db.add(client)
+        await db.flush()
+        order = ClientOrder(client_id=client.id, order_number=f"{tag}-PO")
+        db.add(order)
+        await db.flush()
+        style = Style(client_order_id=order.id, name=f"{tag}STYLE",
+                      article=f"{tag}1", code=f"{tag}STYLE")
+        db.add(style)
+        await db.flush()
+        sku = SKU(style_id=style.id, color_code="BLK", color_name="BLACK",
+                  size="M", qty_ordered=3, code=f"{tag}-PO-{tag}STYLE-BLK-M")
+        db.add(sku)
+        await db.flush()
+        piece = Piece(code=f"{tag}-PIECE-001", seq=1, sku_id=sku.id,
+                      current_operation_id=None)
+        db.add(piece)
+        await db.flush()
+        out[tag] = {"client": client, "order": order, "style": style,
+                    "sku": sku, "piece": piece}
+    await db.commit()
+    return out
+
+
+# ═══════════════════════════════════════════════ the SKU picker leaks everything
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_a_client_login_sees_only_its_own_skus(api_client, as_role,
+                                                     two_clients):
+    """FINDING F147. `list_sku_options` (production/service.py:438-439) accepts
+    `client_scope` and then calls `self.clients.list_sku_options(order_id=...,
+    style_id=...)` — the scope is never passed on and never applied.
+
+    So ACME's login enumerates RIVAL's SKU codes. A SKU code is
+    order·style·colour·size, i.e. it names a competitor's customer, garment,
+    colourway and size run in one string.
+    """
+    as_role(UserRole.CLIENT, client_id=two_clients["ACME"]["client"].id)
+    r = await api_client.get(f"{API}/production/skus")
+    assert r.status_code == 200
+
+    codes = [row.get("sku_code") or row.get("code") for row in r.json()]
+    assert any("ACME" in (c or "") for c in codes), "the caller lost their own data"
+    assert not any("RIVAL" in (c or "") for c in codes), (
+        f"cross-tenant leak: ACME's token returned RIVAL's SKUs — {codes}")
+
+
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_a_client_cannot_read_another_clients_style_progress(
+        api_client, as_role, two_clients):
+    """FINDING F147. `style_progress` (production/service.py:435-436) ignores the
+    scope and returns `stage_totals_for_style(style_id)` for ANY style id.
+
+    Production volume per stage is a competitor's throughput. The analytics
+    equivalent 404s a cross-tenant id on purpose (analytics/service.py:167-173),
+    because existence itself is information.
+    """
+    as_role(UserRole.CLIENT, client_id=two_clients["ACME"]["client"].id)
+    rival_style = two_clients["RIVAL"]["style"].id
+
+    r = await api_client.get(f"{API}/production/styles/{rival_style}/progress")
+    assert r.status_code == 404, (
+        f"cross-tenant leak: ACME read RIVAL's stage progress "
+        f"(HTTP {r.status_code}, body={r.text[:200]})")
+
+
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_a_client_cannot_enumerate_another_clients_pieces(
+        api_client, as_role, two_clients):
+    """FINDING F147. `list_pieces_for_sku` (production/service.py:376-378) takes
+    `client_scope` and its body never mentions it again — it resolves the SKU and
+    returns every piece with code, seq and current stage.
+
+    This is the per-garment traceability surface. Handed to the wrong client it
+    is a live feed of a competitor's work in progress.
+    """
+    as_role(UserRole.CLIENT, client_id=two_clients["ACME"]["client"].id)
+    rival_sku = two_clients["RIVAL"]["sku"].id
+
+    r = await api_client.get(f"{API}/production/skus/{rival_sku}/pieces")
+    assert r.status_code == 404, (
+        f"cross-tenant leak: ACME enumerated RIVAL's pieces "
+        f"(HTTP {r.status_code}, body={r.text[:200]})")
+
+
+# ═══════════════════════════════════ the same endpoints, for staff (control)
+@pytest.mark.asyncio
+async def test_staff_still_read_across_clients(api_client, as_role, two_clients):
+    """The control that stops the fix from over-correcting. `client_scope`
+    returns None for every non-CLIENT role, and the factory's own managers
+    legitimately work across all clients — a fix that scoped staff to nothing
+    would break the floor."""
+    as_role(UserRole.DIRECT_MANAGER)
+    r = await api_client.get(f"{API}/production/skus")
+    assert r.status_code == 200
+
+    codes = [row.get("sku_code") or row.get("code") for row in r.json()]
+    assert any("ACME" in (c or "") for c in codes)
+    assert any("RIVAL" in (c or "") for c in codes)
+
+
+@pytest.mark.asyncio
+async def test_staff_may_read_any_styles_progress(api_client, as_role, two_clients):
+    as_role(UserRole.DIRECT_MANAGER)
+    for tag in ("ACME", "RIVAL"):
+        r = await api_client.get(
+            f"{API}/production/styles/{two_clients[tag]['style'].id}/progress")
+        assert r.status_code == 200
+
+
+# ═════════════════════════════════════════════ IDOR on a non-existent id
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_an_unknown_sku_id_is_404_for_everyone(api_client, as_role):
+    """A random id must not 500. This is the baseline the tenancy 404 has to be
+    indistinguishable from — if 'not yours' and 'not there' answered differently,
+    the difference would itself enumerate the other tenant's ids."""
+    as_role(UserRole.DIRECT_MANAGER)
+    r = await api_client.get(f"{API}/production/skus/{uuid.uuid4()}/pieces")
+    assert r.status_code == 404
+
+
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_the_tenancy_404_is_indistinguishable_from_a_missing_row(
+        api_client, as_role, two_clients):
+    """Both must be a bare 404. If the cross-tenant case answered 403, the
+    caller would learn that the id EXISTS and belongs to someone else — which is
+    the fact the scoping was meant to hide."""
+    as_role(UserRole.CLIENT, client_id=two_clients["ACME"]["client"].id)
+
+    foreign = await api_client.get(
+        f"{API}/production/skus/{two_clients['RIVAL']['sku'].id}/pieces")
+    missing = await api_client.get(
+        f"{API}/production/skus/{uuid.uuid4()}/pieces")
+
+    assert foreign.status_code == missing.status_code == 404
+
+
+====================================================================================================
 FILE: test_role_guards.py
 ====================================================================================================
 
@@ -260,18 +726,12 @@ async def test_employee_rates_is_gated(client):
     f"{API}/production/skus/{uuid.uuid4()}/pieces",
     f"{API}/production/styles/{uuid.uuid4()}/progress",
 ])
-async def test_the_client_scope_gets_are_broken(client, path):
-    """AUDIT F140 (BLOCKER, pass-01): the router passes `client_scope=scope`
-    (production/router.py:71,98,110) to service methods whose signatures accept no
-    such kwarg (service.py:376,435,438). Every call raises TypeError.
-
-    Asserted as a raised TypeError rather than a 500 because ASGITransport
-    propagates the exception instead of letting the handler convert it. When the
-    signatures are fixed this test fails — that is the point.
-    """
+async def test_the_client_scope_gets_are_respected(client, path):
+    """Production read endpoints should accept the client-scope dependency and
+    return a normal response instead of blowing up with a TypeError."""
     _as(UserRole.DIRECT_MANAGER)
-    with pytest.raises(TypeError, match="client_scope"):
-        await client.get(path)
+    r = await client.get(path)
+    assert r.status_code in {200, 404}, r.text
 
 
 @pytest.mark.asyncio

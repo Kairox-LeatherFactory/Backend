@@ -162,7 +162,7 @@ MERGE_GATE_ENTRY = ProductionStage.LINE_STITCHING
 # stage never means remembering to grant them.
 STAGE_ROLE_ACCESS: dict[ProductionStage, set] = {
     ProductionStage.LEATHER_CUTTING:  {UserRole.CUTTING_MANAGER},
-    ProductionStage.LINING_CUTTING:   {LINING_MANAGER},
+    ProductionStage.LINING_CUTTING:   {UserRole.LINING_MANAGER},
     ProductionStage.FUSING:           {UserRole.STITCHING_MANAGER},
     ProductionStage.PASTING:          {UserRole.STITCHING_MANAGER},
     ProductionStage.LINE_STITCHING:   {UserRole.STITCHING_MANAGER},
@@ -197,13 +197,16 @@ ROLE_TO_SCREEN: dict = {
 
 def screen_for_role(role, override=None):
     """Resolve the screen context for a logging request.
- 
-    - CUTTING/LINING/STITCHING managers, supervisor, HR: pinned by role.
-    - DM / MD (or any role not in ROLE_TO_SCREEN): may pass an explicit override;
-      default to PIPELINE when none is given.
+
+    - DM / MD / HR: bypass roles — they may log any stage, so they PASS an
+      explicit screen override (required for the two parallel cut stages,
+      LEATHER_CUT / LINING_CUT); default PIPELINE when none is given.
+    - CUTTING/LINING/STITCHING managers, supervisor: pinned by role (role wins,
+      any sent value is ignored).
+    - Anyone else not in ROLE_TO_SCREEN: may pass an override; default PIPELINE.
     """
     from app.core.enums import UserRole  # local import to avoid cycles
-    if role in (UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER):
+    if role in (UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER, UserRole.HR):
         return override or ScreenContext.PIPELINE
     pinned = ROLE_TO_SCREEN.get(role)
     if pinned is not None:

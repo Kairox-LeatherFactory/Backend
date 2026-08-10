@@ -57,7 +57,7 @@ from app.modules.production.repository import ProductionRepository
 from app.modules.users.models import User
 
 # Roles that log ANY stage. MD is the superuser; DM logs freely (spec).
-_STAGE_BYPASS_ROLES = frozenset({UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER})
+_STAGE_BYPASS_ROLES = frozenset({UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER, UserRole.HR,})
 
 
 def _norm(code: str) -> str:
@@ -121,8 +121,11 @@ class ProductionService:
                 or "direct_manager, managing_director"
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
-                f"Role '{user.role.value}' may not log '{stage.value}'. Permitted: {names}.")
-        # unknown op → config table only
+                f"The {stage.value.replace('_', ' ').lower()} stage is logged by its "
+                f"own manager ({names}). Your role ({user.role.value}) can't enter "
+                f"this log — please ask the {names} to record it, or have DM/MD/HR "
+                f"log it. (Employees of any skill may still be assigned here; it's "
+                f"the login that's restricted, not the worker.)")
         if op.id not in await self.repo.operations_for_role(user.role.value):
             raise HTTPException(status.HTTP_403_FORBIDDEN,
                                 f"Your role may not log operation '{op.code}'.")
@@ -277,6 +280,7 @@ class ProductionService:
                     f"{screen.value} screen.")
  
         logged, rework, sequence_blocked, skill_blocked, merge_blocked =  [], [], [], [], []
+        skill_warnings: list[dict] = []   # GATE 2 anomalies (non-blocking now)
         fresh_cut_count = 0
  
         # GATES 2-4 per piece + (write, IF NOT preview)
@@ -287,9 +291,20 @@ class ProductionService:
             op = op_by_stage[stage]
  
             # GATE 2 — SKILL
+            # GATE 2 — SKILL: DEMOTED to a recorded warning (drawer-redesign
+            # build). Any employee may be recorded at any stage; the anomaly is
+            # surfaced for audit but never blocks the log. The manager-role gate
+            # (GATE 1) remains the hard authority on WHO may enter the log.
             if not self._skill_ok(emp.designation, stage):
-                skill_blocked.append(piece.code)
-                continue
+                skill_warnings.append({
+                    "piece": piece.code,
+                    "employee": emp.name,
+                    "designation": Designation.normalise(emp.designation),
+                    "stage": stage.value,
+                    "note": self._skill_msg(emp.name, emp.designation, stage),
+                })
+                # NB: no `continue` — the piece proceeds through the remaining
+                # gates and is logged.
             # GATE 3 — SEQUENCE (no-skip)
             ok_seq, _ = await self._sequence_ok(piece, stage)
             if not ok_seq:
@@ -319,6 +334,13 @@ class ProductionService:
                 piece.current_operation_id = op.id
                 if is_cut:
                     fresh_cut_count += 1
+                # RECYCLE THE DRAWER at PACKAGE_EXPORT: the piece has shipped, so
+                # its drawer returns to WAITING for the next merge. This is the
+                # ONLY point a drawer frees (Hamthan #4: empty only after PACKAGE).
+                # release_nocommit clears both sides of the piece<->drawer link.
+                if stage is ProductionStage.PACKAGE_EXPORT:
+                    from app.modules.drawers.service import DrawerService
+                    await DrawerService(self.db).release_nocommit(piece.id)
  
         consumption_recorded = None
         if is_cut and not preview and fresh_cut_count > 0:
@@ -348,6 +370,7 @@ class ProductionService:
                 "screen_role_warning": screen_role_warning,
                 "consumption_recorded": None,
                 "preview": True,
+                "skill_warnings": skill_warnings,
             }
  
         await self.db.commit()
@@ -360,6 +383,7 @@ class ProductionService:
             "screen_role_warning": screen_role_warning,
             "consumption_recorded": consumption_recorded,
             "preview": False,
+            "skill_warnings": skill_warnings,
         }
     @staticmethod
     def _empty_result(stage, *, skill, screen_warning):
@@ -410,27 +434,40 @@ class ProductionService:
                     prev_stage = None
 
         pieces = []
+        order_id = rows[0][3] if rows else None
+        # Live drawer state per piece → drives the STORE overlay.
+        drawer_states = await self.repo.drawer_states_for_pieces(
+            [p.id for p, _, _ in rows])
+
+        from app.core.store_display import display_stage
+
+        pieces = []
         for p, scode, slabel in rows:
             done = p.id in done_ids
             eligible, reason = True, None
             if op and prev_stage and not done and p.id not in prev_done_ids:
                 eligible, reason = False, f"{prev_stage.value} not completed"
+
+            # STORE overlay: if the piece has cleared the cut side and its drawer
+            # is holding, SHOW store (+ sub-status). Never show LINE_STITCHING
+            # until a real line-stitching event exists.
+            disp = display_stage(
+                current_event_stage=scode,
+                drawer_state=drawer_states.get(p.id),
+                needs_lining=bool(getattr(p, "needs_lining", True)),
+            )
             pieces.append({
                 "piece_id": p.id, "code": p.code, "seq": p.seq,
-                "current_stage": scode, "current_stage_label": slabel,
+                "order_id": order_id, 
+                # real event stage kept for callers that need the raw value:
+                "event_stage": scode, "event_stage_label": slabel,
+                # what the UI shows (may be STORE):
+                "current_stage": disp["display_stage"],
+                "current_stage_label": disp["label"],
+                "in_store": disp["in_store"],
+                "store_status": disp["store_status"],
                 "done_at_op": done, "eligible": eligible, "blocked_reason": reason,
             })
-        done_count = sum(1 for x in pieces if x["done_at_op"])
-        return {
-            "sku_id": sku_id, "sku_code": sku.code,
-            "colour": sku.color_name or sku.color_code, "size": sku.size,
-            "operation_id": op.id if op else None,
-            "operation_code": op.code if op else None,
-            "total": len(pieces), "done": done_count,
-            "pending": len(pieces) - done_count,
-            "blocked": sum(1 for x in pieces if not x["eligible"]),
-            "pieces": pieces,
-        }
 
     async def list_events(self, **filters) -> list[ProductionEvent]:
         return await self.repo.list_events(**filters)

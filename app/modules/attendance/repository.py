@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.attendance.models import AttendanceLog, ShiftConfig
+from app.modules.attendance import schemas
 
 
 class AttendanceRepository:
@@ -50,7 +51,11 @@ class AttendanceRepository:
         )
         return list(res.scalars())
 
-    async def by_day(self, work_date: date) -> list[AttendanceLog]:
+    async def by_day(self, work_date: date) -> list[schemas.AttendanceRead]:
+        from app.modules.employees.models import Employee
         res = await self.db.execute(
-            select(AttendanceLog).where(AttendanceLog.work_date == work_date))
-        return list(res.scalars())
+            select(AttendanceLog, Employee.name)
+            .join(Employee, AttendanceLog.employee_id == Employee.id)
+            .where(AttendanceLog.work_date == work_date)
+        )
+        return res.all()

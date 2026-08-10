@@ -1,44 +1,52 @@
 """
 ================================================================================
-modules/imports/premint.py — Mint pieces + barcodes + drawers at breakdown upload
+modules/imports/premint.py — Mint pieces + barcodes at breakdown upload,
+                             allocate them into a FIXED, RECYCLING DRAWER POOL
 ================================================================================
 
-THE INVERSION.
-    Before this build, pieces were minted at cutting. Now they are minted HERE,
-    at breakdown upload, so a garment has a barcode identity and a drawer before
-    it is ever cut. cut() stops minting and becomes a scan-style logger (see
-    production/service.py).
+WHAT CHANGED IN THIS BUILD (the drawer pool inversion)
+--------------------------------------------------------------------------------
+BEFORE
+    premint_order minted ONE BRAND-NEW drawer per piece, on every upload, forever.
+    Drawers grew unbounded and were never reused; the pool concept did not exist.
 
-WHY THIS IS SYNC (not async like the rest of the feature).
-    The importer (imports/load_to_db.py) runs on a synchronous Session and ends
-    with db.commit(). Pre-minting must happen in that SAME session, right before
-    the commit, so the SKUs, pieces, barcodes and drawers are one atomic write —
-    a half-minted order (SKUs but no pieces) would be un-cuttable. So this module
-    speaks the sync Session API and is CALLED FROM the loader, not from an async
-    service.
+NOW
+    Drawers are a FIXED POOL that RECYCLES.
 
-CALL SITE (add ONE line to imports/load_to_db.py, in BOTH load_preview and
-load_preview_into_order, immediately before the final `db.commit()`):
+      1. BOOTSTRAP once: 200 permanent, barcoded drawers (DRW-0001 … DRW-0200),
+         all in state WAITING. Their codes are STATIC and never change. See
+         bootstrap_drawer_pool() — run from the seed script exactly once.
 
-        from app.modules.imports.premint import premint_order
-        stats.update(premint_order(db, order))     # <-- add this line
+      2. On breakdown upload, each new piece is MERGED INTO AN EMPTY (WAITING)
+         drawer — oldest seq first — NOT into a fresh drawer.
 
-`order` is the ClientOrder already in scope in both loaders.
+      3. When the pool has no WAITING drawer left AND there are still pieces to
+         place, we MINT the exact shortfall as NEW PERMANENT drawers (barcoded,
+         appended to the pool: 200 → 200+N → …). Those new drawers are permanent
+         from then on; the next upload reuses them once they recycle. This is
+         Hamthan's rule: "if we need 230 more, create 230 more; 200+230=430
+         permanent drawers; when all 430 occupied, create more and append."
 
-NEEDS_LINING.
-    Read from the breakdown material dimension. johnpeter SKUs carry a knit/nylon
-    lining colour; a SKU with any lining colour → its pieces need lining. When the
-    sheet gives no lining signal we default needs_lining=True (the safe default:
-    the completeness gate then waits for a lining, and a DM override can clear it),
-    EXCEPT where the style/material is explicitly leather-only. Tune
-    _sku_needs_lining as the material column is better understood.
+      4. A drawer returns to WAITING only after the piece it holds finishes
+         PACKAGE (drawers/service.release_nocommit, wired into the PACKAGE_EXPORT
+         branch of production.log_batch in THIS build — see the note there).
 
-IDEMPOTENCY.
-    The loaders run with replace=True, deleting a client's prior styles/SKUs
-    first. Pieces/drawers/barcodes hang off SKUs; when a SKU is deleted its pieces
-    cascade. This module only mints for pieces that do NOT already exist (keyed by
-    (sku_id, seq)), so a re-run of a partially-minted order tops up rather than
-    duplicating.
+ATOMICITY / SHORTFALL
+    A single upload is one atomic write. If free drawers < pieces, we mint the
+    shortfall inside the same transaction (mint-the-shortfall, confirmed) rather
+    than blocking the upload. The whole allocation commits with the loader.
+
+WHY THIS IS SYNC
+    Unchanged from before: the importer runs on a synchronous Session and ends
+    with db.commit(); pre-minting must join that same unit of work so an order is
+    never half-minted. bootstrap_drawer_pool is ALSO sync for the same reason and
+    is safe to call from the seed script's sync session.
+
+IDEMPOTENCY
+    Pieces are keyed (sku_id, seq); a re-run tops up only the missing pieces.
+    Drawer allocation is driven by "does this piece already have a drawer?": a
+    piece that is already merged (piece.drawer_id set) is skipped, so a re-run
+    never double-allocates or leaks a drawer.
 ================================================================================
 """
 from __future__ import annotations
@@ -53,19 +61,20 @@ from app.modules.barcode.models import BarcodeRegistry, Drawer
 from app.modules.clients.models import SKU, Style
 from app.modules.production.models import Piece
 
+# The size of the initial permanent drawer pool. Business constant.
+INITIAL_DRAWER_POOL = 200
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# needs_lining detection (unchanged from the shipped build)
+# ──────────────────────────────────────────────────────────────────────────────
 def _sku_needs_lining(sku: SKU) -> bool:
     """Lining detection from the SKU's parsed dimensions.
 
-    H9: this used to `return True` on BOTH branches, so every piece was minted
-    needing a lining. needs_lining drives the merge gate's completeness rule
-    (drawers/service.py:141-146), so a leather-only garment could never reach
-    RECEIVED — its drawer waited forever for a lining nobody would cut, and
-    line-stitching stayed blocked for the whole order.
-
-    Defaulting to True is not the conservative choice for a gate that BLOCKS.
-    We now require positive evidence: a lining colour on the SKU means lined;
-    no signal means not lined, and a DM who knows better can correct the piece.
+    Positive evidence only: a lining colour on the SKU means lined; no signal
+    means not lined (a DM who knows better corrects the piece). Defaulting to
+    True would wedge a leather-only piece's drawer at the completeness gate
+    forever, blocking line-stitching for the order.
     """
     for attr in ("knit_color", "nylon_color", "lining_color", "lining_type"):
         val = getattr(sku, attr, None)
@@ -74,27 +83,104 @@ def _sku_needs_lining(sku: SKU) -> bool:
     return False
 
 
-def _next_drawer_seq(db: Session) -> int:
-    mx = db.scalar(select(func.coalesce(func.max(Drawer.seq), 0))) or 0
-    return int(mx) + 1
+# ──────────────────────────────────────────────────────────────────────────────
+# Pool primitives
+# ──────────────────────────────────────────────────────────────────────────────
+def _max_drawer_seq(db: Session) -> int:
+    return int(db.scalar(select(func.coalesce(func.max(Drawer.seq), 0))) or 0)
 
 
+def _drawer_count(db: Session) -> int:
+    return int(db.scalar(select(func.count(Drawer.id))) or 0)
+
+
+def _mint_drawer(db: Session, seq: int) -> Drawer:
+    """Create ONE permanent, barcoded drawer in WAITING state. Static code."""
+    code = f"DRW-{seq:04d}"
+    drawer = Drawer(code=code, seq=seq, state=DrawerState.WAITING.value)
+    db.add(drawer)
+    db.flush()  # drawer.id
+    db.add(BarcodeRegistry(
+        code=code, type=BarcodeType.DRAWER.value,
+        status=BarcodeStatus.ACTIVE.value, drawer_id=drawer.id,
+        caption=f"Drawer {seq}"))
+    return drawer
+
+
+def bootstrap_drawer_pool(db: Session, size: int = INITIAL_DRAWER_POOL) -> dict:
+    """Create the initial permanent pool of `size` barcoded WAITING drawers.
+
+    Idempotent and additive: if the pool already has >= size drawers, does
+    nothing; if it has fewer, tops up to `size`. Never deletes. Safe to run from
+    the seed script on every boot. Caller commits.
+    """
+    have = _drawer_count(db)
+    if have >= size:
+        return {"drawers_bootstrapped": 0, "pool_size": have}
+    start = _max_drawer_seq(db) + 1
+    minted = 0
+    for seq in range(start, size + 1):
+        _mint_drawer(db, seq)
+        minted += 1
+    return {"drawers_bootstrapped": minted, "pool_size": max(have + minted, size)}
+
+
+class _PoolAllocator:
+    """Hands out drawers for one upload: empties first, then mints the shortfall.
+
+    Loads the current WAITING drawers ONCE (oldest seq first) and serves them
+    in order. When they run out it mints new permanent drawers on demand,
+    continuing the seq. All within the caller's transaction.
+    """
+
+    def __init__(self, db: Session):
+        self.db = db
+        # Oldest empty drawers first — deterministic, low-churn reuse.
+        self._free: list[Drawer] = list(db.scalars(
+            select(Drawer)
+            .where(Drawer.state == DrawerState.WAITING.value,
+                   Drawer.current_piece_id.is_(None))
+            .order_by(Drawer.seq.asc())
+        ).all())
+        self._next_seq = _max_drawer_seq(db) + 1
+        self.reused = 0
+        self.minted = 0
+
+    def take(self) -> Drawer:
+        if self._free:
+            drawer = self._free.pop(0)
+            self.reused += 1
+        else:
+            drawer = _mint_drawer(self.db, self._next_seq)
+            self._next_seq += 1
+            self.minted += 1
+        return drawer
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# The upload-time mint + allocate
+# ──────────────────────────────────────────────────────────────────────────────
 def premint_order(db: Session, order) -> dict:
-    """Mint pieces + parent barcodes + drawer assignments for every SKU of an
-    order. Sync. Caller commits.
+    """Mint pieces + parent barcodes for every SKU of an order and MERGE each new
+    piece into a drawer drawn from the pool (empties first, mint shortfall).
+    Sync. Caller commits.
 
     Returns stats merged into the loader's result dict.
     """
-    stats = {"pieces_minted": 0, "drawers_assigned": 0,
-             "pieces_needing_lining": 0, "sample_barcodes": []}
+    stats = {
+        "pieces_minted": 0,
+        "drawers_reused": 0,      # taken from existing WAITING pool
+        "drawers_minted": 0,      # new permanent drawers appended this upload
+        "pieces_needing_lining": 0,
+        "sample_barcodes": [],
+    }
 
-    # All SKUs of this order, via its styles.
     sku_rows = db.scalars(
         select(SKU).join(Style, Style.id == SKU.style_id)
         .where(Style.client_order_id == order.id)
     ).all()
 
-    drawer_seq = _next_drawer_seq(db)
+    allocator = _PoolAllocator(db)
 
     for sku in sku_rows:
         qty = int(sku.qty_ordered or 0)
@@ -116,56 +202,47 @@ def premint_order(db: Session, order) -> dict:
 
         for i in range(1, to_mint + 1):
             seq = base + i
-            # Parent code = SKU code + seq. SKU.code already encodes
-            # order-style-colour-size, so this is STYLE-COLOUR-SIZE-seq, globally
-            # unique and human-readable.
             code = f"{(sku.code or 'NA').upper()}-{seq:03d}"
 
-            # 1) a drawer for this piece (one piece = one drawer)
-            drawer = Drawer(
-                code=f"DRW-{drawer_seq:04d}", seq=drawer_seq,
-                state=DrawerState.MERGED.value)
-            db.add(drawer)
-            db.flush()   # drawer.id
-
-            # 2) the piece, merged to that drawer
-            piece = Piece(
-                code=code, seq=seq, sku_id=sku.id,
-                current_operation_id=None,        # not yet cut
-            )
-            # set the barcode-build columns if present on the model
+            # 1) the piece (not yet cut)
+            piece = Piece(code=code, seq=seq, sku_id=sku.id,
+                          current_operation_id=None)
             if hasattr(piece, "needs_lining"):
                 piece.needs_lining = needs_lining
+            db.add(piece)
+            db.flush()  # piece.id
+
+            # 2) allocate a drawer from the pool (reuse empty, else mint)
+            drawer = allocator.take()
+            drawer.state = DrawerState.MERGED.value
+            drawer.current_piece_id = piece.id
+            # A fresh merge starts with neither part in.
+            drawer.leather_in = False
+            drawer.lining_in = False
+            drawer.received_at = None
+            drawer.sended_at = None
             if hasattr(piece, "drawer_id"):
                 piece.drawer_id = drawer.id
-            db.add(piece)
-            db.flush()   # piece.id
 
-            drawer.current_piece_id = piece.id
-
-            # 3) register the parent + drawer barcodes
+            # 3) register the parent barcode (drawer barcode already exists — it
+            #    is permanent and static; we do NOT re-register it on reuse)
             db.add(BarcodeRegistry(
                 code=code, type=BarcodeType.PIECE.value,
                 status=BarcodeStatus.ACTIVE.value, piece_id=piece.id,
                 caption=_piece_caption(db, sku, seq),
-                order_id=order.id,            # <-- new: denormalised order context
-                sku_id=sku.id,                # <-- new
-                style_id=sku.style_id,        # <-- new
+                order_id=order.id,
+                sku_id=sku.id,
+                style_id=sku.style_id,
             ))
-            db.add(BarcodeRegistry(
-                code=drawer.code, type=BarcodeType.DRAWER.value,
-                status=BarcodeStatus.ACTIVE.value, drawer_id=drawer.id,
-                caption=f"Drawer {drawer.seq}"))
 
             stats["pieces_minted"] += 1
-            stats["drawers_assigned"] += 1
             if needs_lining:
                 stats["pieces_needing_lining"] += 1
             if len(stats["sample_barcodes"]) < 5:
                 stats["sample_barcodes"].append(code)
 
-            drawer_seq += 1
-
+    stats["drawers_reused"] = allocator.reused
+    stats["drawers_minted"] = allocator.minted
     return stats
 
 

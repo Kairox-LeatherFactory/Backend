@@ -131,7 +131,7 @@ class Settings(BaseSettings):
     
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
-    
+        
     # PDF "is this scanned?" threshold. A page with fewer than this many extracted
     # text characters routes to the vision LLM instead of the text LLM. 40 chars per
     # page reliably distinguishes a real text-layer PDF from one with noise leak.
@@ -186,7 +186,7 @@ class Settings(BaseSettings):
 
     # Login rate-limit (defends the login endpoint from brute force).
     login_max_attempts: int = 10
-    login_window_seconds: int = 60                 # 10 minutes
+    login_window_seconds: int = 300                 # 5 minutes
 
     # ── Stage 1: upload, storage & virus scan (BOM Procurement Workflow) ─────
     # Pluggable storage backend so the repo keeps NO hard Supabase dependency and
@@ -294,13 +294,13 @@ class Settings(BaseSettings):
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
 
-     # ── F32 / H5: never sign production tokens with a well-known key ──────────
+    # ── F32 / H5: never sign production tokens with a well-known key ──────────
     # H5: the original guard keyed ONLY on `environment`, which defaults to
     # "local" (config.py:50) — so DEBUG=false with ENVIRONMENT unset booted on
     # the shipped key. It also matched one prefix, while .env.example:19 ships
     # "change-me-to-a-long-random-string", which that prefix does not catch.
     _INSECURE_SECRET_PREFIXES = ("dev-only", "change-me", "changeme", "secret",
-                                 "test", "please-change")
+                                "test", "please-change")
     _MIN_SECRET_LEN = 32
 
     @model_validator(mode="after")
@@ -432,10 +432,9 @@ class Base(DeclarativeBase):
 def _engine_kwargs(url: str) -> dict:
     """Pooling args only make sense for Postgres; SQLite rejects them."""
     if url.startswith("postgresql"):
-        return dict(pool_pre_ping=True, pool_size=5, max_overflow=10)
+        return dict(pool_pre_ping=True, pool_size=3, max_overflow=5)
     # SQLite (tests/local): a single shared connection, no pool sizing.
     return dict()
-
 
 # ──────────────────────────────────────────────────────────────────────────
 # ASYNC engine + session  (the live API runs on these)
@@ -462,7 +461,6 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             yield session
         finally:
             await session.close()
-
 
 # ──────────────────────────────────────────────────────────────────────────
 # SYNC engine + session  (Alembic migrations + scripts/seed.py)
@@ -542,8 +540,15 @@ ROLE MODEL (maps directly onto the factory's org chart)
                        draft BOMs, manages users/clients, runs payroll. During the
                        MD transition still bypasses role gates (see users/deps.py).
     CUTTING_MANAGER    Logs cutting-side production operations.
+    LINING_MANAGER     Logs the lining-cut path.
     STITCHING_MANAGER  Logs fusing -> lining-stitch -> final-finish operations.
-    EMPLOYEE           A shop-floor worker. Can view their own work / wages.
+    SECURITY           Gate operator. Scans employee cards in and out.
+    MERCHANDISER       Client-facing order/sample coordinator. NOTE: no route
+                       grants this role anything yet — it can log in, but every
+                       require_roles gate will 403 until access is decided.
+    EMPLOYEE           LEGACY — no longer minted. A shop-floor worker has NO
+                       login at all: they are a payroll/production identity with
+                       a scannable card, nothing more. See login_roles().
     CLIENT             An external client logging in to track their own orders.
     HR                 Reads employees / wages / attendance + inventory checks.
     VIEWER             Read-only office staff (accountant) — no data entry.
@@ -559,16 +564,45 @@ class UserRole(str, enum.Enum):
     CUTTING_MANAGER = "cutting_manager"
     LINING_MANAGER = "lining_manager"
     STITCHING_MANAGER = "stitching_manager"
-    EMPLOYEE = "employee"
+    EMPLOYEE = "employee"          # LEGACY — never minted any more, see login_roles()
     CLIENT = "client"
     VIEWER = "viewer"
     SUPERVISOR = "supervisor"      # may PROXY check-in daily-wage workers + add them
-    HR = "hr"                      # HR / accounts: reads people, wages, attendance
+    HR = "hr" # HR / accounts: reads people, wages, attendance
+    SECURITY = "security"
+    MERCHANDISER = "merchandiser"  # client-facing order/sample coordinator
 
     @classmethod
     def manager_roles(cls) -> set["UserRole"]:
         """Roles allowed to enter production data (besides the superuser)."""
         return {cls.CUTTING_MANAGER, cls.STITCHING_MANAGER}
+
+    @classmethod
+    def login_roles(cls) -> set["UserRole"]:
+        """The roles that may hold a row in `app_user` — i.e. can log in.
+
+        EMPLOYEE IS DELIBERATELY ABSENT. Shop-floor workers are NOT given system
+        access: no login, no app_user row, and therefore no phone/email needed to
+        create one. Their attendance is entered FOR them by an operator
+        (see ATTENDANCE_OPERATOR_ROLES) scanning their employee card.
+
+        The EMPLOYEE value stays in the enum because `app_user.role` is a NATIVE
+        PG enum (values cannot be dropped) and historical rows may still carry
+        it — but nothing in the app may MINT it any more.
+        """
+        return {cls.MANAGING_DIRECTOR, cls.DIRECT_MANAGER, cls.CUTTING_MANAGER,
+                cls.LINING_MANAGER, cls.STITCHING_MANAGER, cls.HR,
+                cls.SECURITY, cls.MERCHANDISER, cls.CLIENT, cls.SUPERVISOR,
+                cls.VIEWER}
+
+
+# The ONLY logins permitted to write attendance — for themselves or, far more
+# commonly, for a worker whose card they scan. Workers hold no login, so every
+# check-in/check-out on the floor passes through one of these four.
+ATTENDANCE_OPERATOR_ROLES = frozenset({
+    UserRole.SECURITY, UserRole.HR,
+    UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER,
+})
 
 
 class WageType(str, enum.Enum):
@@ -670,6 +704,8 @@ from app.core.enums_barcode import (  # noqa: E402
     MATERIAL_SPEC,
     uom_for,
     resolve_spec,
+    ROLE_TO_SCREEN,
+    screen_for_role,
 )
 
 
@@ -841,7 +877,7 @@ MERGE_GATE_ENTRY = ProductionStage.LINE_STITCHING
 # stage never means remembering to grant them.
 STAGE_ROLE_ACCESS: dict[ProductionStage, set] = {
     ProductionStage.LEATHER_CUTTING:  {UserRole.CUTTING_MANAGER},
-    ProductionStage.LINING_CUTTING:   {LINING_MANAGER},
+    ProductionStage.LINING_CUTTING:   {UserRole.LINING_MANAGER},
     ProductionStage.FUSING:           {UserRole.STITCHING_MANAGER},
     ProductionStage.PASTING:          {UserRole.STITCHING_MANAGER},
     ProductionStage.LINE_STITCHING:   {UserRole.STITCHING_MANAGER},
@@ -866,6 +902,29 @@ SCREEN_TO_STAGE: dict[ScreenContext, ProductionStage] = {
     ScreenContext.LINING_CUT: ProductionStage.LINING_CUTTING,
 }
 
+ROLE_TO_SCREEN: dict = {
+    UserRole.CUTTING_MANAGER: ScreenContext.LEATHER_CUT,
+    UserRole.LINING_MANAGER:  ScreenContext.LINING_CUT,
+    UserRole.STITCHING_MANAGER: ScreenContext.PIPELINE,
+    UserRole.SUPERVISOR: ScreenContext.PIPELINE,
+    UserRole.HR: ScreenContext.PIPELINE,
+}
+
+def screen_for_role(role, override=None):
+    """Resolve the screen context for a logging request.
+ 
+    - CUTTING/LINING/STITCHING managers, supervisor, HR: pinned by role.
+    - DM / MD (or any role not in ROLE_TO_SCREEN): may pass an explicit override;
+      default to PIPELINE when none is given.
+    """
+    from app.core.enums import UserRole  # local import to avoid cycles
+    if role in (UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER):
+        return override or ScreenContext.PIPELINE
+    pinned = ROLE_TO_SCREEN.get(role)
+    if pinned is not None:
+        return pinned                     # role wins; sent value ignored
+    return override or ScreenContext.PIPELINE
+
 # Which role each cut SCREEN expects — the screen↔role cross-check. A leather
 # cutter scanned on the lining screen (or the reverse) raises a warning, not a
 # hard block: the work still logs, but the mismatch is surfaced.
@@ -885,7 +944,6 @@ class Designation(str, enum.Enum):
     CONTROLLED VOCABULARY, not free text: the moment it is free text, 'Cutter',
     'cutter ' and 'CUTTTER' become three skills and the gate is decorative.
     """
-
     CUTTER = "CUTTER"
     LINING_CUTTER = "LINING_CUTTER"
     FUSER = "FUSER"
@@ -898,6 +956,13 @@ class Designation(str, enum.Enum):
     TAILOR = "TAILOR"        # general stitching hand — multi-station
     HELPER = "HELPER"
     SUPERVISOR = "SUPERVISOR"
+    TRIMMER = "TRIMMER"
+    CHEMICAL_TECHNICIAN = "CHEMICAL_TECHNICIAN"
+    SECURITY = "SECURITY"
+    MERCHANDISER = "MERCHANDISER"
+    STITCHING_INSTRUCTOR = "STITCHING_INSTRUCTOR"
+    QC_INSPECTOR = "QC_INSPECTOR"
+
 
     @classmethod
     def normalise(cls, raw: str | None) -> str | None:
@@ -1575,12 +1640,9 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     except (ValueError, TypeError):
         return False
 
-
 def get_password_hash(password: str) -> str:
     pw = password.encode("utf-8")[:72]
     return bcrypt.hashpw(pw, bcrypt.gensalt()).decode("utf-8")
-
-
 
 # ══════════════════════════════════════════════════════════════════════════
 # JWT helpers

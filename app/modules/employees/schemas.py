@@ -40,6 +40,7 @@ class EmployeeRead(BaseModel):
     is_active: bool
     phone: str | None = None
     email: str | None = None
+    role: UserRole | None = None
     # The worker's ACTIVE card code (EMP-000123). None when the card was
     # retired (leaver) or never issued — a retired code is not scannable, so
     # showing it would invite a scan that resolves 410 Gone.

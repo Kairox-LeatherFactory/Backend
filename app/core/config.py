@@ -127,7 +127,7 @@ class Settings(BaseSettings):
 
     # Login rate-limit (defends the login endpoint from brute force).
     login_max_attempts: int = 10
-    login_window_seconds: int = 60                 # 1 minute
+    login_window_seconds: int = 300                 # 5 minutes
 
     # ── Stage 1: upload, storage & virus scan (BOM Procurement Workflow) ─────
     # Pluggable storage backend so the repo keeps NO hard Supabase dependency and

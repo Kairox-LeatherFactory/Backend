@@ -329,6 +329,78 @@ async def db_session(db) -> AsyncSession:
     return db
 
 
+# ==============================================================================
+# SYSTEM-LAYER FIXTURES (router → service → repo → DB over HTTP)
+# ------------------------------------------------------------------------------
+# ADDED because they were genuinely missing from the shared harness: the only
+# HTTP client in the suite was defined PRIVATELY inside
+# tests/system/test_role_guards.py, so a second system-layer file had no way to
+# speak HTTP without copying it. Copying an auth-override fixture is how two
+# files end up disagreeing about what "authenticated" means, which is exactly
+# the class of bug the system layer exists to catch. Promoted verbatim in
+# behaviour so test_role_guards.py's own copy stays valid.
+# ==============================================================================
+
+class FakeAuthUser:
+    """Duck-typed stand-in for the User ORM row `get_current_user` returns.
+
+    Deliberately NOT the `FakeUser` above: that one models the ACTOR passed to a
+    service (role + employee_id), while the deps layer also reads `is_active`
+    and `phone`. Kept separate so a service-level test cannot accidentally
+    depend on HTTP-only attributes.
+    """
+    def __init__(self, role, employee_id=None, client_id=None):
+        self.id = uuid.uuid4()
+        self.role = role
+        self.name = role.value
+        self.phone = "9000000000"
+        self.employee_id = employee_id
+        self.client_id = client_id
+        self.is_active = True
+
+
+@pytest_asyncio.fixture
+async def api_client(db):
+    """An httpx client bound to the real FastAPI app and the test session.
+
+    `get_db` is overridden so the app writes to the same in-memory SQLite the
+    fixtures seeded. Auth is NOT overridden here — a test must opt in via
+    `as_role`, so an endpoint's behaviour for an ANONYMOUS caller stays testable.
+    """
+    from httpx import ASGITransport, AsyncClient
+    from app.core.database import get_db
+    from app.main import app
+
+    async def _db():
+        yield db
+
+    app.dependency_overrides[get_db] = _db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def as_role():
+    """`as_role(UserRole.HR)` installs that role as the authenticated caller.
+
+    Overriding `get_current_user` rather than minting real JWTs keeps these tests
+    about AUTHORIZATION instead of about signing — the token path has its own
+    coverage in the users module.
+    """
+    from app.core.database import get_db          # noqa: F401  (kept symmetrical)
+    from app.main import app
+    from app.modules.users.deps import get_current_user
+
+    def _install(role, **kw):
+        user = FakeAuthUser(role, **kw)
+        app.dependency_overrides[get_current_user] = lambda: user
+        return user
+
+    return _install
+
+
 @pytest_asyncio.fixture
 async def seed_min(db, operations):
     """Minimal seed used by a couple of structural regression tests (F05, F34).
