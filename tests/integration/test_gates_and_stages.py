@@ -70,8 +70,12 @@ def _role_ok(role, stage):
     (UserRole.STITCHING_MANAGER, PS.FINAL_FINISH, True),
     (UserRole.STITCHING_MANAGER, PS.FINAL_INSPECTION, False),
     (UserRole.STITCHING_MANAGER, PS.PACKAGE_EXPORT, False),
-    (UserRole.CUTTING_MANAGER, PS.FUSING, True),      # CLAUDE.md §3
-    (UserRole.STITCHING_MANAGER, PS.FUSING, False),
+    # FUSING is post-cut floor work. It was granted to the cutting manager, whose
+    # screen is pinned to LEATHER_CUT — so the grant could never fire, and its
+    # only live effect was to 403 the stitching manager, the one role that CAN
+    # reach the stage from the PIPELINE screen.
+    (UserRole.STITCHING_MANAGER, PS.FUSING, True),
+    (UserRole.CUTTING_MANAGER, PS.FUSING, False),
 ])
 def test_role_gate(role, stage, ok):
     assert _role_ok(role, stage) is ok

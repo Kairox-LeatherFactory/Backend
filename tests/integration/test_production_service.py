@@ -59,13 +59,13 @@ async def test_the_cut_screen_fixes_the_stage(db, operations, pieces, cutter,
 
 @pytest.mark.asyncio
 async def test_pipeline_infers_the_next_stage_from_the_pieces_own_history(
-    db, operations, pieces, cutter, cutting_mgr, leather_lot
+    db, operations, pieces, cutter, cutting_mgr, stitching_mgr, leather_lot
 ):
     """Cut → the next PIPELINE scan is FUSING, not 'whatever was sent'."""
     piece, _ = pieces[0]
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
 
-    res = await _log(db, cutting_mgr, cutter, [piece.id])
+    res = await _log(db, stitching_mgr, cutter, [piece.id])
     assert res["stage"] == "FUSING" and res["count_logged"] == 1
 
 
@@ -100,13 +100,27 @@ async def test_the_role_gate_403s_the_whole_request(
 
 
 @pytest.mark.asyncio
-async def test_the_cutting_manager_owns_fusing(
-    db, operations, pieces, cutter, cutting_mgr, leather_lot
+async def test_the_stitching_manager_owns_fusing_not_the_cutting_manager(
+    db, operations, pieces, cutter, cutting_mgr, stitching_mgr, leather_lot
 ):
-    """CLAUDE.md §3: the cutting manager logs leather cutting AND fusing."""
+    """FUSING belongs to the STITCHING manager.
+
+    It was granted to the cutting manager, which could never fire: ROLE_TO_SCREEN
+    pins a cutting manager to LEATHER_CUT, so their scan is fixed at
+    LEATHER_CUTTING and never infers FUSING. The grant's only live effect was to
+    403 the stitching manager — the one role that CAN reach the stage.
+    """
     piece, _ = pieces[0]
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
-    res = await _log(db, cutting_mgr, cutter, [piece.id])
+
+    # the cutting manager is now refused the stage outright
+    with pytest.raises(HTTPException) as exc:
+        await _log(db, cutting_mgr, cutter, [piece.id])
+    assert exc.value.status_code == 403
+    assert "stitching_manager" in exc.value.detail
+
+    # and the stitching manager logs it, with no OperationAccess row involved
+    res = await _log(db, stitching_mgr, cutter, [piece.id])
     assert res["stage"] == "FUSING" and res["count_logged"] == 1
 
 
@@ -137,7 +151,7 @@ async def test_a_wrong_skill_warns_but_still_logs(
 # ══════════════════════════════════════════════════ GATE 3 — sequence (per-piece)
 @pytest.mark.asyncio
 async def test_one_out_of_sequence_piece_does_not_lose_the_good_ones(
-    db, operations, pieces, cutter, cutting_mgr, leather_lot
+    db, operations, pieces, cutter, cutting_mgr, stitching_mgr, leather_lot
 ):
     """THE per-piece promise: piece 1 is cut and ready for FUSING; piece 2 was
     never cut. One batch → piece 1 logs, piece 2 lands in sequence_blocked."""
@@ -145,7 +159,7 @@ async def test_one_out_of_sequence_piece_does_not_lose_the_good_ones(
     skipped, _ = pieces[1]
     await _cut(db, cutting_mgr, cutter, ready, leather_lot)
 
-    res = await _log(db, cutting_mgr, cutter, [ready.id, skipped.id])
+    res = await _log(db, stitching_mgr, cutter, [ready.id, skipped.id])
     assert res["stage"] == "FUSING"
     assert res["logged"] == [ready.code]
     assert res["sequence_blocked"] == [skipped.code]
@@ -160,7 +174,7 @@ async def test_line_stitching_is_blocked_until_the_drawer_is_sended(
 ):
     piece, drawer = pieces[0]
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
-    await _log(db, cutting_mgr, cutter, [piece.id])            # FUSING
+    await _log(db, stitching_mgr, cutter, [piece.id])          # FUSING
     await _log(db, stitching_mgr, paster, [piece.id])          # PASTING
 
     blocked = await _log(db, stitching_mgr, paster, [piece.id])
@@ -290,7 +304,7 @@ async def test_package_export_recycles_the_drawer(
     drawers = DrawerService(db)
 
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
-    await _log(db, cutting_mgr, cutter, [piece.id])             # FUSING
+    await _log(db, stitching_mgr, cutter, [piece.id])           # FUSING
     await _log(db, stitching_mgr, paster, [piece.id])           # PASTING
     await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
                              part=DrawerPart.LEATHER)

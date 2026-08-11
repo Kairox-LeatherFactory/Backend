@@ -108,7 +108,7 @@ async def test_uat3_worker_cannot_work_unskilled_stage(
 # ── UAT-4: Sequence gate ─────────────────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_uat4_piece_cannot_skip_ahead(
-        db, operations, pieces, cutter, cutting_mgr, leather_lot):
+        db, operations, pieces, cutter, cutting_mgr, stitching_mgr, leather_lot):
     """AS the system, WHEN a piece has only been cut, THEN the next PIPELINE scan
     logs FUSING (the immediate next step), never a later stage — no skipping."""
     today = datetime.date.today()
@@ -118,7 +118,7 @@ async def test_uat4_piece_cannot_skip_ahead(
         work_date=today, screen=ScreenContext.LEATHER_CUT,
         leather_lot_id=leather_lot.id, consumption_qty=10.0)
     res = await ProductionService(db).log_batch(
-        user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[p.id],
+        user=stitching_mgr, employee_id=cutter[0].id, piece_ids=[p.id],
         work_date=today, screen=ScreenContext.PIPELINE)
     assert res["stage"] == "FUSING"   # not PASTING or later
 
@@ -139,7 +139,7 @@ async def test_uat5_lined_jacket_blocks_line_stitch_until_complete(
         await prod.log_batch(user=mgr, employee_id=emp.id, piece_ids=[piece.id],
                              work_date=today, screen=screen,
                              leather_lot_id=leather_lot.id, consumption_qty=10.0)
-    await prod.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
+    await prod.log_batch(user=stitching_mgr, employee_id=cutter[0].id,
                          piece_ids=[piece.id], work_date=today,
                          screen=ScreenContext.PIPELINE)   # fusing
     await prod.log_batch(user=stitching_mgr, employee_id=paster[0].id,

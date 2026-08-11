@@ -227,37 +227,80 @@ class AttendanceService:
     # ══════════════════════════════════════════════════════════════════
     # Flow B — Supervisor proxy-marks daily-wage workers
     # ══════════════════════════════════════════════════════════════════
-    async def proxy_mark_present(self, operator: User,
-                                body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
-        """Manual check-in fallback (card failed / forgotten). Authorised in the
-        router (SECURITY / HR / MD / DM). Works for ANY wage type — every employee
-        has a card, and any of them can forget it.
- 
-        The GPS pinged is the OPERATOR's device (they are standing at the gate)."""
+    async def proxy_mark_present(
+        self, operator: User, body: schemas.ProxyMarkRequest
+    ) -> list[schemas.AttendanceRead]:
+
         dist = await self._enforce_geofence(body.lat, body.lon)
- 
-        out: list[AttendanceLog] = []
+
+        out: list[schemas.AttendanceRead] = []
+
         for emp_id in body.employee_ids:
             emp = await self.employees.get(emp_id)
             if not emp:
                 raise HTTPException(
-                    status_code=404, detail=f"Employee {emp_id} not found.")
-            # REMOVED: the "not a piece-rate worker — proxy not allowed" refusal.
-            # A monthly worker who forgot their card must still get a manual
-            # check-in. Manual attendance is a fallback for EVERYONE now.
+                    status_code=404, detail=f"Employee {emp_id} not found."
+                )
+
             log = await self._open_or_reject(
-                employee_id=emp.id, source=AttendanceSource.PROXY,
-                recorded_by=operator.id, distance_m=dist)
-            out.append(log)
+                employee_id=emp.id,
+                source=AttendanceSource.PROXY,
+                recorded_by=operator.id,
+                distance_m=dist,
+            )
+
+            # ✅ FIX: return schema instead of model
+            out.append(
+                schemas.AttendanceRead(
+                    id=log.id,
+                    employee_id=log.employee_id,
+                    name=emp.name,  # 🔥 ADD THIS
+                    work_date=log.work_date,
+                    check_in_at=log.check_in_at,
+                    check_out_at=log.check_out_at,
+                    source=log.source,
+                    is_late=log.is_late,
+                    is_short=log.is_short,
+                    is_overtime=log.is_overtime,
+                    distance_m=log.distance_m,
+                )
+            )
+
         return out
 
-    async def proxy_check_out(self, operator: User,
-                              body: schemas.ProxyMarkRequest) -> list[AttendanceLog]:
-        """Manual check-out fallback. Authorised in the router. Any wage type."""
+    async def proxy_check_out(
+        self, operator: User, body: schemas.ProxyMarkRequest
+    ) -> list[schemas.AttendanceRead]:
+
         await self._enforce_geofence(body.lat, body.lon)
-        out: list[AttendanceLog] = []
+
+        out: list[schemas.AttendanceRead] = []
+
         for emp_id in body.employee_ids:
-            out.append(await self._close(employee_id=emp_id))
+            emp = await self.employees.get(emp_id)
+            if not emp:
+                raise HTTPException(
+                    status_code=404, detail=f"Employee {emp_id} not found."
+                )
+
+            log = await self._close(employee_id=emp_id)
+
+            out.append(
+                schemas.AttendanceRead(
+                    id=log.id,
+                    employee_id=log.employee_id,
+                    name=emp.name,  # 🔥 REQUIRED FIX
+                    work_date=log.work_date,
+                    check_in_at=log.check_in_at,
+                    check_out_at=log.check_out_at,
+                    source=log.source,
+                    is_late=log.is_late,
+                    is_short=log.is_short,
+                    is_overtime=log.is_overtime,
+                    distance_m=log.distance_m,
+                )
+            )
+
         return out
 
     # ══════════════════════════════════════════════════════════════════
