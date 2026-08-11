@@ -33,7 +33,7 @@ import uuid
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import Designation, WageType
+from app.core.enums import Designation, UserRole, WageType
 from app.modules.employees import schemas
 from app.modules.employees.models import Employee
 from app.modules.employees.repository import EmployeeRepository
@@ -74,6 +74,18 @@ class EmployeeService:
             return {}
         from app.modules.barcode.service import BarcodeService
         return await BarcodeService(self.db).employee_codes(ids)
+
+    async def login_role_for(self, employee_id: uuid.UUID) -> UserRole | None:
+        """The role of this employee's linked login — None for a plain worker.
+
+        `role` lives on app_user, NOT on Employee (there is no such column, by
+        design: an Employee is a payroll identity, a User is a credential). So
+        EmployeeRead.role has nothing to read off the ORM row and serialises to
+        null unless it is filled in here — including on the response to the very
+        PATCH that just minted the login."""
+        from app.modules.users.repository import UserRepository
+        user = await UserRepository(self.db).get_by_employee(employee_id)
+        return user.role if user else None
 
     # ── name disambiguation ─────────────────────────────────────────────────
     async def _unique_name(self, raw_name: str) -> str:
@@ -202,13 +214,14 @@ class EmployeeService:
                 "history_preserved": True}
 
     async def update(self, employee_id: uuid.UUID,
-                     body: schemas.EmployeeUpdate) -> Employee:
+                     body: schemas.EmployeeUpdate, actor=None) -> Employee:
         """Partial update. Designation is re-normalised; name changes re-run the
         uniqueness check."""
         emp = await self.repo.get(employee_id)
         if not emp:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Employee not found")
-        data = body.model_dump(exclude_unset=True)
+        data = body.model_dump(exclude_unset=True,
+                       exclude={"role", "password"})
         if "designation" in data:
             data["designation"] = Designation.normalise(data["designation"])
         if "name" in data and " ".join(data["name"].split()).lower() != emp.name.lower():
@@ -229,6 +242,33 @@ class EmployeeService:
         for k, v in data.items():
             if k in _ALLOWED:
                 setattr(emp, k, v)
+
+        if body.role is not None:
+            from app.modules.employees.schemas import _EMPLOYEE_LOGIN_ROLES
+            from app.modules.users.repository import UserRepository
+
+            actor_role = actor.role if actor is not None else None
+            allowed = UserService(self.db)._GRANTABLE.get(actor_role, set())
+            if body.role not in _EMPLOYEE_LOGIN_ROLES or body.role not in allowed:
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    f"Role '{actor_role.value if actor_role else 'unknown'}' "
+                    "may not create a "
+                    f"'{body.role.value}' login.")
+            users = UserRepository(self.db)
+            if await users.get_by_employee(emp.id):
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    "This employee already has an app_user login")
+            if not emp.phone:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    "phone is required when creating a staff login")
+            await UserService(self.db).provision_user(
+                UserCreate(name=emp.name, phone=emp.phone, email=emp.email,
+                           role=body.role, password=body.password,
+                           employee_id=emp.id),
+                must_change_password=True)
         await self.repo.save(emp)
         return emp
 

@@ -238,7 +238,7 @@ async def test_an_unknown_lot_is_a_404_and_nothing_is_logged(
 
 @pytest.mark.asyncio
 async def test_an_uncut_piece_on_the_pipeline_screen_is_blocked_per_piece(
-        db, operations, pieces, cutter, cutting_mgr, leather_lot):
+        db, operations, pieces, cutter, cutting_mgr, stitching_mgr, leather_lot):
     """Consumption is ONE number for the request, so a batch that spanned
     CUTTING and FUSING could not honestly say which pieces the hide went into.
 
@@ -260,7 +260,7 @@ async def test_an_uncut_piece_on_the_pipeline_screen_is_blocked_per_piece(
 
     # PIPELINE infers FUSING for `advanced`; `fresh` has never been cut.
     res = await ProductionService(db).log_batch(
-        user=cutting_mgr, employee_id=cutter[0].id,
+        user=stitching_mgr, employee_id=cutter[0].id,
         piece_ids=[advanced.id, fresh.id], work_date=TODAY,
         screen=ScreenContext.PIPELINE)
 

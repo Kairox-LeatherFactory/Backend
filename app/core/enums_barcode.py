@@ -160,19 +160,30 @@ MERGE_GATE_ENTRY = ProductionStage.LINE_STITCHING
 # Which manager role may LOG which stage.
 # DM and MD are omitted deliberately — they bypass in the service, so adding a
 # stage never means remembering to grant them.
+# THE CUT SIDE IS THE ONLY SPLIT. Each cut entry belongs to its own manager,
+# because each is fixed by its own login screen (SCREEN_TO_STAGE). The floor
+# stages downstream of the cut — FUSING through FINAL_FINISH — belong to the
+# STITCHING manager, who is the one role on the PIPELINE screen and therefore
+# the only manager whose scan can infer those stages at all. The last two stay
+# empty on purpose: inspection and export are APPROVALS, not floor work, so only
+# the DM/MD/HR bypass reaches them.
+#
+# FUSING lived here as {CUTTING_MANAGER} and was UNREACHABLE: ROLE_TO_SCREEN pins
+# a cutting manager to LEATHER_CUT, so their scan is fixed at LEATHER_CUTTING and
+# never infers FUSING. The grant could never fire; its only live effect was to
+# 403 the stitching manager, the one role that CAN reach the stage. Production
+# bears this out — every FUSING event in the DB was entered by the DM bypass,
+# none by a manager. Moving it to STITCHING_MANAGER makes the grant reachable.
 STAGE_ROLE_ACCESS: dict[ProductionStage, set] = {
     ProductionStage.LEATHER_CUTTING:  {UserRole.CUTTING_MANAGER},
     ProductionStage.LINING_CUTTING:   {UserRole.LINING_MANAGER},
-    # FUSING belongs to the CUTTING manager (CLAUDE.md §3: "Logs leather cutting
-    # + fusing"). It was mis-assigned to STITCHING_MANAGER, which 403'd the
-    # cutting manager out of the stage immediately after their own cut.
-    ProductionStage.FUSING:           {UserRole.CUTTING_MANAGER},
+    ProductionStage.FUSING:           {UserRole.STITCHING_MANAGER},
     ProductionStage.PASTING:          {UserRole.STITCHING_MANAGER},
     ProductionStage.LINE_STITCHING:   {UserRole.STITCHING_MANAGER},
     ProductionStage.SHELL_STITCHING:  {UserRole.STITCHING_MANAGER},
     ProductionStage.FINAL_FINISH:     {UserRole.STITCHING_MANAGER},
-    ProductionStage.FINAL_INSPECTION: set(),   # DM/MD only (approval)
-    ProductionStage.PACKAGE_EXPORT:   set(),   # DM/MD only
+    ProductionStage.FINAL_INSPECTION: set(),   # DM/MD/HR only (approval)
+    ProductionStage.PACKAGE_EXPORT:   set(),   # DM/MD/HR only (approval)
 }
 
 

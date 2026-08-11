@@ -70,16 +70,19 @@ async def update_employee(
     employee_id: uuid.UUID,
     body: schemas.EmployeeUpdate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(
+    actor: User = Depends(require_roles(
         UserRole.DIRECT_MANAGER, UserRole.HR, UserRole.MANAGING_DIRECTOR)),
 ):
     """Edit an employee (name/designation/wage_type/salary/contact/active).
     Reaches the existing service.update() (was unreachable — F89)."""
     svc = EmployeeService(db)
-    emp = await svc.update(employee_id, body)
+    emp = await svc.update(employee_id, body, actor=actor)
     out = schemas.EmployeeRead.model_validate(emp)
     # Same shape as the list row — the edit screen keeps showing the card code.
     out.employee_barcode = (await svc.barcodes_for([emp.id])).get(emp.id)
+    # role lives on app_user, not on Employee — read it back so a PATCH that
+    # granted a login answers with the role it granted instead of null.
+    out.role = await svc.login_role_for(emp.id)
     return out
  
  

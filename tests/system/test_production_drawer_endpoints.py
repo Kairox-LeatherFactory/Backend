@@ -96,12 +96,19 @@ async def test_log_preview_writes_nothing_and_echoes_preview(
 async def test_log_rejects_a_stage_the_role_does_not_own(
     api_client, as_role, operations, pieces, cutter, leather_lot
 ):
-    """The piece is cut first, so PIPELINE infers FUSING — a stage the stitching
-    manager does not own (CLAUDE.md §3: the cutting manager logs fusing)."""
+    """The piece is cut first, so PIPELINE infers FUSING — a stage the SUPERVISOR
+    does not own.
+
+    This used to use the stitching manager, back when FUSING was granted to the
+    cutting manager. That grant was unreachable (the cutting manager's screen is
+    pinned to LEATHER_CUT), so FUSING now belongs to the stitching manager and it
+    is no longer a role that can demonstrate the gate. The supervisor is: they
+    sit on the PIPELINE screen, so their scan reaches the stage, and they appear
+    in no STAGE_ROLE_ACCESS set at all."""
     piece, _ = pieces[0]
     await _cut(api_client, as_role, piece, cutter[0], leather_lot)
 
-    as_role(UserRole.STITCHING_MANAGER)
+    as_role(UserRole.SUPERVISOR)
     r = await api_client.post(f"{API}/production/log", json={
         "actor": {"employee_id": str(cutter[0].id)},
         "targets": {"piece_barcodes": [piece.code]},
