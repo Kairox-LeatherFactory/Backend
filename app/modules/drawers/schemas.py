@@ -37,11 +37,18 @@ class DrawerLabel(BaseModel):
 
     `barcode` is the string to encode on the label; `barcode_id` is the registry
     row that owns it. Both are null if the drawer has no registry row — that is a
-    broken label the print sheet should SHOW, not silently drop."""
+    broken label the print sheet should SHOW, not silently drop.
+
+    `state` is the drawer's LIFECYCLE position; `holding` is what is physically
+    inside it. They are not the same question, and they stop agreeing the moment
+    the DM moves the drawer on: at state `received` or `sended` the lifecycle no
+    longer says whether the drawer holds leather, lining or both, but `holding`
+    still does."""
     drawer_id: uuid.UUID
     seq: int
     code: str
     state: str
+    holding: str          # HOLDING LEATHER | HOLDING LINING | HOLDING BOTH | EMPTY
     barcode_id: uuid.UUID | None = None
     barcode: str | None = None
     caption: str | None = None

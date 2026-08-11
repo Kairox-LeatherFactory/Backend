@@ -201,3 +201,45 @@ async def test_the_label_sheet_lists_drawers_with_their_barcodes(db, pieces):
     page = await DrawerService(db).list_labels(seq_from=2, seq_to=3)
     assert [i["seq"] for i in page["items"]] == [2, 3]
     assert page["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_the_label_sheet_reports_what_each_drawer_holds(db, pieces):
+    """`holding` names the CONTENTS; `state` names the LIFECYCLE position.
+
+    The two answer different questions and stop agreeing at RECEIVED — which is
+    exactly why contents get their own field instead of being read off `state`.
+    """
+    svc = DrawerService(db)
+    piece, drawer = pieces[0]
+
+    async def holding_of(code: str) -> str:
+        out = await svc.list_labels()
+        return next(i["holding"] for i in out["items"] if i["code"] == code)
+
+    # Nothing scanned in yet: merged to a piece, but physically empty.
+    assert await holding_of(drawer.code) == "EMPTY"
+
+    await svc.store_scan(drawer_id=drawer.id, piece_id=piece.id,
+                         part=DrawerPart.LEATHER)
+    assert await holding_of(drawer.code) == "HOLDING LEATHER"
+
+    await svc.store_scan(drawer_id=drawer.id, piece_id=piece.id,
+                         part=DrawerPart.LINING)
+    assert await holding_of(drawer.code) == "HOLDING BOTH"
+
+    # THE POINT: once the DM receives and sends, `state` reads received/sended and
+    # no longer says what is inside. `holding` still does.
+    for transition in ("RECEIVED", "SENDED"):
+        await svc.transition(drawer_id=drawer.id, transition=transition,
+                             actor_id=None)
+    out = await svc.list_labels()
+    row = next(i for i in out["items"] if i["code"] == drawer.code)
+    assert row["state"] == DrawerState.SENDED.value
+    assert row["holding"] == "HOLDING BOTH"
+
+    # A lining-first scan must read HOLDING LINING, not HOLDING LEATHER.
+    other_piece, other = pieces[1]
+    await svc.store_scan(drawer_id=other.id, piece_id=other_piece.id,
+                         part=DrawerPart.LINING)
+    assert await holding_of(other.code) == "HOLDING LINING"

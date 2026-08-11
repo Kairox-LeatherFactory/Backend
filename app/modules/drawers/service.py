@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import (BarcodeAuditAction, BarcodeType, DrawerPart,
                             DrawerState)
+from app.core.store_display import holding_label
 from app.modules.barcode.models import BarcodeRegistry, Drawer
 from app.modules.production.models import Piece
 
@@ -105,6 +106,8 @@ class DrawerService:
                 "seq": drawer.seq,
                 "code": drawer.code,
                 "state": drawer.state,
+                "holding": holding_label(leather_in=drawer.leather_in,
+                                         lining_in=drawer.lining_in),
                 "barcode_id": bc_id,
                 "barcode": bc_code,
                 "caption": caption,
