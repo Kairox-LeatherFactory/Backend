@@ -79,6 +79,32 @@ _STORE_SUBLABEL = {
 }
 
 
+# What is PHYSICALLY in the drawer, as one ready-to-render label.
+#
+# This is NOT a restatement of DrawerState. `state` is a LIFECYCLE position, and
+# the moment the DM moves a drawer on it reads "received" / "sended" — at which
+# point the state no longer says whether that drawer holds leather, lining or
+# both. The parts themselves are recorded separately (Drawer.leather_in /
+# lining_in) and remain true for the drawer's whole life, so contents are derived
+# from those two booleans and never from `state`.
+_HOLDING_LABEL = {
+    (True,  True):  "HOLDING BOTH",
+    (True,  False): "HOLDING LEATHER",
+    (False, True):  "HOLDING LINING",
+    (False, False): "EMPTY",
+}
+
+
+def holding_label(*, leather_in: bool | None, lining_in: bool | None) -> str:
+    """One field naming what is inside a drawer right now.
+
+    Returns HOLDING LEATHER / HOLDING LINING / HOLDING BOTH / EMPTY. Survives the
+    RECEIVED and SENDED transitions, which is the whole point: a drawer the DM has
+    released still holds its parts, and `state` has stopped saying so.
+    """
+    return _HOLDING_LABEL[(bool(leather_in), bool(lining_in))]
+
+
 def display_stage(
     *,
     current_event_stage: str | None,
