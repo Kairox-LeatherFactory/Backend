@@ -49,9 +49,9 @@ production event, attendance, and wage.
 |---|---|---|
 | Managing Director | `managing_director` | Superuser; finalises costing; bypasses stage gates |
 | Direct Manager | `direct_manager` | Designer; uploads breakdown; drawer RECEIVED/SENDED; bypasses stage gates |
-| Cutting Manager | `cutting_manager` | Logs leather cutting + fusing; creates material lots |
+| Cutting Manager | `cutting_manager` | Logs leather cutting **only**; creates material lots |
 | **Lining Manager** | `lining_manager` | **NEW in Phase 1** — logs the lining-cut path |
-| Stitching Manager | `stitching_manager` | Logs pasting, line-stitching, shell-stitching |
+| Stitching Manager | `stitching_manager` | Logs **every post-cut floor stage**: fusing, pasting, line-stitching, shell-stitching, final finish |
 | Supervisor | `supervisor` | Reads the floor roster (no attendance writes, no user creation) |
 | HR | `hr` | Employees, wages visibility, designation backfill, attendance operator |
 | **Security** | `security` | **Gate operator** — scans employee cards in and out |

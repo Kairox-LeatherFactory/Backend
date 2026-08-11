@@ -94,6 +94,9 @@ def get_password_hash(password: str) -> str:
     pw = password.encode("utf-8")[:72]
     return bcrypt.hashpw(pw, bcrypt.gensalt()).decode("utf-8")
 
+passw = get_password_hash("9884227592")
+print(passw)  # F41: dummy hash for unknown-user path
+
 # ══════════════════════════════════════════════════════════════════════════
 # JWT helpers
 # ══════════════════════════════════════════

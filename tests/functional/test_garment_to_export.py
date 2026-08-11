@@ -114,7 +114,7 @@ async def test_one_lined_jacket_walks_the_whole_chain_and_recycles_its_drawer(
     assert s["ready_for_received"] is True
 
     # ── 3 · the leather chain up to the merge gate ───────────────────────────
-    r = await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
+    r = await svc.log_batch(user=stitching_mgr, employee_id=cutter[0].id,
                             piece_ids=[piece.id], work_date=TODAY,
                             screen=ScreenContext.PIPELINE)
     assert r["stage"] == "FUSING" and r["count_logged"] == 1
@@ -210,7 +210,7 @@ async def test_a_leather_only_garment_never_waits_for_a_lining(
     await drawers.transition(drawer.id, "RECEIVED", dm.id)
     await drawers.transition(drawer.id, "SENDED", dm.id)
 
-    await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
+    await svc.log_batch(user=stitching_mgr, employee_id=cutter[0].id,
                         piece_ids=[piece.id], work_date=TODAY,
                         screen=ScreenContext.PIPELINE)          # FUSING
     await svc.log_batch(user=stitching_mgr, employee_id=paster[0].id,
