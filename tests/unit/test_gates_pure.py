@@ -99,12 +99,26 @@ def test_every_stage_appears_in_the_role_map():
         assert stage in STAGE_ROLE_ACCESS, f"{stage.value} missing from STAGE_ROLE_ACCESS"
 
 
-def test_final_stages_are_reserved_to_md_and_dm():
-    """FINAL_FINISH / FINAL_INSPECTION / PACKAGE_EXPORT carry an EMPTY role set —
-    only the bypass roles reach them (enums_barcode.py:171-173)."""
-    for stage in (ProductionStage.FINAL_FINISH, ProductionStage.FINAL_INSPECTION,
-                  ProductionStage.PACKAGE_EXPORT):
+def test_approval_stages_are_reserved_to_the_bypass_roles():
+    """FINAL_INSPECTION / PACKAGE_EXPORT carry an EMPTY role set — they are
+    APPROVALS, not floor work, so only the DM/MD/HR bypass reaches them.
+
+    FINAL_FINISH is deliberately NOT in this list: it is floor work and belongs
+    to the stitching manager, like every other post-cut stage. This test used to
+    assert FINAL_FINISH was empty too, which never matched the table."""
+    for stage in (ProductionStage.FINAL_INSPECTION, ProductionStage.PACKAGE_EXPORT):
         assert STAGE_ROLE_ACCESS[stage] == set()
+    assert STAGE_ROLE_ACCESS[ProductionStage.FINAL_FINISH] == {UserRole.STITCHING_MANAGER}
+
+
+def test_every_post_cut_floor_stage_belongs_to_the_stitching_manager():
+    """The stitching manager is the ONLY role on the PIPELINE screen, so it is the
+    only role whose scan can infer a post-cut stage. Any post-cut floor stage
+    granted to someone else is unreachable by definition."""
+    for stage in (ProductionStage.FUSING, ProductionStage.PASTING,
+                  ProductionStage.LINE_STITCHING, ProductionStage.SHELL_STITCHING,
+                  ProductionStage.FINAL_FINISH):
+        assert STAGE_ROLE_ACCESS[stage] == {UserRole.STITCHING_MANAGER}, stage.value
 
 
 def test_the_two_cut_paths_belong_to_different_roles():

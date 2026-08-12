@@ -50,7 +50,10 @@ def infer_stage(done_codes: set, screen: ScreenContext):
 
 # ── mirror of role gate ───────────────────────────────────────────────────────
 def role_ok(role, stage):
-    if role in (UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER):
+    # Mirrors production.service._STAGE_BYPASS_ROLES — which includes HR. This
+    # mirror listed only MD/DM, so every HR assertion here was checking the wrong
+    # rule. Keep the two in step; the service is the source of truth.
+    if role in (UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER, UserRole.HR):
         return True
     return role in STAGE_ROLE_ACCESS.get(stage, set())
 
@@ -80,7 +83,13 @@ check("stitching mgr may log pasting", role_ok(UserRole.STITCHING_MANAGER, PS.PA
 check("cutting mgr may NOT log pasting", not role_ok(UserRole.CUTTING_MANAGER, PS.PASTING))
 check("MD may log final finish (bypass)", role_ok(UserRole.MANAGING_DIRECTOR, PS.FINAL_FINISH))
 check("DM may log lining cut (bypass)", role_ok(UserRole.DIRECT_MANAGER, PS.LINING_CUTTING))
-check("stitching mgr may NOT log final finish", not role_ok(UserRole.STITCHING_MANAGER, PS.FINAL_FINISH))
+check("stitching mgr may log fusing", role_ok(UserRole.STITCHING_MANAGER, PS.FUSING))
+check("cutting mgr may NOT log fusing", not role_ok(UserRole.CUTTING_MANAGER, PS.FUSING))
+check("stitching mgr may log final finish", role_ok(UserRole.STITCHING_MANAGER, PS.FINAL_FINISH))
+# Inspection + export are APPROVALS: no floor manager owns them, only the bypass.
+check("stitching mgr may NOT log final inspection", not role_ok(UserRole.STITCHING_MANAGER, PS.FINAL_INSPECTION))
+check("stitching mgr may NOT log package export", not role_ok(UserRole.STITCHING_MANAGER, PS.PACKAGE_EXPORT))
+check("HR may log package export (bypass)", role_ok(UserRole.HR, PS.PACKAGE_EXPORT))
 
 print("\n=== SKILL GATE ===")
 check("CUTTER may cut leather", skill_ok("CUTTER", PS.LEATHER_CUTTING))

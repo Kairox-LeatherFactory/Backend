@@ -48,8 +48,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.enums import (
     MERGE_GATE_ENTRY, MULTI_STAGE_DESIGNATIONS, SCREEN_EXPECTED_ROLE,
     SCREEN_TO_STAGE, STAGE_DESIGNATIONS, STAGE_ROLE_ACCESS, Designation,
-    ProductionStage, ScreenContext, UserRole,
+    DrawerState, ProductionStage, ScreenContext, UserRole,
 )
+from app.core.store_display import display_stage
 from app.modules.clients.service import ClientService
 from app.modules.employees.service import EmployeeService
 from app.modules.production.models import Operation, Piece, ProductionEvent
@@ -175,14 +176,26 @@ class ProductionService:
     async def _merge_ok(self, piece: Piece,
                         stage: ProductionStage) -> tuple[bool, str | None]:
         """Only LINE_STITCHING is gated on completeness. The drawer must be SENDED
-        (leather + lining both merged and the DM released it)."""
+        (leather + lining both merged and the store released it).
+
+        THE MESSAGE NAMES THE DRAWER. "its drawer must hold leather + lining" told
+        an operator holding a garment nothing they could act on — the whole point
+        of bug #12 is that the drawer is the thing they cannot see from the
+        production screen. The drawer is already loaded here to answer the gate,
+        so naming it costs nothing and turns the rejection into an instruction.
+        """
         if stage is not MERGE_GATE_ENTRY:
             return True, None
         from app.modules.drawers.service import DrawerService
-        if await DrawerService(self.db).is_sended(piece.id):
+        drawers = DrawerService(self.db)
+        drawer = await drawers.drawer_for_piece(piece.id)
+        if drawer is not None and drawer.state == DrawerState.SENDED.value:
             return True, None
-        return False, (f"{piece.code} is not ready for {stage.value} — its drawer "
-                       "must hold leather + lining and be marked SENDED by the DM.")
+        where = f"drawer {drawer.code}" if drawer is not None else "its drawer"
+        return False, (
+            f"{piece.code} is not ready for {stage.value} — {where} must hold "
+            f"leather + lining and be marked SENDED (send it from the Drawers "
+            f"List).")
 
     # ═══════════════════════════════════════════════════════════════ presence
     async def _assert_present(self, employee_id: uuid.UUID, work_date: date) -> None:
@@ -318,12 +331,30 @@ class ProductionService:
         if denied and len(denied) == len(op_by_stage):
             raise next(iter(denied.values()))
 
+        # ── CONSUMPTION REQUIREMENTS: THE TWO CUTS DIFFER (bugs #9/#10) ──────
+        # This used to be one rule for "any cut stage": dcm required, lot
+        # required, else 422. That is right for LEATHER — leather is the
+        # expensive, per-hide-measured material the whole costing rests on — and
+        # wrong for LINING, where the client has now confirmed every field
+        # (DCM, article, style, colour, thickness) is OPTIONAL.
+        #
+        # A lining cut with nothing supplied is a legitimate, complete record: the
+        # work happened, the piece advances, and no stock moves because nobody
+        # measured any. Forcing a number there only teaches the floor to invent
+        # one, which is a worse ledger than an absent one.
+        #
+        # Supplying consumption on a lining cut still behaves exactly as before —
+        # it is optional, not ignored.
+        lining_only = cut_stages == {ProductionStage.LINING_CUTTING}
         consumption_value = None
-        if is_cut:
+        if is_cut and (consumption_qty is not None or not lining_only):
             if consumption_qty is None:
                 raise HTTPException(
                     status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    "Consumption quantity is required for cut stages.")
+                    "Consumption quantity (dcm) is required at leather cutting — "
+                    "it is what the material ledger and the costing are built on. "
+                    "Send `consumption.dcm` with `consumption.article` (+ colour, "
+                    "and thickness if it narrows the lot), or a lot id directly.")
             try:
                 consumption_value = Decimal(str(consumption_qty))
             except Exception as exc:
@@ -337,8 +368,9 @@ class ProductionService:
             if not (leather_lot_id or lining_lot_id):
                 raise HTTPException(
                     status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    "A cut stage requires a material lot.")
- 
+                    "A measured cut needs to name its material: send "
+                    "`consumption.article` (+ colour / thickness) or a lot id.")
+
         screen_role_warning = None
         if screen in SCREEN_EXPECTED_ROLE and user.role not in _STAGE_BYPASS_ROLES:
             expected = SCREEN_EXPECTED_ROLE[screen]
@@ -431,7 +463,12 @@ class ProductionService:
  
         consumption_recorded = None
         stock_warning = None
-        if is_cut and not preview and fresh_cut_count > 0:
+        # NO MEASUREMENT → NO DECREMENT. An unmeasured lining cut (bug #10) writes
+        # its events and stops there: there is no quantity to take off any lot, and
+        # inventing one would corrupt the ledger this block exists to keep honest.
+        if (is_cut and not preview and fresh_cut_count > 0
+                and consumption_value is not None
+                and (leather_lot_id or lining_lot_id)):
             lot_id = leather_lot_id or lining_lot_id
             from app.modules.materials.service import MaterialService
             total_consumption = consumption_value * fresh_cut_count
@@ -474,6 +511,16 @@ class ProductionService:
         else:
             rep_stage = None
 
+        # BUG #12 — the drawer for every piece in this batch, on the response the
+        # scan screen already reads. One query for the whole batch. Without it the
+        # operator has to leave the production screen to find out where the
+        # garment they just logged actually lives.
+        drawers_by_id = await self.repo.drawers_for_pieces(list(pieces))
+        drawer_by_piece = {
+            piece.code: drawers_by_id[pid]
+            for pid, piece in pieces.items() if pid in drawers_by_id
+        }
+
         result = {
             "stage": rep_stage,
             "stages": stages_seen,
@@ -492,6 +539,11 @@ class ProductionService:
             "stock_warning": None,
             "preview": bool(preview),
             "skill_warnings": skill_warnings,
+            # BUG #12 — where each scanned garment lives, on the response the scan
+            # screen already reads. {piece_code: {code, state, holding, …}}.
+            "drawer_by_piece": drawer_by_piece,
+            # BUG #8 — filled in after the commit; see below.
+            "sku_progress": None,
         }
 
         if preview:
@@ -501,6 +553,23 @@ class ProductionService:
         await self.db.commit()
         result["consumption_recorded"] = consumption_recorded
         result["stock_warning"] = stock_warning
+
+        # BUG #8 — how much of this SKU is left at the stage just logged, so the
+        # screen can CLOSE a style for further scanning the moment it completes
+        # rather than trusting a client-side tally (which a reload, a second gun
+        # or a second operator all defeat).
+        #
+        # DELIBERATELY AFTER THE COMMIT. The session runs autoflush=False
+        # (core/database.py:104), so a count issued while the events were still
+        # pending would not see them and would report one piece too many as
+        # remaining — closing the style one scan late, every time.
+        if logged and rep_stage and rep_stage != "MIXED":
+            resolved = screen_stage or next(
+                iter(dict.fromkeys(stage_by_piece.values())), None)
+            first = next(iter(pieces.values()), None)
+            if resolved is not None and first is not None:
+                result["sku_progress"] = await self._sku_progress_at_stage(
+                    first.sku_id, resolved)
         return result
 
     @staticmethod
@@ -538,6 +607,156 @@ class ProductionService:
         else:
             head = "Nothing logged."
         return head
+    # ═══════════════════════════════════ THE SCAN-TIME STATE READ (bugs 4/6/8/12)
+    async def piece_state(self, piece_id: uuid.UUID,
+                          *, user: User | None = None) -> dict:
+        """Everything the scan screen needs about ONE piece, before it logs.
+
+        WHY THIS ENDPOINT EXISTS
+            Three of the reported bugs are the same missing read:
+
+              #4  the operator has to pick the stage by hand, because the stage is
+                  only inferred at WRITE time — the UI cannot see it in advance.
+              #6  later stage cards can be scanned into before their predecessor
+                  is done, because the UI has no way to know which are locked.
+              #12 the drawer is invisible outside the Store hub.
+
+            All three are answered by asking the server, at scan time, "what is
+            true about this piece?" — which is what this returns.
+
+        IT REUSES THE WRITE PATH'S OWN PREDICATES — _infer_stage_for_piece,
+        _sequence_ok, _merge_ok — rather than restating them. That is the whole
+        design constraint: a second, parallel copy of the gate logic would drift,
+        and the failure mode is the worst kind — a card the UI shows as open that
+        the server then rejects, or (worse) a card the UI locks that the server
+        would have accepted, silently stalling the line. One source of truth, read
+        and write.
+        """
+        piece = await self.db.get(Piece, piece_id)
+        if piece is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Piece not found.")
+
+        from app.modules.barcode.service import BarcodeService
+        card = await BarcodeService(self.db)._piece_payload(piece_id)
+
+        done = await self.repo.completed_stage_codes(piece.id)
+        chain = ProductionStage.leather_chain()
+        next_stage = await self._infer_stage_for_piece(piece, ScreenContext.PIPELINE)
+
+        # ── the stage card map (bug #6) ──────────────────────────────────────
+        # Every stage the UI draws a card for, with the reason it is not open.
+        # LINING_CUTTING is included even though it is off the leather chain: it
+        # is a real card on the floor (its own screen, its own manager) and a
+        # lined piece is not finished with the cut side without it.
+        stages: list[dict] = []
+        for stage in [ProductionStage.LEATHER_CUTTING,
+                      ProductionStage.LINING_CUTTING, *chain[1:]]:
+            entry: dict = {"stage": stage.value,
+                           "requires_consumption": stage.requires_consumption}
+            if stage.value in done:
+                entry["state"] = "completed"
+                stages.append(entry)
+                continue
+            # A lining cut on a piece that needs no lining is not "locked" —
+            # it is simply not part of this garment's route.
+            if stage is ProductionStage.LINING_CUTTING and not bool(
+                    getattr(piece, "needs_lining", True)):
+                entry["state"] = "not_applicable"
+                entry["reason"] = (f"{piece.code} needs no lining, so the lining "
+                                   f"cut never applies to it.")
+                stages.append(entry)
+                continue
+            ok_seq, why_seq = await self._sequence_ok(piece, stage)
+            ok_merge, why_merge = await self._merge_ok(piece, stage)
+            if not ok_seq:
+                entry.update(state="locked", gate="sequence", reason=why_seq)
+            elif not ok_merge:
+                entry.update(state="locked", gate="merge", reason=why_merge)
+            elif stage is next_stage or stage.is_cut_entry:
+                # Cut entries have no predecessor, so they are open whenever they
+                # are not already done — they are reached from their own screen,
+                # not by pipeline inference, which is why `next_stage` (a PIPELINE
+                # answer) does not name them.
+                entry["state"] = "next"
+            else:
+                entry.update(
+                    state="locked", gate="sequence",
+                    reason=(f"{piece.code} is not at {stage.value} yet — "
+                            f"{next_stage.value if next_stage else 'the line'} "
+                            f"comes first."))
+            stages.append(entry)
+
+        # ── how much of this SKU is left at that stage (bug #8) ──────────────
+        sku_block = await self._sku_progress_at_stage(piece.sku_id, next_stage)
+
+        drawer = card.get("drawer")
+        disp = display_stage(
+            current_event_stage=card.get("current_stage"),
+            drawer_state=(drawer or {}).get("state"),
+            needs_lining=bool(getattr(piece, "needs_lining", True)),
+        )
+
+        return {
+            "piece": card,
+            "drawer": drawer,                                   # bug #12
+            "completed_stages": sorted(done),
+            "next_stage": next_stage.value if next_stage else None,   # bug #4
+            "next_stage_requires_consumption": bool(
+                next_stage and next_stage.requires_consumption),
+            "display_stage": disp["display_stage"],
+            "display_label": disp["label"],
+            "in_store": disp["in_store"],
+            "stages": stages,                                   # bug #6
+            "sku": sku_block,                                   # bug #8
+            # Whether THIS login could log the next stage — so the screen can say
+            # "ask the stitching manager" instead of letting the scan 403.
+            "can_log_next": await self._can_log(user, next_stage),
+        }
+
+    async def _sku_progress_at_stage(self, sku_id: uuid.UUID,
+                                     stage: "ProductionStage | None") -> dict:
+        """How many pieces of this SKU still need `stage` (bug #8).
+
+        The cutting screen used to load a whole style at once and submit it in one
+        click; the fix is per-piece scanning, and per-piece scanning needs a
+        server-side answer to "am I done with this style yet?" — a frontend tally
+        of what the operator happened to scan is not that answer (a reload, a
+        second gun or a second operator all break it).
+
+        Reuses repo.piece_ids_done_at_op, the same batch read the checklist uses.
+        """
+        rows = await self.repo.list_pieces_for_sku(sku_id)
+        piece_ids = [p.id for p, _, _, _ in rows]
+        out = {"sku_id": str(sku_id), "total": len(piece_ids),
+               "stage": stage.value if stage else None,
+               "done": 0, "remaining": len(piece_ids), "closed": False}
+        if stage is None or not piece_ids:
+            return out
+        op = await self.repo.get_operation_by_code(stage.value)
+        if op is None:
+            return out
+        done_ids = await self.repo.piece_ids_done_at_op(piece_ids, op.id)
+        out["done"] = len(done_ids)
+        out["remaining"] = len(piece_ids) - len(done_ids)
+        # CLOSED = every piece of this SKU is logged at this stage, so the style
+        # must stop being offered for scanning here (the client's words).
+        out["closed"] = out["remaining"] == 0
+        return out
+
+    async def _can_log(self, user: User | None,
+                       stage: "ProductionStage | None") -> bool | None:
+        """Would GATE 1 let this login log that stage? None when unknowable."""
+        if user is None or stage is None:
+            return None
+        op = await self.repo.get_operation_by_code(stage.value)
+        if op is None:
+            return None
+        try:
+            await self._assert_role(user, stage, op)
+        except HTTPException:
+            return False
+        return True
+
     # ══════════════════════════════════════════════════════════════ readers
     async def list_pieces_for_sku(self, *, sku_id: uuid.UUID | None = None,
                                   sku_code: str | None = None,
@@ -579,10 +798,10 @@ class ProductionService:
                     prev_stage = None
 
         order_id = rows[0][3] if rows else None
-        # Live drawer state per piece → drives the STORE overlay.
-        drawer_states = await self.repo.drawer_states_for_pieces(piece_ids)
-
-        from app.core.store_display import display_stage
+        # Live drawer per piece → drives the STORE overlay AND (bug #12) puts the
+        # drawer code on every checklist row, so a manager on any stage can see
+        # where the garment is without opening the Store hub.
+        drawers = await self.repo.drawers_for_pieces(piece_ids)
 
         pieces = []
         for p, scode, slabel, _ in rows:
@@ -594,14 +813,17 @@ class ProductionService:
             # STORE overlay: if the piece has cleared the cut side and its drawer
             # is holding, SHOW store (+ sub-status). Never show LINE_STITCHING
             # until a real line-stitching event exists.
+            drawer = drawers.get(p.id)
             disp = display_stage(
                 current_event_stage=scode,
-                drawer_state=drawer_states.get(p.id),
+                drawer_state=(drawer or {}).get("state"),
                 needs_lining=bool(getattr(p, "needs_lining", True)),
             )
             pieces.append({
                 "piece_id": p.id, "code": p.code, "seq": p.seq,
-                "order_id": order_id, 
+                # bug #7: the zero-padded serial the cutting screen must show.
+                "serial": f"{p.seq:03d}" if p.seq is not None else None,
+                "order_id": order_id,
                 # real event stage kept for callers that need the raw value:
                 "event_stage": scode, "event_stage_label": slabel,
                 # what the UI shows (may be STORE):
@@ -609,6 +831,9 @@ class ProductionService:
                 "current_stage_label": disp["label"],
                 "in_store": disp["in_store"],
                 "store_status": disp["store_status"],
+                # bug #12: the assigned drawer, on every row.
+                "drawer": drawer,
+                "drawer_code": (drawer or {}).get("code"),
                 "done_at_op": done, "eligible": eligible, "blocked_reason": reason,
             })
 
@@ -625,6 +850,10 @@ class ProductionService:
             "total": len(pieces), "done": done_count,
             "pending": len(pieces) - done_count,
             "blocked": sum(1 for x in pieces if not x["eligible"]),
+            # BUG #8: every piece of this SKU is logged at the requested operation,
+            # so the style must stop being offered for scanning here. False when no
+            # operation was named — "closed" is meaningless without a stage.
+            "closed": bool(op) and done_count == len(pieces) and bool(pieces),
             "pieces": pieces,
         }
 

@@ -110,11 +110,14 @@ async def test_one_lined_jacket_walks_the_whole_chain_and_recycles_its_drawer(
 
     s = await drawers.store_scan(drawer_id=drawer_id, piece_id=piece.id,
                                  part=DrawerPart.LINING)
-    assert s["state"] == DrawerState.HOLDING_BOTH.value
+    # Complete → the drawer receives itself (bug #13). Its CONTENTS are both.
+    assert s["holding"] == "HOLDING BOTH"
+    assert s["state"] == DrawerState.RECEIVED.value
     assert s["ready_for_received"] is True
+    assert s["sent"] is False        # bug #15: still in the store
 
     # ── 3 · the leather chain up to the merge gate ───────────────────────────
-    r = await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
+    r = await svc.log_batch(user=stitching_mgr, employee_id=cutter[0].id,
                             piece_ids=[piece.id], work_date=TODAY,
                             screen=ScreenContext.PIPELINE)
     assert r["stage"] == "FUSING" and r["count_logged"] == 1
@@ -131,11 +134,16 @@ async def test_one_lined_jacket_walks_the_whole_chain_and_recycles_its_drawer(
     assert r["stage"] == "LINE_STITCHING"
     assert r["count_logged"] == 0
     assert r["merge_blocked"], (
-        "HOLDING_BOTH is not a release — the DM must still RECEIVE and SEND")
+        "A complete drawer is not a release — the DM must still SEND it")
 
-    # ── 5 · the DM's two hard transitions ───────────────────────────────────
-    assert (await drawers.transition(drawer_id, "RECEIVED", dm.id))["state"] == "received"
-    assert (await drawers.transition(drawer_id, "SENDED", dm.id))["state"] == "sended"
+    # ── 5 · the DM's send: the one hard transition that is still a decision ──
+    # RECEIVED is now automatic (it only ever restated what the last scan made
+    # true). SEND is the judgement, and it is what opens the merge gate.
+    out = await drawers.send_batch(drawer_ids=[drawer_id],
+                                   destination="STITCHING", actor_id=dm.id)
+    assert out["count_sent"] == 1
+    assert out["sent"][0]["state"] == "sended"
+    assert out["pieces_released"] == [piece.code]
 
     # ── 6 · the rest of the chain, now unblocked ────────────────────────────
     for expected, actor, user in [
@@ -210,7 +218,7 @@ async def test_a_leather_only_garment_never_waits_for_a_lining(
     await drawers.transition(drawer.id, "RECEIVED", dm.id)
     await drawers.transition(drawer.id, "SENDED", dm.id)
 
-    await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
+    await svc.log_batch(user=stitching_mgr, employee_id=cutter[0].id,
                         piece_ids=[piece.id], work_date=TODAY,
                         screen=ScreenContext.PIPELINE)          # FUSING
     await svc.log_batch(user=stitching_mgr, employee_id=paster[0].id,

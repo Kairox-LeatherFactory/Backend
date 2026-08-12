@@ -27,6 +27,13 @@ ROLE MODEL (maps directly onto the factory's org chart)
     LINING_MANAGER     Logs the lining-cut path.
     STITCHING_MANAGER  Logs fusing -> lining-stitch -> final-finish operations.
     SECURITY           Gate operator. Scans employee cards in and out.
+    STORE_MANAGER      Runs the Store Management hub: scans parts into drawers,
+                       reads the Drawers List, and sends batches of drawers on to
+                       lining / stitching. STORE FUNCTIONS ONLY — it is absent
+                       from ROLE_TO_SCREEN and STAGE_ROLE_ACCESS, so it cannot log
+                       a production stage. That separation is the point of the
+                       role: the person who owns the store is not the person who
+                       owns the line.
     MERCHANDISER       Client-facing order/sample coordinator. NOTE: no route
                        grants this role anything yet — it can log in, but every
                        require_roles gate will 403 until access is decided.
@@ -55,6 +62,7 @@ class UserRole(str, enum.Enum):
     HR = "hr" # HR / accounts: reads people, wages, attendance
     SECURITY = "security"
     MERCHANDISER = "merchandiser"  # client-facing order/sample coordinator
+    STORE_MANAGER = "store_manager"  # runs the store hub ONLY — see below
 
     @classmethod
     def manager_roles(cls) -> set["UserRole"]:
@@ -77,7 +85,7 @@ class UserRole(str, enum.Enum):
         return {cls.MANAGING_DIRECTOR, cls.DIRECT_MANAGER, cls.CUTTING_MANAGER,
                 cls.LINING_MANAGER, cls.STITCHING_MANAGER, cls.HR,
                 cls.SECURITY, cls.MERCHANDISER, cls.CLIENT, cls.SUPERVISOR,
-                cls.VIEWER}
+                cls.VIEWER, cls.STORE_MANAGER}
 
 
 # The ONLY logins permitted to write attendance — for themselves or, far more

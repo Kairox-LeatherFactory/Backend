@@ -57,11 +57,22 @@ def test_uat1_breakdown_upload_mints_pieces_and_barcodes():
 
         stats = premint_order(s, order); s.commit()
 
-        # EXPECTED: 21 pieces, 21 parent barcodes, all printable
+        # EXPECTED: 21 pieces, 21 PRINTABLE parent barcodes, all printable.
+        # Since bug #19 each piece also keeps its long code as a scannable ALIAS,
+        # so the row count is 42 — but exactly 21 of them are the labels that get
+        # printed, and that is the number this scenario is about.
         assert stats["pieces_minted"] == 21
         assert s.scalar(select(func.count(Piece.id))) == 21
         assert s.scalar(select(func.count(BarcodeRegistry.id)).where(
-            BarcodeRegistry.type == "PIECE")) == 21
+            BarcodeRegistry.type == "PIECE",
+            BarcodeRegistry.is_alias.is_(False))) == 21
+        assert s.scalar(select(func.count(BarcodeRegistry.id)).where(
+            BarcodeRegistry.type == "PIECE")) == 42
+        # Every printed code is compact, and every one still resolves to a piece.
+        printed = list(s.scalars(select(BarcodeRegistry.code).where(
+            BarcodeRegistry.type == "PIECE", BarcodeRegistry.is_alias.is_(False))))
+        assert all(c.startswith("PC-") and len(c) == 9 for c in printed), printed
+        assert len(set(printed)) == 21
 
 
 # ── UAT-2: Cutting with consumption drops stock ──────────────────────────────
@@ -108,7 +119,7 @@ async def test_uat3_worker_cannot_work_unskilled_stage(
 # ── UAT-4: Sequence gate ─────────────────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_uat4_piece_cannot_skip_ahead(
-        db, operations, pieces, cutter, cutting_mgr, leather_lot):
+        db, operations, pieces, cutter, cutting_mgr, stitching_mgr, leather_lot):
     """AS the system, WHEN a piece has only been cut, THEN the next PIPELINE scan
     logs FUSING (the immediate next step), never a later stage — no skipping."""
     today = datetime.date.today()
@@ -118,7 +129,7 @@ async def test_uat4_piece_cannot_skip_ahead(
         work_date=today, screen=ScreenContext.LEATHER_CUT,
         leather_lot_id=leather_lot.id, consumption_qty=10.0)
     res = await ProductionService(db).log_batch(
-        user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[p.id],
+        user=stitching_mgr, employee_id=cutter[0].id, piece_ids=[p.id],
         work_date=today, screen=ScreenContext.PIPELINE)
     assert res["stage"] == "FUSING"   # not PASTING or later
 
@@ -139,7 +150,7 @@ async def test_uat5_lined_jacket_blocks_line_stitch_until_complete(
         await prod.log_batch(user=mgr, employee_id=emp.id, piece_ids=[piece.id],
                              work_date=today, screen=screen,
                              leather_lot_id=leather_lot.id, consumption_qty=10.0)
-    await prod.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
+    await prod.log_batch(user=stitching_mgr, employee_id=cutter[0].id,
                          piece_ids=[piece.id], work_date=today,
                          screen=ScreenContext.PIPELINE)   # fusing
     await prod.log_batch(user=stitching_mgr, employee_id=paster[0].id,

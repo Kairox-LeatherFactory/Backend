@@ -26,7 +26,7 @@ async def _advance_to_pasted(db, piece, cutter, paster, cutting_mgr, stitching_m
     await svc.log_batch(user=cutting_mgr, employee_id=cutter.id, piece_ids=[piece.id],
                         work_date=today, screen=ScreenContext.LEATHER_CUT,
                         leather_lot_id=lot.id, consumption_qty=10.0)
-    await svc.log_batch(user=cutting_mgr, employee_id=cutter.id, piece_ids=[piece.id],
+    await svc.log_batch(user=stitching_mgr, employee_id=cutter.id, piece_ids=[piece.id],
                         work_date=today, screen=ScreenContext.PIPELINE)   # fusing
     await svc.log_batch(user=stitching_mgr, employee_id=paster.id, piece_ids=[piece.id],
                         work_date=today, screen=ScreenContext.PIPELINE)   # pasting
@@ -64,17 +64,20 @@ async def test_store_scan_and_full_merge_then_line_stitch(db, operations, pieces
     assert r1["ready_for_received"] is False
     assert "LINING" in r1["awaiting"]
 
-    # store lining → holding_both
+    # store lining → complete, so the drawer auto-advances to RECEIVED (bug #13).
+    # Its CONTENTS are still "holding both"; `state` has moved on.
     r2 = await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
                                   part=DrawerPart.LINING)
-    assert r2["state"] == DrawerState.HOLDING_BOTH.value
+    assert r2["holding"] == "HOLDING BOTH"
+    assert r2["state"] == DrawerState.RECEIVED.value
+    assert r2["auto_received"] is True
     assert r2["ready_for_received"] is True
 
-    # DM RECEIVED then SENDED
-    rec = await drawers.transition(drawer.id, "RECEIVED", actor_id=dm.id)
-    assert rec["state"] == "received"
-    snd = await drawers.transition(drawer.id, "SENDED", actor_id=dm.id)
-    assert snd["state"] == "sended"
+    # SEND is still a decision, and it is what opens the merge gate.
+    snd = await drawers.send_batch(drawer_ids=[drawer.id],
+                                   destination="STITCHING", actor_id=dm.id)
+    assert snd["count_sent"] == 1
+    assert snd["sent"][0]["state"] == "sended"
 
     # now advance leather chain and line-stitch succeeds
     await _advance_to_pasted(db, piece, cutter[0], paster[0], cutting_mgr,
@@ -96,7 +99,7 @@ def _seed_events(db, cutter, *pairs):
 
 @pytest.mark.asyncio
 async def test_role_gate_rejects_only_the_pieces_it_owns_in_a_mixed_batch(
-        db, operations, pieces, cutter, cutting_mgr):
+        db, operations, pieces, cutter, stitching_mgr):
     """GATE 1 on a MIXED batch: the denied pieces are rejected, the rest LOG.
 
     CHANGED CONTRACT (was: whole-request 403 if ANY stage is closed to the role).
@@ -105,43 +108,44 @@ async def test_role_gate_rejects_only_the_pieces_it_owns_in_a_mixed_batch(
     piece lost every good piece scanned with it — the exact outcome gates 2-4 are
     per-piece to prevent. An ALL-denied batch is still a 403; see the test below.
 
-    Stage pair matters here. CUTTING_MANAGER owns BOTH LEATHER_CUTTING and FUSING
-    (app/core/enums_barcode.py:165,167), so a cut+fuse batch does not exercise the
-    gate — and because LEATHER_CUTTING requires consumption, such a batch is
-    rejected 422 by the cut-mixing rule before the role gate is even interesting.
-    The pair below is FUSING (owned) + PASTING (not owned, it belongs to
-    STITCHING_MANAGER at :168), and neither is a cut stage.
+    Stage pair matters here, and it must be TWO NON-CUT stages: a cut stage
+    requires consumption and is rejected 422 by the cut-mixing rule before the
+    role gate is even interesting. The only role that owns some post-cut stages
+    and not others is the STITCHING manager, who owns FUSING..FINAL_FINISH but
+    not the two APPROVAL stages. So the pair is FINAL_FINISH (owned) +
+    FINAL_INSPECTION (denied — bypass roles only).
     """
     piece1, _ = pieces[0]
     piece2, _ = pieces[1]
 
-    # piece1: completed LEATHER_CUTTING          -> next stage is FUSING  (allowed)
-    # piece2: completed LEATHER_CUTTING + FUSING -> next stage is PASTING (denied)
+    # piece1: done through SHELL_STITCHING -> next is FINAL_FINISH     (allowed)
+    # piece2: done through FINAL_FINISH    -> next is FINAL_INSPECTION (denied)
+    upto_shell = ["LEATHER_CUTTING", "FUSING", "PASTING", "LINE_STITCHING",
+                  "SHELL_STITCHING"]
     _seed_events(db, cutter[0],
-                 (piece1, operations["LEATHER_CUTTING"]),
-                 (piece2, operations["LEATHER_CUTTING"]),
-                 (piece2, operations["FUSING"]))
+                 *[(piece1, operations[c]) for c in upto_shell],
+                 *[(piece2, operations[c]) for c in upto_shell + ["FINAL_FINISH"]])
     await db.commit()
 
     res = await ProductionService(db).log_batch(
-        user=cutting_mgr, employee_id=cutter[0].id,
+        user=stitching_mgr, employee_id=cutter[0].id,
         piece_ids=[piece1.id, piece2.id],
         work_date=datetime.date.today(), screen=ScreenContext.PIPELINE)
 
     # the piece whose stage this role DOES own was logged
     assert res["logged"] == [piece1.code]
-    assert res["stage_by_piece"][piece1.code] == "FUSING"
+    assert res["stage_by_piece"][piece1.code] == "FINAL_FINISH"
 
     # the piece whose stage it does NOT own was rejected, alone, with the reason
     assert res["role_blocked"] == [piece2.code]
     reason = next(b for b in res["blocked"] if b["gate"] == "role")
-    assert reason["piece"] == piece2.code and reason["stage"] == "PASTING"
-    assert "stitching_manager" in reason["reason"].lower()
+    assert reason["piece"] == piece2.code and reason["stage"] == "FINAL_INSPECTION"
 
-    # and PASTING was genuinely not written
+    # and FINAL_INSPECTION was genuinely not written
     from sqlalchemy import func, select
-    n = await db.scalar(select(func.count(ProductionEvent.id))
-                        .where(ProductionEvent.operation_id == operations["PASTING"].id))
+    n = await db.scalar(
+        select(func.count(ProductionEvent.id))
+        .where(ProductionEvent.operation_id == operations["FINAL_INSPECTION"].id))
     assert n == 0
 
 
@@ -200,12 +204,30 @@ async def test_received_requires_completeness(db, operations, pieces, dm):
 
 @pytest.mark.asyncio
 async def test_sended_requires_received(db, operations, pieces, dm):
+    """A drawer that is not complete cannot be sent.
+
+    The leather-only shortcut this test used to take no longer works: a piece
+    with needs_lining=False is COMPLETE on leather alone, so its drawer
+    auto-receives and sending it is legitimate. The rule being defended is
+    "incomplete drawers do not leave the store", so the setup now uses a piece
+    that genuinely still needs its lining.
+    """
     piece, drawer = pieces[0]
-    piece.needs_lining = False
+    piece.needs_lining = True
     await db.commit()
     await DrawerService(db).store_scan(drawer_id=drawer.id, piece_id=piece.id,
                                        part=DrawerPart.LEATHER)
-    # jump straight to SENDED → rejected
+
+    # Still awaiting lining → not RECEIVED → nothing is sent.
+    out = await DrawerService(db).send_batch(
+        drawer_ids=[drawer.id], destination="STITCHING", actor_id=dm.id)
+    assert out["count_sent"] == 0
+    assert out["sent"] == []
+    assert len(out["not_ready"]) == 1
+    assert out["not_ready"][0]["state"] == DrawerState.HOLDING_LEATHER.value
+    assert "RECEIVED" in out["not_ready"][0]["reason"]
+
+    # the deprecated single-drawer route enforces the same order
     with pytest.raises(Exception) as ei:
         await DrawerService(db).transition(drawer.id, "SENDED", actor_id=dm.id)
     assert "RECEIVED" in str(ei.value) or "before" in str(ei.value).lower()

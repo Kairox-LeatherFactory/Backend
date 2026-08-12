@@ -14,7 +14,7 @@ transaction (that path does need phone + password).
 """
 import uuid
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.enums import UserRole, WageType
 
@@ -118,3 +118,18 @@ class EmployeeUpdate(BaseModel):
     phone: str | None = None
     email: str | None = None
     is_active: bool | None = None
+    role: UserRole | None = None
+    password: str | None = Field(default=None, min_length=8)
+
+    @model_validator(mode="after")
+    def _login_fields(self):
+        if self.role is UserRole.EMPLOYEE:
+            raise ValueError("The 'employee' role does not get a login")
+        if self.role is not None and self.role not in _EMPLOYEE_LOGIN_ROLES:
+            raise ValueError(
+                f"Role '{self.role.value}' cannot be assigned here")
+        if self.password is not None and self.role is None:
+            raise ValueError("role is required when creating a staff login")
+        if self.role is not None and self.password is None:
+            raise ValueError("password is required when creating a staff login")
+        return self

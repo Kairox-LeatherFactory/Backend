@@ -27,6 +27,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import BarcodeStatus, BarcodeType
+from app.core.store_display import holding_label
 from app.modules.barcode.repository import BarcodeRepository
 
 
@@ -66,6 +67,10 @@ class BarcodeService:
             "type": row.type,
             "active": row.status == BarcodeStatus.ACTIVE.value,
             "caption": row.caption,
+            # True for a legacy long code kept alive after the compact-code switch
+            # (bug #19). The scan still works; the UI can nudge the operator to
+            # reprint the label with the small code.
+            "is_alias": bool(getattr(row, "is_alias", False)),
         }
         if row.type == BarcodeType.PIECE.value and row.piece_id:
             out["piece"] = await self._piece_payload(row.piece_id)
@@ -75,7 +80,31 @@ class BarcodeService:
             out["drawer"] = await self._drawer_payload(row.drawer_id)
         elif row.material_lot_id:
             out["lot"] = await self._lot_payload(row.material_lot_id)
+        out["next_expected_scan"] = self._next_expected_scan(out)
         return out
+
+    @staticmethod
+    def _next_expected_scan(payload: dict) -> str | None:
+        """Which barcode the store screen should ask for NEXT (bug #11).
+
+        The drawer and piece guns feed one merged input, so after a scan the
+        operator has to work out which code the system is now waiting for. The
+        server already knows: a drawer that is still accumulating wants its piece,
+        and a piece whose drawer has not taken both parts wants that drawer. This
+        is GUIDANCE ONLY — the authority on whether a scan is legal remains
+        DrawerService.store_scan, which still rejects a piece scanned into the
+        wrong drawer with a 409.
+        """
+        drawer = payload.get("drawer")
+        if drawer is not None:
+            # A drawer with no piece merged to it has nothing to ask for yet.
+            return "PIECE" if drawer.get("current_piece_id") else None
+        piece = payload.get("piece")
+        if piece is not None:
+            pd = piece.get("drawer") or {}
+            if pd.get("code") and not (pd.get("leather_in") and pd.get("lining_in")):
+                return "DRAWER"
+        return None
 
     async def resolve_piece_id(self, code: str) -> uuid.UUID:
         """resolve() narrowed to 'give me the piece id or 404'. Used by /production/log
@@ -113,22 +142,53 @@ class BarcodeService:
         r = await self.repo.piece_card(piece_id)
         if not r:
             return {"piece_id": str(piece_id)}
+        short = (await self.repo.short_codes_for_pieces([piece_id])).get(piece_id)
+        serial = f"{r.seq:03d}" if r.seq is not None else None
         return {
             "piece_id": str(r.id),
             "code": r.code,
+            # The compact code the label now carries (bug #19). None for a piece
+            # minted before the switch and not yet backfilled — the long `code`
+            # above still scans, so this is a gap to fill, not a failure.
+            "short_code": short,
+            "sku_id": str(r.sku_id) if r.sku_id else None,
             "sku_code": r.sku_code,
+            "style_id": str(r.style_id) if r.style_id else None,
             "style_name": r.style_name,
+            # BUG #7/#19: the two fields the cutting screen was missing. `seq` was
+            # already here as a bare int; `serial` is the zero-padded form the
+            # client asks for by name ("001, 002 or 003").
+            "article": r.article,
+            "serial": serial,
             "colour": r.color_name or r.color_code,
             "size": r.size,
             "seq": r.seq,
+            "order_id": str(r.order_id) if r.order_id else None,
             "order_number": r.order_number,
             "client": r.client_name,
             "current_stage": r.current_stage,
-            # null pre-merge / pre-cut — both are LEFT joins, not errors.
+            # BUG #12: the drawer, in every payload that names a piece — so an
+            # operator on any production stage can see where the garment lives
+            # without opening the Store Management hub. Null pre-merge / post-ship
+            # (a LEFT join, not an error); `drawer_code` is kept flat alongside it
+            # for callers written against the old shape.
             "drawer_code": r.drawer_code,
+            "drawer": None if not r.drawer_id else {
+                "drawer_id": str(r.drawer_id),
+                "code": r.drawer_code,
+                "state": r.drawer_state,
+                "holding": holding_label(leather_in=r.leather_in,
+                                         lining_in=r.lining_in),
+                "leather_in": bool(r.leather_in),
+                "lining_in": bool(r.lining_in),
+            },
             "leather_consumption_dcm": (
                 float(r.consumption_qty) if r.consumption_qty is not None else None),
             "needs_lining": bool(r.needs_lining),
+            # The sticker text, pre-joined so every screen prints it identically.
+            "label_line": " · ".join(str(v) for v in [
+                r.order_number, r.style_name, r.article,
+                r.color_name or r.color_code, r.size, serial] if v),
         }
 
     async def _employee_payload(self, employee_id: uuid.UUID) -> dict:
@@ -152,6 +212,9 @@ class BarcodeService:
             "state": r.state,
             "current_piece_id": str(r.current_piece_id) if r.current_piece_id else None,
             "leather_in": r.leather_in, "lining_in": r.lining_in,
+            "holding": holding_label(leather_in=r.leather_in,
+                                     lining_in=r.lining_in),
+            "sent_to": r.sent_to,
         }
 
     async def _lot_payload(self, lot_id: uuid.UUID) -> dict:
@@ -221,23 +284,41 @@ class BarcodeService:
     async def print_payload(self, *, codes: list[str] | None = None,
                             sku_id: uuid.UUID | None = None,
                             order_id: uuid.UUID | None = None) -> dict:
-        """Return {code, symbology, caption} for a set of codes so the frontend
-        can render Code128 labels. Backend renders no images."""
+        """The print run: a SMALL barcode plus the business identity to set under
+        it. Backend renders no images (bug #19).
+
+        `code` is what gets encoded — now the compact `PC-…` id, so the symbol is
+        short enough to scan reliably. `details` is what gets TYPESET below it:
+        order, article, style, colour, size and the 3-digit serial. Nothing is
+        lost by shrinking the symbol, because the information moved to the text
+        instead of into the bars.
+        """
         resolved_codes: list[str] = list(codes or [])
         if sku_id or order_id:
             resolved_codes += await self.repo.piece_codes_for(
                 sku_id=sku_id, order_id=order_id)
 
         captions = await self.repo.captions_for_codes(resolved_codes)
+        # One query for the whole sheet, not one per label.
+        details = await self.repo.label_details_for_codes(resolved_codes)
         labels = []
         for c in resolved_codes:
             norm = (c or "").strip().upper()
             known = norm in captions
+            detail = details.get(norm)
             labels.append({
                 "code": norm,
                 "symbology": "code128",
                 "caption": captions.get(norm) or (c or ""),
                 "known": known,
+                # None for a drawer / employee / lot label: those name no garment,
+                # so there is no order·article·style line to print under them.
+                "details": detail,
+                "label_line": None if not detail else " · ".join(
+                    str(v) for v in [
+                        detail["order_number"], detail["style"], detail["article"],
+                        detail["colour"], detail["size"], detail["serial"],
+                    ] if v),
             })
         return {"labels": labels}
     

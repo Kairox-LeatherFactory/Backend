@@ -272,6 +272,39 @@ class ProductionRepository:
         )
         return {pid: st for pid, st in res.all() if pid is not None}
 
+    async def drawers_for_pieces(
+        self, piece_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, dict]:
+        """piece_id -> {code, state, holding, leather_in, lining_in}, ONE query.
+
+        BUG #12: every production stage must show the drawer assigned to the piece
+        being scanned, not just the Store hub. drawer_states_for_pieces above
+        returns only the state, which cannot render a card — the operator needs
+        the drawer CODE to walk to it. Same single query, four more columns.
+        """
+        if not piece_ids:
+            return {}
+        from app.core.store_display import holding_label
+        from app.modules.barcode.models import Drawer
+        res = await self.db.execute(
+            select(Drawer.current_piece_id, Drawer.id, Drawer.code, Drawer.state,
+                   Drawer.leather_in, Drawer.lining_in, Drawer.sent_to)
+            .where(Drawer.current_piece_id.in_(piece_ids))
+        )
+        return {
+            r.current_piece_id: {
+                "drawer_id": str(r.id),
+                "code": r.code,
+                "state": r.state,
+                "holding": holding_label(leather_in=r.leather_in,
+                                         lining_in=r.lining_in),
+                "leather_in": bool(r.leather_in),
+                "lining_in": bool(r.lining_in),
+                "sent_to": r.sent_to,
+            }
+            for r in res.all() if r.current_piece_id is not None
+        }
+
     async def piece_ids_done_at_op(
         self, piece_ids: list[uuid.UUID], operation_id: uuid.UUID
     ) -> set[uuid.UUID]:
