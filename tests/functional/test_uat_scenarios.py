@@ -57,11 +57,22 @@ def test_uat1_breakdown_upload_mints_pieces_and_barcodes():
 
         stats = premint_order(s, order); s.commit()
 
-        # EXPECTED: 21 pieces, 21 parent barcodes, all printable
+        # EXPECTED: 21 pieces, 21 PRINTABLE parent barcodes, all printable.
+        # Since bug #19 each piece also keeps its long code as a scannable ALIAS,
+        # so the row count is 42 — but exactly 21 of them are the labels that get
+        # printed, and that is the number this scenario is about.
         assert stats["pieces_minted"] == 21
         assert s.scalar(select(func.count(Piece.id))) == 21
         assert s.scalar(select(func.count(BarcodeRegistry.id)).where(
-            BarcodeRegistry.type == "PIECE")) == 21
+            BarcodeRegistry.type == "PIECE",
+            BarcodeRegistry.is_alias.is_(False))) == 21
+        assert s.scalar(select(func.count(BarcodeRegistry.id)).where(
+            BarcodeRegistry.type == "PIECE")) == 42
+        # Every printed code is compact, and every one still resolves to a piece.
+        printed = list(s.scalars(select(BarcodeRegistry.code).where(
+            BarcodeRegistry.type == "PIECE", BarcodeRegistry.is_alias.is_(False))))
+        assert all(c.startswith("PC-") and len(c) == 9 for c in printed), printed
+        assert len(set(printed)) == 21
 
 
 # ── UAT-2: Cutting with consumption drops stock ──────────────────────────────

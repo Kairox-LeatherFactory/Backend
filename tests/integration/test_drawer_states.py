@@ -16,6 +16,17 @@ THE RULE THIS FILE DEFENDS
 
     Then: RECEIVED needs completeness, SENDED needs RECEIVED, line-stitching
     needs SENDED, and PACKAGE_EXPORT recycles the drawer to WAITING.
+
+COMPLETENESS NOW AUTO-ADVANCES TO RECEIVED (bug #13).
+    The scan that completes a drawer moves it straight to RECEIVED, so `state`
+    reads "received" the moment the last part lands and never rests at
+    HOLDING_BOTH. That is not a loss of information: `holding` still reports
+    HOLDING BOTH (contents), and `ready_for_received` still reports completeness.
+    The assertions below therefore check the CONTENTS field for what is in the
+    drawer and the STATE field for where it is in its lifecycle — which is the
+    distinction this file was written to defend in the first place.
+
+    SENDED stays manual, and is now plural: see test_drawer_batch_send.py.
 """
 import pytest
 from fastapi import HTTPException
@@ -45,9 +56,16 @@ async def test_leather_first_then_lining(db, pieces):
     assert out["drawer_code"] == drawer.code and out["piece_code"] == piece.code
 
     out = await _scan(db, drawer, piece, DrawerPart.LINING)
-    assert out["state"] == DrawerState.HOLDING_BOTH.value
+    # Contents say BOTH; the lifecycle has already advanced past holding.
+    assert out["holding"] == "HOLDING BOTH"
+    assert out["state"] == DrawerState.RECEIVED.value
+    assert out["auto_received"] is True
     assert out["awaiting"] == []
     assert out["ready_for_received"] is True
+    # BUG #15: scanning is not completion. The piece is in the drawer and stays
+    # there until someone sends it.
+    assert out["sent"] is False and out["sent_to"] is None
+    assert "Send to Lining / Stitching" in out["next_action"]
 
 
 @pytest.mark.asyncio
@@ -62,7 +80,8 @@ async def test_lining_first_then_leather(db, pieces):
     assert out["ready_for_received"] is False
 
     out = await _scan(db, drawer, piece, DrawerPart.LEATHER)
-    assert out["state"] == DrawerState.HOLDING_BOTH.value
+    assert out["holding"] == "HOLDING BOTH"
+    assert out["state"] == DrawerState.RECEIVED.value
     assert out["awaiting"] == []
     assert out["ready_for_received"] is True
 
@@ -70,13 +89,16 @@ async def test_lining_first_then_leather(db, pieces):
 @pytest.mark.asyncio
 async def test_leather_only_piece_holds_leather_and_is_ready(db, pieces):
     """needs_lining=False: complete on leather alone, but the drawer holds
-    LEATHER — never HOLDING_BOTH, because no lining exists for this piece."""
+    LEATHER — never HOLDING BOTH, because no lining exists for this piece."""
     piece, drawer = pieces[2]
     piece.needs_lining = False
     await db.commit()
 
     out = await _scan(db, drawer, piece, DrawerPart.LEATHER)
-    assert out["state"] == DrawerState.HOLDING_LEATHER.value
+    # Complete on one part, so it auto-receives — but its CONTENTS are leather
+    # only, and must never claim a lining that is not coming.
+    assert out["holding"] == "HOLDING LEATHER"
+    assert out["state"] == DrawerState.RECEIVED.value
     assert out["needs_lining"] is False
     assert out["awaiting"] == []              # nothing else is coming
     assert out["ready_for_received"] is True  # complete despite holding one part

@@ -296,7 +296,9 @@ def seed_rates(db: Session, ops: dict[str, Operation]) -> int:
 
 # ── Step 5: user logins for staff, employees, and clients ───────────────────
 def _make_user(db: Session, *, name: str, phone: str, role: UserRole,
-               email: str | None = None, employee_id=None, client_id=None) -> User:
+               email: str | None = None, employee_id=None, client_id=None,
+               password: str | None = None,
+               must_change_password: bool = True) -> User:
     # Idempotent on phone OR email. If the user already exists, refresh the
     # foreign-key links (client/employee IDs change when orders are re-imported
     # with replace=True) instead of inserting a duplicate.
@@ -312,8 +314,10 @@ def _make_user(db: Session, *, name: str, phone: str, role: UserRole,
         return existing
     u = User(
         name=name, phone=phone, email=email, role=role,
-        password_hash=get_password_hash(phone),   # password == phone
-        is_active=True, must_change_password=True,  # force reset on first login
+        # Default stays "password == phone"; `password` overrides it for the one
+        # account the client specified by name (see the store manager below).
+        password_hash=get_password_hash(password or phone),
+        is_active=True, must_change_password=must_change_password,
         employee_id=employee_id, client_id=client_id,
     )
     db.add(u); db.flush()
@@ -342,6 +346,23 @@ def seed_users(db: Session, employees: list[Employee]) -> dict[str, int]:
         _make_user(db, name=nm, phone=ph, role=role,
                    email=f"{_slug(nm)}@factory.local")
         stats["staff"] += 1
+
+    # ── The Store Management login (bug #16) ─────────────────────────────────
+    # The client specified this account by name: username STOREMANAGER, password
+    # STORE. `User.phone` IS the login username (UserRepository.get_by_username
+    # queries User.phone), so the username goes in that column — it is a login
+    # identifier here, not a phone number.
+    #
+    # THIS IS A WEAK, SHARED, WELL-KNOWN CREDENTIAL and it is seeded because it
+    # was asked for explicitly. must_change_password is False so it keeps working
+    # as specified rather than forcing a reset on first use — which also means
+    # nothing will ever prompt anyone to change it. Rotate it before this reaches
+    # a real factory network; the role itself is correctly scoped (store hub
+    # only), so the exposure is the store, not the whole ERP.
+    _make_user(db, name="Store Manager", phone="STOREMANAGER",
+               role=UserRole.STORE_MANAGER, email="storemanager@factory.local",
+               password="STORE", must_change_password=False)
+    stats["staff"] += 1
 
     # NO logins for shop-floor employees. Workers are not given system access:
     # they hold an employee record + a scannable card, and SECURITY / HR / MD /
