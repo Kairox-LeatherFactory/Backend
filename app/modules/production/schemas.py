@@ -234,7 +234,7 @@ class LogResult(BaseModel):
     # them, so the floor never saw the warning it was told it would get.
     skill_warnings: list[dict] = Field(default_factory=list)
     # BUG #12 — {piece_code: {drawer_id, code, state, holding, leather_in,
-    # lining_in, sent_to}} for every scanned piece that has a drawer.
+    # lining_in}} for every scanned piece that has a drawer.
     drawer_by_piece: dict[str, dict] = Field(default_factory=dict)
     # BUG #8 — {sku_id, stage, total, done, remaining, closed} for the stage just
     # logged. `closed: true` means every piece of the SKU is done here and the

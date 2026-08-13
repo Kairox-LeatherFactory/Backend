@@ -392,8 +392,7 @@ async def test_a_finished_piece_is_not_ready_and_says_why(
     drawers = DrawerService(db)
     for part in (DrawerPart.LEATHER, DrawerPart.LINING):
         await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id, part=part)
-    await drawers.send_batch(drawer_ids=[drawer.id], destination="STITCHING",
-                             actor_id=dm.id)
+    await drawers.send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
     for _ in range(len(ProductionStage.leather_chain()) + 1):
         if (await svc.log_batch(user=dm, employee_id=tailor[0].id,
                                 piece_ids=[piece.id], work_date=TODAY,

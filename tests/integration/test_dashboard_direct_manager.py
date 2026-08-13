@@ -113,8 +113,7 @@ async def test_a_department_counts_a_garment_once_however_many_of_its_stages_it_
     drawers = DrawerService(db)
     for part in (DrawerPart.LEATHER, DrawerPart.LINING):
         await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id, part=part)
-    await drawers.send_batch(drawer_ids=[drawer.id], destination="STITCHING",
-                             actor_id=dm.id)
+    await drawers.send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
     # line, shell, final finish — all three Stitching stages
     for _ in range(3):
         await ProductionService(db).log_batch(

@@ -113,7 +113,7 @@ async def test_completeness_advances_to_received_by_itself(db, pieces, dm):
     assert full["auto_received"] is True
     assert full["state"] == DrawerState.RECEIVED.value
     # ...but NOT sent. Receiving records contents; sending releases the garment.
-    assert full["sent"] is False and full["sent_to"] is None
+    assert full["sent"] is False
 
 
 @pytest.mark.asyncio
@@ -140,8 +140,7 @@ async def test_many_drawers_go_in_one_action_and_release_their_pieces(
     for piece, drawer in chosen:
         await _fill(db, piece, drawer, DrawerPart.LEATHER, DrawerPart.LINING)
 
-    out = await svc.send_batch(drawer_ids=[d.id for _, d in chosen],
-                               destination="STITCHING", actor_id=dm.id)
+    out = await svc.send_batch(drawer_ids=[d.id for _, d in chosen], actor_id=dm.id)
 
     assert out["count_sent"] == 3 and out["requested"] == 3
     assert out["not_ready"] == [] and out["not_found"] == []
@@ -163,8 +162,7 @@ async def test_one_unready_drawer_never_loses_the_ready_ones(db, pieces, dm):
     untouched = pieces[2]
 
     out = await svc.send_batch(
-        drawer_ids=[ready[1].id, half_full[1].id, untouched[1].id],
-        destination="STITCHING", actor_id=dm.id)
+        drawer_ids=[ready[1].id, half_full[1].id, untouched[1].id], actor_id=dm.id)
 
     assert out["count_sent"] == 1
     assert out["sent"][0]["drawer_code"] == ready[1].code
@@ -177,22 +175,32 @@ async def test_one_unready_drawer_never_loses_the_ready_ones(db, pieces, dm):
 
 
 @pytest.mark.asyncio
-async def test_sending_to_lining_records_the_route_without_opening_the_gate(
-    db, pieces, dm
-):
-    """The two destinations are not interchangeable: only STITCHING releases a
-    piece into line-stitching."""
+async def test_sending_takes_nothing_but_the_drawers(db, pieces, dm):
+    """THERE IS NO DESTINATION TO CHOOSE, and the API must not ask for one.
+
+    The store sits at exactly one point in the pipeline: lining is cut and then
+    scanned INTO the drawer, so a merged drawer has one way forward — line
+    stitching, then shell, then final finish. A `destination` argument implied a
+    fork that does not exist on the floor, and "send to lining" would have meant
+    routing a garment backwards to a stage it had already cleared.
+    """
+    import inspect
+
     svc = DrawerService(db)
+    params = inspect.signature(svc.send_batch).parameters
+    assert "destination" not in params, (
+        "send_batch must not ask which way to send — there is only one way")
+    assert set(params) == {"drawer_ids", "actor_id"}
+
     piece, drawer = pieces[0]
     await _fill(db, piece, drawer, DrawerPart.LEATHER, DrawerPart.LINING)
+    out = await svc.send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
 
-    out = await svc.send_batch(drawer_ids=[drawer.id], destination="LINING",
-                               actor_id=dm.id)
     assert out["count_sent"] == 1
-    assert out["sent"][0]["sent_to"] == "LINING"
-
-    detail = await svc.drawer_detail(drawer.id)
-    assert detail["sent"] is True and detail["sent_to"] == "LINING"
+    assert "destination" not in out
+    assert "sent_to" not in out["sent"][0]
+    # ...and the send did the one thing it exists to do.
+    assert await svc.is_sended(piece.id) is True
 
 
 @pytest.mark.asyncio
@@ -200,11 +208,9 @@ async def test_a_resent_drawer_is_reported_not_double_counted(db, pieces, dm):
     svc = DrawerService(db)
     piece, drawer = pieces[0]
     await _fill(db, piece, drawer, DrawerPart.LEATHER, DrawerPart.LINING)
-    await svc.send_batch(drawer_ids=[drawer.id], destination="STITCHING",
-                         actor_id=dm.id)
+    await svc.send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
 
-    again = await svc.send_batch(drawer_ids=[drawer.id], destination="STITCHING",
-                                 actor_id=dm.id)
+    again = await svc.send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
     assert again["count_sent"] == 0
     assert "already sent" in again["not_ready"][0]["reason"]
 
@@ -216,8 +222,7 @@ async def test_a_duplicate_selection_is_collapsed(db, pieces, dm):
     piece, drawer = pieces[0]
     await _fill(db, piece, drawer, DrawerPart.LEATHER, DrawerPart.LINING)
 
-    out = await svc.send_batch(drawer_ids=[drawer.id, drawer.id, drawer.id],
-                               destination="STITCHING", actor_id=dm.id)
+    out = await svc.send_batch(drawer_ids=[drawer.id, drawer.id, drawer.id], actor_id=dm.id)
     assert out["requested"] == 1 and out["count_sent"] == 1
 
 
@@ -229,26 +234,15 @@ async def test_an_unknown_drawer_is_bucketed_not_fatal(db, pieces, dm):
     await _fill(db, piece, drawer, DrawerPart.LEATHER, DrawerPart.LINING)
 
     ghost = _uuid.uuid4()
-    out = await svc.send_batch(drawer_ids=[drawer.id, ghost],
-                               destination="STITCHING", actor_id=dm.id)
+    out = await svc.send_batch(drawer_ids=[drawer.id, ghost], actor_id=dm.id)
     assert out["count_sent"] == 1
     assert out["not_found"] == [str(ghost)]
 
 
 @pytest.mark.asyncio
-async def test_an_unknown_destination_is_422(db, pieces, dm):
-    _, drawer = pieces[0]
-    with pytest.raises(HTTPException) as exc:
-        await DrawerService(db).send_batch(drawer_ids=[drawer.id],
-                                           destination="WAREHOUSE", actor_id=dm.id)
-    assert exc.value.status_code == 422
-
-
-@pytest.mark.asyncio
 async def test_an_empty_selection_is_422(db, dm):
     with pytest.raises(HTTPException) as exc:
-        await DrawerService(db).send_batch(drawer_ids=[], destination="STITCHING",
-                                           actor_id=dm.id)
+        await DrawerService(db).send_batch(drawer_ids=[], actor_id=dm.id)
     assert exc.value.status_code == 422
 
 
@@ -291,20 +285,19 @@ async def test_drawer_detail_reports_what_it_is_waiting_for(db, pieces):
 
 
 @pytest.mark.asyncio
-async def test_a_recycled_drawer_forgets_where_it_was_sent(
-    db, operations, pieces, dm
-):
-    """`sent_to` is per-garment. A drawer that comes back to WAITING and takes the
-    NEXT piece must not still read "sent to stitching"."""
+async def test_a_recycled_drawer_comes_back_clean(db, operations, pieces, dm):
+    """A drawer that recycles must carry nothing from the garment that just left,
+    or the NEXT piece inherits a state it never earned."""
     svc = DrawerService(db)
     piece, drawer = pieces[0]
     await _fill(db, piece, drawer, DrawerPart.LEATHER, DrawerPart.LINING)
-    await svc.send_batch(drawer_ids=[drawer.id], destination="STITCHING",
-                         actor_id=dm.id)
+    await svc.send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
 
     await svc.release_nocommit(piece.id)
     await db.commit()
     await db.refresh(drawer)
 
     assert drawer.state == DrawerState.WAITING.value
-    assert drawer.sent_to is None
+    assert drawer.current_piece_id is None
+    assert drawer.leather_in is False and drawer.lining_in is False
+    assert drawer.received_at is None and drawer.sended_at is None

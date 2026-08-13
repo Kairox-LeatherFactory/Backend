@@ -112,11 +112,13 @@ class Drawer(Base, UUIDMixin, TimestampMixin):
     lining_in: Mapped[bool] = mapped_column(Boolean, default=False)
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # WHERE the batch send routed this drawer: STITCHING (released past the merge
-    # gate into line-stitching) or LINING (routed to the lining floor, gate still
-    # shut). `state` says the drawer was sent; it cannot say where, and the store
-    # screen has to show which of the two happened. Null until the first send.
-    sent_to: Mapped[str | None] = mapped_column(String(20), index=True)
+    # NO `sent_to`. A drawer briefly carried one, on the assumption that a send
+    # chose between a lining floor and a stitching floor. It does not: lining is
+    # UPSTREAM of the store — the lining part is cut and then scanned INTO this
+    # drawer — so a merged drawer has exactly one way forward, into
+    # LINE_STITCHING. `state == SENDED` therefore already says everything a
+    # destination column could, and a column whose only possible value is a
+    # constant is a question the schema should not be asking.
 
 
 class MaterialLot(Base, UUIDMixin, TimestampMixin):

@@ -288,7 +288,7 @@ class ProductionRepository:
         from app.modules.barcode.models import Drawer
         res = await self.db.execute(
             select(Drawer.current_piece_id, Drawer.id, Drawer.code, Drawer.state,
-                   Drawer.leather_in, Drawer.lining_in, Drawer.sent_to)
+                   Drawer.leather_in, Drawer.lining_in)
             .where(Drawer.current_piece_id.in_(piece_ids))
         )
         return {
@@ -300,7 +300,6 @@ class ProductionRepository:
                                          lining_in=r.lining_in),
                 "leather_in": bool(r.leather_in),
                 "lining_in": bool(r.lining_in),
-                "sent_to": r.sent_to,
             }
             for r in res.all() if r.current_piece_id is not None
         }

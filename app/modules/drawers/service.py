@@ -35,10 +35,6 @@ from app.core.store_display import holding_label
 from app.modules.barcode.models import BarcodeRegistry, Drawer
 from app.modules.production.models import Piece
 
-# Where a batch send routes a drawer. STITCHING is the one that opens the merge
-# gate (production reads DrawerState.SENDED through is_sended); LINING records
-# that the drawer went to the lining floor and deliberately does NOT.
-SEND_DESTINATIONS = ("STITCHING", "LINING")
 
 
 class DrawerService:
@@ -147,7 +143,6 @@ class DrawerService:
                 "piece_code": r.piece_code,
                 "piece_serial": (f"{r.piece_seq:03d}"
                                  if r.piece_seq is not None else None),
-                "sent_to": drawer.sent_to,
                 "can_send": drawer.state == DrawerState.RECEIVED.value,
                 "barcode_id": r[1],
                 "barcode": r[2],
@@ -351,7 +346,6 @@ class DrawerService:
             # fields say so in the response itself, so the UI has no excuse to
             # infer otherwise.
             "sent": drawer.state == DrawerState.SENDED.value,
-            "sent_to": drawer.sent_to,
             # THREE OUTCOMES NOW, not two, because auto-receive needs both parts
             # while completeness does not. The middle one is the leather-only
             # piece: it is ready, but a person confirms it rather than the flag.
@@ -415,10 +409,6 @@ class DrawerService:
                     "Cannot SEND before RECEIVED. Set RECEIVED first.")
             drawer.state = DrawerState.SENDED.value
             drawer.sended_at = datetime.now(timezone.utc)
-            # The legacy single-drawer route names no destination; it always
-            # meant "release to line-stitching", so record that rather than
-            # leaving sent_to null and making the list show a blank column.
-            drawer.sent_to = "STITCHING"
             action = BarcodeAuditAction.DRAWER_SENDED.value
         else:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -476,7 +466,6 @@ class DrawerService:
             "complete": bool(complete),
             "received_at": drawer.received_at,
             "sended_at": drawer.sended_at,
-            "sent_to": drawer.sent_to,
             "sent": drawer.state == DrawerState.SENDED.value,
             # What the list's Send button should do with this row.
             "can_send": drawer.state == DrawerState.RECEIVED.value,
@@ -484,33 +473,34 @@ class DrawerService:
         }
 
     # ── the batch send (bugs #13, #14, #15) ──────────────────────────────────
-    async def send_batch(self, *, drawer_ids: list[uuid.UUID], destination: str,
+    async def send_batch(self, *, drawer_ids: list[uuid.UUID],
                          actor_id: uuid.UUID | None) -> dict:
         """Send MANY drawers — and the pieces in them — onward, in one action.
 
         WHY BATCH. The store does not release garments one at a time; it fills a
         bank of drawers and moves them together. The single-drawer transition
         endpoint made that N requests and N chances to lose track of which
-        drawers had actually gone, which is what bug #14 is about.
+        drawers had actually gone.
+
+        THERE IS NO DESTINATION TO CHOOSE, and asking for one was a modelling
+        mistake. The store sits at ONE point in the pipeline:
+
+            leather cut ─┐
+                         ├─► drawer (merge) ─► LINE_STITCHING ─► SHELL_STITCHING
+            lining cut ──┘                     ─► FINAL_FINISH ─► ...
+
+        Lining is UPSTREAM: the lining is cut and then scanned INTO the drawer.
+        A drawer that holds both parts has exactly one way forward, so "send to
+        lining" would mean sending a garment backwards to a stage it has already
+        cleared. Sending simply releases the piece into line-stitching — which is
+        precisely what ProductionService._merge_ok reads, through is_sended.
 
         PARTIAL ACCEPT, LIKE THE PRODUCTION GATES. One drawer that is not ready
         must never lose the twenty that are — the same reasoning that makes gates
         2-4 of the production log per-piece rather than per-request. So every
         drawer lands in exactly one bucket, with the reason attached, and the
         good ones commit.
-
-        DESTINATION IS NOT DECORATION. STITCHING sets SENDED, which is precisely
-        what ProductionService._merge_ok reads (through is_sended) to release a
-        piece into LINE_STITCHING — so this call is what unblocks that whole
-        bunch of pieces. LINING records that the drawer went to the lining floor
-        and leaves the stitching gate shut, because the garment is not ready for
-        it yet.
         """
-        dest = (destination or "").strip().upper()
-        if dest not in SEND_DESTINATIONS:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                f"destination must be one of {list(SEND_DESTINATIONS)}.")
         if not drawer_ids:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 "Select at least one drawer to send.")
@@ -541,8 +531,7 @@ class DrawerService:
                 not_ready.append({
                     "drawer_id": str(did), "drawer_code": drawer.code,
                     "state": drawer.state,
-                    "reason": (f"Drawer {drawer.code} was already sent"
-                               f"{' to ' + drawer.sent_to if drawer.sent_to else ''}.")})
+                    "reason": f"Drawer {drawer.code} was already sent."})
                 continue
             if drawer.state != DrawerState.RECEIVED.value:
                 not_ready.append({
@@ -556,33 +545,27 @@ class DrawerService:
 
             drawer.state = DrawerState.SENDED.value
             drawer.sended_at = now
-            drawer.sent_to = dest
             await self._audit(
                 actor_id, BarcodeAuditAction.DRAWER_SENDED.value, drawer.id,
                 {"piece": piece.code if piece else None, "state": drawer.state,
-                 "destination": dest, "batch_size": len(wanted)})
+                 "batch_size": len(wanted)})
             sent.append({
                 "drawer_id": str(did), "drawer_code": drawer.code,
                 "piece_code": piece.code if piece else None,
-                "state": drawer.state, "sent_to": dest})
+                "state": drawer.state})
 
         await self.repo_commit()
 
         released = [s["piece_code"] for s in sent if s["piece_code"]]
-        if sent and dest == "STITCHING":
-            message = (f"Sent {len(sent)} drawer(s) to stitching — "
-                       f"{len(released)} piece(s) released for line-stitching.")
-        elif sent:
-            message = (f"Sent {len(sent)} drawer(s) to lining. Their pieces stay "
-                       f"blocked for line-stitching until they come back and are "
-                       f"sent to stitching.")
+        if sent:
+            message = (f"Sent {len(sent)} drawer(s) — {len(released)} piece(s) "
+                       f"released for line-stitching.")
         else:
             message = "Nothing sent — see `not_ready` for the reason on each."
         if not_ready:
             message += f" {len(not_ready)} drawer(s) were not ready."
 
         return {
-            "destination": dest,
             "requested": len(wanted),
             "count_sent": len(sent),
             "sent": sent, "not_ready": not_ready, "not_found": not_found,
@@ -605,9 +588,6 @@ class DrawerService:
             drawer.lining_in = False
             drawer.received_at = None
             drawer.sended_at = None
-            # A recycled drawer has not been sent anywhere; a stale routing would
-            # show the NEXT garment as already sent to stitching.
-            drawer.sent_to = None
         # F11: clear BOTH sides of the piece↔drawer link. Previously only
         # drawer.current_piece_id was nulled, so after release the piece still
         # pointed at a drawer that no longer claimed it — the barcode payload and

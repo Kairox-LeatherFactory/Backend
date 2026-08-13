@@ -60,7 +60,7 @@ async def test_the_store_manager_runs_the_whole_store_hub(
 
     # and releasing a batch — the decision the role exists to own
     r = await api_client.post(f"{API}/drawers/send", json={
-        "drawer_ids": [str(drawer.id)], "destination": "STITCHING"})
+        "drawer_ids": [str(drawer.id)], })
     assert r.status_code == 200, r.text
     assert r.json()["count_sent"] == 1
 
@@ -113,7 +113,7 @@ async def test_a_floor_manager_may_scan_but_may_not_release(
     assert r.status_code == 200, r.text
 
     r = await api_client.post(f"{API}/drawers/send", json={
-        "drawer_ids": [str(drawer.id)], "destination": "STITCHING"})
+        "drawer_ids": [str(drawer.id)], })
     assert r.status_code == 403
 
 
@@ -124,7 +124,7 @@ async def test_a_viewer_reaches_none_of_the_store(api_client, as_role, pieces):
     assert (await api_client.get(f"{API}/drawers")).status_code == 403
     assert (await api_client.get(f"{API}/drawers/{drawer.id}")).status_code == 403
     r = await api_client.post(f"{API}/drawers/send", json={
-        "drawer_ids": [str(drawer.id)], "destination": "STITCHING"})
+        "drawer_ids": [str(drawer.id)], })
     assert r.status_code == 403
 
 

@@ -102,12 +102,16 @@ async def send_drawers(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(_SENDERS),
 ):
-    """Send one or many drawers — and the pieces in them — onward (bugs #13/#14).
+    """Send one or many drawers — and the pieces in them — onward.
 
-    `destination=STITCHING` sets each drawer to SENDED, which is exactly what the
-    production merge gate reads: the whole selected bunch of pieces becomes
-    eligible for LINE_STITCHING in one action. `destination=LINING` records the
-    routing and leaves that gate shut.
+    Sets each drawer to SENDED, which is exactly what the production merge gate
+    reads: the whole selected bunch of pieces becomes eligible for LINE_STITCHING
+    in one action, and then follows the chain on to shell stitching and final
+    finish.
+
+    THERE IS NO DESTINATION TO PICK. Lining is upstream of the store — the lining
+    part is cut and then scanned INTO the drawer — so a merged drawer has exactly
+    one way forward. Send the ids and nothing else.
 
     PARTIAL ACCEPT: a drawer that is not yet RECEIVED comes back in `not_ready`
     with the reason; the rest are still sent. Check `count_sent`, not the HTTP
@@ -117,8 +121,7 @@ async def send_drawers(
     "send" would be parsed as a drawer id and 422 on the UUID conversion.
     """
     return await DrawerService(db).send_batch(
-        drawer_ids=body.drawer_ids, destination=body.destination,
-        actor_id=user.id)
+        drawer_ids=body.drawer_ids, actor_id=user.id)
 
 
 @router.get("/{drawer_id}", response_model=schemas.DrawerDetail)
