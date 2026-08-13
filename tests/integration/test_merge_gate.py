@@ -224,7 +224,7 @@ async def test_sended_requires_received(db, operations, pieces, dm):
     assert out["sent"] == []
     assert len(out["not_ready"]) == 1
     assert out["not_ready"][0]["state"] == DrawerState.HOLDING_LEATHER.value
-    assert "RECEIVED" in out["not_ready"][0]["reason"]
+    assert "awaiting its lining" in out["not_ready"][0]["reason"]
 
     # the deprecated single-drawer route enforces the same order
     with pytest.raises(Exception) as ei:

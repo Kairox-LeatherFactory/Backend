@@ -168,8 +168,9 @@ async def test_one_unready_drawer_never_loses_the_ready_ones(db, pieces, dm):
     assert out["sent"][0]["drawer_code"] == ready[1].code
     assert {r["drawer_code"] for r in out["not_ready"]} == {
         half_full[1].code, untouched[1].code}
-    # every rejection carries an actionable reason
-    assert all("RECEIVED" in r["reason"] for r in out["not_ready"])
+    # Every rejection names WHAT IS MISSING, not just that it was refused —
+    # "still awaiting its lining" is an instruction; "not RECEIVED" is a status.
+    assert all("awaiting its" in r["reason"] for r in out["not_ready"])
     assert await svc.is_sended(ready[0].id) is True
     assert await svc.is_sended(half_full[0].id) is False
 

@@ -26,7 +26,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import (BarcodeAuditAction, BarcodeType, DrawerPart,
@@ -95,16 +95,37 @@ class DrawerService:
                 stmt = stmt.where(Drawer.current_piece_id.isnot(None))
             elif has_piece is False:
                 stmt = stmt.where(Drawer.current_piece_id.is_(None))
-            # "Show me what I can send right now" — RECEIVED is reached
-            # automatically on completeness, so this is the send queue.
+            # "Show me what I can send right now" — the SEND QUEUE, and it has to
+            # be the same predicate send_batch enforces or the screen offers a
+            # queue the server disagrees with.
+            #
+            # That predicate is COMPLETENESS, not state == RECEIVED: a drawer
+            # holding both parts auto-receives, but a leather-only piece never
+            # gets a second part and so never reaches RECEIVED, while still being
+            # complete and perfectly sendable. Expressed in SQL here because the
+            # filter has to run in the database, with the same
+            # "leather AND (lining OR needs no lining)" shape used in Python below.
+            complete_sql = and_(
+                Drawer.leather_in.is_(True),
+                or_(Drawer.lining_in.is_(True),
+                    Piece.needs_lining.is_(False)),
+            )
+            not_gone = Drawer.state != DrawerState.SENDED.value
             if sendable is True:
-                stmt = stmt.where(Drawer.state == DrawerState.RECEIVED.value)
+                stmt = stmt.where(and_(complete_sql, not_gone))
             elif sendable is False:
-                stmt = stmt.where(Drawer.state != DrawerState.RECEIVED.value)
+                stmt = stmt.where(~and_(complete_sql, not_gone))
             return stmt
 
+        # The COUNT joins Piece as well. `sendable` filters on Piece.needs_lining,
+        # so without the join here the count would reference a table it never
+        # selected from — a cartesian product on Postgres and a different total
+        # from the page it is supposed to be counting.
         total = int(await self.db.scalar(
-            _filtered(select(func.count(Drawer.id)))) or 0)
+            _filtered(
+                select(func.count(Drawer.id))
+                .select_from(Drawer)
+                .outerjoin(Piece, Piece.id == Drawer.current_piece_id))) or 0)
 
         rows = (await self.db.execute(
             _filtered(
@@ -143,7 +164,12 @@ class DrawerService:
                 "piece_code": r.piece_code,
                 "piece_serial": (f"{r.piece_seq:03d}"
                                  if r.piece_seq is not None else None),
-                "can_send": drawer.state == DrawerState.RECEIVED.value,
+                # SAME PREDICATE THE SEND USES. If this said "state == RECEIVED"
+                # while send_batch accepts any complete drawer, the list would
+                # grey out rows the server would happily take — and a leather-only
+                # garment would look permanently stuck to the operator.
+                "can_send": bool(complete)
+                            and drawer.state != DrawerState.SENDED.value,
                 "barcode_id": r[1],
                 "barcode": r[2],
                 "caption": r[3],
@@ -468,7 +494,8 @@ class DrawerService:
             "sended_at": drawer.sended_at,
             "sent": drawer.state == DrawerState.SENDED.value,
             # What the list's Send button should do with this row.
-            "can_send": drawer.state == DrawerState.RECEIVED.value,
+            # Same predicate as send_batch — see the note in list_labels.
+            "can_send": bool(complete) and drawer.state != DrawerState.SENDED.value,
             "piece": piece_card,
         }
 
@@ -533,18 +560,41 @@ class DrawerService:
                     "state": drawer.state,
                     "reason": f"Drawer {drawer.code} was already sent."})
                 continue
-            if drawer.state != DrawerState.RECEIVED.value:
+
+            # THE GATE IS COMPLETENESS, NOT THE LITERAL 'RECEIVED' STATE.
+            #
+            # This required state == RECEIVED, and that quietly stranded a whole
+            # class of garment. Auto-receive fires only on HOLDING_BOTH — two
+            # physical scans — so a piece that needs no lining never gets a second
+            # part, never auto-receives, and could never be sent. Its drawer sat
+            # complete and immovable, and nothing in the UI could free it, so the
+            # garment never reached line-stitching at all. On the live database
+            # that flag covers most pieces.
+            #
+            # Completeness is the real question a send asks: does this drawer hold
+            # everything its garment needs? It SUBSUMES the old check — a drawer
+            # only ever reached RECEIVED by being complete — so nothing that used
+            # to be sendable stops being sendable, and the stranded case is freed.
+            needs_lining = bool(getattr(piece, "needs_lining", True)) if piece else True
+            complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
+            if not complete:
+                missing = "leather" if not drawer.leather_in else "lining"
                 not_ready.append({
                     "drawer_id": str(did), "drawer_code": drawer.code,
                     "state": drawer.state,
                     "reason": (
-                        f"Drawer {drawer.code} is {drawer.state} — it reaches "
-                        f"RECEIVED automatically once its leather and lining are "
-                        f"both scanned in. Scan the missing part first.")})
+                        f"Drawer {drawer.code} is still awaiting its {missing}. "
+                        f"Scan the missing part into it before sending.")})
                 continue
 
             drawer.state = DrawerState.SENDED.value
             drawer.sended_at = now
+            # A complete drawer that never passed through RECEIVED (the
+            # leather-only case) is received at the moment it is sent — otherwise
+            # the audit trail would show a garment released with no record of it
+            # ever having been confirmed complete.
+            if drawer.received_at is None:
+                drawer.received_at = now
             await self._audit(
                 actor_id, BarcodeAuditAction.DRAWER_SENDED.value, drawer.id,
                 {"piece": piece.code if piece else None, "state": drawer.state,
