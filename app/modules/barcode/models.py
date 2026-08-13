@@ -71,6 +71,25 @@ class BarcodeRegistry(Base, UUIDMixin, TimestampMixin):
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     retired_reason: Mapped[str | None] = mapped_column(String(120))
 
+    # ONE PIECE, TWO CODES — and only one of them is the label (bug #19).
+    #
+    # Since the compact code arrived, a piece has TWO active registry rows: the
+    # small `PC-…` code that is printed and scanned (is_alias=False, the PRIMARY),
+    # and its old long `KJ2451-CLERMONT-57-M-005` code, kept alive so labels
+    # printed before the change still resolve (is_alias=True).
+    #
+    # WHY THIS IS A STORED FLAG AND NOT INFERRED FROM THE CODE PREFIX.
+    # Every per-order count and the whole history list select `type=PIECE` rows.
+    # With two rows per piece and no discriminator, `minted` doubles, `balance`
+    # goes negative, the `duplicates` integrity proof reads as broken, and the
+    # history table shows each garment twice. Those queries need to name the rule
+    # they mean; "the code happens to start with PC-" is not that rule. An alias
+    # also carries NO order/sku/style FK, so it stays out of those queries even
+    # if one is ever written without the flag — belt and braces on a count the
+    # factory reconciles against.
+    is_alias: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0", index=True)
+
 
 class Drawer(Base, UUIDMixin, TimestampMixin):
     """A physical storage drawer. STATIC code, RECYCLING state.
@@ -93,6 +112,13 @@ class Drawer(Base, UUIDMixin, TimestampMixin):
     lining_in: Mapped[bool] = mapped_column(Boolean, default=False)
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # NO `sent_to`. A drawer briefly carried one, on the assumption that a send
+    # chose between a lining floor and a stitching floor. It does not: lining is
+    # UPSTREAM of the store — the lining part is cut and then scanned INTO this
+    # drawer — so a merged drawer has exactly one way forward, into
+    # LINE_STITCHING. `state == SENDED` therefore already says everything a
+    # destination column could, and a column whose only possible value is a
+    # constant is a question the schema should not be asking.
 
 
 class MaterialLot(Base, UUIDMixin, TimestampMixin):

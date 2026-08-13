@@ -103,8 +103,20 @@ def test_premint_commits_with_foreign_keys_enforced(fk_db):
     assert stats["pieces_minted"] == 12
     assert fk_db.scalar(select(func.count(Piece.id))) == 12
     assert fk_db.scalar(select(func.count(Drawer.id))) == 12
-    # one PIECE barcode + one DRAWER barcode each
-    assert fk_db.scalar(select(func.count(BarcodeRegistry.id))) == 24
+    # THREE barcode rows per piece since the compact-code switch (bug #19):
+    # the PC-… primary that gets printed, the long code kept as a scannable
+    # alias, and the drawer's own permanent label. 12 × 3 = 36.
+    assert fk_db.scalar(select(func.count(BarcodeRegistry.id))) == 36
+    # Exactly ONE primary per piece — this is the count every per-order total
+    # reconciles against, and the alias must never inflate it.
+    assert fk_db.scalar(
+        select(func.count(BarcodeRegistry.id))
+        .where(BarcodeRegistry.type == "PIECE",
+               BarcodeRegistry.is_alias.is_(False))) == 12
+    assert fk_db.scalar(
+        select(func.count(BarcodeRegistry.id))
+        .where(BarcodeRegistry.type == "PIECE",
+               BarcodeRegistry.is_alias.is_(True))) == 12
 
 
 def test_every_barcode_points_at_a_row_that_exists(fk_db):
@@ -173,4 +185,6 @@ def test_a_rerun_tops_up_without_duplicating(fk_db):
 
     assert again["pieces_minted"] == 0
     assert fk_db.scalar(select(func.count(Piece.id))) == 9
-    assert fk_db.scalar(select(func.count(BarcodeRegistry.id))) == 18
+    # 9 pieces × (compact primary + long alias + drawer label) = 27, and a re-run
+    # must not add a second compact code to a piece that already has one.
+    assert fk_db.scalar(select(func.count(BarcodeRegistry.id))) == 27

@@ -34,6 +34,60 @@ def _norm(code: str | None) -> str:
     return (code or "").strip().upper()
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# THE COMPACT PIECE CODE  (bug #19)
+# ══════════════════════════════════════════════════════════════════════════
+# A piece's identity used to BE its printed code: "KJ2451-CLERMONT-57-M-005",
+# ~24 characters. Encoded as Code128 that is a wide label and a slow, error-prone
+# scan, and the client also wants ARTICLE on the sticker — which would make it
+# longer still. So the two jobs are separated:
+#
+#     the BARCODE carries a small unique id      → PC-23456A
+#     the STICKER prints the business identity   → order · style · article ·
+#                                                   colour · size · serial
+#
+# The long code is NOT retired. Every label already printed keeps resolving,
+# because the old code stays in the registry as an ALIAS row (is_alias=True)
+# pointing at the same piece. See BarcodeRegistry.is_alias for why that flag is
+# stored rather than inferred.
+#
+# BASE 30, NOT BASE 36. The alphabet omits 0/O and 1/I — the four characters a
+# human re-keying a smudged label confuses — and is in ASCII-ascending order, so
+# a fixed-width encoding sorts lexicographically exactly as it sorts numerically.
+# That is what lets _next_code's "ORDER BY code DESC LIMIT 1" trick work here too
+# (one row transferred per mint instead of the whole prefix).
+SHORT_CODE_PREFIX = "PC"
+SHORT_CODE_WIDTH = 6
+_B30 = "23456789ABCDEFGHJKMNPQRSTVWXYZ"          # 30 chars, ascending ASCII
+_B30_INDEX = {c: i for i, c in enumerate(_B30)}
+
+
+def encode_short(counter: int) -> str:
+    """1 → 'PC-222223'. Fixed width, left-padded with the alphabet's zero digit."""
+    n = max(int(counter), 0)
+    out = ""
+    while n:
+        n, rem = divmod(n, len(_B30))
+        out = _B30[rem] + out
+    return f"{SHORT_CODE_PREFIX}-{out.rjust(SHORT_CODE_WIDTH, _B30[0])}"
+
+
+def decode_short(code: str | None) -> int:
+    """'PC-222223' → 1. Returns 0 for anything that is not a short code, so a
+    stray row can never poison the counter (it just doesn't raise the maximum)."""
+    text = _norm(code)
+    head, sep, tail = text.partition("-")
+    if head != SHORT_CODE_PREFIX or not sep or not tail:
+        return 0
+    total = 0
+    for ch in tail:
+        idx = _B30_INDEX.get(ch)
+        if idx is None:
+            return 0
+        total = total * len(_B30) + idx
+    return total
+
+
 class BarcodeRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -91,7 +145,18 @@ class BarcodeRepository:
         This was 3 round-trips in the service (piece+joins, then a drawer get, then
         a consumption select). The drawer is a LEFT JOIN (null before merge) and the
         consumption is a correlated scalar subquery (null before cutting), so the
-        whole card is one statement — one scan, one query."""
+        whole card is one statement — one scan, one query.
+
+        THE DRAWER JOIN IS ON `Drawer.current_piece_id`, NOT `Piece.drawer_id`.
+        Those two are the same link from opposite ends, but only one of them is
+        live: `release_nocommit` nulls BOTH when a piece ships, while a store scan
+        moves `Drawer.state`/`leather_in`/`lining_in` on the row that CLAIMS the
+        piece. Reading the drawer through the claim is what makes the state and
+        holding columns below (bug #12) the same answer the store screen gives.
+
+        ARTICLE (bug #7/#19) comes off Style — it is the field the printed sticker
+        must show and the one the barcode payload never carried.
+        """
         consumption = (
             select(ProductionEvent.consumption_qty)
             .where(ProductionEvent.piece_id == Piece.id,
@@ -104,13 +169,20 @@ class BarcodeRepository:
         return (await self.db.execute(
             select(
                 Piece.id, Piece.code, Piece.seq, Piece.needs_lining,
+                SKU.id.label("sku_id"),
                 SKU.code.label("sku_code"),
                 SKU.color_name, SKU.color_code, SKU.size,
+                Style.id.label("style_id"),
                 Style.name.label("style_name"),
+                Style.article.label("article"),
+                ClientOrder.id.label("order_id"),
                 ClientOrder.order_number,
                 Client.name.label("client_name"),
                 Operation.code.label("current_stage"),
+                Drawer.id.label("drawer_id"),
                 Drawer.code.label("drawer_code"),
+                Drawer.state.label("drawer_state"),
+                Drawer.leather_in, Drawer.lining_in,
                 consumption.label("consumption_qty"),
             )
             .join(SKU, SKU.id == Piece.sku_id)
@@ -118,7 +190,7 @@ class BarcodeRepository:
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .join(Client, Client.id == ClientOrder.client_id)
             .outerjoin(Operation, Operation.id == Piece.current_operation_id)
-            .outerjoin(Drawer, Drawer.id == Piece.drawer_id)
+            .outerjoin(Drawer, Drawer.current_piece_id == Piece.id)
             .where(Piece.id == piece_id)
         )).first()
 
@@ -132,7 +204,8 @@ class BarcodeRepository:
     async def drawer_card(self, drawer_id: uuid.UUID) -> Row | None:
         return (await self.db.execute(
             select(Drawer.id, Drawer.code, Drawer.seq, Drawer.state,
-                   Drawer.current_piece_id, Drawer.leather_in, Drawer.lining_in)
+                   Drawer.current_piece_id, Drawer.leather_in, Drawer.lining_in,
+                   )
             .where(Drawer.id == drawer_id)
         )).first()
 
@@ -206,11 +279,17 @@ class BarcodeRepository:
                           piece_id: uuid.UUID | None = None,
                           employee_id: uuid.UUID | None = None,
                           drawer_id: uuid.UUID | None = None,
-                          material_lot_id: uuid.UUID | None = None) -> BarcodeRegistry:
+                          material_lot_id: uuid.UUID | None = None,
+                          order_id: uuid.UUID | None = None,
+                          sku_id: uuid.UUID | None = None,
+                          style_id: uuid.UUID | None = None,
+                          is_alias: bool = False) -> BarcodeRegistry:
         row = BarcodeRegistry(
             code=_norm(code), type=type_.value, status=BarcodeStatus.ACTIVE.value,
             caption=caption, piece_id=piece_id, employee_id=employee_id,
             drawer_id=drawer_id, material_lot_id=material_lot_id,
+            order_id=order_id, sku_id=sku_id, style_id=style_id,
+            is_alias=is_alias,
         )
         self.db.add(row)
         return row
@@ -228,6 +307,70 @@ class BarcodeRepository:
         return self.register_nocommit(
             code=code, type_=BarcodeType.DRAWER, drawer_id=drawer_id,
             caption=caption or f"Drawer {seq}")
+
+    # ── the compact piece code (bug #19) ─────────────────────────────────────
+    async def max_short_code_counter(self) -> int:
+        """The highest short-code counter in use, as an int.
+
+        ONE row transferred, for the same reason _next_code does it this way: the
+        encoding is fixed-width over an ASCII-ascending alphabet, so the
+        lexicographic maximum IS the numeric maximum. Callers that mint a whole
+        import's worth of codes read this ONCE and then count up in Python — a
+        1,400-piece upload must not run 1,400 MAX() queries (that is exactly the
+        quadratic behaviour F79/F99 removed from _next_code).
+        """
+        top = await self.db.scalar(
+            select(BarcodeRegistry.code)
+            .where(BarcodeRegistry.code.like(f"{SHORT_CODE_PREFIX}-%"))
+            .order_by(BarcodeRegistry.code.desc())
+            .limit(1)
+        )
+        return decode_short(top)
+
+    async def mint_piece_short_code_nocommit(
+        self, piece_id: uuid.UUID, *, caption: str | None = None,
+        order_id: uuid.UUID | None = None, sku_id: uuid.UUID | None = None,
+        style_id: uuid.UUID | None = None,
+    ) -> BarcodeRegistry:
+        """Mint ONE compact code for a piece. For a single piece (a repair, a
+        reprint); the importer uses max_short_code_counter + encode_short directly
+        so it pays one read for the whole batch."""
+        code = encode_short(await self.max_short_code_counter() + 1)
+        return self.register_nocommit(
+            code=code, type_=BarcodeType.PIECE, piece_id=piece_id,
+            caption=caption, order_id=order_id, sku_id=sku_id, style_id=style_id)
+
+    async def short_codes_for_pieces(
+        self, piece_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, str]:
+        """piece_id → its COMPACT scannable code, for a whole page in ONE query.
+
+        Batch form, mirroring codes_for_employees. Three filters, each load-bearing:
+
+          is_alias=False   the legacy long code is not the code to print
+          status=ACTIVE    a retired label is not the code to print either
+          code LIKE 'PC-%' the row must actually BE a compact code
+
+        The prefix filter is not redundant with is_alias. A piece minted before
+        the switch and not yet backfilled has exactly one row — its long code,
+        primary and active — and without this clause that long code would come
+        back as the piece's "short_code", which is precisely the thing it is not.
+        A missing entry is the honest answer there, and it is what the payload
+        documents: null means "not backfilled yet", so `scripts/backfill_short_
+        codes.py` still has work to do.
+        """
+        if not piece_ids:
+            return {}
+        rows = await self.db.execute(
+            select(BarcodeRegistry.piece_id, BarcodeRegistry.code)
+            .where(BarcodeRegistry.piece_id.in_(piece_ids),
+                   BarcodeRegistry.type == BarcodeType.PIECE.value,
+                   BarcodeRegistry.is_alias.is_(False),
+                   BarcodeRegistry.status == BarcodeStatus.ACTIVE.value,
+                   BarcodeRegistry.code.like(f"{SHORT_CODE_PREFIX}-%"))
+            .order_by(BarcodeRegistry.created_at.asc())
+        )
+        return {pid: code for pid, code in rows.all() if pid is not None}
 
     async def mint_lot_code_nocommit(self, material_lot_id: uuid.UUID,
                                      type_: BarcodeType,
@@ -264,15 +407,68 @@ class BarcodeRepository:
 
     async def piece_codes_for(self, *, sku_id: uuid.UUID | None = None,
                               order_id: uuid.UUID | None = None) -> list[str]:
-        """Every piece code under a SKU and/or an order — the print run's expansion
-        of 'print all labels for this SKU/order'."""
-        stmt = select(Piece.code).join(SKU, SKU.id == Piece.sku_id)
+        """Every SCANNABLE piece code under a SKU and/or an order — the print run's
+        expansion of 'print all labels for this SKU/order'.
+
+        Reads the registry, not Piece.code: since bug #19 the code that goes on the
+        label is the compact primary row, and Piece.code is the long identity that
+        now only lives on the sticker text. Selecting Piece.code here would print a
+        sheet of the very labels the change set out to shrink.
+        """
+        stmt = (
+            select(BarcodeRegistry.code)
+            .join(Piece, Piece.id == BarcodeRegistry.piece_id)
+            .join(SKU, SKU.id == Piece.sku_id)
+            .where(BarcodeRegistry.type == BarcodeType.PIECE.value,
+                   BarcodeRegistry.is_alias.is_(False),
+                   BarcodeRegistry.status == BarcodeStatus.ACTIVE.value)
+            .order_by(Piece.code)
+        )
         if sku_id:
             stmt = stmt.where(Piece.sku_id == sku_id)
         if order_id:
             stmt = stmt.join(Style, Style.id == SKU.style_id).where(
                 Style.client_order_id == order_id)
         return list((await self.db.scalars(stmt)).all())
+
+    async def label_details_for_codes(self, codes: list[str]) -> dict[str, dict]:
+        """{code → the business identity printed UNDER the barcode} (bug #19).
+
+        One query for a whole print run. The barcode itself is now a small opaque
+        id, so this is what makes a label readable by a human: order, article,
+        style, colour, size and the zero-padded serial (001/002/003 — bug #7).
+        Keyed by the registry code, so it answers for the compact code AND for a
+        legacy long alias, both of which name the same piece.
+        """
+        if not codes:
+            return {}
+        norm = {_norm(c) for c in codes}
+        rows = (await self.db.execute(
+            select(
+                BarcodeRegistry.code,
+                Piece.code.label("piece_code"), Piece.seq,
+                SKU.color_name, SKU.color_code, SKU.size,
+                Style.name.label("style_name"), Style.article,
+                ClientOrder.order_number,
+            )
+            .join(Piece, Piece.id == BarcodeRegistry.piece_id)
+            .join(SKU, SKU.id == Piece.sku_id)
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .where(BarcodeRegistry.code.in_(norm))
+        )).all()
+        return {
+            r.code: {
+                "order_number": r.order_number,
+                "article": r.article,
+                "style": r.style_name,
+                "colour": r.color_name or r.color_code,
+                "size": r.size,
+                "serial": f"{r.seq:03d}" if r.seq is not None else None,
+                "piece_code": r.piece_code,
+            }
+            for r in rows
+        }
 
     def add_audit_nocommit(self, *, actor_id: uuid.UUID | None, action: str,
                            entity_id: uuid.UUID, after: dict) -> None:
@@ -313,7 +509,8 @@ class BarcodeRepository:
             .join(
                 BarcodeRegistry,
                 and_(BarcodeRegistry.order_id == ClientOrder.id,
-                        BarcodeRegistry.type == BarcodeType.PIECE.value),
+                        BarcodeRegistry.type == BarcodeType.PIECE.value,
+                        BarcodeRegistry.is_alias.is_(False)),
             )
             .group_by(ClientOrder.id, ClientOrder.order_number, Client.name)
             .order_by(func.max(BarcodeRegistry.created_at).desc())
@@ -342,11 +539,19 @@ class BarcodeRepository:
         )
         return int(total or 0)
 
+    # NOTE ON is_alias IN THE THREE COUNTS BELOW.
+    # These answer "how many GARMENTS have a barcode", which the factory
+    # reconciles against SKU.qty_ordered. Since bug #19 a piece can hold two
+    # registry rows — the compact primary and its legacy long alias — so counting
+    # rows without excluding aliases would report double the pieces, drive
+    # `balance` negative and make the duplicates=0 integrity proof read as broken.
+    # An alias also carries no order_id, so the filter is belt and braces.
     async def order_minted_total(self, order_id: uuid.UUID) -> int:
         total = await self.db.scalar(
             select(func.count(BarcodeRegistry.id))
             .where(BarcodeRegistry.order_id == order_id,
-                    BarcodeRegistry.type == BarcodeType.PIECE.value)
+                    BarcodeRegistry.type == BarcodeType.PIECE.value,
+                    BarcodeRegistry.is_alias.is_(False))
         )
         return int(total or 0)
 
@@ -356,6 +561,7 @@ class BarcodeRepository:
             select(func.count(BarcodeRegistry.id))
             .where(BarcodeRegistry.order_id == order_id,
                     BarcodeRegistry.type == BarcodeType.PIECE.value,
+                    BarcodeRegistry.is_alias.is_(False),
                     BarcodeRegistry.status == BarcodeStatus.ACTIVE.value)
         )
         return int(total or 0)
@@ -366,7 +572,8 @@ class BarcodeRepository:
         total = await self.db.scalar(
             select(func.count(func.distinct(BarcodeRegistry.code)))
             .where(BarcodeRegistry.order_id == order_id,
-                    BarcodeRegistry.type == BarcodeType.PIECE.value)
+                    BarcodeRegistry.type == BarcodeType.PIECE.value,
+                    BarcodeRegistry.is_alias.is_(False))
         )
         return int(total or 0)
 
@@ -389,7 +596,8 @@ class BarcodeRepository:
             select(BarcodeRegistry.style_id,
                     func.count(BarcodeRegistry.id).label("minted"))
             .where(BarcodeRegistry.order_id == order_id,
-                    BarcodeRegistry.type == BarcodeType.PIECE.value)
+                    BarcodeRegistry.type == BarcodeType.PIECE.value,
+                    BarcodeRegistry.is_alias.is_(False))
             .group_by(BarcodeRegistry.style_id)
         )).all()
         minted_by_style = {r.style_id: int(r.minted) for r in minted_rows}
@@ -426,9 +634,13 @@ class BarcodeRepository:
         """Return (rows, total_count). Filters: style, sku, style+size, status,
         generated-date range. size filters via SKU.size (join only when needed)."""
 
-        # Base filter on the indexed denormalised columns.
+        # Base filter on the indexed denormalised columns. is_alias is excluded
+        # explicitly: a piece has one PRIMARY code and possibly one legacy alias,
+        # and the history table lists GARMENTS, not labels — without this each
+        # piece would appear twice (see BarcodeRegistry.is_alias).
         conds = [BarcodeRegistry.order_id == order_id,
-                    BarcodeRegistry.type == BarcodeType.PIECE.value]
+                    BarcodeRegistry.type == BarcodeType.PIECE.value,
+                    BarcodeRegistry.is_alias.is_(False)]
         if sku_id:
             conds.append(BarcodeRegistry.sku_id == sku_id)
         if style_id:
@@ -460,6 +672,8 @@ class BarcodeRepository:
                 SKU.code.label("sku_code"),
                 SKU.color_name, SKU.color_code, SKU.size,
                 Style.name.label("style_name"),
+                Style.article,
+                Piece.code.label("piece_code"),
                 Piece.seq,
                 Operation.code.label("current_stage"),
             )
@@ -479,6 +693,10 @@ class BarcodeRepository:
                 "status": r.status,
                 "sku_code": r.sku_code,
                 "style_name": r.style_name,
+                # bug #7/#19: the two columns the history table could not show.
+                "article": r.article,
+                "serial": f"{r.seq:03d}" if r.seq is not None else None,
+                "piece_code": r.piece_code,
                 "colour": r.color_name or r.color_code,
                 "size": r.size,
                 "seq": r.seq,

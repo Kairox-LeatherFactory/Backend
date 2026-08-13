@@ -26,14 +26,15 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import (BarcodeAuditAction, BarcodeType, DrawerPart,
-                            DrawerState)
+                            DrawerState, ProductionStage)
 from app.core.store_display import holding_label
 from app.modules.barcode.models import BarcodeRegistry, Drawer
 from app.modules.production.models import Piece
+
 
 
 class DrawerService:
@@ -65,15 +66,23 @@ class DrawerService:
     # ── the label sheet (print) ──────────────────────────────────────────────
     async def list_labels(self, *, state: str | None = None,
                           seq_from: int | None = None, seq_to: int | None = None,
+                          has_piece: bool | None = None,
+                          sendable: bool | None = None,
                           limit: int = 500, offset: int = 0) -> dict:
-        """Drawers + their DRAWER-type barcode, seq order — the print sheet.
+        """Every drawer + its barcode + the garment inside it — the Drawers List.
 
-        OUTER join on purpose. A drawer whose registry row is missing is a drawer
-        nobody can scan; it must appear in the sheet with a null barcode so the
-        gap is visible, not vanish from a list that claims to be every drawer.
-        The join is pinned to type=DRAWER so a stale row of another type can
-        never supply the code, and drawer codes are unique in the registry
-        (uq_barcode_code) so one drawer yields at most one row.
+        THIS STARTED LIFE AS A PRINT SHEET and is now also the working list bug
+        #13 asks for, which needs the piece, not just the code: an operator
+        choosing which drawers to send is choosing GARMENTS, and a screen of
+        DRW-0001…DRW-0430 with no styles on it cannot support that choice. The
+        piece columns are one extra LEFT JOIN on the same statement.
+
+        OUTER join on the barcode, on purpose. A drawer whose registry row is
+        missing is a drawer nobody can scan; it must appear in the sheet with a
+        null barcode so the gap is visible, not vanish from a list that claims to
+        be every drawer. The join is pinned to type=DRAWER so a stale row of
+        another type can never supply the code, and drawer codes are unique in the
+        registry (uq_barcode_code) so one drawer yields at most one row.
         """
         def _filtered(stmt):
             if state:
@@ -82,44 +91,160 @@ class DrawerService:
                 stmt = stmt.where(Drawer.seq >= seq_from)
             if seq_to is not None:
                 stmt = stmt.where(Drawer.seq <= seq_to)
+            if has_piece is True:
+                stmt = stmt.where(Drawer.current_piece_id.isnot(None))
+            elif has_piece is False:
+                stmt = stmt.where(Drawer.current_piece_id.is_(None))
+            # "Show me what I can send right now" — the SEND QUEUE, and it has to
+            # be the same predicate send_batch enforces or the screen offers a
+            # queue the server disagrees with.
+            #
+            # That predicate is COMPLETENESS, not state == RECEIVED: a drawer
+            # holding both parts auto-receives, but a leather-only piece never
+            # gets a second part and so never reaches RECEIVED, while still being
+            # complete and perfectly sendable. Expressed in SQL here because the
+            # filter has to run in the database, with the same
+            # "leather AND (lining OR needs no lining)" shape used in Python below.
+            complete_sql = and_(
+                Drawer.leather_in.is_(True),
+                or_(Drawer.lining_in.is_(True),
+                    Piece.needs_lining.is_(False)),
+            )
+            not_gone = Drawer.state != DrawerState.SENDED.value
+            if sendable is True:
+                stmt = stmt.where(and_(complete_sql, not_gone))
+            elif sendable is False:
+                stmt = stmt.where(~and_(complete_sql, not_gone))
             return stmt
 
+        # The COUNT joins Piece as well. `sendable` filters on Piece.needs_lining,
+        # so without the join here the count would reference a table it never
+        # selected from — a cartesian product on Postgres and a different total
+        # from the page it is supposed to be counting.
         total = int(await self.db.scalar(
-            _filtered(select(func.count(Drawer.id)))) or 0)
+            _filtered(
+                select(func.count(Drawer.id))
+                .select_from(Drawer)
+                .outerjoin(Piece, Piece.id == Drawer.current_piece_id))) or 0)
 
         rows = (await self.db.execute(
             _filtered(
                 select(Drawer, BarcodeRegistry.id, BarcodeRegistry.code,
-                       BarcodeRegistry.caption, BarcodeRegistry.status)
+                       BarcodeRegistry.caption, BarcodeRegistry.status,
+                       Piece.code.label("piece_code"), Piece.seq.label("piece_seq"),
+                       Piece.needs_lining)
                 .outerjoin(
                     BarcodeRegistry,
                     and_(BarcodeRegistry.drawer_id == Drawer.id,
                          BarcodeRegistry.type == BarcodeType.DRAWER.value))
+                .outerjoin(Piece, Piece.id == Drawer.current_piece_id)
             )
             .order_by(Drawer.seq.asc())
             .limit(limit).offset(offset)
         )).all()
 
-        items = [
-            {
+        items = []
+        for r in rows:
+            drawer = r[0]
+            needs_lining = (True if r.needs_lining is None
+                            else bool(r.needs_lining))
+            complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
+            items.append({
                 "drawer_id": drawer.id,
                 "seq": drawer.seq,
                 "code": drawer.code,
                 "state": drawer.state,
                 "holding": holding_label(leather_in=drawer.leather_in,
                                          lining_in=drawer.lining_in),
-                "barcode_id": bc_id,
-                "barcode": bc_code,
-                "caption": caption,
-                "barcode_status": bc_status,
-            }
-            for drawer, bc_id, bc_code, caption, bc_status in rows
-        ]
+                "leather_in": bool(drawer.leather_in),
+                "lining_in": bool(drawer.lining_in),
+                "complete": bool(complete),
+                # bug #13: the garment in the drawer, so the list is choosable.
+                "piece_id": drawer.current_piece_id,
+                "piece_code": r.piece_code,
+                "piece_serial": (f"{r.piece_seq:03d}"
+                                 if r.piece_seq is not None else None),
+                # SAME PREDICATE THE SEND USES. If this said "state == RECEIVED"
+                # while send_batch accepts any complete drawer, the list would
+                # grey out rows the server would happily take — and a leather-only
+                # garment would look permanently stuck to the operator.
+                "can_send": bool(complete)
+                            and drawer.state != DrawerState.SENDED.value,
+                "barcode_id": r[1],
+                "barcode": r[2],
+                "caption": r[3],
+                "barcode_status": r[4],
+            })
         return {"total": total, "count": len(items), "items": items}
+
+    # ── which bucket does this scan belong in? (bug #18) ─────────────────────
+    async def infer_part(self, drawer: Drawer, piece: Piece) -> DrawerPart:
+        """Work out whether this scan is the LEATHER or the LINING arriving.
+
+        BUG #18 — the operator used to click "Hold Leather" or "Hold Lining" by
+        hand after selecting the drawer. That button is a question the system can
+        already answer: the piece's own production history says which side of the
+        cut it has been through, and the drawer says which side it is still
+        missing. A hand-picked bucket is only ever a chance to pick the wrong one.
+
+        The order below is "what does the evidence say", then "what is missing":
+
+          1. The piece has a LINING_CUTTING event and the drawer has no lining in
+             → this is that lining arriving.
+          2. The piece has a leather-side event and no leather in → the leather.
+          3. Neither is decisive → fill whichever side is still empty.
+          4. Both sides already in → 409; there is nothing left to put anywhere.
+
+        Rule 3 matters more than it looks: a factory that has not yet started
+        logging its cut events would otherwise have no inferable answer at all,
+        and the store screen would be unusable. The drawer's own emptiness is
+        always a valid signal.
+        """
+        if drawer.leather_in and drawer.lining_in:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Drawer {drawer.code} already holds both leather and lining for "
+                f"{piece.code} — there is nothing further to scan in.")
+
+        from app.modules.production.repository import ProductionRepository
+        done = await ProductionRepository(self.db).completed_stage_codes(piece.id)
+
+        if ProductionStage.LINING_CUTTING.value in done and not drawer.lining_in:
+            return DrawerPart.LINING
+        leather_side = {ProductionStage.LEATHER_CUTTING.value,
+                        ProductionStage.FUSING.value,
+                        ProductionStage.PASTING.value}
+        if (done & leather_side) and not drawer.leather_in:
+            return DrawerPart.LEATHER
+        return DrawerPart.LEATHER if not drawer.leather_in else DrawerPart.LINING
 
     # ── store-scan ───────────────────────────────────────────────────────────
     async def store_scan(self, *, drawer_id: uuid.UUID, piece_id: uuid.UUID,
-                         part: DrawerPart) -> dict:
+                         part: DrawerPart | None = None,
+                         actor_id: uuid.UUID | None = None,
+                         employee_id: uuid.UUID | None = None) -> dict:
+        """Record a part arriving in its drawer.
+
+        TWO IDENTITIES, TWO PARAMETERS — and they are not interchangeable.
+
+            actor_id     the LOGIN that performed this action  → app_user.id
+            employee_id  the WORKER whose card was scanned     → employee.id
+
+        They were briefly the same parameter, with the scanned worker passed as
+        `actor_id`. That id then reached `_audit`, which writes
+        `AuditLog.actor_user_id` — a foreign key to `app_user.id`. An employee is
+        not a user, so Postgres rejected the row with "employee barcode ID is not
+        found in the app_user table", and it only fired on the scan that COMPLETED
+        a drawer, because the auto-RECEIVED branch is the only path here that
+        audits. First scan fine, second one a 500.
+
+        SQLite does not enforce foreign keys unless PRAGMA foreign_keys=ON, which
+        is why the whole test suite went green on it. The regression test turns the
+        pragma on for exactly this reason.
+
+        The worker is not lost — they are DATA about the action, and belong in the
+        audit payload and the response, which is where they now are.
+        """
         drawer = await self.get(drawer_id)
         if not drawer:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Drawer not found.")
@@ -143,6 +268,13 @@ class DrawerService:
                 status.HTTP_409_CONFLICT,
                 f"Drawer {drawer.code} is already {drawer.state} and cannot accept "
                 "another part scan. Its pieces have been released for the next stage.")
+
+        # BUG #18: no manual Hold Leather / Hold Lining button. An explicit part
+        # still wins (a screen that genuinely knows), otherwise the system reads
+        # it off the piece's history and the drawer's contents.
+        inferred = part is None
+        if part is None:
+            part = await self.infer_part(drawer, piece)
 
         if part is DrawerPart.LEATHER:
             drawer.leather_in = True
@@ -170,6 +302,48 @@ class DrawerService:
         else:
             drawer.state = DrawerState.WAITING.value
 
+        # ── HOLDING BOTH AUTO-ADVANCES TO RECEIVED ───────────────────────────
+        # RECEIVED used to be a button pressed on one drawer at a time, and it
+        # asserts one thing the scan itself establishes, so it advances by itself.
+        #
+        # BUT ONLY ON HOLDING_BOTH — physically both parts in the drawer.
+        #
+        # It first triggered on `complete`, which is "leather in AND (lining in OR
+        # the piece needs no lining)". That let the LEATHER-ONLY branch fire on a
+        # single scan: a piece whose needs_lining flag was False went straight to
+        # RECEIVED the moment its leather was stored, right after pasting, with an
+        # empty lining side. On the floor that reads as the drawer receiving
+        # itself before the lining has arrived.
+        #
+        # AND THAT FLAG CANNOT CARRY THIS DECISION. needs_lining is written once
+        # at breakdown upload and never recomputed — on the live database 925 of
+        # 1,425 pieces in one order are flagged wrongly (see
+        # scripts/backfill_needs_lining.py). Auto-advancing a drawer on a value we
+        # know to be unreliable means auto-advancing on a guess. Two booleans set
+        # by two physical scans are not a guess.
+        #
+        # A GENUINELY LEATHER-ONLY PIECE IS NOT STRANDED. It stays HOLDING_LEATHER
+        # with `ready_for_received` true, and a human confirms it through
+        # POST /drawers/{id}/receive — which still validates completeness, so it
+        # accepts exactly this case and nothing weaker. The judgement call ("this
+        # garment really has no lining") stays with the person who can see the
+        # garment, which is the right place for it.
+        #
+        # SEND REMAINS MANUAL EITHER WAY. Receiving records what is in the drawer;
+        # sending releases the piece into the next stage. See send_batch.
+        auto_received = False
+        if drawer.leather_in and drawer.lining_in:
+            drawer.state = DrawerState.RECEIVED.value
+            drawer.received_at = datetime.now(timezone.utc)
+            auto_received = True
+            await self._audit(
+                actor_id, BarcodeAuditAction.DRAWER_RECEIVED.value, drawer.id,
+                {"piece": piece.code, "state": drawer.state, "auto": True,
+                 # The worker who physically put the part in. Recorded as data,
+                 # NOT as actor_user_id — see the docstring above.
+                 "employee_id": str(employee_id) if employee_id else None,
+                 "part": part.value})
+
         await self.repo_commit()   # F71: commit via a single seam (see below)
         await self.db.refresh(drawer)
 
@@ -182,7 +356,48 @@ class DrawerService:
             "drawer_code": drawer.code, "piece_code": piece.code,
             "state": drawer.state, "needs_lining": needs_lining,
             "awaiting": awaiting, "ready_for_received": complete,
+            "part": part.value,
+            # True when the bucket was decided by the server, not the operator —
+            # so the screen can show WHICH bucket it chose (bug #18).
+            "part_inferred": inferred,
+            # Echoed back so the screen can confirm WHO was credited with the scan.
+            "employee_id": str(employee_id) if employee_id else None,
+            "holding": holding_label(leather_in=drawer.leather_in,
+                                     lining_in=drawer.lining_in),
+            "auto_received": auto_received,
+            # ── BUG #15: THIS SCAN IS NOT COMPLETION ─────────────────────────
+            # The frontend was marking an item finished as soon as it was scanned
+            # in. It is not: the piece is sitting in a drawer, and it does not
+            # move on until someone selects that drawer and sends it. These two
+            # fields say so in the response itself, so the UI has no excuse to
+            # infer otherwise.
+            "sent": drawer.state == DrawerState.SENDED.value,
+            # THREE OUTCOMES NOW, not two, because auto-receive needs both parts
+            # while completeness does not. The middle one is the leather-only
+            # piece: it is ready, but a person confirms it rather than the flag.
+            "next_action": self._next_action(
+                piece_code=piece.code, drawer_code=drawer.code,
+                auto_received=auto_received, complete=complete,
+                awaiting=awaiting),
         }
+
+    @staticmethod
+    def _next_action(*, piece_code: str, drawer_code: str, auto_received: bool,
+                     complete: bool, awaiting: list[str]) -> str:
+        """One sentence telling the operator what actually happens next."""
+        if auto_received:
+            return (f"{piece_code} is in drawer {drawer_code}, which now holds "
+                    f"both parts and has been received. Select it in the Drawers "
+                    f"List and Send to Lining / Stitching to move it on.")
+        if complete:
+            # Leather-only: nothing more is coming, but the drawer does not
+            # receive itself on one part. Name the confirmation that is needed
+            # instead of leaving it looking stuck.
+            return (f"{piece_code} needs no lining, so drawer {drawer_code} holds "
+                    f"everything it will get. Confirm receipt on the drawer, then "
+                    f"send it.")
+        return (f"{piece_code} is logged in drawer {drawer_code}. Still awaiting "
+                f"{' + '.join(awaiting)} before it can be received.")
 
     # ── received / sended ────────────────────────────────────────────────────
     async def transition(self, drawer_id: uuid.UUID, transition: str,
@@ -233,6 +448,179 @@ class DrawerService:
             "drawer_code": drawer.code,
             "piece_code": piece.code if piece else None,
             "state": drawer.state,
+        }
+
+    # ── drawer detail (bug #13) ──────────────────────────────────────────────
+    async def drawer_detail(self, drawer_id: uuid.UUID) -> dict:
+        """One drawer, opened: what it holds, which garment, and what it is
+        waiting for.
+
+        The Drawers List (bug #13) needs a row you can click into. `list_labels`
+        was built as a PRINT sheet — codes and states, no garment — so there was
+        nothing behind the row. This is that detail: the piece card (article,
+        serial, order), the hold-leather / hold-lining truth, and whether the
+        drawer is eligible to be sent.
+        """
+        drawer = await self.get(drawer_id)
+        if not drawer:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Drawer not found.")
+
+        piece_card = None
+        needs_lining = True
+        if drawer.current_piece_id:
+            from app.modules.barcode.service import BarcodeService
+            piece_card = await BarcodeService(self.db)._piece_payload(
+                drawer.current_piece_id)
+            needs_lining = bool(piece_card.get("needs_lining", True))
+
+        complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
+        awaiting = []
+        if not drawer.leather_in:
+            awaiting.append("LEATHER")
+        if needs_lining and not drawer.lining_in:
+            awaiting.append("LINING")
+
+        return {
+            "drawer_id": drawer.id, "code": drawer.code, "seq": drawer.seq,
+            "state": drawer.state,
+            "holding": holding_label(leather_in=drawer.leather_in,
+                                     lining_in=drawer.lining_in),
+            "leather_in": bool(drawer.leather_in),
+            "lining_in": bool(drawer.lining_in),
+            "needs_lining": needs_lining,
+            "awaiting": awaiting,
+            "complete": bool(complete),
+            "received_at": drawer.received_at,
+            "sended_at": drawer.sended_at,
+            "sent": drawer.state == DrawerState.SENDED.value,
+            # What the list's Send button should do with this row.
+            # Same predicate as send_batch — see the note in list_labels.
+            "can_send": bool(complete) and drawer.state != DrawerState.SENDED.value,
+            "piece": piece_card,
+        }
+
+    # ── the batch send (bugs #13, #14, #15) ──────────────────────────────────
+    async def send_batch(self, *, drawer_ids: list[uuid.UUID],
+                         actor_id: uuid.UUID | None) -> dict:
+        """Send MANY drawers — and the pieces in them — onward, in one action.
+
+        WHY BATCH. The store does not release garments one at a time; it fills a
+        bank of drawers and moves them together. The single-drawer transition
+        endpoint made that N requests and N chances to lose track of which
+        drawers had actually gone.
+
+        THERE IS NO DESTINATION TO CHOOSE, and asking for one was a modelling
+        mistake. The store sits at ONE point in the pipeline:
+
+            leather cut ─┐
+                         ├─► drawer (merge) ─► LINE_STITCHING ─► SHELL_STITCHING
+            lining cut ──┘                     ─► FINAL_FINISH ─► ...
+
+        Lining is UPSTREAM: the lining is cut and then scanned INTO the drawer.
+        A drawer that holds both parts has exactly one way forward, so "send to
+        lining" would mean sending a garment backwards to a stage it has already
+        cleared. Sending simply releases the piece into line-stitching — which is
+        precisely what ProductionService._merge_ok reads, through is_sended.
+
+        PARTIAL ACCEPT, LIKE THE PRODUCTION GATES. One drawer that is not ready
+        must never lose the twenty that are — the same reasoning that makes gates
+        2-4 of the production log per-piece rather than per-request. So every
+        drawer lands in exactly one bucket, with the reason attached, and the
+        good ones commit.
+        """
+        if not drawer_ids:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "Select at least one drawer to send.")
+
+        # De-duplicate but keep the caller's order, so the response reads back in
+        # the order the operator ticked the boxes.
+        wanted = list(dict.fromkeys(drawer_ids))
+        rows = list((await self.db.execute(
+            select(Drawer).where(Drawer.id.in_(wanted)))).scalars())
+        by_id = {d.id: d for d in rows}
+
+        sent: list[dict] = []
+        not_ready: list[dict] = []
+        not_found: list[str] = []
+        now = datetime.now(timezone.utc)
+
+        for did in wanted:
+            drawer = by_id.get(did)
+            if drawer is None:
+                not_found.append(str(did))
+                continue
+            piece = (await self.db.get(Piece, drawer.current_piece_id)
+                     if drawer.current_piece_id else None)
+
+            if drawer.state == DrawerState.SENDED.value:
+                # Already gone. Not an error worth failing a batch over — the
+                # operator re-ticked a row — but it is not a fresh send either.
+                not_ready.append({
+                    "drawer_id": str(did), "drawer_code": drawer.code,
+                    "state": drawer.state,
+                    "reason": f"Drawer {drawer.code} was already sent."})
+                continue
+
+            # THE GATE IS COMPLETENESS, NOT THE LITERAL 'RECEIVED' STATE.
+            #
+            # This required state == RECEIVED, and that quietly stranded a whole
+            # class of garment. Auto-receive fires only on HOLDING_BOTH — two
+            # physical scans — so a piece that needs no lining never gets a second
+            # part, never auto-receives, and could never be sent. Its drawer sat
+            # complete and immovable, and nothing in the UI could free it, so the
+            # garment never reached line-stitching at all. On the live database
+            # that flag covers most pieces.
+            #
+            # Completeness is the real question a send asks: does this drawer hold
+            # everything its garment needs? It SUBSUMES the old check — a drawer
+            # only ever reached RECEIVED by being complete — so nothing that used
+            # to be sendable stops being sendable, and the stranded case is freed.
+            needs_lining = bool(getattr(piece, "needs_lining", True)) if piece else True
+            complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
+            if not complete:
+                missing = "leather" if not drawer.leather_in else "lining"
+                not_ready.append({
+                    "drawer_id": str(did), "drawer_code": drawer.code,
+                    "state": drawer.state,
+                    "reason": (
+                        f"Drawer {drawer.code} is still awaiting its {missing}. "
+                        f"Scan the missing part into it before sending.")})
+                continue
+
+            drawer.state = DrawerState.SENDED.value
+            drawer.sended_at = now
+            # A complete drawer that never passed through RECEIVED (the
+            # leather-only case) is received at the moment it is sent — otherwise
+            # the audit trail would show a garment released with no record of it
+            # ever having been confirmed complete.
+            if drawer.received_at is None:
+                drawer.received_at = now
+            await self._audit(
+                actor_id, BarcodeAuditAction.DRAWER_SENDED.value, drawer.id,
+                {"piece": piece.code if piece else None, "state": drawer.state,
+                 "batch_size": len(wanted)})
+            sent.append({
+                "drawer_id": str(did), "drawer_code": drawer.code,
+                "piece_code": piece.code if piece else None,
+                "state": drawer.state})
+
+        await self.repo_commit()
+
+        released = [s["piece_code"] for s in sent if s["piece_code"]]
+        if sent:
+            message = (f"Sent {len(sent)} drawer(s) — {len(released)} piece(s) "
+                       f"released for line-stitching.")
+        else:
+            message = "Nothing sent — see `not_ready` for the reason on each."
+        if not_ready:
+            message += f" {len(not_ready)} drawer(s) were not ready."
+
+        return {
+            "requested": len(wanted),
+            "count_sent": len(sent),
+            "sent": sent, "not_ready": not_ready, "not_found": not_found,
+            "pieces_released": released,
+            "message": message,
         }
 
     # ── the merge gate check (called by production before LINE_STITCHING) ─────

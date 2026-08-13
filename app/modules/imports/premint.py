@@ -58,6 +58,9 @@ from sqlalchemy.orm import Session
 
 from app.core.enums import BarcodeStatus, BarcodeType, DrawerState
 from app.modules.barcode.models import BarcodeRegistry, Drawer
+from app.modules.barcode.repository import (
+    SHORT_CODE_PREFIX, decode_short, encode_short,
+)
 from app.modules.clients.models import SKU, Style
 from app.modules.production.models import Piece
 
@@ -133,6 +136,24 @@ def _max_drawer_seq(db: Session) -> int:
 
 def _drawer_count(db: Session) -> int:
     return int(db.scalar(select(func.count(Drawer.id))) or 0)
+
+
+def _max_short_code_counter(db: Session) -> int:
+    """Sync twin of BarcodeRepository.max_short_code_counter.
+
+    The importer runs on a synchronous Session (see WHY THIS IS SYNC above) and
+    cannot await the repository, so the one read it needs is duplicated here —
+    deliberately, and it is one read for the WHOLE upload: premint counts up in
+    Python from this base. The encode/decode functions themselves are imported,
+    so the alphabet has exactly one definition.
+    """
+    top = db.scalar(
+        select(BarcodeRegistry.code)
+        .where(BarcodeRegistry.code.like(f"{SHORT_CODE_PREFIX}-%"))
+        .order_by(BarcodeRegistry.code.desc())
+        .limit(1)
+    )
+    return decode_short(top)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -272,6 +293,10 @@ def premint_order(db: Session, order) -> dict:
     new_pieces: list[Piece] = []          # phase 2
     links: list[tuple] = []               # phase 3: (drawer, piece) to wire up
     piece_barcodes: list[BarcodeRegistry] = []   # phase 4
+    # ONE read for the whole upload, then count up in Python. Re-reading the max
+    # per piece would put a MAX() query back in the inner loop — the exact
+    # quadratic shape the four-phase rewrite removed.
+    short_counter = _max_short_code_counter(db)
 
     for sku in sku_rows:
         qty = int(sku.qty_ordered or 0)
@@ -322,23 +347,44 @@ def premint_order(db: Session, order) -> dict:
             if hasattr(piece, "drawer_id"):
                 piece.drawer_id = drawer.id
 
-            # 3) register the parent barcode (drawer barcode already exists — it
-            #    is permanent and static; we do NOT re-register it on reuse).
+            # 3) register the parent barcodes (the drawer barcode already exists —
+            #    it is permanent and static; we do NOT re-register it on reuse).
             #    Buffered for phase 4: piece.id is not in the DB until phase 2.
+            #
+            #    TWO ROWS PER PIECE since bug #19:
+            #      • the COMPACT code (PC-…) — the PRIMARY. It is what gets
+            #        printed and scanned, and it carries the order/sku/style FKs,
+            #        so every per-order count and the history list resolve through
+            #        it and see exactly one row per garment.
+            #      • the LONG code — an ALIAS. Labels printed before this change
+            #        must keep scanning, and the long code is still the piece's
+            #        human identity, so it stays in the registry. It carries NO
+            #        order/sku/style FK: see BarcodeRegistry.is_alias for why
+            #        counting it would double every minted total.
+            short_counter += 1
+            short_code = encode_short(short_counter)
+            caption = f"{caption_prefix} · #{seq}"
             piece_barcodes.append(BarcodeRegistry(
-                code=code, type=BarcodeType.PIECE.value,
+                code=short_code, type=BarcodeType.PIECE.value,
                 status=BarcodeStatus.ACTIVE.value, piece_id=piece.id,
-                caption=f"{caption_prefix} · #{seq}",
+                caption=caption,
                 order_id=order.id,
                 sku_id=sku.id,
                 style_id=sku.style_id,
+                is_alias=False,
+            ))
+            piece_barcodes.append(BarcodeRegistry(
+                code=code, type=BarcodeType.PIECE.value,
+                status=BarcodeStatus.ACTIVE.value, piece_id=piece.id,
+                caption=caption,
+                is_alias=True,
             ))
 
             stats["pieces_minted"] += 1
             if needs_lining:
                 stats["pieces_needing_lining"] += 1
             if len(stats["sample_barcodes"]) < 5:
-                stats["sample_barcodes"].append(code)
+                stats["sample_barcodes"].append(short_code)
 
     # ── the four ordered phases (see the INSERT ORDER note at the top) ────────
     # PHASE 1 — drawers land first, with current_piece_id still NULL. This flush

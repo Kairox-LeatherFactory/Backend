@@ -64,17 +64,19 @@ async def test_store_scan_and_full_merge_then_line_stitch(db, operations, pieces
     assert r1["ready_for_received"] is False
     assert "LINING" in r1["awaiting"]
 
-    # store lining → holding_both
+    # store lining → complete, so the drawer auto-advances to RECEIVED (bug #13).
+    # Its CONTENTS are still "holding both"; `state` has moved on.
     r2 = await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
                                   part=DrawerPart.LINING)
-    assert r2["state"] == DrawerState.HOLDING_BOTH.value
+    assert r2["holding"] == "HOLDING BOTH"
+    assert r2["state"] == DrawerState.RECEIVED.value
+    assert r2["auto_received"] is True
     assert r2["ready_for_received"] is True
 
-    # DM RECEIVED then SENDED
-    rec = await drawers.transition(drawer.id, "RECEIVED", actor_id=dm.id)
-    assert rec["state"] == "received"
-    snd = await drawers.transition(drawer.id, "SENDED", actor_id=dm.id)
-    assert snd["state"] == "sended"
+    # SEND is still a decision, and it is what opens the merge gate.
+    snd = await drawers.send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
+    assert snd["count_sent"] == 1
+    assert snd["sent"][0]["state"] == "sended"
 
     # now advance leather chain and line-stitch succeeds
     await _advance_to_pasted(db, piece, cutter[0], paster[0], cutting_mgr,
@@ -201,12 +203,30 @@ async def test_received_requires_completeness(db, operations, pieces, dm):
 
 @pytest.mark.asyncio
 async def test_sended_requires_received(db, operations, pieces, dm):
+    """A drawer that is not complete cannot be sent.
+
+    The leather-only shortcut this test used to take no longer works: a piece
+    with needs_lining=False is COMPLETE on leather alone, so its drawer
+    auto-receives and sending it is legitimate. The rule being defended is
+    "incomplete drawers do not leave the store", so the setup now uses a piece
+    that genuinely still needs its lining.
+    """
     piece, drawer = pieces[0]
-    piece.needs_lining = False
+    piece.needs_lining = True
     await db.commit()
     await DrawerService(db).store_scan(drawer_id=drawer.id, piece_id=piece.id,
                                        part=DrawerPart.LEATHER)
-    # jump straight to SENDED → rejected
+
+    # Still awaiting lining → not RECEIVED → nothing is sent.
+    out = await DrawerService(db).send_batch(
+        drawer_ids=[drawer.id], actor_id=dm.id)
+    assert out["count_sent"] == 0
+    assert out["sent"] == []
+    assert len(out["not_ready"]) == 1
+    assert out["not_ready"][0]["state"] == DrawerState.HOLDING_LEATHER.value
+    assert "awaiting its lining" in out["not_ready"][0]["reason"]
+
+    # the deprecated single-drawer route enforces the same order
     with pytest.raises(Exception) as ei:
         await DrawerService(db).transition(drawer.id, "SENDED", actor_id=dm.id)
     assert "RECEIVED" in str(ei.value) or "before" in str(ei.value).lower()

@@ -165,9 +165,25 @@ class Targets(BaseModel):
 
 
 class Consumption(BaseModel):
+    """What the cut consumed — reachable through EITHER door.
+
+    ID DOOR (unchanged): the screen already picked a lot, so it sends the id.
+    SPEC DOOR (bugs #9/#10): the cutting manager types what is on the hide —
+    article, colour, and optionally a thickness — and the router resolves it to a
+    lot through the existing /materials/lots picker.
+
+    THICKNESS IS OPTIONAL AND FREE TEXT, deliberately. It was a required dropdown,
+    which meant a hide whose thickness was not already in the list could not be
+    logged at all; the floor's answer to that is to pick a wrong value, which is
+    worse than a blank. It narrows the lot match when supplied and is ignored when
+    not.
+    """
     leather_lot_id: uuid.UUID | None = None
     lining_lot_id: uuid.UUID | None = None
     dcm: float | None = None
+    article: str | None = None
+    colour: str | None = None
+    thickness: str | None = None
 
 
 class LogRequest(BaseModel):
@@ -217,3 +233,70 @@ class LogResult(BaseModel):
     # has always returned these; without the field the response model dropped
     # them, so the floor never saw the warning it was told it would get.
     skill_warnings: list[dict] = Field(default_factory=list)
+    # BUG #12 — {piece_code: {drawer_id, code, state, holding, leather_in,
+    # lining_in}} for every scanned piece that has a drawer.
+    drawer_by_piece: dict[str, dict] = Field(default_factory=dict)
+    # BUG #8 — {sku_id, stage, total, done, remaining, closed} for the stage just
+    # logged. `closed: true` means every piece of the SKU is done here and the
+    # style must stop being offered for scanning. Null on a preview or a MIXED
+    # batch (there is no single stage to report against).
+    sku_progress: dict | None = None
+
+
+# ── the scan-time state read (bugs #4, #6, #8, #12) ─────────────────────────
+class PieceStageCard(BaseModel):
+    """One stage card, and whether the operator may scan into it.
+
+    state ∈ completed | next | locked | not_applicable
+      completed       an event exists at this stage
+      next            the stage this scan would log
+      locked          a gate refuses it — `gate` + `reason` say which and why
+      not_applicable  off this garment's route (a lining cut on an unlined piece)
+    """
+    stage: str
+    state: str
+    gate: str | None = None          # sequence | merge
+    reason: str | None = None
+    requires_consumption: bool = False
+
+
+class PieceState(BaseModel):
+    """ONE PIECE — its identity, where it is, where it goes next, and whether the
+    scan can just be logged.
+
+    This is what a barcode scan should return. `piece` is the individual garment
+    (code, serial, article, style, colour, size), never a SKU roll-up: a SKU
+    describes a whole style and cannot answer anything about the item in the
+    operator's hand.
+    """
+    piece: dict                      # the full barcode piece card (article, serial…)
+    drawer: dict | None = None       # bug #12
+    completed_stages: list[str] = Field(default_factory=list)
+    # WHERE THE PIECE IS NOW — the real, event-backed stage. Distinct from
+    # `display_stage`, which may read STORE (a drawer state, not an event).
+    current_stage: str | None = None
+    current_stage_label: str | None = None
+    next_stage: str | None = None    # bug #4 — inferred, never chosen by the user
+    next_stage_requires_consumption: bool = False
+    display_stage: str | None = None  # may be the virtual STORE
+    display_label: str | None = None
+    in_store: bool = False
+    stages: list[PieceStageCard] = Field(default_factory=list)   # bug #6
+    sku: dict                        # bug #8 — total/done/remaining/closed
+    # Whether THIS login's role could log next_stage. Lets the screen say "ask the
+    # stitching manager" instead of letting the scan come back 403.
+    can_log_next: bool | None = None
+    # The scanned worker, when one was supplied: name, designation, whether they
+    # are checked in today, and any skill anomaly. Skill is a WARNING — the log
+    # records the piece and reports it — so it never appears in `blockers`.
+    actor: dict | None = None
+    # Everything standing between this scan and a logged event. Each entry is
+    # {gate, reason}; gate ∈ {employee, attendance, role, sequence, merge,
+    # consumption, completed}.
+    blockers: list[dict] = Field(default_factory=list)
+    # THE ONE BOOLEAN AN AUTOMATIC SCREEN NEEDS.
+    #   true  → POST /production/log now; no stage to pick, nothing to ask
+    #   false → show `blockers`
+    #   null  → no employee was supplied, so the question is unanswered (which is
+    #           not the same as "blocked", and must not be rendered as one)
+    ready_to_log: bool | None = None

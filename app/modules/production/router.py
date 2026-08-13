@@ -29,8 +29,10 @@ from app.modules.barcode.service import BarcodeService
 from app.modules.production.service import ProductionService
 from app.modules.users.deps import get_current_user, require_roles
 from app.modules.users.models import User
-from app.modules.production.schemas import LogRequest, LogResult, Consumption
-from app.core.enums import ScreenContext, screen_for_role   
+from app.modules.production.schemas import (
+    Consumption, LogRequest, LogResult, PieceState,
+)
+from app.core.enums import ProductionStage, ScreenContext, screen_for_role
 
 router = APIRouter(prefix="/production", tags=["Production"])
 
@@ -43,6 +45,29 @@ def client_scope(user: User = Depends(get_current_user)) -> uuid.UUID | None:
 
 # Raw event feed + piece-level reads are floor/office data, never customer data.
 _FLOOR_READERS = require_roles(
+    UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER, UserRole.HR,
+    UserRole.SUPERVISOR, UserRole.CUTTING_MANAGER, UserRole.LINING_MANAGER,
+    UserRole.STITCHING_MANAGER,
+)
+
+# WHO MAY REACH THE LOG AT ALL — a door gate, in front of the per-stage GATE 1.
+#
+# This route deliberately carried no role dependency: "the role gate is
+# stage-specific, in-service". That is true for a piece with a resolvable stage,
+# and it leaves a gap for one without. A piece that has not been cut yet resolves
+# to NO stage on the PIPELINE screen, so GATE 1 never runs and the request comes
+# back 201 with everything in the `not_cut` bucket — for ANY authenticated
+# token, including a VIEWER, a CLIENT, or (bug #16) the new STORE_MANAGER.
+#
+# Nothing is written on that path, so this was never a data leak; it was worse as
+# an ANSWER. A store login is told "nothing logged, cut it first", implying it
+# may log once the piece is cut, when in fact its scan will 403 the moment a
+# stage resolves. The role that cannot log anything should be told so at the
+# door, once, instead of being led down the path and stopped at the end of it.
+#
+# STORE_MANAGER is deliberately absent: store functions only (CLAUDE.md §3 and
+# the bug-#16 separation). GATE 1 still does the per-stage work behind this.
+_LOGGERS = require_roles(
     UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER, UserRole.HR,
     UserRole.SUPERVISOR, UserRole.CUTTING_MANAGER, UserRole.LINING_MANAGER,
     UserRole.STITCHING_MANAGER,
@@ -110,11 +135,119 @@ async def list_pieces(
     return await ProductionService(db).list_pieces_for_sku(
         sku_id=sku_id, operation_id=operation_id, client_scope=scope)
 
+@router.get("/piece-state", response_model=PieceState)
+async def piece_state(
+    code: str | None = Query(None, description="A scanned piece barcode "
+                                               "(compact or legacy long code)."),
+    piece_id: uuid.UUID | None = Query(None, description="Manual door."),
+    employee_barcode: str | None = Query(
+        None, description="The scanned worker's card. Supply it and the response "
+                          "also answers whether THIS worker can log the piece's "
+                          "next stage right now (`ready_to_log` / `blockers`)."),
+    employee_id: uuid.UUID | None = Query(None, description="Manual actor door."),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_FLOOR_READERS),
+):
+    """What is true about THIS PIECE, the instant it is scanned — and, if you send
+    the worker's card too, whether it can be logged without asking anyone.
+
+    ONE PIECE, NOT A SKU. A scan screen holds one garment: it needs that
+    garment's identity, the stage it is in, the stage it is going to, and a yes/no
+    on logging it. A SKU-wide read answers a different question — "what is the
+    state of this whole style" — and cannot say anything about the piece in the
+    operator's hand, which is why the verify step must call this instead.
+
+    THE READ THE SCAN SCREEN NEVER HAD. Stage inference, the sequence gate and
+    the merge gate all ran only at WRITE time, so the UI had to guess: it made
+    the operator pick a stage by hand (bug #4) and it left later stage cards
+    scannable before their predecessor was done (bug #6). This answers both from
+    the server, using the very same predicates POST /log enforces — so a card the
+    UI opens is a card the log will accept.
+
+    FOR A FULLY AUTOMATIC SCAN, send `code` + `employee_barcode` and read:
+        current_stage   where the piece is now
+        next_stage      what this scan would log — never chosen by hand
+        ready_to_log    true  -> POST /production/log immediately
+                        false -> show `blockers`; each names its gate and reason
+                        null  -> no employee sent, so the question is unanswered
+
+    Also carries the piece's drawer (bug #12) and how many pieces of its SKU are
+    still outstanding at the next stage (bug #8).
+    """
+    if not code and not piece_id:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "Provide code or piece_id.")
+    barcodes = BarcodeService(db)
+    if piece_id is None:
+        piece_id = await barcodes.resolve_piece_id(code)
+    if employee_id is None and employee_barcode:
+        employee_id = await barcodes.resolve_employee_id(employee_barcode)
+    return await ProductionService(db).piece_state(
+        piece_id, user=user, employee_id=employee_id)
+
+
+async def _resolve_cut_lot(
+    db: AsyncSession, cons: Consumption, screen: ScreenContext,
+) -> tuple[uuid.UUID | None, uuid.UUID | None]:
+    """Turn the cut screen's inputs into (leather_lot_id, lining_lot_id).
+
+    TWO DOORS, ONE OUTCOME — the same pattern the log itself uses. A screen that
+    already picked a lot sends its id and nothing happens here. A cutting manager
+    who typed article + colour (+ optional thickness) gets it resolved through the
+    EXISTING lot picker, MaterialService.list_lots, which already filters on
+    exactly those three fields and already returns lot ids (bugs #9/#10).
+
+    Resolving in the ROUTER is deliberate: the service must keep seeing ids only
+    (CLAUDE.md §15), exactly as barcodes are resolved to ids here and not inside
+    log_batch.
+
+    AMBIGUITY IS AN ERROR, NOT A GUESS. If the spec matches several lots we 409
+    and name them. Silently taking the first would decrement stock from a lot the
+    manager never chose — a wrong number in the one ledger the factory reconciles
+    against, and invisible.
+    """
+    is_lining = screen is ScreenContext.LINING_CUT
+    if is_lining and cons.lining_lot_id:
+        return None, cons.lining_lot_id
+    if not is_lining and cons.leather_lot_id:
+        return cons.leather_lot_id, None
+    # Either id may be sent regardless of screen (DM/MD logging a mixed shift).
+    if cons.leather_lot_id or cons.lining_lot_id:
+        return cons.leather_lot_id, cons.lining_lot_id
+    if not cons.article:
+        return None, None                 # nothing to resolve; caller validates
+
+    from app.modules.materials.service import MaterialService
+    category = "LINING" if is_lining else "LEATHER"
+    found = await MaterialService(db).list_lots(
+        category=category, article=cons.article, colour=cons.colour,
+        thickness=cons.thickness)
+    lots = found["lots"]
+    if not lots:
+        spec = " · ".join(str(v) for v in
+                          [cons.article, cons.colour, cons.thickness] if v)
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"No {category} lot in stock for {spec}. Add the delivery with "
+            f"POST /materials before cutting from it.")
+    if len(lots) > 1:
+        names = "; ".join(
+            f"{l['article']} · {l['colour']} · {l['thickness'] or 'no thickness'} "
+            f"({l['available']} {l['uom']} available, lot {l['lot_id']})"
+            for l in lots[:5])
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"{len(lots)} {category} lots match that spec — say which one. "
+            f"Add a thickness, or send the lot id directly. Candidates: {names}")
+    lot_id = lots[0]["lot_id"]
+    return (None, lot_id) if is_lining else (lot_id, None)
+
+
 @router.post("/log", response_model=LogResult, status_code=201)
 async def log_batch(
     body: LogRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),   # role gate is stage-specific, in-service
+    user: User = Depends(_LOGGERS),   # door gate; per-stage GATE 1 is in-service
 ):
     """Log one stage for a batch of pieces. Stage is inferred (never sent):
     a cut screen fixes it; PIPELINE infers it from each piece's history.
@@ -166,11 +299,15 @@ async def log_batch(
     screen = screen_for_role(user.role, override=override)
 
     cons = body.consumption or Consumption()
+    # Bugs #9/#10: the cut screen may name the material by article/colour/
+    # thickness instead of by lot id. Resolved to ids HERE so the service still
+    # sees ids only, exactly as barcodes are.
+    leather_lot_id, lining_lot_id = await _resolve_cut_lot(db, cons, screen)
     return await svc.log_batch(
         user=user, employee_id=employee_id, piece_ids=piece_ids,
         work_date=body.work_date, screen=screen,
-        leather_lot_id=cons.leather_lot_id, lining_lot_id=cons.lining_lot_id,
-        consumption_qty=cons.dcm,preview=body.preview)
+        leather_lot_id=leather_lot_id, lining_lot_id=lining_lot_id,
+        consumption_qty=cons.dcm, preview=body.preview)
 
 
 
