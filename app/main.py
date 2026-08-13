@@ -66,6 +66,7 @@ from app.modules.bom import models as _bom                  # noqa: F401  Stage 
 from app.modules.inventory import models as _inventory      # noqa: F401  Stage 4
 from app.modules.supplier_po import models as _supplier_po  # noqa: F401  Stage 5
 
+
 # ──────────────────────────────────────────────────────────
 # Router imports
 # ──────────────────────────────────────────────────────────
@@ -89,6 +90,7 @@ from app.modules.barcode.router import emp_router as barcode_emp_router
 from app.modules.materials.router import router as materials_router
 from app.modules.materials.router import sup_router as suppliers_router
 from app.modules.drawers.router import router as drawers_router
+from app.modules.dashboard.router import router as dashboard_router
 
 from app.modules.users.deps import block_employees
 
@@ -263,7 +265,7 @@ app.include_router(procurement_router, prefix=API_PREFIX, dependencies=_LOCKED)
 app.include_router(bom_router,         prefix=API_PREFIX, dependencies=_LOCKED)
 app.include_router(inventory_router,   prefix=API_PREFIX, dependencies=_LOCKED)
 app.include_router(supplier_po_router, prefix=API_PREFIX, dependencies=_LOCKED)
-
+app.include_router(dashboard_router, prefix=API_PREFIX, dependencies=_LOCKED)
 
 # ──────────────────────────────────────────────────────────
 # Health

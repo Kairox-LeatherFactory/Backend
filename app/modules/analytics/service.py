@@ -54,7 +54,7 @@ class AnalyticsService(BarcodeAnalyticsMixin):
             "total_pieces_ordered": int(total_ordered),
             "total_operations_logged": int(total_produced),
         }
-        
+
     # =============================================== explorer navigation tree
     async def explorer_tree(self, *, client_id: uuid.UUID | None = None,
                             include_pieces: bool = True) -> dict:
