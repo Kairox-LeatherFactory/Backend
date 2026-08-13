@@ -79,6 +79,11 @@ from app.modules.analytics.router import router as analytics_router
 from app.modules.imports.router import router as imports_router
 from app.modules.intelligence.router import router as chat_router
 from app.modules.attendance.router import router as attendance_router
+# Manager dashboards (cutting / lining / stitching / store). READ-ONLY, and it
+# owns NO tables — every query reads other modules' models — so there is no
+# `dashboard.models` to add to the model-import block above. Verified before
+# registering: a missed model import is the schema-drift trap in §11.
+from app.modules.dashboard.router import router as dashboard_router
 from app.modules.procurement.router import router as procurement_router
 from app.modules.bom.router import router as bom_router
 from app.modules.inventory.router import router as inventory_router
@@ -253,6 +258,7 @@ app.include_router(employees_router,   prefix=API_PREFIX, dependencies=_LOCKED)
 app.include_router(production_router,  prefix=API_PREFIX, dependencies=_LOCKED)
 app.include_router(wages_router,       prefix=API_PREFIX, dependencies=_LOCKED)
 app.include_router(analytics_router,   prefix=API_PREFIX, dependencies=_LOCKED)
+app.include_router(dashboard_router,   prefix=API_PREFIX, dependencies=_LOCKED)  # manager dashboards
 app.include_router(imports_router,     prefix=API_PREFIX, dependencies=_LOCKED)
 app.include_router(chat_router,        prefix=API_PREFIX, dependencies=_LOCKED)
 app.include_router(barcode_emp_router, prefix=API_PREFIX, dependencies=_LOCKED)  # NEW: /employees/{id}/barcode

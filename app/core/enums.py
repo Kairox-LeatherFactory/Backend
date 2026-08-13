@@ -198,4 +198,5 @@ from app.core.enums_barcode import (  # noqa: E402
     resolve_spec,
     ROLE_TO_SCREEN,
     screen_for_role,
+    next_chain_stage,
 )

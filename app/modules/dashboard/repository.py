@@ -46,7 +46,7 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import ProductionStage
@@ -66,6 +66,24 @@ _FINAL_FINISH = ProductionStage.FINAL_FINISH.value
 _FINAL_INSPECTION = ProductionStage.FINAL_INSPECTION.value
 
 _CUT_STAGES = (_LEATHER_CUT, _LINING_CUT)
+
+# WHICH LOT COLUMN BELONGS TO WHICH CUT STAGE — one binding, not a per-call
+# argument the caller can get wrong.
+#
+# A consumption row is only meaningful when the stage and the lot column agree: a
+# LINING_CUTTING event records its material in `lining_lot_id` and nothing at all
+# in `leather_lot_id`. The cutting dashboard used to ask for BOTH cut stages while
+# joining `leather_lot_id`, so every lining-cut event came back in the leather
+# grid with a blank lot and its quantity landed in the leather totals. Pairing the
+# two here means a caller cannot express that combination at all.
+#
+# Populated lazily (the column objects need the model imported) via _lot_col_for.
+def _lot_col_for(stage: str):
+    """The ProductionEvent lot column that a given cut stage writes."""
+    return {
+        _LEATHER_CUT: ProductionEvent.leather_lot_id,
+        _LINING_CUT: ProductionEvent.lining_lot_id,
+    }.get((stage or "").strip().upper())
 
 # Stitching-manager stages, grouped per the requirements doc (§1, §5, §8).
 _PRE_STORE_STAGES = (_PASTING, _FUSING)
@@ -343,15 +361,26 @@ class DashboardRepository:
     async def leather_by_lot(self, *, limit: int = 200) -> list:
         """Section 8 — available-leather + DCM grid. ONE query."""
         return await self._material_by_lot(
-            category="leather", lot_col=ProductionEvent.leather_lot_id, limit=limit)
+            category="leather", lot_col=ProductionEvent.leather_lot_id,
+            cut_stage=_LEATHER_CUT, limit=limit)
 
     async def _material_by_lot(
-        self, *, category: str, lot_col, limit: int = 200,
+        self, *, category: str, lot_col, cut_stage: str, limit: int = 200,
     ) -> list:
         """One row per lot of `category` with available (on_hand), consumed-from
         -this-lot and pieces-from-this-lot, via ONE correlated LEFT JOIN aggregate
         on cut events referencing the lot. `lot_col` is leather_lot_id or
-        lining_lot_id, so the same query serves both material sides."""
+        lining_lot_id, so the same query serves both material sides.
+
+        `cut_stage` IS NOT OPTIONAL. This aggregate previously filtered on nothing
+        but `lot_col IS NOT NULL`, so it summed consumption from ANY event that
+        ever carried that lot reference, at any stage. Today only the two cut
+        stages set those columns, which made the omission harmless and invisible —
+        but "harmless because nothing else writes it yet" is not a filter, and the
+        moment another stage records material against a lot these per-lot totals
+        would silently absorb it. The stage the material was consumed AT is part
+        of the question being asked.
+        """
         from app.modules.barcode.models import MaterialLot
 
         consumed_sq = (
@@ -361,7 +390,8 @@ class DashboardRepository:
                     .label("consumed"),
                 func.count(func.distinct(ProductionEvent.piece_id)).label("pieces"),
             )
-            .where(lot_col.isnot(None))
+            .join(Operation, Operation.id == ProductionEvent.operation_id)
+            .where(lot_col.isnot(None), Operation.code == cut_stage)
             .group_by(lot_col)
             .subquery()
         )
@@ -460,21 +490,40 @@ class DashboardRepository:
     # ═══════════════════════════════════ per-piece consumption (analysis grid)
     async def piece_consumption(
         self, *, client_scope: uuid.UUID | None,
+        stage: str,
         order_id: uuid.UUID | None = None,
         employee_id: uuid.UUID | None = None,
         start: date | None = None, end: date | None = None,
-        stages: tuple[str, ...] = _CUT_STAGES,
-        material_lot_col=None,
+        include_unmeasured: bool = False,
         limit: int = 500,
     ) -> list:
         """Sections 11 & 14 — one row per cut EVENT with actual consumption, the
         worker, the lot and the piece. ONE query; no expected/variance because the
         schema stores no expected baseline (that is the BOM, flagged).
 
-        `stages` + `material_lot_col` parametrise leather (default) vs lining."""
+        ONE STAGE PER CALL, AND IT IS REQUIRED. This took a `stages` TUPLE that
+        defaulted to both cut entries, plus a separately-passed lot column — so
+        the cutting dashboard, which passed neither, asked for leather AND lining
+        events while joining the leather lot. Lining cuts appeared in the leather
+        grid with an empty lot and their quantities counted toward leather totals.
+
+        A consumption row only means anything when the stage and the lot column
+        agree, so the caller no longer chooses them independently: name the stage,
+        and `_lot_col_for` supplies the column that stage actually writes.
+
+        `include_unmeasured` exists because lining consumption became OPTIONAL:
+        an unmeasured lining cut has consumption_qty NULL and would otherwise be
+        filtered out of the grid entirely — the work would look like it never
+        happened. Off by default so existing screens are unchanged; on, those
+        events come back with a null quantity rather than vanishing.
+        """
         from app.modules.barcode.models import MaterialLot
-        lot_col = material_lot_col if material_lot_col is not None \
-            else ProductionEvent.leather_lot_id
+
+        lot_col = _lot_col_for(stage)
+        if lot_col is None:
+            raise ValueError(
+                f"{stage!r} is not a cut stage — only "
+                f"{_LEATHER_CUT} and {_LINING_CUT} record material consumption.")
 
         stmt = (
             select(
@@ -492,9 +541,10 @@ class DashboardRepository:
             .join(Style, Style.id == SKU.style_id)
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .outerjoin(MaterialLot, MaterialLot.id == lot_col)
-            .where(Operation.code.in_(stages),
-                   ProductionEvent.consumption_qty.isnot(None))
+            .where(Operation.code == stage)
         )
+        if not include_unmeasured:
+            stmt = stmt.where(ProductionEvent.consumption_qty.isnot(None))
         if order_id is not None:
             stmt = stmt.where(ClientOrder.id == order_id)
         if employee_id is not None:
@@ -613,8 +663,20 @@ class DashboardRepository:
     async def lining_required_pieces(
         self, *, client_scope: uuid.UUID | None, order_id: uuid.UUID | None = None,
     ) -> int:
-        """Active pieces whose needs_lining is True — the population the lining
-        stage must process. ONE scalar read."""
+        """Active pieces whose STORED needs_lining flag is True. ONE scalar read.
+
+        THE FLAG IS A SNAPSHOT, NOT A FACT. It is written once by
+        imports/premint.py::_sku_needs_lining at mint time and never recomputed,
+        so an order minted before that heuristic last changed carries whatever
+        answer was current then — permanently. On the live database that is
+        exactly what happened: of two orders holding the same 17 styles, one has
+        925 pieces flagged and the other has 0, which is why this number looked
+        impossibly small next to the ordered total.
+
+        Read alongside `lining_required_derived` below, which recomputes the same
+        population from live style/SKU signals. When the two disagree, the flag is
+        stale — see lining_production_kpis.
+        """
         stmt = (
             select(func.count(func.distinct(Piece.id)))
             .select_from(Piece)
@@ -628,12 +690,121 @@ class DashboardRepository:
         stmt = self._scope(stmt, client_scope)
         return int((await self.db.execute(stmt)).scalar_one() or 0)
 
+    async def lining_required_derived(
+        self, *, client_scope: uuid.UUID | None, order_id: uuid.UUID | None = None,
+    ) -> int:
+        """The same population, recomputed LIVE from the style/SKU signals rather
+        than read from the stored flag.
+
+        It applies the current `_sku_needs_lining` rules in SQL: an explicit knit
+        or nylon colour on the SKU, or a lining marker in the style name/article.
+        The marker vocabulary is imported from premint — NOT restated here — so
+        the dashboard and the importer can never drift to different definitions of
+        "needs lining".
+
+        This is a REPORTING cross-check, not a replacement: the merge gate still
+        reads the stored flag, so a disagreement means the DATA needs fixing
+        (scripts/backfill_needs_lining.py), not that the dashboard should quietly
+        substitute its own answer.
+        """
+        from app.modules.imports.premint import LINING_NAME_MARKERS
+
+        # The two SKU colour columns premint checks first (source 1).
+        colour_signal = or_(
+            and_(SKU.knit_color.isnot(None), func.trim(SKU.knit_color) != ""),
+            and_(SKU.nylon_color.isnot(None), func.trim(SKU.nylon_color) != ""),
+        )
+        # The style name/article markers (source 2) — the signal that actually
+        # fires on the real sheets.
+        haystack = func.upper(
+            func.coalesce(Style.name, "") + " " + func.coalesce(Style.article, ""))
+        name_signal = or_(*[haystack.like(f"%{m}%") for m in LINING_NAME_MARKERS])
+
+        stmt = (
+            select(func.count(func.distinct(Piece.id)))
+            .select_from(Piece)
+            .join(SKU, SKU.id == Piece.sku_id)
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .where(Piece.is_active.is_(True), or_(colour_signal, name_signal))
+        )
+        if order_id is not None:
+            stmt = stmt.where(ClientOrder.id == order_id)
+        stmt = self._scope(stmt, client_scope)
+        return int((await self.db.execute(stmt)).scalar_one() or 0)
+
+    async def minted_piece_count(
+        self, *, client_scope: uuid.UUID | None, order_id: uuid.UUID | None = None,
+    ) -> int:
+        """Active pieces in scope — the population every piece-derived number on
+        the lining dashboard is actually counted against."""
+        stmt = (
+            select(func.count(func.distinct(Piece.id)))
+            .select_from(Piece)
+            .join(SKU, SKU.id == Piece.sku_id)
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .where(Piece.is_active.is_(True))
+        )
+        if order_id is not None:
+            stmt = stmt.where(ClientOrder.id == order_id)
+        stmt = self._scope(stmt, client_scope)
+        return int((await self.db.execute(stmt)).scalar_one() or 0)
+
+    async def orders_without_pieces(
+        self, *, client_scope: uuid.UUID | None, order_id: uuid.UUID | None = None,
+    ) -> int:
+        """Orders in scope that have NO pieces minted at all.
+
+        This is the other half of the `overall` vs `lining_required` gap. The
+        ordered total spans every order; every piece-derived number can only span
+        the orders that have been through breakdown upload. On the live database
+        that is 4 of 6 orders, and nothing on the screen said so — the ratio just
+        looked broken.
+        """
+        has_piece = (
+            select(Piece.id)
+            .join(SKU, SKU.id == Piece.sku_id)
+            .join(Style, Style.id == SKU.style_id)
+            .where(Style.client_order_id == ClientOrder.id,
+                   Piece.is_active.is_(True))
+            .exists()
+        )
+        stmt = select(func.count(ClientOrder.id)).where(~has_piece)
+        if order_id is not None:
+            stmt = stmt.where(ClientOrder.id == order_id)
+        if client_scope is not None:
+            stmt = stmt.where(ClientOrder.client_id == client_scope)
+        return int((await self.db.execute(stmt)).scalar_one() or 0)
+
     async def lining_production_kpis(
         self, *, today: date, client_scope: uuid.UUID | None,
         order_id: uuid.UUID | None = None,
     ) -> dict:
-        """Lining §3 KPIs. assigned/completed derive from LINING_CUTTING events;
-        pending is against the lining-required population."""
+        """Lining §3 KPIs.
+
+        THREE DIFFERENT POPULATIONS LIVE IN THIS ONE BLOCK, and conflating them is
+        what made `overall` (12,417) look absurd next to `lining_required` (947):
+
+            total_order_pieces      Σ SKU.qty_ordered over EVERY order in scope,
+                                    including orders with nothing minted yet
+            minted_pieces           actual `piece` rows — the only population any
+                                    piece-derived number below can count against
+            lining_required_pieces  minted pieces whose STORED flag says lined
+
+        On the live database 4 of 6 orders had no pieces at all, so the first
+        number spanned six orders and the third spanned two. Nothing on the screen
+        said so. Every one of them is now returned, plus the two diagnostics that
+        make a bad ratio legible instead of mysterious:
+
+            orders_without_pieces   why the ordered total outruns the rest
+            lining_flag_stale       the stored flag disagrees with a live recount,
+                                    i.e. the data needs the backfill run
+
+        `overall_pending` is deliberately computed against `lining_required_pieces`
+        — the work the lining stage actually has to do — and `pending_basis` names
+        that in the response so a reader never has to infer the denominator.
+        """
         ord_stmt = (
             select(func.coalesce(func.sum(SKU.qty_ordered), 0))
             .select_from(SKU)
@@ -645,7 +816,13 @@ class DashboardRepository:
         ord_stmt = self._scope(ord_stmt, client_scope)
         qty_ordered = int((await self.db.execute(ord_stmt)).scalar_one() or 0)
 
+        minted = await self.minted_piece_count(
+            client_scope=client_scope, order_id=order_id)
         required = await self.lining_required_pieces(
+            client_scope=client_scope, order_id=order_id)
+        derived = await self.lining_required_derived(
+            client_scope=client_scope, order_id=order_id)
+        unminted_orders = await self.orders_without_pieces(
             client_scope=client_scope, order_id=order_id)
         assigned = await self._assigned_count(
             today=today, client_scope=client_scope, order_id=order_id,
@@ -660,7 +837,20 @@ class DashboardRepository:
         overall_completed = assigned["overall"]     # lining is one cut event
         return {
             "total_order_pieces": qty_ordered,
+            "minted_pieces": minted,
             "lining_required_pieces": required,
+            "lining_required_derived": derived,
+            "lining_flag_stale": derived != required,
+            # THE DIRECTION MATTERS, so it is reported separately. `stale` only
+            # says the two disagree; this says how many pieces the rules would
+            # flag that the stored data does not — the ones whose lining work is
+            # currently invisible, and the number `backfill_needs_lining` would
+            # fix. A disagreement the other way (more stored than derived) is
+            # usually a deliberate hand-correction, not a defect, and must not be
+            # reported as missing work.
+            "lining_flag_undercount": max(derived - required, 0),
+            "orders_without_pieces": unminted_orders,
+            "pending_basis": "lining_required_pieces",
             "assigned_pieces": assigned["overall"],
             "assigned_today": assigned["today"],
             "completed_today": completed_today,
@@ -681,7 +871,8 @@ class DashboardRepository:
 
     async def lining_by_lot(self, *, limit: int = 200) -> list:
         return await self._material_by_lot(
-            category="lining", lot_col=ProductionEvent.lining_lot_id, limit=limit)
+            category="lining", lot_col=ProductionEvent.lining_lot_id,
+            cut_stage=_LINING_CUT, limit=limit)
 
     async def lining_upcoming(
         self, *, client_scope: uuid.UUID | None,
@@ -1154,41 +1345,309 @@ class DashboardRepository:
     # ══════════════════════════════════ piece stage history (stitching trace)
     async def piece_stage_history(self, *, piece_code: str) -> dict | None:
         """§21 traceability — every real production event of a piece, in pipeline
-        order, plus the piece's current drawer state for the STORE overlay. Two
-        queries: the piece head (+ drawer state) and its events."""
-        from app.modules.barcode.models import Drawer
+        order, plus its drawer for the STORE overlay. Two queries: the piece head
+        and its events.
 
+        THIS IS THE ONE PIECE-TRACKING READ. It was mounted only under the
+        stitching dashboard, which is why the other stages had no piece-level
+        view; it is now the shared handler behind every dashboard's piece route
+        (see the router). So it has to carry what each of those screens needs:
+
+          • CONSUMPTION + the lot article per cut event — the cutting and lining
+            screens are about material, and without these they could show that a
+            piece was cut but not what it cost.
+          • The drawer CODE, not just its state. "holding_leather" does not tell
+            an operator which drawer to walk to.
+          • The article and the padded serial, matching every other piece payload.
+
+        THE DRAWER JOIN READS `Drawer.current_piece_id`, NOT `Piece.drawer_id`.
+        Those are the same link from opposite ends, and only the first one is
+        live: a store scan mutates the drawer that CLAIMS the piece. Reading
+        through the stored pointer is how a payload ends up disagreeing with the
+        store screen about the same piece — the same correction already made in
+        barcode/repository.py::piece_card.
+        """
+        from app.modules.barcode.models import Drawer, MaterialLot
+
+        # EVERY column is labelled. Four of the tables in this join have a `code`
+        # and two have a `name`, so unlabelled attribute access on the Row would
+        # silently resolve to whichever one SQLAlchemy happened to keep — a bug
+        # that reads as correct code.
         head = (await self.db.execute(
             select(
-                Piece.id, Piece.code, Piece.needs_lining,
-                Operation.code, Style.name, ClientOrder.order_number,
-                SKU.color_name, SKU.size, Drawer.state,
+                Piece.id.label("piece_id"),
+                Piece.code.label("piece_code"),
+                Piece.seq.label("seq"),
+                Piece.needs_lining.label("needs_lining"),
+                Operation.code.label("current_stage"),
+                Style.name.label("style"),
+                Style.article.label("article"),
+                ClientOrder.order_number.label("order_number"),
+                SKU.color_name.label("color_name"),
+                SKU.color_code.label("color_code"),
+                SKU.size.label("size"),
+                Drawer.state.label("drawer_state"),
+                Drawer.code.label("drawer_code"),
+                Drawer.leather_in.label("leather_in"),
+                Drawer.lining_in.label("lining_in"),
+                Drawer.sent_to.label("sent_to"),
             )
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .outerjoin(Operation, Operation.id == Piece.current_operation_id)
-            .outerjoin(Drawer, Drawer.id == Piece.drawer_id)
+            .outerjoin(Drawer, Drawer.current_piece_id == Piece.id)
             .where(Piece.code == piece_code)
         )).first()
         if head is None:
             return None
-        (pid, pcode, needs_lining, cur_stage, style, onum,
-         colour, size, drawer_state) = head
 
+        # The lot is a LEFT JOIN and the quantity is not filtered: a cut logged
+        # without a measurement (legal for lining since consumption became
+        # optional) must still appear in the piece's own story with a null
+        # quantity, not drop out of its history entirely.
         events = (await self.db.execute(
-            select(Operation.code, Employee.name, ProductionEvent.work_date)
+            select(
+                Operation.code.label("stage"),
+                Employee.name.label("employee"),
+                ProductionEvent.work_date.label("work_date"),
+                ProductionEvent.consumption_qty.label("consumption"),
+                MaterialLot.article.label("lot_article"),
+                MaterialLot.colour.label("lot_colour"),
+            )
             .select_from(ProductionEvent)
             .join(Operation, Operation.id == ProductionEvent.operation_id)
             .join(Employee, Employee.id == ProductionEvent.employee_id)
-            .where(ProductionEvent.piece_id == pid)
-            .order_by(ProductionEvent.work_date)
+            .outerjoin(
+                MaterialLot,
+                MaterialLot.id == func.coalesce(ProductionEvent.leather_lot_id,
+                                                ProductionEvent.lining_lot_id))
+            .where(ProductionEvent.piece_id == head.piece_id)
+            .order_by(ProductionEvent.work_date, ProductionEvent.created_at)
         )).all()
 
         return {
-            "piece_code": pcode, "needs_lining": bool(needs_lining),
-            "current_stage": cur_stage, "style": style, "order_number": onum,
-            "colour": colour, "size": size, "drawer_state": drawer_state,
+            "piece_id": head.piece_id,
+            "piece_code": head.piece_code,
+            "serial": f"{head.seq:03d}" if head.seq is not None else None,
+            "needs_lining": bool(head.needs_lining),
+            "current_stage": head.current_stage,
+            "style": head.style,
+            "article": head.article,
+            "order_number": head.order_number,
+            "colour": head.color_name or head.color_code,
+            "size": head.size,
+            "drawer_state": head.drawer_state,
+            "drawer_code": head.drawer_code,
+            "drawer_leather_in": bool(head.leather_in),
+            "drawer_lining_in": bool(head.lining_in),
+            "drawer_sent_to": head.sent_to,
             "events": events,
         }
+
+    # ══════════════════════════════════════════════════════ DIRECT MANAGER
+    # Factory-wide aggregates for the DM control panel. All follow the same
+    # single-grouped-query discipline as the four stage dashboards; attendance
+    # and shift config are imported lazily inside their methods so the acyclic
+    # import chain is preserved (the same pattern used for MaterialLot/Drawer).
+
+    # op -> department, in pipeline order. Cutting folds leather + lining cut;
+    # Stitching folds line + shell + final finish.
+    _DM_DEPARTMENTS = (
+        ("Cutting", (_LEATHER_CUT, _LINING_CUT)),
+        ("Fusing", (_FUSING,)),
+        ("Pasting", (_PASTING,)),
+        ("Stitching", (_LINE_STITCHING, _SHELL_STITCHING, _FINAL_FINISH)),
+        ("Inspection", (_FINAL_INSPECTION,)),
+        ("Packing", (_TERMINAL_STAGE,)),
+    )
+    # The full factory chain, in order, for the pipeline + bottleneck view.
+    # LINING_CUTTING is absent on purpose: it is a PARALLEL entry that rejoins at
+    # the drawer, so putting it in a linear funnel would compare it against a
+    # predecessor it does not have.
+    _DM_PIPELINE = (
+        _LEATHER_CUT, _FUSING, _PASTING, _LINE_STITCHING,
+        _SHELL_STITCHING, _FINAL_FINISH, _FINAL_INSPECTION, _TERMINAL_STAGE,
+    )
+
+    async def operation_meta(self) -> dict[str, tuple[str, int]]:
+        """Operation label + sequence per code, in ONE query.
+
+        Drives the pipeline node labels and ordering from the `operation` table
+        (which the MD edits) instead of hardcoding display strings — the same
+        reason CLAUDE.md keeps labels in the table and only the ORDER in code.
+        """
+        rows = (await self.db.execute(
+            select(Operation.code, Operation.label, Operation.sequence)
+        )).all()
+        return {code: (label, int(seq or 0)) for code, label, seq in rows}
+
+    async def stage_funnel(
+        self, *, ops: tuple[str, ...], today: date,
+        client_scope: uuid.UUID | None, order_id: uuid.UUID | None = None,
+        style_id: uuid.UUID | None = None,
+    ) -> dict[str, dict]:
+        """Generic factory funnel — per op in `ops`, distinct pieces (overall +
+        today). ONE grouped query.
+
+        Powers the DM pipeline, order tracking and style tracking from a single
+        query shape; `stitching_funnel` above is the fixed-ops special case that
+        predates it.
+        """
+        stmt = (
+            select(
+                Operation.code,
+                func.count(func.distinct(ProductionEvent.piece_id)).label("overall"),
+                func.count(func.distinct(
+                    case((ProductionEvent.work_date == today,
+                          ProductionEvent.piece_id))
+                )).label("today"),
+            )
+            .select_from(ProductionEvent)
+            .join(Operation, Operation.id == ProductionEvent.operation_id)
+            .join(SKU, SKU.id == ProductionEvent.sku_id)
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .where(Operation.code.in_(ops))
+        )
+        if order_id is not None:
+            stmt = stmt.where(ClientOrder.id == order_id)
+        if style_id is not None:
+            stmt = stmt.where(Style.id == style_id)
+        stmt = self._scope(stmt, client_scope)
+        stmt = stmt.group_by(Operation.code)
+        rows = (await self.db.execute(stmt)).all()
+        return {code: {"overall": int(o or 0), "today": int(t or 0)}
+                for code, o, t in rows}
+
+    async def department_performance(
+        self, *, today: date, client_scope: uuid.UUID | None,
+    ) -> list:
+        """Distinct produced pieces per DEPARTMENT (overall + today), ONE grouped
+        query.
+
+        The op -> department CASE is what makes the count correct for
+        multi-op departments: Cutting folds leather and lining cut, Stitching
+        folds three stages. Counting per op and summing afterwards would count a
+        piece once per stage it passed, so a garment through all three stitching
+        stages would read as three produced. The distinct is on piece_id PER
+        DEPARTMENT LABEL, which is the only grouping that answers "how many
+        garments has this department worked".
+        """
+        dept = case(
+            (Operation.code.in_((_LEATHER_CUT, _LINING_CUT)), literal("Cutting")),
+            (Operation.code == _FUSING, literal("Fusing")),
+            (Operation.code == _PASTING, literal("Pasting")),
+            (Operation.code.in_((_LINE_STITCHING, _SHELL_STITCHING, _FINAL_FINISH)),
+             literal("Stitching")),
+            (Operation.code == _FINAL_INSPECTION, literal("Inspection")),
+            (Operation.code == _TERMINAL_STAGE, literal("Packing")),
+            else_=literal("Other"),
+        ).label("department")
+        stmt = (
+            select(
+                dept,
+                func.count(func.distinct(ProductionEvent.piece_id)).label("produced"),
+                func.count(func.distinct(
+                    case((ProductionEvent.work_date == today,
+                          ProductionEvent.piece_id))
+                )).label("produced_today"),
+            )
+            .select_from(ProductionEvent)
+            .join(Operation, Operation.id == ProductionEvent.operation_id)
+            .join(SKU, SKU.id == ProductionEvent.sku_id)
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+        )
+        stmt = self._scope(stmt, client_scope)
+        stmt = stmt.group_by(dept)
+        return (await self.db.execute(stmt)).all()
+
+    async def active_employee_stats(
+        self, *, today: date, client_scope: uuid.UUID | None,
+    ) -> dict:
+        """Present / active / assigned employees + today's event count.
+
+        TWO reads, and they are scoped differently on purpose. Attendance is a
+        factory-wide fact with no client link — a worker is present or not,
+        regardless of whose order they touch — so `present` is NOT client-scoped.
+        The production figures are order-derived and therefore honour scope. A
+        scoped CLIENT can consequently see more people present than active, which
+        is correct: the rest are working on someone else's garments.
+        """
+        from app.modules.attendance.models import AttendanceLog
+
+        present = (await self.db.execute(
+            select(func.count(func.distinct(AttendanceLog.employee_id)))
+            .where(AttendanceLog.work_date == today)
+        )).scalar_one()
+
+        prod = (await self.db.execute(
+            self._scope(
+                select(
+                    func.count(func.distinct(ProductionEvent.employee_id)).label("assigned"),
+                    func.count(func.distinct(
+                        case((ProductionEvent.work_date == today,
+                              ProductionEvent.employee_id))
+                    )).label("active"),
+                    func.count(
+                        case((ProductionEvent.work_date == today, ProductionEvent.id))
+                    ).label("prod_today"),
+                )
+                .select_from(ProductionEvent)
+                .join(SKU, SKU.id == ProductionEvent.sku_id)
+                .join(Style, Style.id == SKU.style_id)
+                .join(ClientOrder, ClientOrder.id == Style.client_order_id),
+                client_scope,
+            )
+        )).one()
+        return {
+            "employees_present": int(present or 0),
+            "active_employees": int(prod.active or 0),
+            "employees_assigned": int(prod.assigned or 0),
+            "production_today": int(prod.prod_today or 0),
+        }
+
+    async def shift_hours(self) -> float:
+        """Factory shift length, for the pieces-per-hour figure. ONE scalar read
+        of the ShiftConfig singleton; 8h when unset, which is the same default
+        the column itself carries."""
+        from app.modules.attendance.models import ShiftConfig
+        val = (await self.db.execute(
+            select(ShiftConfig.shift_length_hours).limit(1)
+        )).scalar_one_or_none()
+        return float(val) if val is not None else 8.0
+
+    async def order_head(self, *, order_id: uuid.UUID) -> tuple | None:
+        """Order number + total ordered qty for one order. ONE read.
+
+        OUTER joins: an order with no styles yet is a real order and must return
+        (number, 0) rather than vanishing and 404ing a page that should show an
+        empty funnel.
+        """
+        return (await self.db.execute(
+            select(
+                ClientOrder.order_number,
+                func.coalesce(func.sum(SKU.qty_ordered), 0),
+            )
+            .select_from(ClientOrder)
+            .outerjoin(Style, Style.client_order_id == ClientOrder.id)
+            .outerjoin(SKU, SKU.style_id == Style.id)
+            .where(ClientOrder.id == order_id)
+            .group_by(ClientOrder.order_number)
+        )).first()
+
+    async def style_head(self, *, style_id: uuid.UUID) -> tuple | None:
+        """Style name + order number + total qty for one style. ONE read."""
+        return (await self.db.execute(
+            select(
+                Style.name, ClientOrder.order_number,
+                func.coalesce(func.sum(SKU.qty_ordered), 0),
+            )
+            .select_from(Style)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .outerjoin(SKU, SKU.style_id == Style.id)
+            .where(Style.id == style_id)
+            .group_by(Style.name, ClientOrder.order_number)
+        )).first()

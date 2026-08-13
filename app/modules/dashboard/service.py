@@ -29,15 +29,19 @@ from app.core.enums import ProductionStage
 from app.core.store_display import STORE, display_stage, holding_label
 from app.modules.dashboard.repository import DashboardRepository
 from app.modules.dashboard.schemas import (
-    CurrentOrder, CurrentStyle, CutterRow, CuttingDashboard, DailyRow,
-    DashboardMeta, DrawerCutterRow, DrawerDetail, DrawerMovementRow, DrawerRow,
+    Bottleneck, CurrentOrder, CurrentStyle, CutterRow, CuttingDashboard, DailyRow,
+    DashboardMeta, DMAttendance, DMOverallProduction, DMProductionRate, DMQuality,
+    DMStore, DeptPerformanceRow, DirectManagerDashboard, DrawerCutterRow,
+    DrawerDetail, DrawerMovementRow, DrawerRow,
     EmployeePieceRow, EmptyDrawerRow, LeatherKPIs, LeatherLotRow,
     LiningDashboard, LiningEmployeeRow, LiningLotRow, LiningMaterialKPIs,
-    LiningProductionKPIs, MaterialCutterTrace, OrderProgressRow,
-    PieceConsumptionRow, PieceStageHistoryRow, PieceTrace, ProductionKPIs,
-    StageBlock, StageDailyRow, StitchingCurrentStyle, StitchingDashboard,
+    LiningProductionKPIs, MaterialCutterTrace, OrderProgressRow, OrderStageRow,
+    OrderTracking, PieceConsumptionRow, PieceStageHistoryRow, PieceTrace,
+    ProductionKPIs, StageBlock, StageDailyRow, StagePipelineNode,
+    StitchingCurrentStyle, StitchingDashboard,
     StitchingEmployeeRow, StitchingKPIs, StitchingStyleStage, StoreCurrentStyleRow,
-    StoreDashboard, StoreHandoff, StoreKPIs, UpcomingPieceRow,
+    StoreDashboard, StoreHandoff, StoreKPIs, StyleStageRow, StyleTracking,
+    UpcomingPieceRow,
 )
 
 _TERMINAL = ProductionStage.leather_chain()[-1].value
@@ -333,19 +337,38 @@ class DashboardService:
         self, *, client_scope: uuid.UUID | None,
         order_id: uuid.UUID | None = None, employee_id: uuid.UUID | None = None,
         start: date | None = None, end: date | None = None,
+        stage: str = _LEATHER_CUT, include_unmeasured: bool = False,
     ) -> list[PieceConsumptionRow]:
+        """The CUTTING consumption grid — leather by default, explicitly.
+
+        This used to pass no stage at all and inherit a default meaning "both cut
+        stages", which put lining-cut events in the leather grid. The stage is now
+        always stated; `stage` lets the caller ask for the other one deliberately.
+        """
         rows = await self.repo.piece_consumption(
-            client_scope=client_scope, order_id=order_id, employee_id=employee_id,
-            start=start, end=end)
-        return [
-            PieceConsumptionRow(
-                piece_code=pcode, work_date=wd, employee=emp, stage=stage,
-                actual_consumption=float(cons) if cons is not None else None,
-                leather_article=lart, colour=lcol, thickness=lthk,
-                style=style, order_number=onum, size=size)
-            for (pcode, wd, emp, stage, cons, lart, lcol, lthk,
-                 style, onum, size) in rows
-        ]
+            client_scope=client_scope, stage=stage, order_id=order_id,
+            employee_id=employee_id, start=start, end=end,
+            include_unmeasured=include_unmeasured)
+        return [self._consumption_row(r) for r in rows]
+
+    @staticmethod
+    def _consumption_row(r) -> PieceConsumptionRow:
+        """One shared mapper for both consumption grids.
+
+        The leather and lining versions were two identical unpack-and-build
+        blocks. Identical code in two places is how the two screens end up
+        disagreeing about a field after someone edits one of them.
+        """
+        (pcode, wd, emp, stage, cons, art, col, thk, style, onum, size) = r
+        return PieceConsumptionRow(
+            piece_code=pcode, work_date=wd, employee=emp, stage=stage,
+            actual_consumption=float(cons) if cons is not None else None,
+            material_article=art,
+            # Same value under the old field name, for one release — the cutting
+            # screen reads `leather_article` today and must not break mid-deploy.
+            leather_article=art,
+            colour=col, thickness=thk,
+            style=style, order_number=onum, size=size)
 
     # ══════════════════════════════════════════════════════════════ LINING
     async def lining_overview(
@@ -439,21 +462,20 @@ class DashboardService:
         self, *, client_scope: uuid.UUID | None,
         order_id: uuid.UUID | None = None, employee_id: uuid.UUID | None = None,
         start: date | None = None, end: date | None = None,
+        stage: str = _LINING_CUT, include_unmeasured: bool = False,
     ) -> list[PieceConsumptionRow]:
-        from app.modules.production.models import ProductionEvent
+        """The LINING consumption grid.
+
+        `include_unmeasured` matters more here than on the leather side: lining
+        consumption is optional, so an unmeasured lining cut is real work with a
+        null quantity. Off by default (the grid is about consumption), on when the
+        screen wants to show that the cut happened at all.
+        """
         rows = await self.repo.piece_consumption(
-            client_scope=client_scope, order_id=order_id, employee_id=employee_id,
-            start=start, end=end, stages=(_LINING_CUT,),
-            material_lot_col=ProductionEvent.lining_lot_id)
-        return [
-            PieceConsumptionRow(
-                piece_code=pcode, work_date=wd, employee=emp, stage=stage,
-                actual_consumption=float(cons) if cons is not None else None,
-                leather_article=lart, colour=lcol, thickness=lthk,
-                style=style, order_number=onum, size=size)
-            for (pcode, wd, emp, stage, cons, lart, lcol, lthk,
-                 style, onum, size) in rows
-        ]
+            client_scope=client_scope, stage=stage, order_id=order_id,
+            employee_id=employee_id, start=start, end=end,
+            include_unmeasured=include_unmeasured)
+        return [self._consumption_row(r) for r in rows]
 
     # ══════════════════════════════════════════════════════════════ STITCHING
     async def stitching_overview(
@@ -597,7 +619,15 @@ class DashboardService:
                 for wd, code, c, e in rows]
 
     async def piece_trace(self, *, piece_code: str) -> PieceTrace | None:
-        """§21 traceability — full stage history + the derived STORE overlay."""
+        """§21 traceability — full stage history + the derived STORE overlay.
+
+        THE SHARED PIECE-TRACKING READ. Mounted under every dashboard, not just
+        stitching (see the router): the cutting, lining and store screens each
+        need to follow one garment, and three near-identical endpoints would drift
+        apart. One handler, several URLs.
+        """
+        from app.core.store_display import holding_label
+
         data = await self.repo.piece_stage_history(piece_code=piece_code)
         if data is None:
             return None
@@ -609,27 +639,56 @@ class DashboardService:
 
         history: list[PieceStageHistoryRow] = []
         inserted_store = False
-        for op_code, emp, wd in data["events"]:
-            label = _FUNNEL_LABELS.get(op_code, (op_code or "").replace("_", " ").title())
+        total_consumption = 0.0
+        measured_any = False
+
+        def _store_row() -> PieceStageHistoryRow:
+            return PieceStageHistoryRow(
+                stage=STORE, label="Store / Drawer", employee=None,
+                work_date=None, is_store_overlay=True,
+                store_status=disp["store_status"])
+
+        for ev in data["events"]:
+            label = _FUNNEL_LABELS.get(
+                ev.stage, (ev.stage or "").replace("_", " ").title())
+            consumption = float(ev.consumption) if ev.consumption is not None else None
+            if consumption is not None:
+                total_consumption += consumption
+                measured_any = True
             history.append(PieceStageHistoryRow(
-                stage=op_code, label=label, employee=emp, work_date=wd))
+                stage=ev.stage, label=label, employee=ev.employee,
+                work_date=ev.work_date, consumption=consumption,
+                lot_article=ev.lot_article, lot_colour=ev.lot_colour))
             # insert the STORE overlay row right after the cut-side terminals
-            if disp["in_store"] and not inserted_store and op_code in (_PASTING, _LINING_CUT):
-                history.append(PieceStageHistoryRow(
-                    stage=STORE, label="Store / Drawer", employee=None,
-                    work_date=None, is_store_overlay=True,
-                    store_status=disp["store_status"]))
+            if disp["in_store"] and not inserted_store and ev.stage in (_PASTING, _LINING_CUT):
+                history.append(_store_row())
                 inserted_store = True
         if disp["in_store"] and not inserted_store:
-            history.append(PieceStageHistoryRow(
-                stage=STORE, label="Store / Drawer", employee=None, work_date=None,
-                is_store_overlay=True, store_status=disp["store_status"]))
+            history.append(_store_row())
 
         return PieceTrace(
-            piece_code=data["piece_code"], style=data["style"],
-            order_number=data["order_number"], colour=data["colour"],
-            size=data["size"], display_stage=disp["display_stage"],
-            in_store=disp["in_store"], store_label=disp["label"], history=history)
+            piece_code=data["piece_code"],
+            serial=data["serial"],
+            article=data["article"],
+            style=data["style"],
+            order_number=data["order_number"],
+            colour=data["colour"],
+            size=data["size"],
+            display_stage=disp["display_stage"],
+            in_store=disp["in_store"],
+            store_label=disp["label"],
+            needs_lining=data["needs_lining"],
+            drawer_code=data["drawer_code"],
+            drawer_state=data["drawer_state"],
+            drawer_holding=holding_label(
+                leather_in=data["drawer_leather_in"],
+                lining_in=data["drawer_lining_in"]) if data["drawer_code"] else None,
+            drawer_sent_to=data["drawer_sent_to"],
+            # None, not 0.0, when nothing was ever measured — "no measurement
+            # taken" and "measured zero" are different facts, and lining cuts can
+            # legitimately be the former.
+            total_consumption=round(total_consumption, 3) if measured_any else None,
+            history=history)
 
     # ══════════════════════════════════════════════════════════════ STORE
     async def store_overview(
@@ -741,3 +800,221 @@ class DashboardService:
             for (pcode, op_code, emp_id, emp_name, style, onum, colour, size,
                  wd, dcode) in rows
         ]
+
+    # ══════════════════════════════════════════════════════ DIRECT MANAGER
+    # The DM screen is the whole factory in one view: overall production,
+    # department performance, the stage pipeline + bottleneck, production rate,
+    # quality, attendance and store send/receive, plus order and style
+    # drill-downs.
+    #
+    # IT COMPOSES THE OTHER DASHBOARDS' AGGREGATES rather than recomputing them.
+    # That is the point: if this screen and the cutting screen ever disagreed
+    # about how many pieces were cut, both would be untrustworthy, and the MD's
+    # is the one people act on.
+    #
+    # QUERY BUDGET — roughly 15 grouped round trips for the entire control panel.
+    _DM_UNSUPPORTED = {
+        "quality_rejection": (
+            "No quality/rejection table exists. produced / inspected / event-based "
+            "rework are real; accepted / rejected / defective_pct are null until a "
+            "PieceInspection (pass/reject/rework) model + migration lands."
+        ),
+        "department_target_routing": (
+            "Department target uses the order quantity as a uniform denominator. "
+            "Per-stage routing (which pieces a style actually sends to each stage) "
+            "can be refined via the StyleOperation table when precise "
+            "per-department targets are required."
+        ),
+        "rate_shift_costing": (
+            "pieces_per_hour uses the ShiftConfig shift length. pieces_per_shift "
+            "assumes a single shift; per_piece_rate (rs/piece) is a wages/costing "
+            "concern owned by the wages module — both null here."
+        ),
+        "store_is_drawer_state": (
+            "Store send/receive counts are derived from drawer state "
+            "(received/sended), not from a STORE production event."
+        ),
+        "lining_cut_excluded_from_pipeline": (
+            "The pipeline funnel is the linear leather chain. LINING_CUTTING is a "
+            "PARALLEL entry that rejoins at the drawer, so it has no predecessor "
+            "to measure a queue against; lining progress lives on /dashboard/lining."
+        ),
+    }
+
+    async def direct_manager_overview(
+        self, *, client_scope: uuid.UUID | None = None, today: date | None = None,
+    ) -> DirectManagerDashboard:
+        today = today or date.today()
+
+        prod = await self.repo.production_kpis(today=today, client_scope=client_scope)
+        dept_rows = await self.repo.department_performance(
+            today=today, client_scope=client_scope)
+        funnel = await self.repo.stage_funnel(
+            ops=self.repo._DM_PIPELINE, today=today, client_scope=client_scope)
+        opmeta = await self.repo.operation_meta()
+        emp = await self.repo.active_employee_stats(
+            today=today, client_scope=client_scope)
+        hours = await self.repo.shift_hours()
+        skpis = await self.repo.store_kpis(client_scope=client_scope)
+        handoff = await self.repo.store_handoff(client_scope=client_scope)
+        progress = await self._order_progress(client_scope=client_scope, today=today)
+        daily = await self._daily(client_scope=client_scope)
+
+        target = prod["total_order_pieces"]
+        produced = prod["overall_completed"]
+        produced_today = prod["completed_today"]
+
+        # Roll the per-STYLE progress rows up to per-ORDER. An order is complete
+        # only when every style in it is, and late if ANY style is late — a single
+        # slipping style makes the order late, not three-quarters late.
+        by_order: dict[uuid.UUID, dict] = {}
+        for p in progress:
+            o = by_order.setdefault(p.order_id, {"ordered": 0, "completed": 0,
+                                                 "delayed": False})
+            o["ordered"] += p.total_ordered
+            o["completed"] += p.completed
+            if p.delay_status == "LATE":
+                o["delayed"] = True
+        orders_completed = sum(1 for o in by_order.values()
+                               if o["ordered"] and o["completed"] >= o["ordered"])
+        delayed_orders = sum(1 for o in by_order.values() if o["delayed"])
+        orders_in_progress = max(len(by_order) - orders_completed, 0)
+
+        overall = DMOverallProduction(
+            total_target=target, total_produced=produced,
+            total_pending=max(target - produced, 0),
+            overall_achievement_pct=round(produced / target * 100, 1) if target else 0.0,
+            orders_in_progress=orders_in_progress,
+            orders_completed=orders_completed, delayed_orders=delayed_orders)
+
+        # Department performance against a uniform target (the order quantity).
+        # See _DM_UNSUPPORTED["department_target_routing"] for why that is a
+        # denominator and not a routing-accurate per-stage target.
+        produced_by_dept = {d: (int(pr or 0), int(td or 0))
+                            for d, pr, td in dept_rows}
+        departments = []
+        for label, ops in self.repo._DM_DEPARTMENTS:
+            pr, td = produced_by_dept.get(label, (0, 0))
+            departments.append(DeptPerformanceRow(
+                department=label, stages=list(ops), target=target, produced=pr,
+                produced_today=td,
+                achievement_pct=round(pr / target * 100, 1) if target else 0.0))
+
+        # The pipeline + the bottleneck. `pending` at each node is the WIP the
+        # upstream stage has finished and this one has not — a queue depth. The
+        # bottleneck is the DEEPEST such queue, i.e. the actual constraint on
+        # throughput, not simply the earliest stage with unfinished work.
+        pipeline: list[StagePipelineNode] = []
+        prev_completed = target
+        bottleneck = Bottleneck(stage=None, label=None, pending=0, queue=0)
+        for idx, code in enumerate(self.repo._DM_PIPELINE):
+            completed = funnel.get(code, {}).get("overall", 0)
+            label, seq = opmeta.get(code, (code.replace("_", " ").title(), idx))
+            pending = max(prev_completed - completed, 0)
+            pipeline.append(StagePipelineNode(
+                stage=code, label=label, sequence=seq,
+                completed=completed, pending=pending))
+            if pending > bottleneck.pending:
+                bottleneck = Bottleneck(stage=code, label=label,
+                                        pending=pending, queue=pending)
+            prev_completed = completed
+
+        rate = DMProductionRate(
+            pieces_per_day=round(sum(d.completed for d in daily) / len(daily), 1)
+            if daily else 0.0,
+            pieces_per_employee_today=round(
+                produced_today / emp["active_employees"], 1)
+            if emp["active_employees"] else 0.0,
+            pieces_per_hour_today=round(produced_today / hours, 1) if hours else None)
+
+        quality = DMQuality(
+            produced=produced,
+            inspected=funnel.get(_INSPECTION, {}).get("overall", 0),
+            rework_pieces=prod["rework_pieces"])
+
+        attendance = DMAttendance(**emp)
+        store = DMStore(
+            drawers_in_store=skpis["drawers_in_store"],
+            drawers_sent=skpis["drawers_sent"],
+            drawers_received=handoff["received"])
+
+        return DirectManagerDashboard(
+            meta=DashboardMeta(generated_for=today, scope=_scope_label(client_scope),
+                               unsupported=self._DM_UNSUPPORTED),
+            overall=overall, departments=departments, pipeline=pipeline,
+            bottleneck=bottleneck, production_rate=rate, quality=quality,
+            attendance=attendance, store=store, order_progress=progress,
+            daily_production=daily)
+
+    async def dm_order_tracking(
+        self, *, order_id: uuid.UUID, client_scope: uuid.UUID | None = None,
+        today: date | None = None,
+    ) -> OrderTracking | None:
+        """One order's complete journey across every stage, and where it is stuck."""
+        today = today or date.today()
+        head = await self.repo.order_head(order_id=order_id)
+        if head is None:
+            return None
+        order_number, total = head[0], int(head[1] or 0)
+        funnel = await self.repo.stage_funnel(
+            ops=self.repo._DM_PIPELINE, today=today, client_scope=client_scope,
+            order_id=order_id)
+        opmeta = await self.repo.operation_meta()
+
+        stages: list[OrderStageRow] = []
+        prev = total
+        blocked: str | None = None
+        blocked_pending = 0
+        for idx, code in enumerate(self.repo._DM_PIPELINE):
+            completed = funnel.get(code, {}).get("overall", 0)
+            label, seq = opmeta.get(code, (code.replace("_", " ").title(), idx))
+            pct = round(completed / total * 100, 1) if total else 0.0
+            if total and completed >= total:
+                status = "DONE"
+            elif completed == 0:
+                status = "PENDING"
+            else:
+                status = "IN_PROGRESS"
+            # The blocked stage is the one holding the largest backlog — the
+            # actual constraint. "First stage with any WIP" would always name the
+            # earliest stage and be useless on a healthy order.
+            pending = max(prev - completed, 0)
+            if pending > blocked_pending and completed < total:
+                blocked_pending = pending
+                blocked = code
+            stages.append(OrderStageRow(
+                stage=code, label=label, sequence=seq, completed=completed,
+                pct=pct, status=status))
+            prev = completed
+
+        terminal = funnel.get(_TERMINAL, {}).get("overall", 0)
+        return OrderTracking(
+            order_id=order_id, order_number=order_number, total_quantity=total,
+            completion_pct=round(terminal / total * 100, 1) if total else 0.0,
+            blocked_stage=blocked, stages=stages)
+
+    async def dm_style_tracking(
+        self, *, style_id: uuid.UUID, client_scope: uuid.UUID | None = None,
+        today: date | None = None,
+    ) -> StyleTracking | None:
+        """Per-stage quantities for one style, end to end."""
+        today = today or date.today()
+        head = await self.repo.style_head(style_id=style_id)
+        if head is None:
+            return None
+        style_name, order_number, total = head[0], head[1], int(head[2] or 0)
+        funnel = await self.repo.stage_funnel(
+            ops=self.repo._DM_PIPELINE, today=today, client_scope=client_scope,
+            style_id=style_id)
+        opmeta = await self.repo.operation_meta()
+        stages = [
+            StyleStageRow(
+                stage=code,
+                label=opmeta.get(code, (code.replace("_", " ").title(), idx))[0],
+                sequence=opmeta.get(code, (code, idx))[1],
+                completed=funnel.get(code, {}).get("overall", 0))
+            for idx, code in enumerate(self.repo._DM_PIPELINE)
+        ]
+        return StyleTracking(
+            style_id=style_id, style=style_name, order_number=order_number,
+            total_quantity=total, stages=stages)

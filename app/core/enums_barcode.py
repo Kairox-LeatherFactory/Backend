@@ -157,6 +157,32 @@ class ProductionStage(str, enum.Enum):
 MERGE_GATE_ENTRY = ProductionStage.LINE_STITCHING
 
 
+def next_chain_stage(completed_codes) -> "ProductionStage | None":
+    """The next leather-chain stage after everything in `completed_codes`.
+
+    PURE — takes a set of operation codes, touches no database. It exists so the
+    WRITE path (ProductionService._infer_stage_for_piece, which decides what a
+    scan logs) and the READ paths (/barcode/resolve, /production/piece-state,
+    which tell the screen what is coming) cannot answer the question differently.
+    Two copies of this loop would drift, and the drift is invisible until a screen
+    offers a stage the log then refuses.
+
+    "Furthest completed, plus one" rather than "first not completed": a piece that
+    was reworked or logged out of order should advance from how far it has
+    actually got, not stall at the earliest gap.
+
+    Returns None when the piece has finished the chain.
+    """
+    done = {(c or "").strip().upper() for c in (completed_codes or ())}
+    chain = ProductionStage.leather_chain()
+    furthest = -1
+    for i, stage in enumerate(chain):
+        if stage.value in done:
+            furthest = i
+    nxt = furthest + 1
+    return chain[nxt] if 0 <= nxt < len(chain) else None
+
+
 # Which manager role may LOG which stage.
 # DM and MD are omitted deliberately — they bypass in the service, so adding a
 # stage never means remembering to grant them.

@@ -144,6 +144,12 @@ class PieceConsumptionRow(BaseModel):
     actual_consumption: float | None
     expected_consumption: float | None = None   # BOM baseline (flagged)
     variance: float | None = None               # derived from expected (flagged)
+    # The article of whichever material this stage consumed — leather at
+    # LEATHER_CUTTING, lining at LINING_CUTTING. It was named `leather_article`
+    # on both grids, which was simply wrong on the lining one.
+    material_article: str | None = None
+    # DEPRECATED alias carrying the same value, so the cutting screen keeps
+    # working for one release. Remove once the frontend reads material_article.
     leather_article: str | None
     colour: str | None
     thickness: str | None
@@ -178,8 +184,29 @@ class CuttingDashboard(BaseModel):
 # LINING  (mirrors Cutting on the LINING_CUTTING stage + lining lots)
 # ══════════════════════════════════════════════════════════════════════════
 class LiningProductionKPIs(BaseModel):
-    total_order_pieces: int
-    lining_required_pieces: int       # minted pieces whose needs_lining is True
+    """THREE POPULATIONS, NAMED — read the first three fields together.
+
+    `total_order_pieces` is what was ORDERED, across every order in scope
+    including ones with nothing minted. `minted_pieces` is what physically exists
+    as a piece row. `lining_required_pieces` is the subset of those that need a
+    lining. They are legitimately different numbers, and the last two diagnostics
+    exist so a gap between them reads as information rather than as a bug:
+    `orders_without_pieces` explains the ordered total outrunning the rest, and
+    `lining_flag_stale` says the stored needs_lining flags disagree with a live
+    recount and want `scripts/backfill_needs_lining.py`.
+    """
+    total_order_pieces: int           # Σ SKU.qty_ordered — ALL orders in scope
+    minted_pieces: int                # actual piece rows — the real denominator
+    lining_required_pieces: int       # minted pieces whose stored needs_lining is True
+    lining_required_derived: int      # the same count recomputed live from style/SKU
+    lining_flag_stale: bool           # the two above disagree, in either direction
+    # Pieces the rules WOULD flag that the stored data does not — lining work
+    # currently invisible, and exactly what backfill_needs_lining.py would fix.
+    # This is the actionable number; `lining_flag_stale` alone also trips on a
+    # deliberate hand-correction the other way.
+    lining_flag_undercount: int
+    orders_without_pieces: int        # orders with nothing minted (skews the total)
+    pending_basis: str                # which field the pending numbers count against
     assigned_pieces: int              # distinct pieces with a lining-cut event
     assigned_today: int
     completed_today: int              # lining-cut events today
@@ -364,10 +391,28 @@ class PieceStageHistoryRow(BaseModel):
     work_date: date | None
     is_store_overlay: bool = False
     store_status: str | None = None
+    # Material recorded AT this event. Only the two cut stages carry any; null
+    # everywhere else, and also null on a lining cut logged without a measurement
+    # (which is legal) — the event still appears, it just has no quantity.
+    consumption: float | None = None
+    lot_article: str | None = None
+    lot_colour: str | None = None
 
 
 class PieceTrace(BaseModel):
+    """One piece's whole life — the SHARED piece-tracking read.
+
+    Reached from every dashboard (`/dashboard/pieces/{code}` and the per-stage
+    aliases), not just stitching. Three piece reads exist and they answer
+    different questions; do not add a fourth:
+
+        /dashboard/pieces/{code}          what HAS happened  (this one)
+        /production/piece-state           what happens NEXT + which cards to lock
+        /analytics/pieces/{code}/story    the analytics life story
+    """
     piece_code: str
+    serial: str | None = None            # "001" — the padded seq on the label
+    article: str | None = None
     style: str | None
     order_number: str | None
     colour: str | None
@@ -375,6 +420,17 @@ class PieceTrace(BaseModel):
     display_stage: str | None
     in_store: bool
     store_label: str | None
+    needs_lining: bool = True
+    # WHERE the garment physically is. The state alone ("holding_leather") does
+    # not tell an operator which drawer to walk to, which is the whole point of
+    # surfacing the drawer outside the store screen.
+    drawer_code: str | None = None
+    drawer_state: str | None = None
+    drawer_holding: str | None = None    # HOLDING LEATHER | LINING | BOTH | EMPTY
+    drawer_sent_to: str | None = None    # STITCHING | LINING once released
+    # Totals rolled up from the history, so a screen does not re-add them itself
+    # and get a different answer.
+    total_consumption: float | None = None
     history: list[PieceStageHistoryRow]
 
 
@@ -494,3 +550,136 @@ class StoreDashboard(BaseModel):
     drawers: list[DrawerRow]
     held_drawers: list[DrawerRow]
     empty_drawers: list[EmptyDrawerRow]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# DIRECT MANAGER  (factory-wide control + analytics — combines all four)
+# ══════════════════════════════════════════════════════════════════════════
+# The DM screen is the whole factory in one view. It COMPOSES the four stage
+# dashboards' aggregates rather than recomputing them, so every screen keeps one
+# source of truth: if the cutting dashboard and this one ever disagreed about how
+# many pieces were cut, both would be untrustworthy.
+#
+# Several fields are deliberately nullable rather than fabricated — the schema has
+# no quality/rejection table and no costing baseline. `meta.unsupported` names
+# each one and says what would have to exist to fill it. A plausible zero is worse
+# than an honest null on a screen the MD reads to make decisions.
+class DMOverallProduction(BaseModel):
+    total_target: int                 # Σ qty_ordered (all orders in scope)
+    total_produced: int               # distinct pieces at the terminal stage
+    total_pending: int                # target − produced
+    total_rejected: int | None = None  # no quality/rejection table (flagged)
+    overall_achievement_pct: float
+    orders_in_progress: int
+    orders_completed: int
+    delayed_orders: int
+
+
+class DeptPerformanceRow(BaseModel):
+    department: str                   # Cutting | Fusing | Pasting | Stitching | Inspection | Packing
+    stages: list[str]
+    target: int
+    produced: int
+    produced_today: int
+    achievement_pct: float
+
+
+class StagePipelineNode(BaseModel):
+    """One node of the factory production chain.
+
+    `pending` is the WIP sitting in front of this stage — how many pieces the
+    upstream stage finished that this one has not. It is a queue depth, not a
+    remaining-work figure against the order.
+    """
+    stage: str
+    label: str
+    sequence: int
+    completed: int
+    pending: int                      # upstream_completed − completed
+
+
+class Bottleneck(BaseModel):
+    """The stage holding the largest queue — the actual constraint on throughput,
+    not merely the first stage with unfinished work."""
+    stage: str | None
+    label: str | None
+    pending: int
+    queue: int
+
+
+class DMProductionRate(BaseModel):
+    pieces_per_day: float             # avg over the trailing window
+    pieces_per_employee_today: float
+    pieces_per_hour_today: float | None  # produced_today / shift hours
+    pieces_per_shift: float | None = None   # single-shift model (flagged)
+    per_piece_rate: float | None = None     # costing/wages concern (flagged)
+
+
+class DMQuality(BaseModel):
+    produced: int
+    inspected: int                    # pieces reaching FINAL_INSPECTION
+    rework_pieces: int                # event-based rework (>1 event at an op)
+    accepted: int | None = None       # no quality table (flagged)
+    rejected: int | None = None       # no quality table (flagged)
+    defective_pct: float | None = None  # flagged
+
+
+class DMAttendance(BaseModel):
+    employees_present: int            # attendance rows today
+    active_employees: int             # present AND produced today
+    employees_assigned: int           # distinct employees with any event
+    production_today: int             # events today
+
+
+class DMStore(BaseModel):
+    drawers_in_store: int
+    drawers_sent: int
+    drawers_received: int
+
+
+class DirectManagerDashboard(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    meta: DashboardMeta
+    overall: DMOverallProduction
+    departments: list[DeptPerformanceRow]
+    pipeline: list[StagePipelineNode]
+    bottleneck: Bottleneck
+    production_rate: DMProductionRate
+    quality: DMQuality
+    attendance: DMAttendance
+    store: DMStore
+    order_progress: list[OrderProgressRow]
+    daily_production: list[DailyRow]
+
+
+class OrderStageRow(BaseModel):
+    stage: str
+    label: str
+    sequence: int
+    completed: int
+    pct: float
+    status: str                       # DONE | IN_PROGRESS | PENDING
+
+
+class OrderTracking(BaseModel):
+    order_id: uuid.UUID
+    order_number: str | None
+    total_quantity: int
+    completion_pct: float
+    blocked_stage: str | None         # the stage holding the largest backlog
+    stages: list[OrderStageRow]
+
+
+class StyleStageRow(BaseModel):
+    stage: str
+    label: str
+    sequence: int
+    completed: int
+
+
+class StyleTracking(BaseModel):
+    style_id: uuid.UUID
+    style: str | None
+    order_number: str | None
+    total_quantity: int
+    stages: list[StyleStageRow]
