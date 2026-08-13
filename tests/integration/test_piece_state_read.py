@@ -27,7 +27,7 @@ import datetime
 
 import pytest
 
-from app.core.enums import ScreenContext
+from app.core.enums import DrawerPart, ProductionStage, ScreenContext
 from app.modules.drawers.service import DrawerService
 from app.modules.production.service import ProductionService
 
@@ -223,6 +223,187 @@ async def test_the_log_response_carries_each_pieces_drawer(
         leather_lot_id=leather_lot.id, consumption_qty=12.0)
 
     assert res["drawer_by_piece"][piece.code]["code"] == drawer.code
+
+
+# ══════════════════════════════════════════════ the per-piece VERIFY
+# The scan screen's verify step was calling a SKU read, which describes a whole
+# style and cannot say anything about the garment in the operator's hand. These
+# pin the per-piece answer that replaces it: identity, current stage, next stage,
+# and one boolean saying whether the scan can simply log itself.
+@pytest.mark.asyncio
+async def test_the_current_stage_is_answered_at_the_top_level(
+    db, operations, pieces, cutter, cutting_mgr, stitching_mgr, leather_lot
+):
+    """"What stage is this piece in" had two plausible answers — one buried in
+    `piece`, and a `display_stage` that can read STORE. Now it has one."""
+    piece, _ = pieces[0]
+    svc = ProductionService(db)
+
+    fresh = await svc.piece_state(piece.id, user=cutting_mgr)
+    assert fresh["current_stage"] is None
+    assert fresh["current_stage_label"] == "Not started"
+
+    await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
+                        piece_ids=[piece.id], work_date=TODAY,
+                        screen=ScreenContext.LEATHER_CUT,
+                        leather_lot_id=leather_lot.id, consumption_qty=12.0)
+
+    after = await svc.piece_state(piece.id, user=stitching_mgr)
+    assert after["current_stage"] == "LEATHER_CUTTING"
+    assert after["current_stage_label"] == "Leather Cutting"
+    assert after["next_stage"] == "FUSING"          # and where it is going
+
+
+@pytest.mark.asyncio
+async def test_a_scan_with_a_worker_answers_ready_to_log(
+    db, operations, pieces, cutter, paster, cutting_mgr, stitching_mgr, leather_lot
+):
+    piece, _ = pieces[0]
+    svc = ProductionService(db)
+    await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
+                        piece_ids=[piece.id], work_date=TODAY,
+                        screen=ScreenContext.LEATHER_CUT,
+                        leather_lot_id=leather_lot.id, consumption_qty=12.0)
+
+    st = await svc.piece_state(piece.id, user=stitching_mgr,
+                               employee_id=paster[0].id)
+    assert st["next_stage"] == "FUSING"
+    assert st["ready_to_log"] is True, st["blockers"]
+    assert st["blockers"] == []
+    assert st["actor"]["name"] == paster[0].name
+    assert st["actor"]["present_today"] is True
+
+
+@pytest.mark.asyncio
+async def test_without_a_worker_the_verdict_is_null_not_false(
+    db, operations, pieces, cutting_mgr
+):
+    """null and false mean different things: "not asked" must not render as
+    "blocked"."""
+    piece, _ = pieces[0]
+    st = await ProductionService(db).piece_state(piece.id, user=cutting_mgr)
+    assert st["ready_to_log"] is None
+    assert st["actor"] is None
+
+
+@pytest.mark.asyncio
+async def test_an_absent_worker_blocks_and_says_so(
+    db, operations, pieces, absent_worker, cutter, cutting_mgr, stitching_mgr,
+    leather_lot
+):
+    piece, _ = pieces[0]
+    svc = ProductionService(db)
+    await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
+                        piece_ids=[piece.id], work_date=TODAY,
+                        screen=ScreenContext.LEATHER_CUT,
+                        leather_lot_id=leather_lot.id, consumption_qty=12.0)
+
+    st = await svc.piece_state(piece.id, user=stitching_mgr,
+                               employee_id=absent_worker[0].id)
+    assert st["ready_to_log"] is False
+    gates = {b["gate"] for b in st["blockers"]}
+    assert "attendance" in gates
+    assert "not checked in" in next(
+        b["reason"] for b in st["blockers"] if b["gate"] == "attendance")
+
+
+@pytest.mark.asyncio
+async def test_the_merge_gate_blocks_the_verify_and_names_the_drawer(
+    db, operations, pieces, cutter, paster, tailor, cutting_mgr, stitching_mgr,
+    leather_lot
+):
+    piece, drawer = pieces[0]
+    svc = ProductionService(db)
+    await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
+                        piece_ids=[piece.id], work_date=TODAY,
+                        screen=ScreenContext.LEATHER_CUT,
+                        leather_lot_id=leather_lot.id, consumption_qty=12.0)
+    for _ in range(2):      # FUSING, PASTING
+        await svc.log_batch(user=stitching_mgr, employee_id=paster[0].id,
+                            piece_ids=[piece.id], work_date=TODAY,
+                            screen=ScreenContext.PIPELINE)
+
+    st = await svc.piece_state(piece.id, user=stitching_mgr,
+                               employee_id=tailor[0].id)
+    assert st["next_stage"] == "LINE_STITCHING"
+    assert st["ready_to_log"] is False
+    merge = next(b for b in st["blockers"] if b["gate"] == "merge")
+    assert drawer.code in merge["reason"]
+
+
+@pytest.mark.asyncio
+async def test_a_skill_mismatch_warns_but_never_blocks(
+    db, operations, pieces, cutter, paster, cutting_mgr, stitching_mgr, leather_lot
+):
+    """GATE 2 is a warning on the write path, so the verify must not refuse work
+    the log would accept — that would stall the line over an advisory."""
+    piece, _ = pieces[0]
+    svc = ProductionService(db)
+    await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
+                        piece_ids=[piece.id], work_date=TODAY,
+                        screen=ScreenContext.LEATHER_CUT,
+                        leather_lot_id=leather_lot.id, consumption_qty=12.0)
+
+    # next is FUSING; a CUTTER is not a FUSER
+    st = await svc.piece_state(piece.id, user=stitching_mgr,
+                               employee_id=cutter[0].id)
+    assert st["actor"]["skill_ok"] is False
+    assert st["actor"]["skill_note"]
+    assert "skill" not in {b["gate"] for b in st["blockers"]}
+    assert st["ready_to_log"] is True, "a warning must not block the scan"
+
+
+@pytest.mark.asyncio
+async def test_the_verify_agrees_with_what_the_log_then_does(
+    db, operations, pieces, cutter, paster, cutting_mgr, stitching_mgr, leather_lot
+):
+    """THE POINT OF THE WHOLE THING: if verify says ready, the very next log must
+    succeed at exactly the stage it advertised — otherwise the screen cannot act
+    on it without a human."""
+    piece, _ = pieces[0]
+    svc = ProductionService(db)
+    await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
+                        piece_ids=[piece.id], work_date=TODAY,
+                        screen=ScreenContext.LEATHER_CUT,
+                        leather_lot_id=leather_lot.id, consumption_qty=12.0)
+
+    st = await svc.piece_state(piece.id, user=stitching_mgr,
+                               employee_id=paster[0].id)
+    assert st["ready_to_log"] is True
+    advertised = st["next_stage"]
+
+    res = await svc.log_batch(user=stitching_mgr, employee_id=paster[0].id,
+                              piece_ids=[piece.id], work_date=TODAY,
+                              screen=ScreenContext.PIPELINE)
+    assert res["count_logged"] == 1
+    assert res["stage"] == advertised
+    assert res["logged"] == [piece.code]
+
+
+@pytest.mark.asyncio
+async def test_a_finished_piece_is_not_ready_and_says_why(
+    db, operations, pieces, cutter, tailor, dm, leather_lot
+):
+    piece, drawer = pieces[0]
+    svc = ProductionService(db)
+    await svc.log_batch(user=dm, employee_id=cutter[0].id, piece_ids=[piece.id],
+                        work_date=TODAY, screen=ScreenContext.LEATHER_CUT,
+                        leather_lot_id=leather_lot.id, consumption_qty=12.0)
+    drawers = DrawerService(db)
+    for part in (DrawerPart.LEATHER, DrawerPart.LINING):
+        await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id, part=part)
+    await drawers.send_batch(drawer_ids=[drawer.id], destination="STITCHING",
+                             actor_id=dm.id)
+    for _ in range(len(ProductionStage.leather_chain()) + 1):
+        if (await svc.log_batch(user=dm, employee_id=tailor[0].id,
+                                piece_ids=[piece.id], work_date=TODAY,
+                                screen=ScreenContext.PIPELINE))["count_logged"] == 0:
+            break
+
+    st = await svc.piece_state(piece.id, user=dm, employee_id=tailor[0].id)
+    assert st["next_stage"] is None
+    assert st["ready_to_log"] is False
+    assert "completed" in {b["gate"] for b in st["blockers"]}
 
 
 # ══════════════════════════════════════════════ role awareness
