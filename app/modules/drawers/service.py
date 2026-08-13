@@ -200,7 +200,30 @@ class DrawerService:
     # ── store-scan ───────────────────────────────────────────────────────────
     async def store_scan(self, *, drawer_id: uuid.UUID, piece_id: uuid.UUID,
                          part: DrawerPart | None = None,
-                         actor_id: uuid.UUID | None = None) -> dict:
+                         actor_id: uuid.UUID | None = None,
+                         employee_id: uuid.UUID | None = None) -> dict:
+        """Record a part arriving in its drawer.
+
+        TWO IDENTITIES, TWO PARAMETERS — and they are not interchangeable.
+
+            actor_id     the LOGIN that performed this action  → app_user.id
+            employee_id  the WORKER whose card was scanned     → employee.id
+
+        They were briefly the same parameter, with the scanned worker passed as
+        `actor_id`. That id then reached `_audit`, which writes
+        `AuditLog.actor_user_id` — a foreign key to `app_user.id`. An employee is
+        not a user, so Postgres rejected the row with "employee barcode ID is not
+        found in the app_user table", and it only fired on the scan that COMPLETED
+        a drawer, because the auto-RECEIVED branch is the only path here that
+        audits. First scan fine, second one a 500.
+
+        SQLite does not enforce foreign keys unless PRAGMA foreign_keys=ON, which
+        is why the whole test suite went green on it. The regression test turns the
+        pragma on for exactly this reason.
+
+        The worker is not lost — they are DATA about the action, and belong in the
+        audit payload and the response, which is where they now are.
+        """
         drawer = await self.get(drawer_id)
         if not drawer:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Drawer not found.")
@@ -277,7 +300,11 @@ class DrawerService:
             auto_received = True
             await self._audit(
                 actor_id, BarcodeAuditAction.DRAWER_RECEIVED.value, drawer.id,
-                {"piece": piece.code, "state": drawer.state, "auto": True})
+                {"piece": piece.code, "state": drawer.state, "auto": True,
+                 # The worker who physically put the part in. Recorded as data,
+                 # NOT as actor_user_id — see the docstring above.
+                 "employee_id": str(employee_id) if employee_id else None,
+                 "part": part.value})
 
         await self.repo_commit()   # F71: commit via a single seam (see below)
         await self.db.refresh(drawer)
@@ -295,6 +322,8 @@ class DrawerService:
             # True when the bucket was decided by the server, not the operator —
             # so the screen can show WHICH bucket it chose (bug #18).
             "part_inferred": inferred,
+            # Echoed back so the screen can confirm WHO was credited with the scan.
+            "employee_id": str(employee_id) if employee_id else None,
             "holding": holding_label(leather_in=drawer.leather_in,
                                      lining_in=drawer.lining_in),
             "auto_received": auto_received,

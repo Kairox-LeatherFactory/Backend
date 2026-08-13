@@ -26,7 +26,9 @@ import uuid
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import BarcodeStatus, BarcodeType
+from app.core.enums import (
+    MERGE_GATE_ENTRY, BarcodeStatus, BarcodeType, DrawerState, next_chain_stage,
+)
 from app.core.store_display import holding_label
 from app.modules.barcode.repository import BarcodeRepository
 
@@ -81,30 +83,100 @@ class BarcodeService:
         elif row.material_lot_id:
             out["lot"] = await self._lot_payload(row.material_lot_id)
         out["next_expected_scan"] = self._next_expected_scan(out)
+        out.update(await self._next_production_step(out))
         return out
 
     @staticmethod
     def _next_expected_scan(payload: dict) -> str | None:
-        """Which barcode the store screen should ask for NEXT (bug #11).
+        """Which barcode the operator should present NEXT.
 
-        The drawer and piece guns feed one merged input, so after a scan the
-        operator has to work out which code the system is now waiting for. The
-        server already knows: a drawer that is still accumulating wants its piece,
-        and a piece whose drawer has not taken both parts wants that drawer. This
-        is GUIDANCE ONLY — the authority on whether a scan is legal remains
+        WHY THIS RETURNED null MOST OF THE TIME
+            It answered for DRAWER and PIECE codes and fell through to None for
+            everything else — including EMPLOYEE. The production logger scans the
+            employee card FIRST, so the very first resolve of every workflow, the
+            one the screen most needs to act on, came back null.
+
+        THE FULL TABLE, so no type falls through silently:
+
+            EMPLOYEE  → PIECE    the worker is identified; the garment is next
+            LOT       → PIECE    a material was named; scan what it is cut for
+            DRAWER    → PIECE    when a piece is merged to it (else nothing to pair)
+            PIECE     → DRAWER   while its drawer is still accumulating parts
+
+        GUIDANCE ONLY. The authority on whether a scan is legal remains
         DrawerService.store_scan, which still rejects a piece scanned into the
-        wrong drawer with a 409.
+        wrong drawer with a 409. This says what to reach for, not what is allowed.
         """
+        if payload.get("employee") is not None:
+            return "PIECE"
+        if payload.get("lot") is not None:
+            return "PIECE"
+
         drawer = payload.get("drawer")
         if drawer is not None:
             # A drawer with no piece merged to it has nothing to ask for yet.
             return "PIECE" if drawer.get("current_piece_id") else None
+
         piece = payload.get("piece")
         if piece is not None:
             pd = piece.get("drawer") or {}
+            # Still accumulating → the drawer is what pairs with this piece. Once
+            # it holds everything, the piece's next move is a production stage,
+            # not another scan — `next_stage` below carries that answer.
             if pd.get("code") and not (pd.get("leather_in") and pd.get("lining_in")):
                 return "DRAWER"
         return None
+
+    async def _next_production_step(self, payload: dict) -> dict:
+        """What happens to this piece next, in production terms.
+
+        The scan screen needs two different answers and used to get only half of
+        one: WHICH CODE to scan next (above) and WHICH STAGE the piece is due at.
+        A piece whose drawer already holds both parts has no next code — but it
+        very much has a next stage, and returning nothing for it read as "the
+        system doesn't know".
+
+        COST: exactly ONE extra query, and only for a PIECE code. The stage is
+        derived by `next_chain_stage` — the same pure helper the write path uses,
+        so this can never advertise a stage the log would refuse — and the merge
+        check reuses the drawer columns `piece_card` already loaded rather than
+        re-reading them.
+
+        Deliberately NOT a call into ProductionService.piece_state: that builds
+        the whole nine-stage lock map, which is right for the scan screen and far
+        too much for every single resolve.
+        """
+        piece = payload.get("piece")
+        if piece is None or not piece.get("piece_id"):
+            return {"next_stage": None, "next_stage_label": None,
+                    "next_stage_blocked_reason": None}
+
+        from app.modules.production.repository import ProductionRepository
+        done = await ProductionRepository(self.db).completed_stage_codes(
+            uuid.UUID(piece["piece_id"]))
+        stage = next_chain_stage(done)
+        if stage is None:
+            return {"next_stage": None,
+                    "next_stage_label": "Finished — nothing left to log",
+                    "next_stage_blocked_reason": None}
+
+        blocked = None
+        drawer = piece.get("drawer") or {}
+        if stage is MERGE_GATE_ENTRY and drawer.get("state") != DrawerState.SENDED.value:
+            where = f"drawer {drawer['code']}" if drawer.get("code") else "its drawer"
+            blocked = (f"{where} must hold leather + lining and be sent from the "
+                       f"Drawers List before {stage.value} can be logged.")
+        elif stage.is_cut_entry:
+            # A piece with no cut event yet is reached from a cut SCREEN, never by
+            # pipeline inference — say so rather than implying a pipeline scan.
+            blocked = (f"{stage.value} is logged on its own cut screen, not from "
+                       f"the pipeline.")
+
+        return {
+            "next_stage": stage.value,
+            "next_stage_label": stage.value.replace("_", " ").title(),
+            "next_stage_blocked_reason": blocked,
+        }
 
     async def resolve_piece_id(self, code: str) -> uuid.UUID:
         """resolve() narrowed to 'give me the piece id or 404'. Used by /production/log

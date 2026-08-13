@@ -48,7 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.enums import (
     MERGE_GATE_ENTRY, MULTI_STAGE_DESIGNATIONS, SCREEN_EXPECTED_ROLE,
     SCREEN_TO_STAGE, STAGE_DESIGNATIONS, STAGE_ROLE_ACCESS, Designation,
-    DrawerState, ProductionStage, ScreenContext, UserRole,
+    DrawerState, ProductionStage, ScreenContext, UserRole, next_chain_stage,
 )
 from app.core.store_display import display_stage
 from app.modules.clients.service import ClientService
@@ -96,15 +96,12 @@ class ProductionService:
         """
         if screen in SCREEN_TO_STAGE:
             return SCREEN_TO_STAGE[screen]
-        # PIPELINE: find the furthest chain stage the piece has an event at.
-        chain = ProductionStage.leather_chain()
+        # PIPELINE: the next chain stage after the furthest one this piece has an
+        # event at. The loop itself lives in core.enums_barcode.next_chain_stage
+        # because /barcode/resolve now answers the same question on the read side,
+        # and two copies of it would eventually disagree.
         done = await self.repo.completed_stage_codes(piece.id)
-        furthest = -1
-        for i, st in enumerate(chain):
-            if st.value in done:
-                furthest = i
-        nxt = furthest + 1
-        return chain[nxt] if 0 <= nxt < len(chain) else None
+        return next_chain_stage(done)
 
     # ══════════════════════════════════════════════════════════ GATE 1: role
     async def _assert_role(self, user: User, stage: ProductionStage | None,

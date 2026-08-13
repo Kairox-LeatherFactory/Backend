@@ -44,6 +44,10 @@ class StoreScanResult(BaseModel):
     ready_for_received: bool
     part: str                       # the bucket used (LEATHER | LINING)
     part_inferred: bool = False     # True when the server chose it (bug #18)
+    # The worker credited with the scan. Recorded as data on the audit row, never
+    # as its actor — the actor is the login, and audit_log.actor_user_id is a
+    # foreign key to app_user.
+    employee_id: str | None = None
     holding: str = ""               # HOLDING LEATHER | HOLDING LINING | ...
     auto_received: bool = False     # completeness advanced it to RECEIVED (#13)
     # BUG #15 — scanning is NOT completion. The piece stays in the drawer until

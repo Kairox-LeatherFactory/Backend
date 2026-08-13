@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.enums import DrawerPart, DrawerState, UserRole
 from app.modules.barcode.service import BarcodeService
+from app.modules.employees.models import Employee
 from app.modules.drawers import schemas
 from app.modules.drawers.service import DrawerService
 from app.modules.users.deps import get_current_user, require_roles
@@ -135,7 +136,7 @@ async def drawer_detail(
 async def store_scan(
     body: schemas.StoreScanRequest,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(_FLOOR),
+    user: User = Depends(_FLOOR),
 ):
     """Record a leather or lining part arriving in its drawer.
 
@@ -155,10 +156,29 @@ async def store_scan(
 
     # Employee FIRST — resolving it before anything else means an unknown or
     # retired card fails the request before any drawer state is touched.
+    #
+    # resolve_employee_id already 404s an unknown code and 410s a retired one, but
+    # it answers from the BARCODE REGISTRY: it proves the label is known, not that
+    # the worker it names still exists. A registry row whose employee row was
+    # removed would sail through here and fail much later, as a foreign-key error
+    # with no useful message. So the row itself is checked, once, up front.
     if body.employee_id:
         employee_id = body.employee_id
     else:
         employee_id = await barcodes.resolve_employee_id(body.employee_barcode)
+
+    employee = await db.get(Employee, employee_id)
+    if employee is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"No employee record for this card ({employee_id}). The barcode is "
+            f"registered but the worker it names no longer exists — reissue the "
+            f"card, or scan a different one.")
+    if not employee.is_active:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"{employee.name} is not an active employee, so work cannot be "
+            f"recorded against them.")
 
     if body.drawer_id:
         drawer_id = body.drawer_id
@@ -179,7 +199,11 @@ async def store_scan(
     return await drawers.store_scan(
         drawer_id=drawer_id, piece_id=piece_id,
         part=DrawerPart(body.part) if body.part else None,
-        actor_id=employee_id)
+        # actor = the LOGIN (app_user); employee = the WORKER whose card was
+        # scanned. Passing the worker as the actor is what wrote an employee id
+        # into audit_log.actor_user_id and broke this endpoint — see store_scan.
+        actor_id=user.id,
+        employee_id=employee_id)
 
 
 @router.post("/{drawer_id}/receive", response_model=schemas.DrawerTransitionResult,

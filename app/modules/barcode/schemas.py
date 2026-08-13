@@ -20,9 +20,19 @@ class BarcodeResolve(BaseModel):
     # True when this is a legacy long piece code kept scannable after the
     # compact-code switch (bug #19) — the scan works, the label wants reprinting.
     is_alias: bool = False
-    # "PIECE" / "DRAWER" / null — which code the store screen should ask for next
-    # (bug #11). Guidance for the UI; store_scan remains the authority.
+    # "PIECE" / "DRAWER" / null — which code to present next. Answered for EVERY
+    # barcode type, including EMPLOYEE (the first scan of every workflow, which
+    # used to come back null). Guidance; store_scan remains the authority.
     next_expected_scan: str | None = None
+    # The production stage this piece is due at, derived from its completed
+    # operations by the same helper the write path uses. Null once the piece has
+    # finished the chain, or for a code that names no piece.
+    next_stage: str | None = None
+    next_stage_label: str | None = None
+    # Set when that stage cannot be logged yet — e.g. the drawer has not been sent.
+    # The stage is still reported: the screen shows where the piece is going AND
+    # what is holding it there.
+    next_stage_blocked_reason: str | None = None
 
 
 class PrintRequest(BaseModel):
