@@ -373,15 +373,34 @@ class ProductionRepository:
 
     async def list_pieces_for_sku(
         self, sku_id: uuid.UUID
-    ) -> list[tuple[Piece, str | None, str | None]]:
-        """Every active piece of a SKU + its current stage (code, label)."""
+    ) -> list[tuple[Piece, str | None, str | None, uuid.UUID]]:
+        """Every active piece of a SKU + stage and client order id."""
         res = await self.db.execute(
-            select(Piece, Operation.code, Operation.label)
+            select(Piece, Operation.code, Operation.label, Style.client_order_id)
             .outerjoin(Operation, Operation.id == Piece.current_operation_id)
+            .join(SKU, SKU.id == Piece.sku_id)
+            .join(Style, Style.id == SKU.style_id)
             .where(Piece.sku_id == sku_id, Piece.is_active.is_(True))
             .order_by(Piece.seq)
         )
-        return [(p, c, l) for p, c, l in res.all()]
+        return [(p, c, l, order_id) for p, c, l, order_id in res.all()]
+    
+    async def drawer_states_for_pieces(
+        self, piece_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, str]:
+        """piece_id -> its drawer's state, in ONE query (no N+1 on the checklist).
+
+        Reads the drawer by current_piece_id so it reflects the LIVE holding
+        state, not a stale Piece.drawer_id snapshot.
+        """
+        if not piece_ids:
+            return {}
+        from app.modules.barcode.models import Drawer
+        res = await self.db.execute(
+            select(Drawer.current_piece_id, Drawer.state)
+            .where(Drawer.current_piece_id.in_(piece_ids))
+        )
+        return {pid: st for pid, st in res.all() if pid is not None}
 
     async def piece_ids_done_at_op(
         self, piece_ids: list[uuid.UUID], operation_id: uuid.UUID
@@ -694,6 +713,7 @@ class PieceOption(BaseModel):
 class SkuPieceList(BaseModel):
     sku_id: uuid.UUID
     sku_code: str | None
+    order_id: uuid.UUID | None
     colour: str | None
     size: str | None
     operation_id: uuid.UUID | None
@@ -779,17 +799,43 @@ class LogRequest(BaseModel):
 
 
 class LogResult(BaseModel):
+    # A cut screen fixes one stage. PIPELINE infers a stage PER PIECE, so a batch
+    # can span several: `stage` is then "MIXED" and `stage_by_piece` carries the
+    # truth. `stage` is null ONLY when no piece resolved to a loggable stage at
+    # all — `message` and `blocked` say why.
     stage: str | None
+    stages: list[str] = Field(default_factory=list)
+    stage_by_piece: dict[str, str] = Field(default_factory=dict)
     count_logged: int
     logged: list[str]
     rework: list[str]
-    not_found: list[str]
+    not_found: list[str]                     # codes/ids that did not resolve
+    completed: list[str] = Field(default_factory=list)   # past the final stage
     sequence_blocked: list[str]
     skill_blocked: list[str]
     merge_blocked: list[str]
+    # Pieces whose inferred stage this role may not log, in a MIXED batch where
+    # other stages WERE permitted. An all-denied batch is still a 403.
+    role_blocked: list[str] = Field(default_factory=list)
+    # Every per-piece rejection WITH its cause: {piece, stage, gate, reason}.
+    # gate ∈ {role, sequence, merge, not_cut, completed}. The flat lists above
+    # carry the same pieces but no reason, and are kept for existing callers.
+    blocked: list[dict] = Field(default_factory=list)
+    message: str = ""                        # one sentence for the scan screen
     screen_role_warning: str | None = None
+    # Set when a cut consumed more than the lot had available. The cut IS still
+    # recorded — stock drifts and the garment is physically cut — but the
+    # shortfall is surfaced instead of silently driving on_hand negative.
+    # {lot_id, article, colour, uom, requested, available_before, short_by,
+    #  on_hand_after, note}
+    stock_warning: dict | None = None
     consumption_recorded: dict | None = None
     preview: bool = False                    # NEW: echoes whether this was a dry-run
+    # GATE 2 is a WARNING, not a block: the piece is logged and the anomaly is
+    # reported here ({piece, employee, designation, stage, note}). The service
+    # has always returned these; without the field the response model dropped
+    # them, so the floor never saw the warning it was told it would get.
+    skill_warnings: list[dict] = Field(default_factory=list)
 
 
 ====================================================================================================
@@ -855,7 +901,7 @@ from app.modules.production.repository import ProductionRepository
 from app.modules.users.models import User
 
 # Roles that log ANY stage. MD is the superuser; DM logs freely (spec).
-_STAGE_BYPASS_ROLES = frozenset({UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER})
+_STAGE_BYPASS_ROLES = frozenset({UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER, UserRole.HR,})
 
 
 def _norm(code: str) -> str:
@@ -919,8 +965,11 @@ class ProductionService:
                 or "direct_manager, managing_director"
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
-                f"Role '{user.role.value}' may not log '{stage.value}'. Permitted: {names}.")
-        # unknown op → config table only
+                f"The {stage.value.replace('_', ' ').lower()} stage is logged by its "
+                f"own manager ({names}). Your role ({user.role.value}) can't enter "
+                f"this log — please ask the {names} to record it, or have DM/MD/HR "
+                f"log it. (Employees of any skill may still be assigned here; it's "
+                f"the login that's restricted, not the worker.)")
         if op.id not in await self.repo.operations_for_role(user.role.value):
             raise HTTPException(status.HTTP_403_FORBIDDEN,
                                 f"Your role may not log operation '{op.code}'.")
@@ -945,6 +994,14 @@ class ProductionService:
                 f"work {stage.value}. Allowed: {allowed}.")
 
     # ══════════════════════════════════════════════════════ GATE 3: sequence
+    @staticmethod
+    def _cut_screen_hint(stage: ProductionStage) -> str:
+        """Which screen logs a cut entry — the actionable half of a 'not cut yet'
+        rejection. Without it the floor is told 'blocked' and nothing else."""
+        if stage is ProductionStage.LINING_CUTTING:
+            return "the LINING_CUT screen (lining manager)"
+        return "the LEATHER_CUT screen (cutting manager)"
+
     async def _sequence_ok(self, piece: Piece,
                            stage: ProductionStage) -> tuple[bool, str | None]:
         prev = stage.predecessor()
@@ -1014,16 +1071,54 @@ class ProductionService:
                 pieces[pid] = p
  
         screen_stage = SCREEN_TO_STAGE.get(screen)
- 
-        # resolve each piece's stage (unchanged)
+
+        # Every per-piece rejection is recorded here as {piece, stage, gate,
+        # reason}. The flat buckets below stay for back-compat, but they carry a
+        # bare code and no cause — which is how a caller ends up staring at
+        # `{"stage": null, "sequence_blocked": ["…-001"]}` with nothing to act on.
+        blocked: list[dict] = []
+
+        def _block(piece_code: str, gate: str, reason: str,
+                   stage: ProductionStage | None = None) -> None:
+            blocked.append({
+                "piece": piece_code, "gate": gate, "reason": reason,
+                "stage": stage.value if stage is not None else None,
+            })
+
+        # resolve each piece's stage
         stage_by_piece: dict = {}
+        uncut_on_pipeline: list[str] = []
+        completed: list[str] = []
         for pid, piece in pieces.items():
             stage = screen_stage or await self._infer_stage_for_piece(piece, screen)
             if stage is None:
-                not_found.append(f"{piece.code} (no next stage — already complete?)")
+                # The piece is past the END of the chain. It is emphatically NOT
+                # "not found" — its barcode resolved, its history is complete —
+                # so reporting it in not_found was a lie the floor could not
+                # interpret. Its own bucket, with the reason attached.
+                completed.append(piece.code)
+                _block(piece.code, "completed",
+                       f"{piece.code} has already completed the final stage "
+                       f"({ProductionStage.PACKAGE_EXPORT.value}) — nothing left "
+                       f"to log.")
+                continue
+            # PIPELINE + a piece with no cut event yet: its "next stage" is a cut
+            # entry, but cutting is logged on a CUT SCREEN (that is the whole
+            # no-stage-buttons rule). Treated as a stage here it would drag a
+            # consumption requirement into a pipeline batch and 422 the WHOLE
+            # request — one un-cut piece losing every good piece scanned with it,
+            # which is exactly what the per-piece gates exist to prevent. So it
+            # is blocked PER PIECE, like any other out-of-sequence piece.
+            if screen_stage is None and stage.is_cut_entry:
+                uncut_on_pipeline.append(piece.code)
+                _block(piece.code, "not_cut",
+                       f"{piece.code} has not been cut yet, so it has no next "
+                       f"pipeline stage. Log {stage.value} first, on "
+                       f"{self._cut_screen_hint(stage)} — cutting is never logged "
+                       f"from the pipeline screen.", stage)
                 continue
             stage_by_piece[pid] = stage
- 
+
         op_by_stage: dict = {}
         for stage in dict.fromkeys(stage_by_piece.values()):
             op = await self.repo.get_operation_by_code(stage.value)
@@ -1040,10 +1135,32 @@ class ProductionService:
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 "A cutting scan may not be mixed with other stages in one batch.")
  
-        # GATE 1 — ROLE (403, whole request) — runs in preview too, so the user
-        # sees the same 403 they'd hit on commit.
+        # GATE 1 — ROLE. Runs in preview too, so the user sees the same verdict
+        # they'd hit on commit.
+        #
+        # STILL A WHOLE-REQUEST 403 when the role is wrong for EVERY stage in the
+        # batch. That is the documented contract (CLAUDE.md §8) and it is right:
+        # what's wrong is the ROLE, not any particular piece, so there is nothing
+        # to salvage and the caller needs one unambiguous error.
+        #
+        # BUT that rationale — "the role is wrong for the whole batch" — only
+        # holds when the batch HAS one stage. A cut screen fixes one; a PIPELINE
+        # screen infers a stage PER PIECE, so one straggler a stage behind gives
+        # the batch a second stage. Raising on the first denial then 403'd a scan
+        # of 40 legitimately-PASTING pieces because one piece was still at
+        # FUSING: one bad piece losing the 39 good ones, precisely the outcome
+        # gates 2-4 are per-piece to prevent. So when the batch is MIXED and at
+        # least one stage IS permitted, the denied stages degrade to a per-piece
+        # bucket — the good pieces log, the bad ones come back with the same 403
+        # text as their reason.
+        denied: dict = {}
         for stage, op in op_by_stage.items():
-            await self._assert_role(user, stage, op)
+            try:
+                await self._assert_role(user, stage, op)
+            except HTTPException as exc:
+                denied[stage] = exc
+        if denied and len(denied) == len(op_by_stage):
+            raise next(iter(denied.values()))
 
         consumption_value = None
         if is_cut:
@@ -1075,28 +1192,59 @@ class ProductionService:
                     f"{screen.value} screen.")
  
         logged, rework, sequence_blocked, skill_blocked, merge_blocked =  [], [], [], [], []
+        role_blocked: list[str] = []
+        sequence_blocked += uncut_on_pipeline   # never cut → can't be past cutting
+        skill_warnings: list[dict] = []   # GATE 2 anomalies (non-blocking now)
         fresh_cut_count = 0
- 
+        # The stage each piece was ACTUALLY resolved to. The single top-level
+        # `stage` cannot describe a mixed pipeline batch, and guessing one from
+        # dict order reported a stage no piece was written at — see below.
+        stage_by_code: dict[str, str] = {}
+
         # GATES 2-4 per piece + (write, IF NOT preview)
         for pid, piece in pieces.items():
             stage = stage_by_piece.get(pid)
             if stage is None:
                 continue
             op = op_by_stage[stage]
- 
-            # GATE 2 — SKILL
-            if not self._skill_ok(emp.designation, stage):
-                skill_blocked.append(piece.code)
+            stage_by_code[piece.code] = stage.value
+
+            # GATE 1 (per-piece remainder) — only reachable on a MIXED batch in
+            # which some other stage was permitted; an all-denied batch already
+            # raised the 403 above.
+            if stage in denied:
+                role_blocked.append(piece.code)
+                _block(piece.code, "role", str(denied[stage].detail), stage)
                 continue
-            # GATE 3 — SEQUENCE (no-skip)
-            ok_seq, _ = await self._sequence_ok(piece, stage)
+
+            # GATE 2 — SKILL
+            # GATE 2 — SKILL: DEMOTED to a recorded warning (drawer-redesign
+            # build). Any employee may be recorded at any stage; the anomaly is
+            # surfaced for audit but never blocks the log. The manager-role gate
+            # (GATE 1) remains the hard authority on WHO may enter the log.
+            if not self._skill_ok(emp.designation, stage):
+                skill_warnings.append({
+                    "piece": piece.code,
+                    "employee": emp.name,
+                    "designation": Designation.normalise(emp.designation),
+                    "stage": stage.value,
+                    "note": self._skill_msg(emp.name, emp.designation, stage),
+                })
+                # NB: no `continue` — the piece proceeds through the remaining
+                # gates and is logged.
+            # GATE 3 — SEQUENCE (no-skip). The reason string _sequence_ok has
+            # always built was being discarded into `_`; it is the only thing
+            # that tells the floor WHICH stage is missing.
+            ok_seq, why_seq = await self._sequence_ok(piece, stage)
             if not ok_seq:
                 sequence_blocked.append(piece.code)
+                _block(piece.code, "sequence", why_seq or "", stage)
                 continue
             # GATE 4 — MERGE (line-stitch entry)
-            ok_merge, _ = await self._merge_ok(piece, stage)
+            ok_merge, why_merge = await self._merge_ok(piece, stage)
             if not ok_merge:
                 merge_blocked.append(piece.code)
+                _block(piece.code, "merge", why_merge or "", stage)
                 continue
             # already logged at this op? → rework
             if await self.repo.has_event_at_op(piece.id, op.id):
@@ -1117,57 +1265,123 @@ class ProductionService:
                 piece.current_operation_id = op.id
                 if is_cut:
                     fresh_cut_count += 1
+                # RECYCLE THE DRAWER at PACKAGE_EXPORT: the piece has shipped, so
+                # its drawer returns to WAITING for the next merge. This is the
+                # ONLY point a drawer frees (Hamthan #4: empty only after PACKAGE).
+                # release_nocommit clears both sides of the piece<->drawer link.
+                if stage is ProductionStage.PACKAGE_EXPORT:
+                    from app.modules.drawers.service import DrawerService
+                    await DrawerService(self.db).release_nocommit(piece.id)
  
         consumption_recorded = None
+        stock_warning = None
         if is_cut and not preview and fresh_cut_count > 0:
             lot_id = leather_lot_id or lining_lot_id
             from app.modules.materials.service import MaterialService
             total_consumption = consumption_value * fresh_cut_count
-            avail = await MaterialService(self.db).decrement_for_cut_nocommit(
+            # Hold the instance: the shortfall warning comes back on it, not in
+            # the return value (which stays a float for existing callers).
+            materials = MaterialService(self.db)
+            avail = await materials.decrement_for_cut_nocommit(
                 lot_id, float(total_consumption))
+            stock_warning = materials.last_decrement_warning
             consumption_recorded = {
                 "lot_id": str(lot_id),
                 "pieces_consuming": fresh_cut_count,
                 "qty": float(total_consumption),
                 "dcm": float(total_consumption),
                 "available_after": avail,
+                # True when the ledger went short. The cut is still recorded —
+                # see decrement_for_cut_nocommit for why this warns, not blocks.
+                "stock_short": stock_warning is not None,
             }
  
-        rep_stage = screen_stage or (next(iter(op_by_stage)) if op_by_stage else None)
- 
-        if preview:
-            # SHORT-CIRCUIT: nothing written, nothing committed.
-            return {
-                "stage": rep_stage.value if rep_stage else None,
-                "count_logged": len(logged),
-                "logged": logged, "rework": rework, "not_found": not_found,
-                "sequence_blocked": sequence_blocked, "skill_blocked": skill_blocked,
-                "merge_blocked": merge_blocked,
-                "screen_role_warning": screen_role_warning,
-                "consumption_recorded": None,
-                "preview": True,
-            }
- 
-        await self.db.commit()
-        return {
-            "stage": rep_stage.value if rep_stage else None,
+        # ── the reported stage ────────────────────────────────────────────────
+        # A cut SCREEN fixes one stage for the whole batch, so it answers for
+        # itself. PIPELINE does not: it infers a stage PER PIECE, so a batch can
+        # legitimately span several. `next(iter(op_by_stage))` picked whichever
+        # stage happened to be inserted first — i.e. the first PIECE's stage —
+        # and reported it for the whole response, so a batch that wrote FUSING
+        # could answer `"stage": "LINE_STITCHING"` because an unrelated, merge-
+        # blocked piece was scanned first. That is a wrong answer, not a vague
+        # one. Now: one resolved stage → name it; several → "MIXED", with the
+        # per-piece truth in stage_by_piece; none resolved → null, and `message`
+        # says why (that null is what a caller sees when every piece was blocked
+        # before a stage could be resolved at all).
+        stages_seen = [s.value for s in dict.fromkeys(stage_by_piece.values())]
+        if screen_stage is not None:
+            rep_stage = screen_stage.value
+        elif len(stages_seen) == 1:
+            rep_stage = stages_seen[0]
+        elif stages_seen:
+            rep_stage = "MIXED"
+        else:
+            rep_stage = None
+
+        result = {
+            "stage": rep_stage,
+            "stages": stages_seen,
+            "stage_by_piece": stage_by_code,
             "count_logged": len(logged),
             "logged": logged, "rework": rework, "not_found": not_found,
+            "completed": completed,
             "sequence_blocked": sequence_blocked, "skill_blocked": skill_blocked,
-            "merge_blocked": merge_blocked,
+            "merge_blocked": merge_blocked, "role_blocked": role_blocked,
+            "blocked": blocked,
+            "message": self._log_message(
+                rep_stage=rep_stage, logged=logged, rework=rework,
+                blocked=blocked, not_found=not_found),
             "screen_role_warning": screen_role_warning,
-            "consumption_recorded": consumption_recorded,
-            "preview": False,
-        }
-    @staticmethod
-    def _empty_result(stage, *, skill, screen_warning):
-        return {
-            "stage": stage.value if stage else None, "count_logged": 0,
-            "logged": [], "rework": [], "not_found": [],
-            "sequence_blocked": [], "skill_blocked": skill, "merge_blocked": [],
-            "screen_role_warning": screen_warning, "consumption_recorded": None,
+            "consumption_recorded": None,
+            "stock_warning": None,
+            "preview": bool(preview),
+            "skill_warnings": skill_warnings,
         }
 
+        if preview:
+            # SHORT-CIRCUIT: nothing written, nothing committed.
+            return result
+
+        await self.db.commit()
+        result["consumption_recorded"] = consumption_recorded
+        result["stock_warning"] = stock_warning
+        return result
+
+    @staticmethod
+    def _log_message(*, rep_stage: str | None, logged: list, rework: list,
+                     blocked: list, not_found: list) -> str:
+        """One human sentence for the scan screen.
+
+        Exists because the old response could come back with `stage: null`,
+        `count_logged: 0` and a bare piece code in `sequence_blocked` — every
+        field technically correct and the operator still unable to tell whether
+        the system was broken or the piece was.
+        """
+        if logged:
+            head = f"Logged {len(logged)} piece(s)"
+            head += f" at {rep_stage}." if rep_stage and rep_stage != "MIXED" \
+                else " across several stages (see stage_by_piece)."
+        elif rework:
+            head = f"Nothing new logged — {len(rework)} piece(s) already recorded " \
+                   f"at this stage (rework)."
+        elif not_found and not blocked:
+            head = f"Nothing logged — {len(not_found)} code(s) did not resolve."
+        elif blocked:
+            gates = {b["gate"] for b in blocked}
+            if gates == {"not_cut"}:
+                head = (f"Nothing logged — none of these pieces has been cut yet, "
+                        f"so there is no next pipeline stage to infer. Cut them on "
+                        f"the {ScreenContext.LEATHER_CUT.value} / "
+                        f"{ScreenContext.LINING_CUT.value} screen first.")
+            elif gates == {"completed"}:
+                head = "Nothing logged — these pieces have already finished the line."
+            else:
+                head = (f"Nothing logged — {len(blocked)} piece(s) were blocked "
+                        f"({', '.join(sorted(gates))}). See `blocked` for the reason "
+                        f"on each.")
+        else:
+            head = "Nothing logged."
+        return head
     # ══════════════════════════════════════════════════════════════ readers
     async def list_pieces_for_sku(self, *, sku_id: uuid.UUID | None = None,
                                   sku_code: str | None = None,
@@ -1190,8 +1404,9 @@ class ProductionService:
             if not op:
                 raise HTTPException(status.HTTP_404_NOT_FOUND, "Operation not found")
 
+        # rows are 4-tuples: (piece, stage_code, stage_label, client_order_id).
         rows = await self.repo.list_pieces_for_sku(sku_id)
-        piece_ids = [p.id for p, _, _ in rows]
+        piece_ids = [p.id for p, _, _, _ in rows]
 
         done_ids: set[uuid.UUID] = set()
         prev_done_ids: set[uuid.UUID] = set()
@@ -1207,21 +1422,48 @@ class ProductionService:
                 else:
                     prev_stage = None
 
+        order_id = rows[0][3] if rows else None
+        # Live drawer state per piece → drives the STORE overlay.
+        drawer_states = await self.repo.drawer_states_for_pieces(piece_ids)
+
+        from app.core.store_display import display_stage
+
         pieces = []
-        for p, scode, slabel in rows:
+        for p, scode, slabel, _ in rows:
             done = p.id in done_ids
             eligible, reason = True, None
             if op and prev_stage and not done and p.id not in prev_done_ids:
                 eligible, reason = False, f"{prev_stage.value} not completed"
+
+            # STORE overlay: if the piece has cleared the cut side and its drawer
+            # is holding, SHOW store (+ sub-status). Never show LINE_STITCHING
+            # until a real line-stitching event exists.
+            disp = display_stage(
+                current_event_stage=scode,
+                drawer_state=drawer_states.get(p.id),
+                needs_lining=bool(getattr(p, "needs_lining", True)),
+            )
             pieces.append({
                 "piece_id": p.id, "code": p.code, "seq": p.seq,
-                "current_stage": scode, "current_stage_label": slabel,
+                "order_id": order_id, 
+                # real event stage kept for callers that need the raw value:
+                "event_stage": scode, "event_stage_label": slabel,
+                # what the UI shows (may be STORE):
+                "current_stage": disp["display_stage"],
+                "current_stage_label": disp["label"],
+                "in_store": disp["in_store"],
+                "store_status": disp["store_status"],
                 "done_at_op": done, "eligible": eligible, "blocked_reason": reason,
             })
+
+        # The ENVELOPE, not a bare list. Restored after the STORE-overlay edit
+        # dropped it (the checklist screen reads total/done/pending/blocked from
+        # here; without the return the endpoint answered `null`).
         done_count = sum(1 for x in pieces if x["done_at_op"])
         return {
             "sku_id": sku_id, "sku_code": sku.code,
             "colour": sku.color_name or sku.color_code, "size": sku.size,
+            "order_id": order_id,
             "operation_id": op.id if op else None,
             "operation_code": op.code if op else None,
             "total": len(pieces), "done": done_count,
@@ -1235,6 +1477,19 @@ class ProductionService:
 
     async def style_progress(self, style_id: uuid.UUID,
                              client_scope: uuid.UUID | None = None) -> dict[str, int]:
+        """Per-stage completed counts for a style.
+
+        TENANCY: the scoped WHERE alone is not enough. A client asking for
+        another client's style used to get 200 + {} — indistinguishable from
+        "your style, no work logged yet", and still a confirmation the id is
+        real. Existence itself is information, so an invisible (or unknown)
+        style is a 404, matching list_pieces_for_sku."""
+        if not await self.clients.get_style(style_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Style not found")
+        if client_scope is not None and not await self.clients.is_style_visible_to_client(
+            style_id, client_scope
+        ):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Style not found")
         return await self.repo.stage_totals_for_style(style_id, client_scope=client_scope)
 
     async def list_sku_options(self, *, order_id=None, style_id=None,

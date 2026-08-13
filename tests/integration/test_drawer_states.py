@@ -16,6 +16,23 @@ THE RULE THIS FILE DEFENDS
 
     Then: RECEIVED needs completeness, SENDED needs RECEIVED, line-stitching
     needs SENDED, and PACKAGE_EXPORT recycles the drawer to WAITING.
+
+HOLDING BOTH AUTO-ADVANCES TO RECEIVED.
+    The scan that puts the SECOND part in moves the drawer straight to RECEIVED,
+    so `state` reads "received" the moment both parts are physically in and never
+    rests at HOLDING_BOTH. That is not a loss of information: `holding` still
+    reports HOLDING BOTH (contents), and `ready_for_received` still reports
+    completeness. The assertions below therefore check the CONTENTS field for
+    what is in the drawer and the STATE field for where it is in its lifecycle —
+    the distinction this file was written to defend in the first place.
+
+    ONE PART NEVER AUTO-RECEIVES, even for a piece flagged as needing no lining.
+    That flag is written once at upload and is wrong on a large slice of live
+    data, so a drawer must not advance itself on it; two physical scans are the
+    only trigger. A genuinely leather-only drawer is confirmed by a human through
+    the manual receive, which still validates completeness.
+
+    SENDED stays manual, and is now plural: see test_drawer_batch_send.py.
 """
 import pytest
 from fastapi import HTTPException
@@ -45,9 +62,16 @@ async def test_leather_first_then_lining(db, pieces):
     assert out["drawer_code"] == drawer.code and out["piece_code"] == piece.code
 
     out = await _scan(db, drawer, piece, DrawerPart.LINING)
-    assert out["state"] == DrawerState.HOLDING_BOTH.value
+    # Contents say BOTH; the lifecycle has already advanced past holding.
+    assert out["holding"] == "HOLDING BOTH"
+    assert out["state"] == DrawerState.RECEIVED.value
+    assert out["auto_received"] is True
     assert out["awaiting"] == []
     assert out["ready_for_received"] is True
+    # BUG #15: scanning is not completion. The piece is in the drawer and stays
+    # there until someone sends it.
+    assert out["sent"] is False
+    assert "Send" in out["next_action"]
 
 
 @pytest.mark.asyncio
@@ -62,7 +86,8 @@ async def test_lining_first_then_leather(db, pieces):
     assert out["ready_for_received"] is False
 
     out = await _scan(db, drawer, piece, DrawerPart.LEATHER)
-    assert out["state"] == DrawerState.HOLDING_BOTH.value
+    assert out["holding"] == "HOLDING BOTH"
+    assert out["state"] == DrawerState.RECEIVED.value
     assert out["awaiting"] == []
     assert out["ready_for_received"] is True
 
@@ -70,16 +95,69 @@ async def test_lining_first_then_leather(db, pieces):
 @pytest.mark.asyncio
 async def test_leather_only_piece_holds_leather_and_is_ready(db, pieces):
     """needs_lining=False: complete on leather alone, but the drawer holds
-    LEATHER — never HOLDING_BOTH, because no lining exists for this piece."""
+    LEATHER — never HOLDING BOTH, because no lining exists for this piece.
+
+    AND IT DOES NOT RECEIVE ITSELF. Auto-receive fires on HOLDING_BOTH only —
+    two physical scans — not on `complete`, which depends on the needs_lining
+    flag. That flag is written once at upload and is known to be wrong on live
+    data, so letting it advance a drawer on a single scan meant a drawer
+    receiving itself right after pasting with an empty lining side.
+    """
     piece, drawer = pieces[2]
     piece.needs_lining = False
     await db.commit()
 
     out = await _scan(db, drawer, piece, DrawerPart.LEATHER)
+    assert out["holding"] == "HOLDING LEATHER"
     assert out["state"] == DrawerState.HOLDING_LEATHER.value
+    assert out["auto_received"] is False
     assert out["needs_lining"] is False
     assert out["awaiting"] == []              # nothing else is coming
     assert out["ready_for_received"] is True  # complete despite holding one part
+    # Ready but not received — so the operator is told what closes the gap
+    # instead of being left looking at a drawer that seems stuck.
+    assert "Confirm receipt" in out["next_action"]
+
+
+@pytest.mark.asyncio
+async def test_a_leather_only_drawer_is_still_receivable_by_hand(db, pieces):
+    """The other half of the rule above: nothing is stranded. A human confirms
+    it, and the manual route still validates completeness, so it accepts exactly
+    this case and nothing weaker."""
+    piece, drawer = pieces[2]
+    piece.needs_lining = False
+    await db.commit()
+    await _scan(db, drawer, piece, DrawerPart.LEATHER)
+
+    svc = DrawerService(db)
+    out = await svc.transition(drawer.id, "RECEIVED", actor_id=None)
+    assert out["state"] == DrawerState.RECEIVED.value
+    # ...and from there the normal batch send works.
+    sent = await svc.send_batch(drawer_ids=[drawer.id], actor_id=None)
+    assert sent["count_sent"] == 1
+
+
+@pytest.mark.asyncio
+async def test_only_both_parts_trigger_the_automatic_receive(db, pieces):
+    """The rule, stated directly: one part never auto-receives, whatever the
+    needs_lining flag says; two parts always do."""
+    lined_piece, lined_drawer = pieces[0]
+    only_piece, only_drawer = pieces[1]
+    only_piece.needs_lining = False
+    await db.commit()
+
+    # one part, flag says lining is coming   → not received
+    a = await _scan(db, lined_drawer, lined_piece, DrawerPart.LEATHER)
+    assert a["auto_received"] is False
+    # one part, flag says nothing is coming  → STILL not received
+    b = await _scan(db, only_drawer, only_piece, DrawerPart.LEATHER)
+    assert b["auto_received"] is False
+    assert b["state"] == DrawerState.HOLDING_LEATHER.value
+    # the second part lands                  → received, by itself
+    c = await _scan(db, lined_drawer, lined_piece, DrawerPart.LINING)
+    assert c["auto_received"] is True
+    assert c["state"] == DrawerState.RECEIVED.value
+    assert c["holding"] == "HOLDING BOTH"
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,22 @@ class BarcodeResolve(BaseModel):
     employee: dict | None = None
     drawer: dict | None = None
     lot: dict | None = None
+    # True when this is a legacy long piece code kept scannable after the
+    # compact-code switch (bug #19) — the scan works, the label wants reprinting.
+    is_alias: bool = False
+    # "PIECE" / "DRAWER" / null — which code to present next. Answered for EVERY
+    # barcode type, including EMPLOYEE (the first scan of every workflow, which
+    # used to come back null). Guidance; store_scan remains the authority.
+    next_expected_scan: str | None = None
+    # The production stage this piece is due at, derived from its completed
+    # operations by the same helper the write path uses. Null once the piece has
+    # finished the chain, or for a code that names no piece.
+    next_stage: str | None = None
+    next_stage_label: str | None = None
+    # Set when that stage cannot be logged yet — e.g. the drawer has not been sent.
+    # The stage is still reported: the screen shows where the piece is going AND
+    # what is holding it there.
+    next_stage_blocked_reason: str | None = None
 
 
 class PrintRequest(BaseModel):
@@ -32,10 +48,15 @@ class PrintRequest(BaseModel):
 
 
 class PrintLabel(BaseModel):
-    code: str
+    """One sticker: a small symbol plus the text printed under it (bug #19)."""
+    code: str            # encode THIS — the compact PC-… id
     symbology: str
     caption: str
     known: bool
+    # {order_number, article, style, colour, size, serial, piece_code}. Null for
+    # non-piece labels (drawer / employee / lot), which name no garment.
+    details: dict | None = None
+    label_line: str | None = None   # the same fields pre-joined, ready to typeset
 
 
 class PrintResponse(BaseModel):
@@ -91,10 +112,13 @@ class OrderAnalytics(BaseModel):
  
 class BarcodeHistoryRow(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-    code: str
+    code: str                        # the compact scannable id
     status: str
     sku_code: str | None = None
     style_name: str | None = None
+    article: str | None = None       # bug #7/#19
+    serial: str | None = None        # "001" — the zero-padded seq (bug #7)
+    piece_code: str | None = None    # the long human identity, for reference
     colour: str | None = None
     size: str | None = None
     seq: int | None = None

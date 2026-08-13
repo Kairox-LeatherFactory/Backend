@@ -116,7 +116,11 @@ async def test_detail_print_and_order_helpers(db, pieces, order_tree):
     assert out["labels"][0]["known"] is True
     assert out["labels"][0]["code"] == p.code
     assert out["labels"][1] == {"code": "NOPE-1", "symbology": "code128",
-                                "caption": "NOPE-1", "known": False}
+                                "caption": "NOPE-1", "known": False,
+                                # bug #19: a label carries the business identity
+                                # to typeset under the barcode. An unknown code
+                                # names no garment, so there is nothing to print.
+                                "details": None, "label_line": None}
 
     oid = order_tree["order"].id
     assert await svc.resolve_order_id("JP-PO") == oid       # human order_number

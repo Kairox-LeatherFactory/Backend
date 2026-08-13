@@ -100,11 +100,12 @@ class UserService:
             UserRole.HR, UserRole.SUPERVISOR, UserRole.CUTTING_MANAGER,
             UserRole.LINING_MANAGER, UserRole.STITCHING_MANAGER,
             UserRole.SECURITY, UserRole.MERCHANDISER,
-            UserRole.CLIENT, UserRole.VIEWER,
+            UserRole.CLIENT, UserRole.VIEWER, UserRole.STORE_MANAGER,
         },
-        UserRole.HR: {UserRole.SUPERVISOR, UserRole.VIEWER, 
+        UserRole.HR: {UserRole.SUPERVISOR, UserRole.VIEWER,
                       UserRole.SECURITY, UserRole.MERCHANDISER,UserRole.CUTTING_MANAGER,
-                      UserRole.LINING_MANAGER, UserRole.STITCHING_MANAGER,},
+                      UserRole.LINING_MANAGER, UserRole.STITCHING_MANAGER,
+                      UserRole.STORE_MANAGER,},
     }
 
     @staticmethod

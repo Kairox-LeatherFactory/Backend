@@ -193,14 +193,20 @@ async def test_style_progress_counts_events(
 
 
 # ══════════════════════════════════════════════════════ drawers
+def _emp_code(emp) -> str:
+    """The employee card the conftest mints (tests/conftest.py:171)."""
+    return f"EMP-{str(emp.id)[:6].upper()}"
+
+
 async def test_store_scan_through_the_barcode_door(
-    api_client, as_role, pieces
+    api_client, as_role, pieces, cutter
 ):
-    """Scan the drawer, then the piece — codes, not ids."""
+    """Scan the employee, then the drawer, then the piece — codes, not ids."""
     piece, drawer = pieces[0]
     as_role(UserRole.CUTTING_MANAGER)
 
     r = await api_client.post(f"{API}/drawers/store-scan", json={
+        "employee_barcode": _emp_code(cutter[0]),
         "drawer_barcode": drawer.code, "piece_barcode": piece.code,
         "part": "LEATHER"})
     assert r.status_code == 200, r.text
@@ -208,45 +214,174 @@ async def test_store_scan_through_the_barcode_door(
     assert body["state"] == DrawerState.HOLDING_LEATHER.value
     assert body["awaiting"] == ["LINING"]
     assert body["ready_for_received"] is False
+    # BUG #15: the scan logs the part into the drawer and nothing more.
+    assert body["sent"] is False
 
     r = await api_client.post(f"{API}/drawers/store-scan", json={
+        "employee_barcode": _emp_code(cutter[0]),
         "drawer_barcode": drawer.code, "piece_barcode": piece.code,
         "part": "LINING"})
-    assert r.json()["state"] == DrawerState.HOLDING_BOTH.value
-    assert r.json()["ready_for_received"] is True
+    body = r.json()
+    # Complete → auto-RECEIVED (bug #13); contents still report BOTH.
+    assert body["state"] == DrawerState.RECEIVED.value
+    assert body["holding"] == "HOLDING BOTH"
+    assert body["ready_for_received"] is True
+    assert body["sent"] is False
+
+
+async def test_store_scan_requires_the_employee_barcode_first(
+    api_client, as_role, pieces
+):
+    """BUG #2 — the employee scan is mandatory, and enforced HERE.
+
+    The UI was asked to keep the other inputs disabled until an employee is
+    scanned. A rule that lives only in the UI is not a rule: this endpoint used
+    to accept a drawer fill from nobody at all, so "who put this here" was
+    unanswerable for the one write on the floor that has no other actor.
+    """
+    piece, drawer = pieces[0]
+    as_role(UserRole.CUTTING_MANAGER)
+    r = await api_client.post(f"{API}/drawers/store-scan", json={
+        "drawer_barcode": drawer.code, "piece_barcode": piece.code,
+        "part": "LEATHER"})
+    assert r.status_code == 422
+    assert "employee" in r.text.lower()
+
+
+async def test_store_scan_infers_the_hold_bucket(api_client, as_role, pieces, cutter):
+    """BUG #18 — no Hold Leather / Hold Lining button. `part` is omitted and the
+    server decides, reporting which bucket it chose."""
+    piece, drawer = pieces[0]
+    as_role(UserRole.CUTTING_MANAGER)
+
+    r = await api_client.post(f"{API}/drawers/store-scan", json={
+        "employee_barcode": _emp_code(cutter[0]),
+        "drawer_barcode": drawer.code, "piece_barcode": piece.code})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["part_inferred"] is True
+    assert body["part"] == "LEATHER"        # empty drawer → fill the leather side
+    assert body["holding"] == "HOLDING LEATHER"
+
+    # Second scan fills the other side without being told either.
+    r = await api_client.post(f"{API}/drawers/store-scan", json={
+        "employee_barcode": _emp_code(cutter[0]),
+        "drawer_barcode": drawer.code, "piece_barcode": piece.code})
+    body = r.json()
+    assert body["part"] == "LINING" and body["part_inferred"] is True
+    assert body["holding"] == "HOLDING BOTH"
+
+    # Nothing left to scan in — a third scan is a 409, not a silent no-op.
+    r = await api_client.post(f"{API}/drawers/store-scan", json={
+        "employee_barcode": _emp_code(cutter[0]),
+        "drawer_barcode": drawer.code, "piece_barcode": piece.code})
+    assert r.status_code == 409
 
 
 async def test_store_scan_rejects_a_bad_part_and_a_missing_door(
-    api_client, as_role, pieces
+    api_client, as_role, pieces, cutter
 ):
     piece, drawer = pieces[0]
     as_role(UserRole.CUTTING_MANAGER)
 
     r = await api_client.post(f"{API}/drawers/store-scan", json={
+        "employee_barcode": _emp_code(cutter[0]),
         "drawer_barcode": drawer.code, "piece_barcode": piece.code,
         "part": "ZIPPER"})
     assert r.status_code == 422                    # part is pattern-constrained
 
     r = await api_client.post(f"{API}/drawers/store-scan", json={
+        "employee_barcode": _emp_code(cutter[0]),
         "piece_barcode": piece.code, "part": "LEATHER"})
     assert r.status_code == 422                    # no drawer door given
 
 
 async def test_store_scan_409s_a_piece_in_the_wrong_drawer(
-    api_client, as_role, pieces
+    api_client, as_role, pieces, cutter
 ):
     piece, _ = pieces[0]
     _, other = pieces[1]
     as_role(UserRole.CUTTING_MANAGER)
     r = await api_client.post(f"{API}/drawers/store-scan", json={
+        "employee_barcode": _emp_code(cutter[0]),
         "drawer_barcode": other.code, "piece_barcode": piece.code,
         "part": "LEATHER"})
     assert r.status_code == 409
 
 
-async def test_receive_is_dm_md_only_and_enforces_the_order(
-    api_client, as_role, pieces
+async def test_batch_send_releases_many_drawers_at_once(
+    api_client, as_role, pieces, cutter
 ):
+    """BUGS #13/#14/#15 — completeness auto-receives; SEND is the manual step,
+    it takes many drawers, and it partially accepts."""
+    ready, not_ready = pieces[0], pieces[1]
+
+    as_role(UserRole.CUTTING_MANAGER)
+    for part in ("LEATHER", "LINING"):
+        r = await api_client.post(f"{API}/drawers/store-scan", json={
+            "employee_barcode": _emp_code(cutter[0]),
+            "drawer_barcode": ready[1].code, "piece_barcode": ready[0].code,
+            "part": part})
+        assert r.status_code == 200, r.text
+    # the second drawer gets leather only — still awaiting its lining
+    await api_client.post(f"{API}/drawers/store-scan", json={
+        "employee_barcode": _emp_code(cutter[0]),
+        "drawer_barcode": not_ready[1].code, "piece_barcode": not_ready[0].code,
+        "part": "LEATHER"})
+
+    # the send queue shows exactly the one that is ready
+    as_role(UserRole.DIRECT_MANAGER)
+    r = await api_client.get(f"{API}/drawers", params={"sendable": True})
+    assert [i["code"] for i in r.json()["items"]] == [ready[1].code]
+
+    # a floor role may scan parts in but may not decide what leaves the store
+    as_role(UserRole.CUTTING_MANAGER)
+    r = await api_client.post(f"{API}/drawers/send", json={
+        "drawer_ids": [str(ready[1].id)]})
+    assert r.status_code == 403
+
+    as_role(UserRole.DIRECT_MANAGER)
+    r = await api_client.post(f"{API}/drawers/send", json={
+        "drawer_ids": [str(ready[1].id), str(not_ready[1].id)],
+        })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # PARTIAL ACCEPT: the good drawer goes, the incomplete one is reported.
+    assert body["count_sent"] == 1
+    assert body["sent"][0]["drawer_code"] == ready[1].code
+    assert body["pieces_released"] == [ready[0].code]
+    assert len(body["not_ready"]) == 1
+    assert body["not_ready"][0]["drawer_code"] == not_ready[1].code
+
+
+async def test_drawer_detail_opens_a_row_from_the_list(
+    api_client, as_role, pieces, cutter
+):
+    """BUG #13 — the Drawers List row must open into real detail."""
+    piece, drawer = pieces[0]
+    as_role(UserRole.CUTTING_MANAGER)
+    await api_client.post(f"{API}/drawers/store-scan", json={
+        "employee_barcode": _emp_code(cutter[0]),
+        "drawer_barcode": drawer.code, "piece_barcode": piece.code,
+        "part": "LEATHER"})
+
+    as_role(UserRole.DIRECT_MANAGER)
+    r = await api_client.get(f"{API}/drawers/{drawer.id}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["code"] == drawer.code
+    assert body["holding"] == "HOLDING LEATHER"
+    assert body["awaiting"] == ["LINING"]
+    assert body["complete"] is False and body["can_send"] is False
+    # the garment itself, with the fields bug #7 asked for
+    assert body["piece"]["code"] == piece.code
+    assert body["piece"]["serial"] == "001"
+
+
+async def test_receive_is_dm_md_only_and_enforces_the_order(
+    api_client, as_role, pieces, cutter
+):
+    """The DEPRECATED single-drawer route still behaves, for one release."""
     piece, drawer = pieces[0]
 
     as_role(UserRole.CUTTING_MANAGER)
@@ -260,16 +395,26 @@ async def test_receive_is_dm_md_only_and_enforces_the_order(
     assert r.status_code == 409                    # nothing in the drawer yet
 
     as_role(UserRole.CUTTING_MANAGER)
-    for part in ("LEATHER", "LINING"):
-        await api_client.post(f"{API}/drawers/store-scan", json={
-            "drawer_barcode": drawer.code, "piece_barcode": piece.code,
-            "part": part})
+    r = await api_client.post(f"{API}/drawers/store-scan", json={
+        "employee_barcode": _emp_code(cutter[0]),
+        "drawer_barcode": drawer.code, "piece_barcode": piece.code,
+        "part": "LEATHER"})
+    assert r.status_code == 200, r.text
 
     as_role(UserRole.DIRECT_MANAGER)
     r = await api_client.post(f"{API}/drawers/{drawer.id}/receive",
                               json={"transition": "SENDED"})
     assert r.status_code == 409                    # SENDED before RECEIVED
 
+    # completing it auto-receives, so the explicit RECEIVED is now a no-op that
+    # still answers 200 — the deprecated route must not start failing.
+    as_role(UserRole.CUTTING_MANAGER)
+    await api_client.post(f"{API}/drawers/store-scan", json={
+        "employee_barcode": _emp_code(cutter[0]),
+        "drawer_barcode": drawer.code, "piece_barcode": piece.code,
+        "part": "LINING"})
+
+    as_role(UserRole.DIRECT_MANAGER)
     r = await api_client.post(f"{API}/drawers/{drawer.id}/receive",
                               json={"transition": "RECEIVED"})
     assert r.status_code == 200 and r.json()["state"] == DrawerState.RECEIVED.value
