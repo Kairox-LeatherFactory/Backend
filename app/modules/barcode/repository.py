@@ -205,7 +205,7 @@ class BarcodeRepository:
         return (await self.db.execute(
             select(Drawer.id, Drawer.code, Drawer.seq, Drawer.state,
                    Drawer.current_piece_id, Drawer.leather_in, Drawer.lining_in,
-                   Drawer.sent_to)
+                   )
             .where(Drawer.id == drawer_id)
         )).first()
 

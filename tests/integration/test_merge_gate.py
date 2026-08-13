@@ -74,8 +74,7 @@ async def test_store_scan_and_full_merge_then_line_stitch(db, operations, pieces
     assert r2["ready_for_received"] is True
 
     # SEND is still a decision, and it is what opens the merge gate.
-    snd = await drawers.send_batch(drawer_ids=[drawer.id],
-                                   destination="STITCHING", actor_id=dm.id)
+    snd = await drawers.send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
     assert snd["count_sent"] == 1
     assert snd["sent"][0]["state"] == "sended"
 
@@ -220,7 +219,7 @@ async def test_sended_requires_received(db, operations, pieces, dm):
 
     # Still awaiting lining → not RECEIVED → nothing is sent.
     out = await DrawerService(db).send_batch(
-        drawer_ids=[drawer.id], destination="STITCHING", actor_id=dm.id)
+        drawer_ids=[drawer.id], actor_id=dm.id)
     assert out["count_sent"] == 0
     assert out["sent"] == []
     assert len(out["not_ready"]) == 1

@@ -53,8 +53,8 @@ class StoreScanResult(BaseModel):
     # BUG #15 — scanning is NOT completion. The piece stays in the drawer until
     # someone selects it and sends it; these say so explicitly.
     sent: bool = False
-    sent_to: str | None = None
     next_action: str = ""
+
 
 
 class DrawerTransition(BaseModel):
@@ -68,19 +68,18 @@ class DrawerTransitionResult(BaseModel):
 
 
 class DrawerSendRequest(BaseModel):
-    """Send one or many drawers onward in a single action (bugs #13/#14).
+    """Send one or many drawers onward in a single action.
 
-    STITCHING is the destination that opens the merge gate — production reads
-    DrawerState.SENDED to release a piece into LINE_STITCHING, so this call moves
-    that whole bunch of pieces at once. LINING routes the drawer to the lining
-    floor and leaves the gate shut.
+    THERE IS NOTHING TO CHOOSE BUT THE DRAWERS. The store sits at one point in
+    the pipeline: lining is cut and scanned INTO the drawer, so a merged drawer
+    has exactly one way forward — LINE_STITCHING, then shell stitching, then
+    final finish. Sending releases the pieces into that chain, which is what
+    production reads through DrawerState.SENDED.
     """
     drawer_ids: list[uuid.UUID] = Field(min_length=1)
-    destination: str = Field(pattern="^(STITCHING|LINING)$")
 
 
 class DrawerSendResult(BaseModel):
-    destination: str
     requested: int
     count_sent: int
     # PARTIAL ACCEPT, like the production gates: one drawer that is not ready
@@ -115,7 +114,6 @@ class DrawerLabel(BaseModel):
     piece_id: uuid.UUID | None = None
     piece_code: str | None = None
     piece_serial: str | None = None    # "001" (bug #7)
-    sent_to: str | None = None
     can_send: bool = False             # drives the list's Send button
     barcode_id: uuid.UUID | None = None
     barcode: str | None = None
@@ -143,7 +141,6 @@ class DrawerDetail(BaseModel):
     complete: bool
     received_at: datetime | None = None
     sended_at: datetime | None = None
-    sent_to: str | None = None
     sent: bool = False
     can_send: bool = False
     # The full piece card: article, serial, order, style, colour, size.

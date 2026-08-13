@@ -427,7 +427,6 @@ class PieceTrace(BaseModel):
     drawer_code: str | None = None
     drawer_state: str | None = None
     drawer_holding: str | None = None    # HOLDING LEATHER | LINING | BOTH | EMPTY
-    drawer_sent_to: str | None = None    # STITCHING | LINING once released
     # Totals rolled up from the history, so a screen does not re-add them itself
     # and get a different answer.
     total_consumption: float | None = None

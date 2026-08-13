@@ -286,7 +286,6 @@ class BarcodeService:
             "leather_in": r.leather_in, "lining_in": r.lining_in,
             "holding": holding_label(leather_in=r.leather_in,
                                      lining_in=r.lining_in),
-            "sent_to": r.sent_to,
         }
 
     async def _lot_payload(self, lot_id: uuid.UUID) -> dict:

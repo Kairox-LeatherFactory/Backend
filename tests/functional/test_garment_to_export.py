@@ -139,8 +139,7 @@ async def test_one_lined_jacket_walks_the_whole_chain_and_recycles_its_drawer(
     # ── 5 · the DM's send: the one hard transition that is still a decision ──
     # RECEIVED is now automatic (it only ever restated what the last scan made
     # true). SEND is the judgement, and it is what opens the merge gate.
-    out = await drawers.send_batch(drawer_ids=[drawer_id],
-                                   destination="STITCHING", actor_id=dm.id)
+    out = await drawers.send_batch(drawer_ids=[drawer_id], actor_id=dm.id)
     assert out["count_sent"] == 1
     assert out["sent"][0]["state"] == "sended"
     assert out["pieces_released"] == [piece.code]

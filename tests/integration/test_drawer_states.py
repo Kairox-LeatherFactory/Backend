@@ -70,8 +70,8 @@ async def test_leather_first_then_lining(db, pieces):
     assert out["ready_for_received"] is True
     # BUG #15: scanning is not completion. The piece is in the drawer and stays
     # there until someone sends it.
-    assert out["sent"] is False and out["sent_to"] is None
-    assert "Send to Lining / Stitching" in out["next_action"]
+    assert out["sent"] is False
+    assert "Send" in out["next_action"]
 
 
 @pytest.mark.asyncio
@@ -133,8 +133,7 @@ async def test_a_leather_only_drawer_is_still_receivable_by_hand(db, pieces):
     out = await svc.transition(drawer.id, "RECEIVED", actor_id=None)
     assert out["state"] == DrawerState.RECEIVED.value
     # ...and from there the normal batch send works.
-    sent = await svc.send_batch(drawer_ids=[drawer.id], destination="STITCHING",
-                                actor_id=None)
+    sent = await svc.send_batch(drawer_ids=[drawer.id], actor_id=None)
     assert sent["count_sent"] == 1
 
 

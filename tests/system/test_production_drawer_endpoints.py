@@ -337,13 +337,13 @@ async def test_batch_send_releases_many_drawers_at_once(
     # a floor role may scan parts in but may not decide what leaves the store
     as_role(UserRole.CUTTING_MANAGER)
     r = await api_client.post(f"{API}/drawers/send", json={
-        "drawer_ids": [str(ready[1].id)], "destination": "STITCHING"})
+        "drawer_ids": [str(ready[1].id)]})
     assert r.status_code == 403
 
     as_role(UserRole.DIRECT_MANAGER)
     r = await api_client.post(f"{API}/drawers/send", json={
         "drawer_ids": [str(ready[1].id), str(not_ready[1].id)],
-        "destination": "STITCHING"})
+        })
     assert r.status_code == 200, r.text
     body = r.json()
     # PARTIAL ACCEPT: the good drawer goes, the incomplete one is reported.

@@ -189,8 +189,7 @@ async def test_a_batch_send_also_audits_against_the_login(fk_db, scene):
         await svc.store_scan(drawer_id=drawer.id, piece_id=piece.id, part=part,
                              actor_id=user.id, employee_id=scene["employee"].id)
 
-    out = await svc.send_batch(drawer_ids=[drawer.id], destination="STITCHING",
-                               actor_id=user.id)
+    out = await svc.send_batch(drawer_ids=[drawer.id], actor_id=user.id)
     assert out["count_sent"] == 1
 
     actors = set((await fk_db.execute(

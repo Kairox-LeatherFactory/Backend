@@ -683,7 +683,6 @@ class DashboardService:
             drawer_holding=holding_label(
                 leather_in=data["drawer_leather_in"],
                 lining_in=data["drawer_lining_in"]) if data["drawer_code"] else None,
-            drawer_sent_to=data["drawer_sent_to"],
             # None, not 0.0, when nothing was ever measured — "no measurement
             # taken" and "measured zero" are different facts, and lining cuts can
             # legitimately be the former.

@@ -1390,7 +1390,6 @@ class DashboardRepository:
                 Drawer.code.label("drawer_code"),
                 Drawer.leather_in.label("leather_in"),
                 Drawer.lining_in.label("lining_in"),
-                Drawer.sent_to.label("sent_to"),
             )
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
@@ -1442,7 +1441,6 @@ class DashboardRepository:
             "drawer_code": head.drawer_code,
             "drawer_leather_in": bool(head.leather_in),
             "drawer_lining_in": bool(head.lining_in),
-            "drawer_sent_to": head.sent_to,
             "events": events,
         }
 
