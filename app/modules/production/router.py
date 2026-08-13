@@ -140,10 +140,22 @@ async def piece_state(
     code: str | None = Query(None, description="A scanned piece barcode "
                                                "(compact or legacy long code)."),
     piece_id: uuid.UUID | None = Query(None, description="Manual door."),
+    employee_barcode: str | None = Query(
+        None, description="The scanned worker's card. Supply it and the response "
+                          "also answers whether THIS worker can log the piece's "
+                          "next stage right now (`ready_to_log` / `blockers`)."),
+    employee_id: uuid.UUID | None = Query(None, description="Manual actor door."),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(_FLOOR_READERS),
 ):
-    """What is true about this piece, the instant it is scanned.
+    """What is true about THIS PIECE, the instant it is scanned — and, if you send
+    the worker's card too, whether it can be logged without asking anyone.
+
+    ONE PIECE, NOT A SKU. A scan screen holds one garment: it needs that
+    garment's identity, the stage it is in, the stage it is going to, and a yes/no
+    on logging it. A SKU-wide read answers a different question — "what is the
+    state of this whole style" — and cannot say anything about the piece in the
+    operator's hand, which is why the verify step must call this instead.
 
     THE READ THE SCAN SCREEN NEVER HAD. Stage inference, the sequence gate and
     the merge gate all ran only at WRITE time, so the UI had to guess: it made
@@ -152,15 +164,26 @@ async def piece_state(
     the server, using the very same predicates POST /log enforces — so a card the
     UI opens is a card the log will accept.
 
+    FOR A FULLY AUTOMATIC SCAN, send `code` + `employee_barcode` and read:
+        current_stage   where the piece is now
+        next_stage      what this scan would log — never chosen by hand
+        ready_to_log    true  -> POST /production/log immediately
+                        false -> show `blockers`; each names its gate and reason
+                        null  -> no employee sent, so the question is unanswered
+
     Also carries the piece's drawer (bug #12) and how many pieces of its SKU are
     still outstanding at the next stage (bug #8).
     """
     if not code and not piece_id:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             "Provide code or piece_id.")
+    barcodes = BarcodeService(db)
     if piece_id is None:
-        piece_id = await BarcodeService(db).resolve_piece_id(code)
-    return await ProductionService(db).piece_state(piece_id, user=user)
+        piece_id = await barcodes.resolve_piece_id(code)
+    if employee_id is None and employee_barcode:
+        employee_id = await barcodes.resolve_employee_id(employee_barcode)
+    return await ProductionService(db).piece_state(
+        piece_id, user=user, employee_id=employee_id)
 
 
 async def _resolve_cut_lot(

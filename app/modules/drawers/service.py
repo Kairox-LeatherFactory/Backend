@@ -281,20 +281,37 @@ class DrawerService:
         else:
             drawer.state = DrawerState.WAITING.value
 
-        # ── COMPLETENESS AUTO-ADVANCES TO RECEIVED (bug #13) ─────────────────
-        # RECEIVED used to be a button the DM pressed on one drawer at a time. But
-        # RECEIVED asserts exactly one thing — "this drawer holds everything this
-        # piece needs" — and the scan that just landed is what makes that true or
-        # not. There is no judgement left for a human to add, so the click was
-        # pure latency: hundreds of drawers waiting on a manual confirmation of a
-        # fact the server had already computed.
+        # ── HOLDING BOTH AUTO-ADVANCES TO RECEIVED ───────────────────────────
+        # RECEIVED used to be a button pressed on one drawer at a time, and it
+        # asserts one thing the scan itself establishes, so it advances by itself.
         #
-        # SEND IS STILL A DECISION AND STAYS MANUAL. Receiving records what is in
-        # the drawer; sending releases the piece into the next stage. Only the
-        # first is mechanical — which is why this auto-advances one step and
-        # stops. See send_batch.
+        # BUT ONLY ON HOLDING_BOTH — physically both parts in the drawer.
+        #
+        # It first triggered on `complete`, which is "leather in AND (lining in OR
+        # the piece needs no lining)". That let the LEATHER-ONLY branch fire on a
+        # single scan: a piece whose needs_lining flag was False went straight to
+        # RECEIVED the moment its leather was stored, right after pasting, with an
+        # empty lining side. On the floor that reads as the drawer receiving
+        # itself before the lining has arrived.
+        #
+        # AND THAT FLAG CANNOT CARRY THIS DECISION. needs_lining is written once
+        # at breakdown upload and never recomputed — on the live database 925 of
+        # 1,425 pieces in one order are flagged wrongly (see
+        # scripts/backfill_needs_lining.py). Auto-advancing a drawer on a value we
+        # know to be unreliable means auto-advancing on a guess. Two booleans set
+        # by two physical scans are not a guess.
+        #
+        # A GENUINELY LEATHER-ONLY PIECE IS NOT STRANDED. It stays HOLDING_LEATHER
+        # with `ready_for_received` true, and a human confirms it through
+        # POST /drawers/{id}/receive — which still validates completeness, so it
+        # accepts exactly this case and nothing weaker. The judgement call ("this
+        # garment really has no lining") stays with the person who can see the
+        # garment, which is the right place for it.
+        #
+        # SEND REMAINS MANUAL EITHER WAY. Receiving records what is in the drawer;
+        # sending releases the piece into the next stage. See send_batch.
         auto_received = False
-        if complete:
+        if drawer.leather_in and drawer.lining_in:
             drawer.state = DrawerState.RECEIVED.value
             drawer.received_at = datetime.now(timezone.utc)
             auto_received = True
@@ -335,14 +352,32 @@ class DrawerService:
             # infer otherwise.
             "sent": drawer.state == DrawerState.SENDED.value,
             "sent_to": drawer.sent_to,
-            "next_action": (
-                f"{piece.code} is logged in drawer {drawer.code} and stays there. "
-                f"Select the drawer in the Drawers List and Send to Lining / "
-                f"Stitching to move it on."
-                if complete else
-                f"{piece.code} is logged in drawer {drawer.code}. Still awaiting "
-                f"{' + '.join(awaiting)} before it can be sent."),
+            # THREE OUTCOMES NOW, not two, because auto-receive needs both parts
+            # while completeness does not. The middle one is the leather-only
+            # piece: it is ready, but a person confirms it rather than the flag.
+            "next_action": self._next_action(
+                piece_code=piece.code, drawer_code=drawer.code,
+                auto_received=auto_received, complete=complete,
+                awaiting=awaiting),
         }
+
+    @staticmethod
+    def _next_action(*, piece_code: str, drawer_code: str, auto_received: bool,
+                     complete: bool, awaiting: list[str]) -> str:
+        """One sentence telling the operator what actually happens next."""
+        if auto_received:
+            return (f"{piece_code} is in drawer {drawer_code}, which now holds "
+                    f"both parts and has been received. Select it in the Drawers "
+                    f"List and Send to Lining / Stitching to move it on.")
+        if complete:
+            # Leather-only: nothing more is coming, but the drawer does not
+            # receive itself on one part. Name the confirmation that is needed
+            # instead of leaving it looking stuck.
+            return (f"{piece_code} needs no lining, so drawer {drawer_code} holds "
+                    f"everything it will get. Confirm receipt on the drawer, then "
+                    f"send it.")
+        return (f"{piece_code} is logged in drawer {drawer_code}. Still awaiting "
+                f"{' + '.join(awaiting)} before it can be received.")
 
     # ── received / sended ────────────────────────────────────────────────────
     async def transition(self, drawer_id: uuid.UUID, transition: str,

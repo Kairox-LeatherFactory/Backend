@@ -606,8 +606,16 @@ class ProductionService:
         return head
     # ═══════════════════════════════════ THE SCAN-TIME STATE READ (bugs 4/6/8/12)
     async def piece_state(self, piece_id: uuid.UUID,
-                          *, user: User | None = None) -> dict:
+                          *, user: User | None = None,
+                          employee_id: uuid.UUID | None = None) -> dict:
         """Everything the scan screen needs about ONE piece, before it logs.
+
+        THIS IS THE SCAN AND THE VERIFY, FOR ONE PIECE. Pass `employee_id` (the
+        scanned card) and it also answers whether that worker can log the piece's
+        next stage right now — `ready_to_log` is the single boolean an automatic
+        screen needs, and `blockers` says why when it is false. Without it the
+        verify step has to fall back to a SKU-wide read, which describes a whole
+        style and cannot answer anything about the garment in the operator's hand.
 
         WHY THIS ENDPOINT EXISTS
             Three of the reported bugs are the same missing read:
@@ -693,10 +701,58 @@ class ProductionService:
             needs_lining=bool(getattr(piece, "needs_lining", True)),
         )
 
+        # ── THE VERIFY ANSWER ────────────────────────────────────────────────
+        # Everything above describes the PIECE. To decide whether this scan can
+        # simply log itself, the screen also needs the verdict on the WORKER —
+        # which is what `actor` / `blockers` / `ready_to_log` add when an employee
+        # is supplied. Without them a "verify" button has to guess, or fall back
+        # to a SKU-wide read that answers a different question entirely.
+        actor, blockers = await self._verify_actor(
+            employee_id=employee_id, stage=next_stage)
+
+        role_ok = await self._can_log(user, next_stage)
+        if role_ok is False and next_stage is not None:
+            role_name = getattr(getattr(user, "role", None), "value", "this login")
+            blockers.append({
+                "gate": "role",
+                "reason": (f"{role_name} may not log {next_stage.value} — ask the "
+                           f"manager who owns that stage."),
+            })
+
+        if next_stage is None:
+            blockers.append({
+                "gate": "completed",
+                "reason": f"{piece.code} has finished the line — nothing left to log.",
+            })
+        else:
+            # The stage card already computed WHY the next stage is shut, if it
+            # is. Reuse that verdict rather than forming a second opinion.
+            nxt_card = next(
+                (s for s in stages if s["stage"] == next_stage.value), None)
+            if nxt_card and nxt_card["state"] == "locked":
+                blockers.append({"gate": nxt_card.get("gate", "sequence"),
+                                 "reason": nxt_card.get("reason", "")})
+            if next_stage.requires_consumption:
+                blockers.append({
+                    "gate": "consumption",
+                    "reason": (f"{next_stage.value} is a cut — it is logged from "
+                               f"its own cut screen with the material, not by an "
+                               f"automatic pipeline scan."),
+                })
+
         return {
             "piece": card,
             "drawer": drawer,                                   # bug #12
             "completed_stages": sorted(done),
+            # WHERE THE PIECE IS NOW, promoted to the top level. It was only
+            # available nested inside `piece`, beside a `display_stage` that can
+            # legitimately read STORE — so "what stage is this piece in" had two
+            # plausible answers and neither was obvious. `current_stage` is the
+            # real event-backed stage; `display_stage` is what the board shows.
+            "current_stage": card.get("current_stage"),
+            "current_stage_label": (
+                card["current_stage"].replace("_", " ").title()
+                if card.get("current_stage") else "Not started"),
             "next_stage": next_stage.value if next_stage else None,   # bug #4
             "next_stage_requires_consumption": bool(
                 next_stage and next_stage.requires_consumption),
@@ -707,8 +763,59 @@ class ProductionService:
             "sku": sku_block,                                   # bug #8
             # Whether THIS login could log the next stage — so the screen can say
             # "ask the stitching manager" instead of letting the scan 403.
-            "can_log_next": await self._can_log(user, next_stage),
+            "can_log_next": role_ok,
+            "actor": actor,
+            "blockers": blockers,
+            # THE ONE BOOLEAN A SCAN SCREEN NEEDS. True = this scan can be logged
+            # as it stands, with no stage picked by hand and nothing else to ask.
+            # None (not False) when no employee was supplied: the question cannot
+            # be answered without one, and False would tell the screen the piece
+            # is blocked when it is merely unasked.
+            "ready_to_log": None if employee_id is None else not blockers,
         }
+
+    async def _verify_actor(
+        self, *, employee_id: uuid.UUID | None,
+        stage: "ProductionStage | None",
+    ) -> tuple[dict | None, list[dict]]:
+        """The worker half of the verify: who they are, and anything stopping them
+        logging this stage right now.
+
+        Kept beside piece_state rather than folded into it because it is the only
+        part of that read which touches attendance, and because it returns the
+        actor block the scan screen prints regardless of the verdict.
+        """
+        if employee_id is None:
+            return None, []
+
+        emp = await self.employees.get(employee_id)
+        if emp is None:
+            return None, [{"gate": "employee",
+                           "reason": "No employee record for that card."}]
+
+        blockers: list[dict] = []
+        from app.modules.attendance.service import AttendanceService
+        present = await AttendanceService(self.db).is_present_today(employee_id)
+        if not present:
+            blockers.append({
+                "gate": "attendance",
+                "reason": (f"{emp.name} is not checked in today — mark attendance "
+                           f"before recording their work."),
+            })
+
+        # SKILL IS A WARNING, NOT A BLOCKER, and it stays one here. The log
+        # records the piece and reports the anomaly; a verify that refused it
+        # would stall the line over an advisory the server would have accepted.
+        skill_ok = self._skill_ok(emp.designation, stage)
+        return {
+            "employee_id": str(emp.id),
+            "name": emp.name,
+            "designation": Designation.normalise(emp.designation),
+            "present_today": present,
+            "skill_ok": skill_ok,
+            "skill_note": (None if skill_ok or stage is None
+                           else self._skill_msg(emp.name, emp.designation, stage)),
+        }, blockers
 
     async def _sku_progress_at_stage(self, sku_id: uuid.UUID,
                                      stage: "ProductionStage | None") -> dict:

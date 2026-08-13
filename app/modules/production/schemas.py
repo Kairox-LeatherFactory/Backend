@@ -261,9 +261,21 @@ class PieceStageCard(BaseModel):
 
 
 class PieceState(BaseModel):
+    """ONE PIECE — its identity, where it is, where it goes next, and whether the
+    scan can just be logged.
+
+    This is what a barcode scan should return. `piece` is the individual garment
+    (code, serial, article, style, colour, size), never a SKU roll-up: a SKU
+    describes a whole style and cannot answer anything about the item in the
+    operator's hand.
+    """
     piece: dict                      # the full barcode piece card (article, serial…)
     drawer: dict | None = None       # bug #12
     completed_stages: list[str] = Field(default_factory=list)
+    # WHERE THE PIECE IS NOW — the real, event-backed stage. Distinct from
+    # `display_stage`, which may read STORE (a drawer state, not an event).
+    current_stage: str | None = None
+    current_stage_label: str | None = None
     next_stage: str | None = None    # bug #4 — inferred, never chosen by the user
     next_stage_requires_consumption: bool = False
     display_stage: str | None = None  # may be the virtual STORE
@@ -274,3 +286,17 @@ class PieceState(BaseModel):
     # Whether THIS login's role could log next_stage. Lets the screen say "ask the
     # stitching manager" instead of letting the scan come back 403.
     can_log_next: bool | None = None
+    # The scanned worker, when one was supplied: name, designation, whether they
+    # are checked in today, and any skill anomaly. Skill is a WARNING — the log
+    # records the piece and reports it — so it never appears in `blockers`.
+    actor: dict | None = None
+    # Everything standing between this scan and a logged event. Each entry is
+    # {gate, reason}; gate ∈ {employee, attendance, role, sequence, merge,
+    # consumption, completed}.
+    blockers: list[dict] = Field(default_factory=list)
+    # THE ONE BOOLEAN AN AUTOMATIC SCREEN NEEDS.
+    #   true  → POST /production/log now; no stage to pick, nothing to ask
+    #   false → show `blockers`
+    #   null  → no employee was supplied, so the question is unanswered (which is
+    #           not the same as "blocked", and must not be rendered as one)
+    ready_to_log: bool | None = None
