@@ -28,7 +28,7 @@ router = APIRouter(prefix="/materials", tags=["Materials"])
 sup_router = APIRouter(prefix="/suppliers", tags=["MaterialSuppliers"])
 
 _LOT_WRITERS = require_roles(
-    UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.CUTTING_MANAGER)
+    UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.CUTTING_MANAGER,UserRole.LINING_MANAGER)
 _STOCK_READERS = require_roles(
     UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.HR,
     UserRole.CUTTING_MANAGER, UserRole.STITCHING_MANAGER, UserRole.LINING_MANAGER, UserRole.SECURITY, UserRole.STORE_MANAGER)
