@@ -259,11 +259,13 @@ async def log_batch(
     svc = ProductionService(db)
     barcodes = BarcodeService(db)
 
-    # actor → employee_id
-    if body.actor.employee_id:
-        employee_id = body.actor.employee_id
-    else:
-        employee_id = await barcodes.resolve_employee_id(body.actor.employee_barcode)
+    # actor → employee_id. Both doors may be sent; resolve_actor requires them to
+    # agree and checks the id really names an employee, so a barcode-row id (the
+    # classic mix-up — it looks identical) fails with a message that says which
+    # id to use, instead of a bare "Employee not found" further downstream.
+    employee_id = await barcodes.resolve_actor(
+        employee_barcode=body.actor.employee_barcode,
+        employee_id=body.actor.employee_id)
 
     # targets → piece_ids
     piece_ids: list[uuid.UUID] = []

@@ -165,18 +165,10 @@ async def store_scan(
     # the worker it names still exists. A registry row whose employee row was
     # removed would sail through here and fail much later, as a foreign-key error
     # with no useful message. So the row itself is checked, once, up front.
-    if body.employee_id:
-        employee_id = body.employee_id
-    else:
-        employee_id = await barcodes.resolve_employee_id(body.employee_barcode)
+    employee_id = await barcodes.resolve_actor(
+        employee_barcode=body.employee_barcode, employee_id=body.employee_id)
 
     employee = await db.get(Employee, employee_id)
-    if employee is None:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND,
-            f"No employee record for this card ({employee_id}). The barcode is "
-            f"registered but the worker it names no longer exists — reissue the "
-            f"card, or scan a different one.")
     if not employee.is_active:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,

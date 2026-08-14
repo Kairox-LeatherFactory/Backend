@@ -195,6 +195,60 @@ class BarcodeService:
                                 f"'{code}' is not a known employee barcode.")
         return row.employee_id
 
+    async def resolve_actor(self, *, employee_barcode: str | None,
+                            employee_id: uuid.UUID | None) -> uuid.UUID:
+        """The ONE way a two-door endpoint turns 'who did this' into an employee id.
+
+        WHY THIS IS NOT JUST `employee_id or resolve(barcode)`
+            Both doors may be sent at once, and when they disagree the caller has
+            asserted two different people in one request. Preferring one and
+            discarding the other silently is how a scan of MD ISHTIYAQUE's card
+            gets logged against NASREEN — or, as actually happened, how a request
+            carrying a perfectly good barcode came back "Employee not found"
+            because the id beside it was a `barcode_registry` row id rather than
+            an `employee` id. Every fact needed to succeed was in the request.
+
+            So: if both are present they must AGREE. If they do not, the request
+            is ambiguous and says so, naming both people.
+
+        THE ID IS ALSO CHECKED FOR EXISTENCE HERE, because the most common way to
+        get this wrong is to pass an id from the wrong table. `employee.id` is
+        what this wants; a barcode row's own `id` is a different thing that looks
+        identical.
+        """
+        from app.modules.employees.models import Employee
+
+        from_barcode = None
+        if employee_barcode:
+            from_barcode = await self.resolve_employee_id(employee_barcode)
+
+        if employee_id is not None and from_barcode is not None \
+                and employee_id != from_barcode:
+            scanned = await self.db.get(Employee, from_barcode)
+            claimed = await self.db.get(Employee, employee_id)
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"The scanned card '{employee_barcode}' belongs to "
+                f"{scanned.name if scanned else from_barcode}, but employee_id "
+                f"names {claimed.name if claimed else 'an unknown record'} "
+                f"({employee_id}). Send one or the other — or the same person in "
+                f"both.")
+
+        resolved = employee_id if employee_id is not None else from_barcode
+        if resolved is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Provide employee_barcode or employee_id.")
+
+        if await self.db.get(Employee, resolved) is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                f"No employee with id {resolved}. This must be an `employee.id` — "
+                f"the id of a barcode row is a different value that looks the "
+                f"same. Scan the card and send `employee_barcode` instead, or "
+                f"take the id from GET /employees.")
+        return resolved
+
     async def resolve_lot_id(self, code: str) -> uuid.UUID:
         row = await self._get_active_or_410(code)   # F18
         if not row.material_lot_id:
