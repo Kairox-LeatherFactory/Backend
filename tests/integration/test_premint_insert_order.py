@@ -94,10 +94,22 @@ def test_a_dangling_barcode_is_rejected_here(fk_db):
         fk_db.flush()
 
 
+# ── NOTE ON `allow_pool_growth=True` BELOW ───────────────────────────────────
+# These tests are about the FOUR-PHASE INSERT ORDER (drawers → pieces → link →
+# barcodes) under enforced foreign keys. They need premint to actually create
+# drawers, and since change-list item 9 the drawer pool is FIXED by default:
+# premint no longer mints a drawer whenever the pool runs dry, because "200
+# static drawers" stopped being true the first time a big order arrived.
+#
+# `allow_pool_growth=True` is the flag a DM's authorised pool growth passes, and
+# it restores exactly the behaviour these tests were written against — so they go
+# on guarding the insert ordering rather than accidentally guarding the pool
+# policy. The BOUNDED behaviour has its own test:
+# test_premint_pool_bounded.py.
 def test_premint_commits_with_foreign_keys_enforced(fk_db):
     """The regression itself: a full premint must commit cleanly."""
     order = _order_with_skus(fk_db, order_number="FK-1", qty_per_sku=4)
-    stats = premint_order(fk_db, order)
+    stats = premint_order(fk_db, order, allow_pool_growth=True)
     fk_db.commit()          # this is where the production import blew up
 
     assert stats["pieces_minted"] == 12
@@ -121,7 +133,7 @@ def test_premint_commits_with_foreign_keys_enforced(fk_db):
 
 def test_every_barcode_points_at_a_row_that_exists(fk_db):
     order = _order_with_skus(fk_db, order_number="FK-2", qty_per_sku=3)
-    premint_order(fk_db, order)
+    premint_order(fk_db, order, allow_pool_growth=True)
     fk_db.commit()
 
     drawer_ids = set(fk_db.scalars(select(Drawer.id)))
@@ -137,7 +149,7 @@ def test_the_piece_drawer_cycle_is_closed_both_ways(fk_db):
     """piece.drawer_id → drawer.id and drawer.current_piece_id → piece.id are a
     mutual, non-deferrable cycle. Both sides must resolve after commit."""
     order = _order_with_skus(fk_db, order_number="FK-3", qty_per_sku=2)
-    premint_order(fk_db, order)
+    premint_order(fk_db, order, allow_pool_growth=True)
     fk_db.commit()
 
     pieces = list(fk_db.scalars(select(Piece)))
@@ -168,7 +180,7 @@ def test_reusing_pooled_drawers_also_commits(fk_db):
     fk_db.commit()
 
     order = _order_with_skus(fk_db, order_number="FK-4", qty_per_sku=2, n_skus=2)
-    stats = premint_order(fk_db, order)
+    stats = premint_order(fk_db, order, allow_pool_growth=True)
     fk_db.commit()
 
     assert stats["drawers_reused"] == 4 and stats["drawers_minted"] == 0
@@ -180,8 +192,8 @@ def test_reusing_pooled_drawers_also_commits(fk_db):
 def test_a_rerun_tops_up_without_duplicating(fk_db):
     """Idempotency must survive the phased inserts."""
     order = _order_with_skus(fk_db, order_number="FK-5", qty_per_sku=3)
-    premint_order(fk_db, order); fk_db.commit()
-    again = premint_order(fk_db, order); fk_db.commit()
+    premint_order(fk_db, order, allow_pool_growth=True); fk_db.commit()
+    again = premint_order(fk_db, order, allow_pool_growth=True); fk_db.commit()
 
     assert again["pieces_minted"] == 0
     assert fk_db.scalar(select(func.count(Piece.id))) == 9

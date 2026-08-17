@@ -399,6 +399,68 @@ class BarcodeService:
         return {"employee_id": str(employee_id), "employee_barcode": row.code,
                 "active": False, "history_preserved": True}
 
+    # ── material-lot barcode lifecycle (change-list item 7) ─────────────────
+    async def retire_lot_code_nocommit(self, material_lot_id: uuid.UUID) -> bool:
+        """Retire a material lot's barcode. Caller commits. Returns whether one
+        was found and retired.
+
+        Same principle as an employee card: retiring the CODE makes it resolve
+        410 Gone instead of 404, so a scan of an old label says "this lot was
+        retired" rather than "invalid barcode". The lot row and every cut event
+        pointing at it survive untouched — that is the consumption history the
+        costing screens are built on.
+        """
+        from app.modules.barcode.models import BarcodeRegistry
+        from sqlalchemy import select as _select
+
+        row = await self.db.scalar(
+            _select(BarcodeRegistry).where(
+                BarcodeRegistry.material_lot_id == material_lot_id,
+                BarcodeRegistry.status == BarcodeStatus.ACTIVE.value,
+            ).limit(1))
+        if row is None:
+            return False
+        await self.repo.retire_nocommit(row, reason="lot_retired")
+        return True
+
+    async def list_lot_barcodes(self, *, category: str | None = None,
+                                active_only: bool = True) -> list[dict]:
+        """EVERY MATERIAL LOT BARCODE, for the material-barcode print screen.
+
+        The barcode section had screens for pieces, drawers and employee cards
+        but none for material lots, so a lot minted a code nobody could reprint
+        after the first label was lost. This is that list.
+        """
+        from app.modules.barcode.models import BarcodeRegistry, MaterialLot
+        from sqlalchemy import select as _select
+
+        lot_types = [BarcodeType.LEATHER_LOT.value, BarcodeType.LINING_LOT.value,
+                     BarcodeType.ACCESSORY_LOT.value]
+        stmt = (_select(BarcodeRegistry.code, BarcodeRegistry.type,
+                        BarcodeRegistry.status, BarcodeRegistry.caption,
+                        MaterialLot.id, MaterialLot.category, MaterialLot.subtype,
+                        MaterialLot.article, MaterialLot.colour,
+                        MaterialLot.thickness, MaterialLot.size,
+                        MaterialLot.uom, MaterialLot.on_hand)
+                .join(MaterialLot, MaterialLot.id == BarcodeRegistry.material_lot_id)
+                .where(BarcodeRegistry.type.in_(lot_types))
+                .order_by(MaterialLot.category, MaterialLot.article))
+        if active_only:
+            stmt = stmt.where(BarcodeRegistry.status == BarcodeStatus.ACTIVE.value)
+        if category:
+            stmt = stmt.where(MaterialLot.category == category.strip().upper())
+
+        return [{
+            "code": r[0], "type": r[1], "status": r[2], "caption": r[3],
+            "lot_id": r[4], "category": r[5], "subtype": r[6],
+            "article": r[7], "colour": r[8], "thickness": r[9], "size": r[10],
+            "uom": r[11], "on_hand": float(r[12] or 0),
+            # Pre-joined sticker text, same convention as the piece label.
+            "label_line": " · ".join(str(v) for v in
+                                     [r[7], r[8], r[9] or r[10],
+                                      f"{float(r[12] or 0)} {r[11]}"] if v),
+        } for r in (await self.db.execute(stmt)).all()]
+
     async def _audit(self, actor_id, action, entity_id, after: dict) -> None:
         """The transition is audited in the SAME transaction as the retire/mint —
         the repo stages the row, repo.commit() lands both or neither."""

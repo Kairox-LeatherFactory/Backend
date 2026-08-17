@@ -77,6 +77,30 @@ async def employee_barcode_action(
     return await svc.deactivate_employee_barcode(employee_id, actor_id=user.id)
 
 
+@router.get("/materials")
+async def material_barcodes(
+    category: str | None = Query(None, description="LEATHER | LINING | ACCESSORY"),
+    active_only: bool = Query(True, description="Hide retired lot labels."),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_SCREEN_READERS),
+):
+    """THE MATERIAL-BARCODE SCREEN (change-list item 7).
+
+    The barcode section had screens for pieces, drawers and employee cards but
+    none for material lots — so a lot minted a code at creation and nobody could
+    reprint it once the first label was lost or damaged.
+
+    Each row carries `code` (encode as Code128) and `label_line` (typeset
+    underneath as text), the same convention as POST /barcode/print. A row with
+    `status: retired` belongs to a retired lot: show it greyed, do not print it.
+
+    NOTE FOR THE UI: the drawer screen's label reads "bucket barcode" and should
+    read "drawer barcode". The backend has only ever called it DRAWER — there is
+    no `bucket` anywhere in the API — so that rename is frontend-only."""
+    return await BarcodeService(db).list_lot_barcodes(
+        category=category, active_only=active_only)
+
+
 @router.get("/orders", response_model=list[schemas.OrderPickerRow])
 async def list_barcode_orders(
     db: AsyncSession = Depends(get_db),

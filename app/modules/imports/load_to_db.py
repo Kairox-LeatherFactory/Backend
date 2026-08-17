@@ -337,8 +337,22 @@ def load_preview_into_order(db, preview, *, order_number: str,
                         db.flush(); stats["rates"] += 1
                     seen_rates.add((ref_style.id, op.id))
                     
-    from app.modules.imports.premint import premint_order
-    stats.update(premint_order(db, order))
+    # ── NO PRE-MINT HERE ANY MORE (change-list item 9) ───────────────────────
+    # This used to call premint_order(db, order) and mint a barcode + a drawer
+    # for every ordered unit of every SKU, on upload. It no longer does.
+    #
+    # WHY: uploading a breakdown sheet is not a decision to produce it. The DM
+    # reviews and corrects the sheet first, then RELEASES the styles that are
+    # actually going to the floor. Minting on upload burned per-piece barcodes
+    # and consumed drawers from a 200-drawer pool for styles nobody had agreed to
+    # cut yet, and there was no way to take it back — a piece barcode is a
+    # permanent garment identity.
+    #
+    # The mint now happens in BreakdownService.release_styles, which calls
+    # premint_order with the DM's chosen style_ids inside an audited transition.
+    # Styles land here as DRAFT (Style.production_status defaults to it).
+    stats["release_required"] = True
+    stats["pieces_minted"] = 0
 
     db.commit()
     return stats

@@ -207,11 +207,21 @@ class ProductionRepository:
         res = await self.db.execute(stmt)
         return {code: int(total) for code, total in res.all()}
 
-    async def piece_counts_by_employee_style_op(self, start: date, end: date):
+    async def piece_counts_by_employee_style_op(
+        self, start: date, end: date, *,
+        style_ids: list[uuid.UUID] | None = None,
+        order_id: uuid.UUID | None = None,
+    ):
         """Rows of (employee_id, style_id, operation_id, work_date, total_qty) for
         a window — the raw material for piece-rate wage calculation. work_date is
         kept in the grouping so a mid-period rate change prices each day at the
-        rate effective that day."""
+        rate effective that day.
+
+        `style_ids` / `order_id` narrow the run to one style or one order
+        (change-list item 3: "compute the wage … for particular style or
+        particular order"). Both are OPTIONAL and default to the whole factory —
+        an unscoped run is still the normal payroll case, and scoping is what lets
+        a manager price one style's work without opening a window over everyone."""
         stmt = (
             select(
                 ProductionEvent.employee_id,
@@ -222,6 +232,14 @@ class ProductionRepository:
             )
             .join(SKU, SKU.id == ProductionEvent.sku_id)
             .where(ProductionEvent.work_date >= start, ProductionEvent.work_date <= end)
+        )
+        if style_ids:
+            stmt = stmt.where(SKU.style_id.in_(list(style_ids)))
+        if order_id is not None:
+            stmt = stmt.join(Style, Style.id == SKU.style_id).where(
+                Style.client_order_id == order_id)
+        stmt = (
+            stmt
             .group_by(
                 ProductionEvent.employee_id,
                 SKU.style_id,

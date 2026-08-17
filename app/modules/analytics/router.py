@@ -8,7 +8,7 @@ Drill-down: /orders/{id}/tree  ->  /styles/{id}/detail  ->  /pieces/detail
 import uuid
 from datetime import date
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -32,18 +32,34 @@ def client_scope(user: User = Depends(get_current_user)) -> uuid.UUID | None:
     return user.client_id if user.role == UserRole.CLIENT else None
 
 
-@router.get("/overview")
-async def overview(
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(
-        UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER, UserRole.HR,
-        UserRole.SUPERVISOR, UserRole.CUTTING_MANAGER, UserRole.LINING_MANAGER,
-        UserRole.STITCHING_MANAGER)),
-):
-    """H4: the factory dashboard is staff-only. It aggregates across every
-    client — total client count and total order volume are competitive
-    information and must not reach a CLIENT token."""
-    return await AnalyticsService(db).factory_overview()
+# ══════════════════════════════════════════════════════════════════════════════
+# REMOVED SCREENS (change-list item 1) — 410 Gone, not deleted routes
+# ══════════════════════════════════════════════════════════════════════════════
+# The Analytics Overview page and the standalone Risk-Alert page are gone from
+# the product. The BOTTLENECK and the ALERTS were the only parts anyone used, and
+# they belong on the dashboard every manager already opens — a manager should not
+# have to know a separate screen exists to find out their line is blocked. They
+# now live at GET /dashboard/alerts, reachable by every manager role.
+#
+# WHY 410 AND NOT A DELETED ROUTE. A deleted route 404s, and a 404 on a screen
+# that worked yesterday reads to a frontend (and to a support call) as "the
+# server is broken". 410 Gone says the removal was deliberate and the message
+# names the replacement — the same courtesy /production/cutting and
+# /production/scan were given when they were retired. Delete these three stubs
+# one release after the frontend stops calling them.
+_GONE_OVERVIEW = (
+    "The Analytics Overview screen has been removed. Factory-wide figures live "
+    "on the role dashboards: GET /api/v1/dashboard/direct-manager (whole "
+    "factory), or /dashboard/cutting | /lining | /stitching | /store.")
+_GONE_ALERTS = (
+    "The standalone Risk Alerts screen has been removed. Bottleneck and alerts "
+    "are now on GET /api/v1/dashboard/alerts, which every manager role may read.")
+
+
+@router.get("/overview", deprecated=True)
+async def overview(_: User = Depends(get_current_user)):
+    """REMOVED (change-list item 1). Always 410. Use the role dashboards."""
+    raise HTTPException(status.HTTP_410_GONE, _GONE_OVERVIEW)
 
 
 @router.get("/explorer")
@@ -106,21 +122,16 @@ async def employee_rate_analytics(
         start=start, end=end, employee_id=employee_id, style_code=style_code)
 
 
-@router.get("/alerts/stage-spread")
-async def stage_spread(
-    db: AsyncSession = Depends(get_db),
-    scope: uuid.UUID | None = Depends(client_scope),
-):
-    return await AnalyticsService(db).stage_spread_alerts(client_scope=scope)
+@router.get("/alerts/stage-spread", deprecated=True)
+async def stage_spread(_: User = Depends(get_current_user)):
+    """REMOVED (change-list item 1). Always 410. Use GET /dashboard/alerts."""
+    raise HTTPException(status.HTTP_410_GONE, _GONE_ALERTS)
 
 
-@router.get("/alerts/freight-risk")
-async def freight_risk(
-    today: date | None = None,
-    db: AsyncSession = Depends(get_db),
-    scope: uuid.UUID | None = Depends(client_scope),
-):
-    return await AnalyticsService(db).freight_risk(today, client_scope=scope)
+@router.get("/alerts/freight-risk", deprecated=True)
+async def freight_risk(_: User = Depends(get_current_user)):
+    """REMOVED (change-list item 1). Always 410. Use GET /dashboard/alerts."""
+    raise HTTPException(status.HTTP_410_GONE, _GONE_ALERTS)
 
 
 

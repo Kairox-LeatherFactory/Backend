@@ -69,20 +69,18 @@ INITIAL_DRAWER_POOL = 200
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# needs_lining detection (unchanged from the shipped build)
+# needs_lining detection
 # ──────────────────────────────────────────────────────────────────────────────
-# Style-name tokens that are positive evidence of a lining/second component.
-# KNIT and WOOL are lining materials in their own right (MaterialSubtype.KNIT,
-# CLAUDE.md §5 "Lining / knit"); FUR and the DETACH/VEST companion pieces are a
-# second component that must be merged in the drawer before line-stitching.
-# EDIT THIS LIST, not the function — it is the whole vocabulary.
-LINING_NAME_MARKERS: tuple[str, ...] = (
-    "KNIT", "WOOL", "FUR", "LINING", "NYLON", "QUILT", "DETACH", "VEST", "MIX",
+# THE VOCABULARY MOVED to core/lining_rules.py and is imported, not restated.
+# It is now read by TWO sides — this importer (which WRITES the flag) and the
+# drawers completeness gate (which decides what may MOVE) — and two copies would
+# drift silently: the importer would flag a style the gate did not recognise, or
+# the reverse. That drift is the bug where a KNIT jacket flagged False sailed
+# through the store to PACKAGE_EXPORT. See core/lining_rules.py.
+from app.core.lining_rules import (  # noqa: E402
+    LINING_COLOUR_FIELDS, LINING_NAME_MARKERS, is_blank as _blank,
+    name_signals_lining,
 )
-
-
-def _blank(val) -> bool:
-    return not val or str(val).strip().upper() in {"", "NA", "N/A", "NONE", "-"}
 
 
 def _sku_needs_lining(sku: SKU, db: Session | None = None) -> bool:
@@ -113,17 +111,15 @@ def _sku_needs_lining(sku: SKU, db: Session | None = None) -> bool:
     the whole reason the completeness gate exists — never fired once in
     production. Source 2 is what makes it fire.
     """
-    for attr in ("knit_color", "nylon_color", "lining_color", "lining_type"):
+    for attr in LINING_COLOUR_FIELDS:
         if not _blank(getattr(sku, attr, None)):
             return True
 
     # `db` is optional so source 1 stays a pure, session-free predicate (see
     # tests/unit/test_premint_lining_pure.py). Source 2 needs the style row.
     style = db.get(Style, sku.style_id) if db is not None and sku.style_id else None
-    if style is not None:
-        haystack = f"{style.name or ''} {style.article or ''}".upper()
-        if any(marker in haystack for marker in LINING_NAME_MARKERS):
-            return True
+    if style is not None and name_signals_lining(style.name, style.article):
+        return True
     return False
 
 
@@ -228,19 +224,33 @@ def bootstrap_drawer_pool(db: Session, size: int = INITIAL_DRAWER_POOL) -> dict:
 
 
 class _PoolAllocator:
-    """Hands out drawers for one upload: empties first, then mints the shortfall.
+    """Hands out drawers for one release: empties first, then either mints the
+    shortfall or reports it as a WAITING LIST.
 
-    Loads the current WAITING drawers ONCE (oldest seq first) and serves them
-    in order. When they run out it mints new permanent drawers on demand,
-    continuing the seq. All within the caller's transaction.
+    THE POOL IS BOUNDED BY DEFAULT NOW (change-list item 9).
+        The old allocator silently minted a new permanent drawer whenever the
+        pool ran dry, so "200 static drawers" was true only until the first big
+        order and the pool grew without anyone deciding it should. The client's
+        rule is the opposite: 200 drawers, and when the pieces outrun them the
+        remainder WAIT — with DM/MD permission required to grow the pool.
+
+        `allow_pool_growth=True` restores the old mint-the-shortfall behaviour
+        and is what POST /drawers/pool passes once a DM has authorised it.
+
+    A piece with no drawer is not broken and not lost: it has its barcode and its
+    identity, `piece.drawer_id` is NULL, and it appears in the waiting list until
+    a drawer frees up (a piece ships) or the pool is grown. It simply cannot be
+    stored, which means it cannot pass the merge gate — which is correct, because
+    there is physically nowhere to put its parts.
 
     Nothing is added to the session here. Newly minted drawers land in
     `self.new_drawers` and their barcodes in `self.barcodes`, so premint_order
     can insert them in the right phase — see the INSERT ORDER note above.
     """
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, *, allow_pool_growth: bool = False):
         self.db = db
+        self.allow_pool_growth = allow_pool_growth
         # Oldest empty drawers first — deterministic, low-churn reuse.
         self._free: list[Drawer] = list(db.scalars(
             select(Drawer)
@@ -251,45 +261,62 @@ class _PoolAllocator:
         self._next_seq = _max_drawer_seq(db) + 1
         self.reused = 0
         self.minted = 0
+        self.starved = 0        # pieces that got no drawer — the waiting list
         self.new_drawers: list[Drawer] = []
         self.barcodes: list[BarcodeRegistry] = []
 
-    def take(self) -> Drawer:
+    def take(self) -> Drawer | None:
+        """A free drawer, a newly minted one, or None (piece goes on the list)."""
         if self._free:
             drawer = self._free.pop(0)
             self.reused += 1
-        else:
-            drawer = _build_drawer(self._next_seq, self.barcodes)
-            self.new_drawers.append(drawer)
-            self._next_seq += 1
-            self.minted += 1
+            return drawer
+        if not self.allow_pool_growth:
+            self.starved += 1
+            return None
+        drawer = _build_drawer(self._next_seq, self.barcodes)
+        self.new_drawers.append(drawer)
+        self._next_seq += 1
+        self.minted += 1
         return drawer
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # The upload-time mint + allocate
 # ──────────────────────────────────────────────────────────────────────────────
-def premint_order(db: Session, order) -> dict:
-    """Mint pieces + parent barcodes for every SKU of an order and MERGE each new
-    piece into a drawer drawn from the pool (empties first, mint shortfall).
-    Sync. Caller commits.
+def premint_order(db: Session, order, *, style_ids=None,
+                  allow_pool_growth: bool = False) -> dict:
+    """Mint pieces + parent barcodes and MERGE each new piece into a pool drawer.
 
-    Returns stats merged into the loader's result dict.
+    NO LONGER CALLED FROM THE UPLOAD (change-list item 9). An upload writes the
+    breakdown and stops; this runs when the DM RELEASES a style, via
+    BreakdownService.release_styles. `style_ids` is what scopes it to the styles
+    the DM actually picked — omit it and the whole order is minted, which is the
+    behaviour the seed scripts and the pre-change tests rely on.
+
+    `allow_pool_growth=False` (the default) means the drawer pool is FIXED: any
+    piece beyond the free drawers is minted with `drawer_id = NULL` and reported
+    in `pieces_waiting_for_drawer`. Growing the pool is a DM/MD decision made
+    through POST /drawers/pool, not a side effect of an upload.
+
+    Sync. Caller commits. Idempotent — a re-run tops up only what is missing.
     """
     stats = {
         "pieces_minted": 0,
         "drawers_reused": 0,      # taken from existing WAITING pool
-        "drawers_minted": 0,      # new permanent drawers appended this upload
+        "drawers_minted": 0,      # new permanent drawers appended this release
+        "pieces_waiting_for_drawer": 0,   # minted but unmerged — the waiting list
         "pieces_needing_lining": 0,
         "sample_barcodes": [],
     }
 
-    sku_rows = db.scalars(
-        select(SKU).join(Style, Style.id == SKU.style_id)
-        .where(Style.client_order_id == order.id)
-    ).all()
+    sku_q = (select(SKU).join(Style, Style.id == SKU.style_id)
+             .where(Style.client_order_id == order.id))
+    if style_ids:
+        sku_q = sku_q.where(Style.id.in_(list(style_ids)))
+    sku_rows = db.scalars(sku_q).all()
 
-    allocator = _PoolAllocator(db)
+    allocator = _PoolAllocator(db, allow_pool_growth=allow_pool_growth)
     new_pieces: list[Piece] = []          # phase 2
     links: list[tuple] = []               # phase 3: (drawer, piece) to wire up
     piece_barcodes: list[BarcodeRegistry] = []   # phase 4
@@ -332,20 +359,22 @@ def premint_order(db: Session, order) -> dict:
                 piece.needs_lining = needs_lining
             new_pieces.append(piece)
 
-            # 2) allocate a drawer from the pool (reuse empty, else mint)
+            # 2) allocate a drawer from the pool (reuse empty, else mint, else
+            #    the piece goes on the waiting list with drawer_id NULL).
             drawer = allocator.take()
-            drawer.state = DrawerState.MERGED.value
-            # current_piece_id is NOT set yet — piece.id does not exist in the
-            # DB until phase 2, and fk_drawer_current_piece_id_piece is checked
-            # immediately. Deferred to phase 3.
-            links.append((drawer, piece))
-            # A fresh merge starts with neither part in.
-            drawer.leather_in = False
-            drawer.lining_in = False
-            drawer.received_at = None
-            drawer.sended_at = None
-            if hasattr(piece, "drawer_id"):
-                piece.drawer_id = drawer.id
+            if drawer is not None:
+                drawer.state = DrawerState.MERGED.value
+                # current_piece_id is NOT set yet — piece.id does not exist in
+                # the DB until phase 2, and fk_drawer_current_piece_id_piece is
+                # checked immediately. Deferred to phase 3.
+                links.append((drawer, piece))
+                # A fresh merge starts with neither part in.
+                drawer.leather_in = False
+                drawer.lining_in = False
+                drawer.received_at = None
+                drawer.sended_at = None
+                if hasattr(piece, "drawer_id"):
+                    piece.drawer_id = drawer.id
 
             # 3) register the parent barcodes (the drawer barcode already exists —
             #    it is permanent and static; we do NOT re-register it on reuse).
@@ -409,7 +438,93 @@ def premint_order(db: Session, order) -> dict:
 
     stats["drawers_reused"] = allocator.reused
     stats["drawers_minted"] = allocator.minted
+    stats["pieces_waiting_for_drawer"] = allocator.starved
     return stats
+
+
+def allocate_waiting_pieces(db: Session, *, limit: int | None = None) -> dict:
+    """Merge already-minted, drawer-less pieces into whatever drawers are free.
+
+    THE WAITING LIST DRAINS ITSELF. A piece minted while the pool was full keeps
+    its barcode and its identity but has no drawer, so it cannot be stored. This
+    is what gives it one — called after a drawer is freed (a piece ships), after
+    the pool is grown, and on demand from POST /drawers/allocate-waiting.
+
+    Oldest pieces first, oldest drawers first: deterministic, and a piece that
+    has been waiting longest is the one the floor is asking about.
+
+    Sync (it shares the pool primitives with premint). Caller commits.
+    """
+    q = (select(Piece)
+         .where(Piece.drawer_id.is_(None), Piece.is_active.is_(True))
+         .order_by(Piece.created_at.asc(), Piece.code.asc()))
+    if limit:
+        q = q.limit(limit)
+    waiting = list(db.scalars(q).all())
+    if not waiting:
+        return {"allocated": 0, "still_waiting": 0}
+
+    allocator = _PoolAllocator(db, allow_pool_growth=False)
+    allocated = 0
+    for piece in waiting:
+        drawer = allocator.take()
+        if drawer is None:
+            break
+        drawer.state = DrawerState.MERGED.value
+        drawer.leather_in = False
+        drawer.lining_in = False
+        drawer.received_at = None
+        drawer.sended_at = None
+        drawer.current_piece_id = piece.id
+        piece.drawer_id = drawer.id
+        allocated += 1
+    db.flush()
+
+    still = int(db.scalar(
+        select(func.count(Piece.id))
+        .where(Piece.drawer_id.is_(None), Piece.is_active.is_(True))) or 0)
+    return {"allocated": allocated, "still_waiting": still}
+
+
+def grow_drawer_pool(db: Session, add: int) -> dict:
+    """Append `add` NEW PERMANENT barcoded drawers to the pool. DM/MD only.
+
+    The pool only ever grows, and only when a human says so — that is the whole
+    point of bounding it. The new drawers are permanent from this moment: once a
+    piece in one of them ships, the drawer recycles back to WAITING like any
+    other. Caller commits.
+    """
+    if add <= 0:
+        return {"added": 0, "pool_size": _drawer_count(db)}
+    start = _max_drawer_seq(db) + 1
+    barcodes: list = []
+    drawers = [_build_drawer(seq, barcodes) for seq in range(start, start + add)]
+    db.add_all(drawers)
+    db.flush()          # drawers before their barcodes — see the INSERT ORDER note
+    db.add_all(barcodes)
+    db.flush()
+    return {"added": len(drawers), "pool_size": _drawer_count(db)}
+
+
+def drawer_pool_status(db: Session) -> dict:
+    """Pool size, how much of it is free, and how many pieces are waiting."""
+    free = int(db.scalar(
+        select(func.count(Drawer.id))
+        .where(Drawer.state == DrawerState.WAITING.value,
+               Drawer.current_piece_id.is_(None))) or 0)
+    waiting = int(db.scalar(
+        select(func.count(Piece.id))
+        .where(Piece.drawer_id.is_(None), Piece.is_active.is_(True))) or 0)
+    total = _drawer_count(db)
+    return {
+        "pool_size": total,
+        "initial_pool_size": INITIAL_DRAWER_POOL,
+        "free_drawers": free,
+        "occupied_drawers": total - free,
+        "pieces_waiting_for_drawer": waiting,
+        # What a DM would have to add to clear the waiting list right now.
+        "shortfall": max(0, waiting - free),
+    }
 
 
 def _caption_prefix(db: Session, sku: SKU) -> str:

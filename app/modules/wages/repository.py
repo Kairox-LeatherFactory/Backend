@@ -179,8 +179,26 @@ class WageRepository:
         return r
 
     async def overlapping_closed_run(self, start: date, end: date,
-                                     *, exclude_run_id: uuid.UUID | None = None):
-        """Any run — CLOSED **or OPEN** — whose window intersects [start, end].
+                                     *, exclude_run_id: uuid.UUID | None = None,
+                                     scope_order_number: str | None = None,
+                                     scope_style_code: str | None = None):
+        """Any run — CLOSED **or OPEN** — whose window AND SCOPE intersect.
+
+        SCOPE-AWARE SINCE runs can be narrowed to one style or one order
+        (change-list item 3). Two runs over the same fortnight are only a
+        double-payment risk if they can pay the same pieces:
+
+            unscoped  vs anything   → CONFLICT (the unscoped run pays everything)
+            style A   vs style A    → CONFLICT
+            style A   vs style B    → fine, disjoint pieces
+            order X   vs order X    → CONFLICT
+            order X   vs order Y    → fine
+            style     vs order      → CONFLICT, conservatively: the style may
+                                      belong to that order, and answering that
+                                      properly needs a join we should not make the
+                                      guard depend on. Over-blocking here costs a
+                                      manager one re-typed window; under-blocking
+                                      costs a worker a double payment.
 
         B7: this used to filter status == CLOSED. create_run() commits the run as
         OPEN before a single line is written, and add_lines() commits separately,
@@ -198,6 +216,23 @@ class WageRepository:
         )
         if exclude_run_id:
             stmt = stmt.where(WageRun.id != exclude_run_id)
+
+        if scope_style_code or scope_order_number:
+            # A scoped run only clashes with unscoped runs and with runs carrying
+            # the same scope key. See the table in the docstring.
+            unscoped = and_(WageRun.scope_style_code.is_(None),
+                            WageRun.scope_order_number.is_(None))
+            same_scope = []
+            if scope_style_code:
+                same_scope.append(WageRun.scope_style_code == scope_style_code)
+                # style-vs-order: conservative clash
+                same_scope.append(WageRun.scope_order_number.isnot(None))
+            if scope_order_number:
+                same_scope.append(WageRun.scope_order_number == scope_order_number)
+                same_scope.append(WageRun.scope_style_code.isnot(None))
+            from sqlalchemy import or_ as _or
+            stmt = stmt.where(_or(unscoped, *same_scope))
+
         return await self.db.scalar(
             stmt.order_by(WageRun.status.desc()).limit(1))
 
@@ -244,10 +279,29 @@ class WageRepository:
         run.last_recomputed_by = by
         await self.db.commit()
 
-    async def create_run(self, period_start: date, period_end: date) -> WageRun:
+    async def stamp_reopen(self, run: WageRun, *, by: str, reason: str) -> None:
+        """Unfreeze a CLOSED run, on the record.
+
+        Counted separately from recompute because they are different facts: a
+        recompute changes the arithmetic, a reopen removes the protection. A
+        payslip that has been unfrozen after payment must be identifiable as
+        such, and the reason has to be legible a year later.
+        """
+        run.status = RunStatus.OPEN
+        run.reopen_count = (run.reopen_count or 0) + 1
+        run.last_reopened_at = datetime.now(timezone.utc)
+        run.last_reopened_by = by
+        run.last_reopen_reason = reason
+        await self.db.commit()
+
+    async def create_run(self, period_start: date, period_end: date, *,
+                         scope_order_number: str | None = None,
+                         scope_style_code: str | None = None) -> WageRun:
         """Opens a run. Callers MUST validate the window before calling this —
         it commits, so a rejection afterwards strands an OPEN row."""
-        run = WageRun(period_start=period_start, period_end=period_end)
+        run = WageRun(period_start=period_start, period_end=period_end,
+                      scope_order_number=scope_order_number,
+                      scope_style_code=scope_style_code)
         self.db.add(run)
         await self.db.commit()
         await self.db.refresh(run)
@@ -379,6 +433,189 @@ class WageRepository:
             })
         return out
     
+    # ══════════════════════════════════════════════════════════════════════
+    # THE PAYROLL REPORTING SURFACE (change-list item 3)
+    # ══════════════════════════════════════════════════════════════════════
+    # Everything below reads the FROZEN rows (wage_line / wage_line_detail) and
+    # recomputes nothing. That is the whole contract: a ledger that re-derived
+    # amounts at read time would show a different number every time somebody
+    # corrected a historical production event, which is exactly what freezing a
+    # run exists to prevent.
+
+    async def run_breakdown(self, run_id: uuid.UUID) -> list[dict]:
+        """Every frozen (employee, style, operation) row of a run, named.
+
+        ONE query. The three groupings the payroll screen needs — per style, per
+        stage, per employee — are all folds of this same row set, done in the
+        service, so the three views can never disagree about a total.
+        """
+        from app.modules.clients.models import Style
+        from app.modules.employees.models import Employee
+        from app.modules.production.models import Operation
+
+        stmt = (
+            select(WageLineDetailRow.employee_id, Employee.name,
+                   Employee.designation,
+                   WageLineDetailRow.style_id, Style.code, Style.name,
+                   WageLineDetailRow.operation_id, Operation.code, Operation.label,
+                   Operation.sequence,
+                   WageLineDetailRow.pieces, WageLineDetailRow.rate,
+                   WageLineDetailRow.amount)
+            .join(Employee, Employee.id == WageLineDetailRow.employee_id)
+            .join(Style, Style.id == WageLineDetailRow.style_id)
+            .join(Operation, Operation.id == WageLineDetailRow.operation_id)
+            .where(WageLineDetailRow.wage_run_id == run_id)
+            .order_by(Style.code, Operation.sequence, Employee.name)
+        )
+        return [{
+            "employee_id": r[0], "employee_name": r[1], "designation": r[2],
+            "style_id": r[3], "style_code": r[4], "style_name": r[5],
+            "operation_id": r[6], "operation_code": r[7],
+            "operation_label": r[8], "sequence": int(r[9] or 0),
+            "pieces": int(r[10]), "rate": float(r[11]), "amount": float(r[12]),
+        } for r in (await self.db.execute(stmt)).all()]
+
+    async def run_piece_rows(self, run_id: uuid.UUID, run, *,
+                             style_code: str | None = None,
+                             limit: int = 2000, offset: int = 0) -> dict:
+        """PER-PIECE payroll detail: which garment, which stage, which worker,
+        their card, and what that one piece paid.
+
+        WHY THE EVENTS AND NOT A STORED PIECE-LEVEL TABLE
+            wage_line_detail freezes the money at (employee, style, operation)
+            granularity, which is the level a rate is actually set at. Storing a
+            row per piece as well would triple the payroll tables to hold no new
+            money — the amount for one piece IS the frozen rate for its
+            (employee, style, operation) cell.
+
+            So the pieces come from production_event (which garment, which day,
+            which worker — all immutable history) and the MONEY comes from the
+            FROZEN cell. Nothing is re-priced: if the rate table changed after the
+            run closed, this still shows what the run paid.
+
+        Pieces whose cell is not in the frozen breakdown (a monthly worker, or an
+        unrated operation) come back with `amount: null` and a `note`, rather than
+        a zero that reads like the work was worth nothing.
+        """
+        from app.modules.clients.models import SKU, Style
+        from app.modules.employees.models import Employee
+        from app.modules.barcode.models import BarcodeRegistry
+        from app.core.enums import BarcodeStatus, BarcodeType
+        from app.modules.production.models import (Operation, Piece,
+                                                   ProductionEvent)
+
+        frozen = {(r["employee_id"], r["style_id"], r["operation_id"]):
+                  (r["rate"], r["pieces"]) for r in await self.run_breakdown(run_id)}
+
+        stmt = (
+            select(Piece.code, Piece.seq, SKU.color_name, SKU.size,
+                   Style.id, Style.code, Style.name,
+                   Operation.id, Operation.code, Operation.label, Operation.sequence,
+                   Employee.id, Employee.name, Employee.designation,
+                   ProductionEvent.work_date, ProductionEvent.qty,
+                   BarcodeRegistry.code.label("employee_barcode"))
+            .join(Piece, Piece.id == ProductionEvent.piece_id)
+            .join(SKU, SKU.id == Piece.sku_id)
+            .join(Style, Style.id == SKU.style_id)
+            .join(Operation, Operation.id == ProductionEvent.operation_id)
+            .join(Employee, Employee.id == ProductionEvent.employee_id)
+            .outerjoin(
+                BarcodeRegistry,
+                and_(BarcodeRegistry.employee_id == Employee.id,
+                     BarcodeRegistry.type == BarcodeType.EMPLOYEE.value,
+                     BarcodeRegistry.status == BarcodeStatus.ACTIVE.value))
+            .where(ProductionEvent.work_date >= run.period_start,
+                   ProductionEvent.work_date <= run.period_end)
+            .order_by(Style.code, Operation.sequence, Piece.code)
+        )
+        if style_code:
+            stmt = stmt.where(func.upper(Style.code) == style_code.strip().upper())
+        elif run.scope_style_code:
+            stmt = stmt.where(func.upper(Style.code) == run.scope_style_code.upper())
+        if run.scope_order_number:
+            from app.modules.clients.models import ClientOrder
+            stmt = stmt.join(
+                ClientOrder, ClientOrder.id == Style.client_order_id).where(
+                    ClientOrder.order_number == run.scope_order_number)
+
+        total = int(await self.db.scalar(
+            select(func.count()).select_from(stmt.subquery())) or 0)
+        rows = (await self.db.execute(stmt.limit(limit).offset(offset))).all()
+
+        items = []
+        for r in rows:
+            cell = frozen.get((r[11], r[4], r[7]))
+            rate = cell[0] if cell else None
+            items.append({
+                "piece_code": r[0],
+                "serial": f"{r[1]:03d}" if r[1] is not None else None,
+                "colour": r[2], "size": r[3],
+                "style_code": r[5], "style_name": r[6],
+                "operation_code": r[8], "operation_label": r[9],
+                "employee_id": r[11], "employee_name": r[12],
+                "designation": r[13],
+                # What the scanner gun reads — the change list asks for the card
+                # number beside the name on every payroll line.
+                "employee_barcode": r[16],
+                "work_date": r[14],
+                "qty": int(r[15] or 1),
+                "rate": rate,
+                "amount": (round(rate * int(r[15] or 1), 2)
+                           if rate is not None else None),
+                "note": None if rate is not None else (
+                    "Not priced in this run — the worker is on a monthly wage, or "
+                    "this style/stage had no rate when the run was computed."),
+            })
+        return {"total": total, "count": len(items), "items": items}
+
+    async def ledger(self, *, order_number: str | None = None,
+                     style_code: str | None = None,
+                     date_from: date | None = None, date_to: date | None = None,
+                     status: str | None = None,
+                     limit: int = 50, offset: int = 0) -> dict:
+        """THE LEDGER: every computed run, LATEST FIRST, searchable.
+
+        Ordered by `created_at DESC` and not by period, because the change list
+        asks for "the latest computed first" — the question a manager asks the
+        ledger is "what did we just run", not "which fortnight is chronologically
+        last". A recompute does not create a new row, so the recompute stamps on
+        the summary are what tell you a run has been rebuilt since.
+        """
+        stmt = (
+            select(WageRun.id, WageRun.period_start, WageRun.period_end,
+                   WageRun.status, WageRun.scope_order_number,
+                   WageRun.scope_style_code, WageRun.created_at,
+                   WageRun.recompute_count, WageRun.last_recomputed_at,
+                   WageRun.reopen_count,
+                   func.coalesce(func.sum(WageLine.amount), 0),
+                   func.coalesce(func.sum(WageLine.pieces), 0),
+                   func.count(WageLine.id))
+            .outerjoin(WageLine, WageLine.wage_run_id == WageRun.id)
+            .group_by(WageRun.id)
+            .order_by(WageRun.created_at.desc())
+        )
+        if order_number:
+            stmt = stmt.where(WageRun.scope_order_number == order_number.strip())
+        if style_code:
+            stmt = stmt.where(
+                func.upper(WageRun.scope_style_code) == style_code.strip().upper())
+        if date_from:
+            stmt = stmt.where(WageRun.period_end >= date_from)
+        if date_to:
+            stmt = stmt.where(WageRun.period_start <= date_to)
+        if status:
+            stmt = stmt.where(WageRun.status == RunStatus(status.lower()))
+
+        rows = (await self.db.execute(stmt.limit(limit).offset(offset))).all()
+        return {"count": len(rows), "items": [{
+            "run_id": r[0], "period_start": r[1], "period_end": r[2],
+            "status": r[3], "scope_order_number": r[4], "scope_style_code": r[5],
+            "computed_at": r[6], "recompute_count": int(r[7] or 0),
+            "last_recomputed_at": r[8], "reopen_count": int(r[9] or 0),
+            "total_amount": float(r[10]), "total_pieces": int(r[11]),
+            "employee_count": int(r[12]),
+        } for r in rows]}
+
     # ── H8: one run, one transaction ─────────────────────────────────────────
     # The committing variants above stay for now so existing callers keep
     # working. New payroll paths use these and let the SERVICE commit once, so a

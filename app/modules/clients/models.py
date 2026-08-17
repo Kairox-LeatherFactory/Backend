@@ -10,12 +10,13 @@ NAMING (BOM Procurement Workflow, Stage 0)
 The SKU (style + colour + size) is the atomic unit everything else joins to.
 """
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
     Date,
+    DateTime,
     ForeignKey,
     Integer,
     Numeric,
@@ -25,6 +26,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+from app.core.enums import ProductionReleaseStatus
 from app.core.models import GUID, TimestampMixin, UUIDMixin
 
 
@@ -103,6 +105,22 @@ class Style(Base, UUIDMixin, TimestampMixin):
     base_style_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("style.id"), nullable=True, index=True
     )
+    # ── THE PRODUCTION RELEASE GATE (change-list item 9) ────────────────────
+    # A breakdown upload writes styles/SKUs and STOPS. Nothing is minted until
+    # the DM releases the style, which is what creates its per-piece barcodes and
+    # consumes drawers from a finite pool.
+    #
+    # VARCHAR, NOT A NATIVE PG ENUM — deliberately, and the reason is scar tissue:
+    # `app_user.role` is a native enum and adding a label to it has broken a
+    # deploy three separate times (CLAUDE.md §13). Every module-level status in
+    # this schema is a str-Enum over VARCHAR for exactly that reason. Adding
+    # a fourth release state must never need an ALTER TYPE.
+    production_status: Mapped[str] = mapped_column(
+        String(20), default=ProductionReleaseStatus.DRAFT.value,
+        server_default=ProductionReleaseStatus.DRAFT.value, index=True,
+    )
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    released_by: Mapped[str | None] = mapped_column(String(120))
     client_order: Mapped["ClientOrder"] = relationship(back_populates="styles")
     skus: Mapped[list["SKU"]] = relationship(
         back_populates="style", cascade="all, delete-orphan"

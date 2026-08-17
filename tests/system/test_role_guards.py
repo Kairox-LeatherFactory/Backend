@@ -219,23 +219,51 @@ async def test_only_the_direct_manager_may_commit_an_import(client, role):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", [
     f"{API}/analytics/explorer",
-    f"{API}/analytics/alerts/stage-spread",
-    f"{API}/analytics/alerts/freight-risk",
     f"{API}/analytics/consumption",
 ])
 async def test_analytics_endpoints_have_no_role_gate(client, path):
-    """AUDIT (pass-03-security.md): 7 of 10 analytics endpoints carry no
+    """AUDIT (pass-03-security.md): several analytics endpoints carry no
     `require_roles`. `client_scope` is a TENANCY filter that returns None for every
     non-CLIENT role — it is not an authorization check.
 
-    So a SUPERVISOR reads the full order explorer and the freight-risk alerts.
-    This test pins the current behaviour; when the gates are added it fails, and
-    that failure is the confirmation. Do not delete it — invert it to 403.
+    So a SUPERVISOR reads the full order explorer. This test pins the current
+    behaviour; when the gates are added it fails, and that failure is the
+    confirmation. Do not delete it — invert it to 403.
+
+    THE TWO ALERT PATHS LEFT THIS LIST because they no longer exist: the
+    standalone Risk-Alerts screen was removed (change-list item 1) and the alerts
+    moved to GET /dashboard/alerts, which IS role-gated. Their new behaviour is
+    pinned by test_removed_analytics_screens_are_gone below.
     """
     _as(UserRole.SUPERVISOR)
     r = await client.get(path)
     assert r.status_code == 200, (
         "expected the ungated behaviour recorded in the audit")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", [
+    f"{API}/analytics/overview",
+    f"{API}/analytics/alerts/stage-spread",
+    f"{API}/analytics/alerts/freight-risk",
+])
+async def test_removed_analytics_screens_are_gone(client, path):
+    """410, not 404 (change-list item 1).
+
+    The Overview and Risk-Alerts screens were removed and their content moved
+    onto the dashboards every manager already opens. They answer 410 Gone rather
+    than 404 because a 404 on a screen that worked yesterday reads to a frontend
+    — and to a support call — as "the server is broken". The body names the
+    replacement. Same courtesy /production/cutting and /production/scan were
+    given when they were retired.
+
+    DELETE THESE STUBS, AND THIS TEST, one release after the frontend stops
+    calling them.
+    """
+    _as(UserRole.SUPERVISOR)
+    r = await client.get(path)
+    assert r.status_code == 410, r.text
+    assert "dashboard" in r.json()["detail"].lower()
 
 
 @pytest.mark.asyncio

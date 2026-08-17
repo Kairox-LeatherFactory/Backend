@@ -105,9 +105,43 @@ class WageType(str, enum.Enum):
 
 
 class RunStatus(str, enum.Enum):
-    """Lifecycle of a payroll run. A CLOSED run is a frozen snapshot."""
+    """Lifecycle of a payroll run.
+
+    OPEN    a DRAFT. Lines exist and can be recomputed freely — nothing has been
+            paid against them, so rewriting them costs nothing.
+    CLOSED  FROZEN. This is the document the cash was counted against. It is
+            never silently recomputed: rewriting it requires an explicit,
+            audited REOPEN (see WageService.reopen_run), which puts it back to
+            OPEN and stamps who did it.
+
+    That two-step is the resolution of the guardrail conflict in the change list
+    ("recompute frozen payroll"). Recompute-in-place on a CLOSED run would mean
+    last month's payslip stops matching the money that left the building, with
+    nothing on the record to say so.
+    """
     OPEN = "open"
     CLOSED = "closed"
+
+
+class ProductionReleaseStatus(str, enum.Enum):
+    """Whether a breakdown-sheet style has been RELEASED into production.
+
+    THE TWO-PHASE COMMIT (change-list item 9). Uploading a breakdown sheet no
+    longer mints anything. The sheet lands as DRAFT rows the DM can correct;
+    only when the DM explicitly RELEASES a style are its per-piece barcodes
+    minted and its pieces merged into drawers.
+
+    A HARD, AUDITED STATE TRANSITION — never a boolean `is_released`. Releasing
+    is what makes barcodes exist and consumes drawers from a finite pool, so it
+    needs a state name, a timestamp, an actor and an audit_log row (CLAUDE.md
+    §15: approval gates are audited transitions).
+
+    PHASE-2 SEAM: an auto-generated breakdown must flow through this SAME
+    release surface. One ingestion contract, not two.
+    """
+    DRAFT = "DRAFT"          # uploaded, editable, nothing minted
+    RELEASED = "RELEASED"    # DM released it; pieces + barcodes exist
+    CANCELLED = "CANCELLED"  # withdrawn before release; never mints
 
 
 class ShipMode(str, enum.Enum):
