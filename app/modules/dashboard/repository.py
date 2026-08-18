@@ -188,11 +188,88 @@ class DashboardRepository:
             "assigned_today": assigned["today"],
             "completed_today": completed_today,
             "overall_completed": completed,
+            # TODAY'S BALANCE, measured the same way as the overall one: what was
+            # worked on today minus what actually FINISHED today.
+            #
+            # This subtracted `assigned["today"]` — distinct pieces with a CUT
+            # event today — from `completed_today`, which counts pieces reaching
+            # PACKAGE_EXPORT today. Those are two different populations at two
+            # ends of the pipeline, so the result was neither a balance nor a
+            # queue: on a normal day the pieces being cut and the pieces shipping
+            # are entirely different garments, and the figure just restated
+            # today's cut count. It now names what it is.
+            "cut_today": assigned["today"],
             "pending_today": max(assigned["today"] - completed_today, 0),
             "overall_pending": max(qty_ordered - completed, 0),
             "rework_pieces": rework["overall"],
             "rework_today": rework["today"],
         }
+
+    # ══════════════════════════════════════════════ PER-STAGE COMPLETED/PENDING
+    # ONE definition of "how far has this stage got", shared by every dashboard.
+    #
+    # COMPLETED @ a stage = distinct pieces with at least one event at that
+    # stage's op code. Only a logged event counts — a piece that has finished
+    # cutting and is standing in front of the fusing table has completed CUTTING,
+    # not fusing.
+    #
+    # PENDING @ a stage = the BALANCE: everything in scope that has not completed
+    # it. So the piece above is pending AT FUSING, which is what the floor means
+    # by pending and what the change list asks for ("when the cutting finish and
+    # waiting for fusing also means pending").
+    #
+    # Deliberately NOT queue depth (upstream completed − this stage completed).
+    # Queue depth is the right measure for finding a bottleneck and it is still
+    # computed where that is the question — StageBlock.total_received and the DM
+    # pipeline — but as a definition of "pending" it gives every stage a
+    # different denominator, so the columns stop reconciling against the order
+    # quantity and nothing on the page adds up.
+    async def stage_progress(
+        self, *, stages: tuple[str, ...], client_scope: uuid.UUID | None,
+        order_id: uuid.UUID | None = None, style_id: uuid.UUID | None = None,
+    ) -> dict[str, int]:
+        """{stage_code: distinct pieces completed}. ONE grouped query."""
+        stmt = (
+            select(func.upper(Operation.code),
+                   func.count(func.distinct(ProductionEvent.piece_id)))
+            .select_from(ProductionEvent)
+            .join(Operation, Operation.id == ProductionEvent.operation_id)
+            .join(SKU, SKU.id == ProductionEvent.sku_id)
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .where(func.upper(Operation.code).in_(stages))
+            .group_by(func.upper(Operation.code))
+        )
+        if order_id is not None:
+            stmt = stmt.where(ClientOrder.id == order_id)
+        if style_id is not None:
+            stmt = stmt.where(Style.id == style_id)
+        stmt = self._scope(stmt, client_scope)
+        rows = (await self.db.execute(stmt)).all()
+        return {code: int(n or 0) for code, n in rows}
+
+    async def scope_total_pieces(
+        self, *, client_scope: uuid.UUID | None,
+        order_id: uuid.UUID | None = None, style_id: uuid.UUID | None = None,
+    ) -> int:
+        """Σ SKU.qty_ordered in scope — the denominator every stage measures against.
+
+        ORDERED, not minted. A style still sitting DRAFT has minted nothing, and
+        counting only minted pieces would report an order as 100% through a stage
+        while a third of it had not been released yet.
+        """
+        stmt = (
+            select(func.coalesce(func.sum(SKU.qty_ordered), 0))
+            .select_from(SKU)
+            .join(Style, Style.id == SKU.style_id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+        )
+        if order_id is not None:
+            stmt = stmt.where(ClientOrder.id == order_id)
+        if style_id is not None:
+            stmt = stmt.where(Style.id == style_id)
+        stmt = self._scope(stmt, client_scope)
+        return int((await self.db.execute(stmt)).scalar_one() or 0)
 
     async def _assigned_count(
         self, *, today: date, client_scope: uuid.UUID | None,

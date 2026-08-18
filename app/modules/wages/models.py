@@ -43,19 +43,44 @@ class Rate(Base, UUIDMixin, TimestampMixin):
 
 
 class WageRun(Base, UUIDMixin, TimestampMixin):
+    """One payroll window.
+
+    OPEN = DRAFT (recompute freely), CLOSED = FROZEN (the document paid against).
+    See RunStatus in core/enums.py for why rewriting a CLOSED run requires an
+    explicit REOPEN rather than happening in place.
+    """
+
     __tablename__ = "wage_run"
     period_start: Mapped[date] = mapped_column(Date, index=True)
     period_end: Mapped[date] = mapped_column(Date, index=True)
     status: Mapped[RunStatus] = mapped_column(
         Enum(RunStatus, name="run_status"), default=RunStatus.OPEN
     )
-    # ── recompute audit ────────────────────────────────────────────────────
+    # ── SCOPE (change-list item 3) ─────────────────────────────────────────
+    # A run may be narrowed to one order or one style. Stored as the human CODE,
+    # not an id, for the reason the whole wages surface uses codes: a run reprinted
+    # after a style is renamed must still say which style it paid for, and the
+    # code is what appears on the printed traveler. NULL = the whole factory.
+    #
+    # It is stored (rather than passed again at recompute time) so a recompute
+    # reproduces the SAME scope. A recompute that silently widened from one style
+    # to the whole factory would pay everyone twice for the window.
+    scope_order_number: Mapped[str | None] = mapped_column(String(50), index=True)
+    scope_style_code: Mapped[str | None] = mapped_column(String(200), index=True)
+    # ── recompute / reopen audit ───────────────────────────────────────────
     # A closed run is still a snapshot; these make it a VERSIONED one. A payslip
     # printed at recompute_count=0 and one printed at 2 are different documents
     # and must be distinguishable on paper.
     recompute_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     last_recomputed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_recomputed_by: Mapped[str | None] = mapped_column(String(120))
+    # Unfreezing is rarer and more serious than recomputing, so it is counted
+    # separately and carries a REASON. "recomputed twice" and "unfrozen twice
+    # after payment" are different facts about a payslip.
+    reopen_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_reopened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_reopened_by: Mapped[str | None] = mapped_column(String(120))
+    last_reopen_reason: Mapped[str | None] = mapped_column(String(500))
 
     lines: Mapped[list["WageLine"]] = relationship(
         back_populates="run", cascade="all, delete-orphan"

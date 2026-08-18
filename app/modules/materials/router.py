@@ -101,6 +101,80 @@ async def list_lots(
         thickness=thickness, size=size, sku_id=sku_id, required=required)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# LOT CRUD (change-list item 7) — the stock-management screen
+# ══════════════════════════════════════════════════════════════════════════════
+# Declared BEFORE /lots/{lot_id} would matter if any static segment followed
+# /lots; it does not, so ordering here is only readability.
+@router.get("/lots/{lot_id}", response_model=schemas.LotDetail)
+async def get_lot(
+    lot_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_STOCK_READERS),
+):
+    """One lot: identity, its three stock numbers, its barcode, and which of its
+    fields the edit form may show."""
+    return await MaterialService(db).get_lot(lot_id)
+
+
+@router.patch("/lots/{lot_id}", response_model=schemas.LotDetail)
+async def update_lot(
+    lot_id: uuid.UUID,
+    body: schemas.LotPatch,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_LOT_WRITERS),
+):
+    """Correct a lot's IDENTITY — article, colour, thickness, size, supplier.
+
+    CATEGORY, SUBTYPE, UOM AND on_hand ARE NOT PATCHABLE, on purpose:
+      • category/subtype decide the UOM and the whole required-field set. Moving
+        LEATHER→LINING would leave a lot measured in dcm claiming to be metres,
+        and every cut event already pointing at it would silently re-denominate.
+      • on_hand is a LEDGER. It moves by receiving and by cutting. Setting it
+        directly would make the stock and the movement history disagree with no
+        record of who changed it — use PATCH /lots/{id}/adjust, which is the same
+        change with a reason attached.
+
+    409 if the new spec collides with another lot: material is one lot per spec,
+    or the picker shows two rows a cutter cannot tell apart."""
+    return await MaterialService(db).update_lot(
+        lot_id, body.model_dump(exclude_unset=True))
+
+
+@router.patch("/lots/{lot_id}/adjust", response_model=schemas.LotDetail)
+async def adjust_lot(
+    lot_id: uuid.UUID,
+    body: schemas.LotAdjust,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_DM),
+):
+    """A COUNTED STOCK CORRECTION: +/- delta, with a reason, audited.
+
+    The honest form of "edit the quantity" — it records a MOVEMENT rather than
+    overwriting the number, so the ledger still adds up and someone can ask a
+    year later why 40 dcm disappeared. Refuses to take stock below what is
+    already reserved for a cut, and refuses to go negative."""
+    return await MaterialService(db).adjust_lot(
+        lot_id, delta=body.delta, reason=body.reason, actor_id=user.id)
+
+
+@router.delete("/lots/{lot_id}", response_model=schemas.LotRetireResult)
+async def retire_lot(
+    lot_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_DM),
+):
+    """RETIRE a lot — deactivate it and retire its barcode. Never a hard delete.
+
+    Present it as "retire", not "delete". Cut events point at this lot and are
+    the consumption history the costing and traceability screens are built on;
+    the row and every event survive. A scan of the old label returns 410 Gone
+    ("this lot was retired"), not 404 ("invalid barcode").
+
+    409 while any stock is still reserved for a cut."""
+    return await MaterialService(db).retire_lot(lot_id, actor_id=user.id)
+
+
 @router.get("/stock", response_model=schemas.StockRead)
 async def stock(
     category: str | None = Query(None),

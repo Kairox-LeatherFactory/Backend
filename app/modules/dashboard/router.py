@@ -385,6 +385,52 @@ async def store_traceability(
 # require_roles; MD/HR are admitted explicitly through _DASHBOARD_READERS. It is
 # factory-wide, so scope is passed through and is None for staff (a scoped CLIENT
 # still gets its own slice rather than a different code path).
+@router.get("/alerts")
+async def factory_alerts(
+    today: date | None = Query(None, description="Override 'today' for freight risk."),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_DASHBOARD_READERS),
+    scope: uuid.UUID | None = Depends(client_scope),
+):
+    """THE ALERTS, FOR EVERY MANAGER (change-list item 1).
+
+    Replaces the standalone Analytics Overview + Risk Alerts screens, which are
+    now 410 Gone. The bottleneck and the alerts were the only parts of those
+    pages anyone acted on, and a manager should not have to know a separate
+    screen exists to find out their line is blocked — so they moved here, onto
+    the surface every manager already opens, readable by every manager role
+    rather than the DM alone.
+
+    Three blocks, most-actionable first:
+
+      bottleneck     THE DEEPEST QUEUE — the stage with the most work waiting in
+                     front of it. Not "the first unfinished stage": the first
+                     unfinished stage is wherever the line happens to have got to,
+                     which is not a constraint and not actionable.
+      stage_spread   Where each downstream stage lags the leather cut. The gap is
+                     true WIP in flight — cut but not yet arrived at stage X.
+      freight_risk   Orders approaching their sea cut-off. Missing it means air
+                     freight, which is the single biggest margin event in the
+                     business, so it is an alert and not a report line.
+
+    `alert_count` is what a badge should render. Empty lists are a good day, not
+    a missing feature."""
+    from app.modules.analytics.service import AnalyticsService
+
+    analytics = AnalyticsService(db)
+    dm = await DashboardService(db).direct_manager_overview(client_scope=scope)
+    bottleneck = dm.get("bottleneck") if isinstance(dm, dict) else getattr(
+        dm, "bottleneck", None)
+    spread = await analytics.stage_spread_alerts(client_scope=scope)
+    freight = await analytics.freight_risk(today, client_scope=scope)
+    return {
+        "bottleneck": bottleneck,
+        "stage_spread": spread,
+        "freight_risk": freight,
+        "alert_count": len(spread) + len(freight),
+    }
+
+
 @router.get("/direct-manager", response_model=DirectManagerDashboard)
 async def direct_manager_dashboard(
     db: AsyncSession = Depends(get_db),

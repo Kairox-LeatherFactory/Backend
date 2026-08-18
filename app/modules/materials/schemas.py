@@ -73,6 +73,60 @@ class LotCreateResult(BaseModel):
     uom: str
 
 
+# ── lot CRUD (change-list item 7) ───────────────────────────────────────────
+class LotDetail(BaseModel):
+    """One lot, opened from the stock screen."""
+    lot_id: uuid.UUID
+    barcode: str | None = None
+    category: str
+    subtype: str | None = None
+    article: str
+    colour: str | None = None
+    thickness: str | None = None
+    size: str | None = None
+    uom: str
+    on_hand: float
+    reserved: float
+    available: float          # DERIVED, never stored — on_hand − reserved
+    attributes: dict = Field(default_factory=dict)
+    supplier_id: uuid.UUID | None = None
+    is_active: bool = True
+    # So the edit form renders this material's fields without a second call to
+    # GET /materials/spec.
+    editable_fields: list[str] = Field(default_factory=list)
+    required_attributes: list[str] = Field(default_factory=list)
+
+
+class LotPatch(BaseModel):
+    """Correct a lot's IDENTITY. Send only what changes.
+
+    category / subtype / uom / on_hand are absent on purpose — see the route
+    docstring for why each one is a different operation, not a field edit.
+    """
+    article: str | None = None
+    colour: str | None = None
+    thickness: str | None = None
+    size: str | None = None
+    supplier_id: uuid.UUID | None = None
+
+
+class LotAdjust(BaseModel):
+    """A counted stock correction. `delta` is the MOVEMENT, not the new total —
+    +12 adds twelve, -12 removes twelve. The reason is stored on the audit row
+    and is the only record of why the count and the system disagreed."""
+    delta: float
+    reason: str = Field(min_length=3, max_length=300)
+
+
+class LotRetireResult(BaseModel):
+    lot_id: uuid.UUID
+    is_active: bool
+    barcode_retired: bool
+    on_hand: float
+    history_preserved: bool = True
+    message: str = ""
+
+
 class StockRead(BaseModel):
     category: str | None
     subtype: str | None

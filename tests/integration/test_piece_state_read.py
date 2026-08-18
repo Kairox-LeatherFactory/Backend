@@ -116,14 +116,49 @@ async def test_line_stitching_is_locked_on_the_merge_gate_and_names_the_drawer(
     db, operations, pieces, cutting_mgr
 ):
     """bug #6 + #12: the lock reason has to be actionable, so it names the
-    drawer the operator must go and deal with."""
+    drawer the operator must go and deal with.
+
+    THE REASON NOW NAMES THE MISSING PART, not the SENDED state. The gate used to
+    emit one message for every failure — "must hold leather + lining and be
+    marked SENDED" — which told an operator whose drawer was empty to go and send
+    it. The gate distinguishes the two cases (see ProductionService._merge_ok),
+    so the message does too: an incomplete drawer says scan the part in, and only
+    a complete-but-unsent drawer says send it. That second branch is asserted in
+    the test below.
+    """
     piece, drawer = pieces[0]
     state = await ProductionService(db).piece_state(piece.id, user=cutting_mgr)
 
     card = _card(state, "LINE_STITCHING")
     assert card["state"] == "locked" and card["gate"] == "merge"
     assert drawer.code in card["reason"]
-    assert "SENDED" in card["reason"]
+    # Nothing has been scanned into this drawer, so the actionable instruction is
+    # to put the leather in it — not to send an empty drawer.
+    assert "awaiting its leather" in card["reason"]
+
+
+@pytest.mark.asyncio
+async def test_a_complete_but_unsent_drawer_is_told_to_send(
+    db, operations, pieces, cutting_mgr
+):
+    """The OTHER merge-gate branch: the drawer holds everything the garment
+    needs, so the only thing left is the store releasing it."""
+    from app.core.enums import DrawerState
+
+    piece, drawer = pieces[0]
+    # HOLDING BOTH — both physical parts scanned in, so completeness is satisfied
+    # however the lining question is answered, and the only thing left is the
+    # store's send.
+    drawer.leather_in = True
+    drawer.lining_in = True
+    drawer.state = DrawerState.RECEIVED.value
+    await db.commit()
+
+    state = await ProductionService(db).piece_state(piece.id, user=cutting_mgr)
+    card = _card(state, "LINE_STITCHING")
+    assert card["state"] == "locked" and card["gate"] == "merge"
+    assert drawer.code in card["reason"]
+    assert "has not been sent" in card["reason"]
 
 
 @pytest.mark.asyncio

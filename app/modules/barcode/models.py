@@ -51,20 +51,45 @@ class BarcodeRegistry(Base, UUIDMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(15), index=True, default="active")
 
     # Exactly one of these is set, per `type`. All indexed, all real FKs.
+    #
+    # ondelete="SET NULL" — READ THIS BEFORE YOU DELETE A DOMAIN ROW.
+    # Every nullable FK in this schema now carries SET NULL, so that a parent row
+    # can actually be deleted instead of being pinned forever by its children.
+    # On THIS table that rule is the least comfortable, because a registry row
+    # exists in order to name a domain row: null its FK and you are left with an
+    # ACTIVE code of type PIECE that names nothing.
+    #
+    # It is still the right rule here, for two reasons:
+    #   • resolve() already guards every branch on the FK being present
+    #     (`row.type == PIECE and row.piece_id`), so a widowed code degrades to
+    #     "known code, no payload" — it does not crash the scan screen.
+    #   • CASCADE is the alternative, and CASCADE would mean deleting a piece
+    #     silently destroys its printed label's only record. That is the exact
+    #     opposite of "you delete the scannable code, never the person or their
+    #     record" (see the module docstring and CLAUDE.md §6).
+    #
+    # THE REAL POINT: deleting a piece / drawer / employee ROW is not a workflow
+    # this system has. Workers are RETIRED (status → RETIRED, resolve → 410),
+    # pieces are deactivated (`is_active`), drawers recycle to WAITING. These
+    # delete rules exist for administrative cleanup — a mis-imported order, a
+    # test batch — not for anything the floor does. If you do use them, sweep
+    # `barcode_registry` for rows whose type-appropriate FK went NULL, because
+    # they will otherwise keep inflating the per-order `minted` / `balance`
+    # counts the factory reconciles against (see the is_alias note below).
     piece_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("piece.id"), nullable=True, index=True)
+        GUID(), ForeignKey("piece.id", ondelete="SET NULL"), nullable=True, index=True)
     order_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("client_order.id"), nullable=True, index=True)
+        GUID(), ForeignKey("client_order.id", ondelete="SET NULL"), nullable=True, index=True)
     sku_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("sku.id"), nullable=True, index=True)
+        GUID(), ForeignKey("sku.id", ondelete="SET NULL"), nullable=True, index=True)
     style_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("style.id"), nullable=True, index=True)
+        GUID(), ForeignKey("style.id", ondelete="SET NULL"), nullable=True, index=True)
     employee_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("employee.id"), nullable=True, index=True)
+        GUID(), ForeignKey("employee.id", ondelete="SET NULL"), nullable=True, index=True)
     drawer_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("drawer.id"), nullable=True, index=True)
+        GUID(), ForeignKey("drawer.id", ondelete="SET NULL"), nullable=True, index=True)
     material_lot_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("material_lot.id"), nullable=True, index=True)
+        GUID(), ForeignKey("material_lot.id", ondelete="SET NULL"), nullable=True, index=True)
 
     # Freeform caption for the label (STYLE · COLOUR · SIZE · #seq, etc.)
     caption: Mapped[str | None] = mapped_column(String(200))
@@ -98,6 +123,17 @@ class Drawer(Base, UUIDMixin, TimestampMixin):
     is merged to exactly one (sku_id, piece_seq) at a time, holds that piece's
     parts, and returns to WAITING after the piece ships — so `current_piece_id`
     moves over the drawer's life while `code` never changes.
+
+    THE piece↔drawer CYCLE, AND WHY BOTH ENDS SURVIVE.
+        `piece.drawer_id` and `drawer.current_piece_id` are the same 1:1 link
+        read from opposite ends, and they are NOT interchangeable: the drawer's
+        pointer is the LIVE CLAIM (a store scan moves state/leather_in/lining_in
+        on the row that claims the piece; `release_nocommit` nulls it when the
+        garment ships), while the piece's pointer is the piece's own assignment.
+        Every card query in barcode/dashboard/production reads through the claim
+        and every analytics store query reads through the assignment. So the
+        cycle is deliberate — what was missing was a rule for what happens when
+        one end is deleted. See the ondelete note below and on Piece.drawer_id.
     """
     __tablename__ = "drawer"
     __table_args__ = (
@@ -106,8 +142,27 @@ class Drawer(Base, UUIDMixin, TimestampMixin):
     code: Mapped[str] = mapped_column(String(60), index=True)     # "DRW-014"
     seq: Mapped[int] = mapped_column(Integer, index=True)
     state: Mapped[str] = mapped_column(String(20), default="waiting", index=True)
+    # ondelete="SET NULL" — the other half of the cycle. Deleting a piece
+    # releases the drawer instead of blocking the delete; a drawer with
+    # `current_piece_id IS NULL` is the WAITING pool state the allocator already
+    # hands out. Mutual SET NULL is legal in Postgres and is what makes either
+    # row deletable in either order.
+    #
+    # use_alter=True — DDL ORDERING, NOT DELETE SEMANTICS, and it is on THIS side
+    # on purpose. A cycle means create_all cannot topologically sort {piece,
+    # drawer}; SQLAlchemy silently resolved it by moving EVERY foreign key on
+    # BOTH tables out to ALTER TABLE ADD CONSTRAINT — and SQLite cannot execute
+    # those, so on the test harness `piece` was created with no FKs at all
+    # (sku_id and current_operation_id included). Marking this one back-pointer
+    # as the alter-able edge lets the sort succeed: drawer is created first,
+    # `piece` keeps all of its constraints inline, and the only FK SQLite loses
+    # is this one. That is what keeps tests/integration/test_premint_insert_order
+    # (which runs PRAGMA foreign_keys=ON) able to catch a bad insert order.
     current_piece_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("piece.id"), nullable=True, index=True)
+        GUID(),
+        ForeignKey("piece.id", ondelete="SET NULL", use_alter=True,
+                   name="fk_drawer_current_piece_id_piece"),
+        nullable=True, index=True)
     leather_in: Mapped[bool] = mapped_column(Boolean, default=False)
     lining_in: Mapped[bool] = mapped_column(Boolean, default=False)
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -146,7 +201,7 @@ class MaterialLot(Base, UUIDMixin, TimestampMixin):
     uom: Mapped[str] = mapped_column(String(20))
     on_hand: Mapped[Decimal] = mapped_column(Numeric(14, 3), default=0)
     supplier_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("material_supplier.id"), nullable=True, index=True)
+        GUID(), ForeignKey("material_supplier.id", ondelete="SET NULL"), nullable=True, index=True)
     attributes: Mapped[dict | None] = mapped_column(JSON_VARIANT)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -177,11 +232,11 @@ class MaterialReceipt(Base, UUIDMixin, TimestampMixin):
     material_lot_id: Mapped[uuid.UUID] = mapped_column(
         GUID(), ForeignKey("material_lot.id"), index=True)
     supplier_order_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("supplier_order.id"), nullable=True, index=True)
+        GUID(), ForeignKey("supplier_order.id", ondelete="SET NULL"), nullable=True, index=True)
     approved_qty: Mapped[Decimal] = mapped_column(Numeric(14, 3), default=0)
     rejected_qty: Mapped[Decimal] = mapped_column(Numeric(14, 3), default=0)
     received_by: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("app_user.id"), nullable=True)
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True)
 
 
 class MaterialSupplier(Base, UUIDMixin, TimestampMixin):
@@ -214,7 +269,7 @@ class SupplierOrder(Base, UUIDMixin, TimestampMixin):
     uom: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(15), default="ordered", index=True)
     supplier_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("material_supplier.id"), nullable=True, index=True)
+        GUID(), ForeignKey("material_supplier.id", ondelete="SET NULL"), nullable=True, index=True)
     ordered_by: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("app_user.id"), nullable=True)
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True)
     arrived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

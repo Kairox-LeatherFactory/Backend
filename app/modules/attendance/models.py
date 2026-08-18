@@ -81,7 +81,8 @@ class AttendanceLog(Base, UUIDMixin, TimestampMixin):
         Enum(AttendanceSource, name="attendance_source"), default=AttendanceSource.SELF
     )
     # Supervisor (User) who recorded a PROXY entry. NULL for SELF entries.
-    recorded_by_user_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("app_user.id"))
+    recorded_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"))
 
     # Computed at write time so dashboards never recompute on read.
     is_late: Mapped[bool] = mapped_column(Boolean, default=False)

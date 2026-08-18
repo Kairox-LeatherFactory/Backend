@@ -62,7 +62,7 @@ class InventoryCheck(Base, UUIDMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(20), default=InventoryCheckStatus.RUNNING.value)
     run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     run_by: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("app_user.id"), nullable=True
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
     )
     lines: Mapped[list["InventoryCheckLine"]] = relationship(
         back_populates="check", cascade="all, delete-orphan"
@@ -78,7 +78,7 @@ class InventoryCheckLine(Base, UUIDMixin, TimestampMixin):
     )
     bom_item_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("bom_item.id"), index=True)
     inventory_item_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("inventory_item.id"), nullable=True, index=True
+        GUID(), ForeignKey("inventory_item.id", ondelete="SET NULL"), nullable=True, index=True
     )
     required_qty: Mapped[Decimal | None] = mapped_column(Numeric(12, 3))
     on_hand_qty: Mapped[Decimal | None] = mapped_column(Numeric(12, 3))
@@ -99,7 +99,7 @@ class InventoryReservation(Base, UUIDMixin, TimestampMixin):
     )
     bom_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("bom.id"), index=True)
     inventory_check_line_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("inventory_check_line.id"), nullable=True
+        GUID(), ForeignKey("inventory_check_line.id", ondelete="SET NULL"), nullable=True
     )
     qty: Mapped[Decimal] = mapped_column(Numeric(12, 3), default=0)
     status: Mapped[str] = mapped_column(

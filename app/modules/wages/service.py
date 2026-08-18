@@ -276,11 +276,17 @@ class WageService:
 
     # ── runs ────────────────────────────────────────────────────────────────
     async def _validate_window(self, period_start: date, period_end: date,
-                               *, replacing: uuid.UUID | None = None) -> int:
+                               *, replacing: uuid.UUID | None = None,
+                               scope_order_number: str | None = None,
+                               scope_style_code: str | None = None) -> int:
         """Guards for a hand-typed window. Returns gap_days.
 
         `replacing` is the run being recomputed — its own window must not count
         as an overlap with itself, or recompute would always 409.
+
+        The scope is threaded through so two runs over the same fortnight for
+        DIFFERENT styles are allowed (they pay disjoint pieces) while an
+        unscoped run still blocks everything in its window.
         """
         if period_end < period_start:
             raise HTTPException(
@@ -296,17 +302,22 @@ class WageService:
         # B7: overlapping_closed_run now returns any CLOSED **or OPEN** run in the
         # window, so a run that died mid-population can no longer hide from this.
         clash = await self.repo.overlapping_closed_run(
-            period_start, period_end, exclude_run_id=replacing
+            period_start, period_end, exclude_run_id=replacing,
+            scope_order_number=scope_order_number,
+            scope_style_code=scope_style_code,
         )
         if clash:
             state = ("closed" if clash.status == RunStatus.CLOSED
-                     else "OPEN (in progress, or abandoned mid-compute)")
+                     else "OPEN (a draft, in progress, or abandoned mid-compute)")
+            clash_scope = (clash.scope_style_code or clash.scope_order_number
+                           or "the whole factory")
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 f"Period overlaps {state} run {clash.id} "
-                f"({clash.period_start}..{clash.period_end}). Payroll windows must "
-                f"not intersect — the same pieces would be paid twice. If that run "
-                f"is wreckage from a failed compute, delete it before retrying.",
+                f"({clash.period_start}..{clash.period_end}, scope: {clash_scope}). "
+                f"Payroll windows must not intersect for the same pieces — they "
+                f"would be paid twice. Narrow one run to a different style/order, "
+                f"or delete that run if it is wreckage from a failed compute.",
             )
 
         last = await self.repo.last_closed_run(exclude_run_id=replacing)
@@ -314,31 +325,104 @@ class WageService:
             return max(0, (period_start - last.period_end).days - 1)
         return 0
 
+    # ══════════════════════════════════════════════════════════════════════
+    # THE FREEZE CONTRACT — draft, freeze, reopen  (change-list item 3)
+    # ══════════════════════════════════════════════════════════════════════
+    # THE CONFLICT THIS RESOLVES
+    #     The change list asks to "re-compute the frozen payroll and update it".
+    #     The standing guardrail says a CLOSED run is a frozen snapshot and is
+    #     never recomputed. Both are right, and the resolution is that they were
+    #     talking about two different documents:
+    #
+    #       OPEN   = a DRAFT. Recompute it as often as you like — nothing has
+    #                been paid against it, so there is nothing to protect.
+    #       CLOSED = the document the cash was counted against. Rewriting it
+    #                takes an explicit REOPEN, which is audited and stamped.
+    #
+    #     So: POST /wages/runs computes a DRAFT by default. Freeze it when the
+    #     numbers are agreed. To change a frozen run, reopen → recompute →
+    #     re-freeze, three deliberate steps, each on the record.
+    #
+    #     THE LEDGER ALWAYS READS THE FROZEN ROWS, never a live recompute.
+
+    async def reopen_run(self, run_id: uuid.UUID, *, user_name: str,
+                         reason: str) -> dict:
+        """Unfreeze a CLOSED run so it can be recomputed. DM/MD only, audited.
+
+        This is the ONLY door out of CLOSED, and it is deliberately a separate
+        call from the recompute rather than a flag on it. A manager who has to
+        press "reopen", type why, and then press "recompute" cannot rewrite a
+        paid payslip by mistyping a run id.
+
+        WHAT IT CANNOT PROTECT YOU FROM: cash already disbursed. Reopening on
+        Monday changes the record, not the payment — which is exactly why the
+        reason is stored and shown on every reprint of that payslip.
+        """
+        run = await self.repo.get_run(run_id)
+        if not run:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Wage run not found")
+        if run.status != RunStatus.CLOSED:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Run {run.id} is already {run.status.value} — only a CLOSED run "
+                f"needs reopening.")
+        reason = (reason or "").strip()
+        if len(reason) < 5:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Give a reason for reopening a paid payroll run — it is printed "
+                "on every reissued payslip for this period.")
+
+        await self.repo.stamp_reopen(run, by=user_name, reason=reason)
+        return {
+            "id": run.id, "status": run.status,
+            "period_start": run.period_start, "period_end": run.period_end,
+            "reopen_count": run.reopen_count,
+            "last_reopened_by": run.last_reopened_by,
+            "last_reopen_reason": run.last_reopen_reason,
+            "message": (f"Run {run.id} is OPEN again. Recompute it, then close it "
+                        f"— it stays unfrozen until you do."),
+        }
+
+    async def close_run(self, run_id: uuid.UUID, *, user_name: str) -> dict:
+        """FREEZE a draft run. From here it is the document of record."""
+        run = await self.repo.get_run(run_id)
+        if not run:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Wage run not found")
+        if run.status == RunStatus.CLOSED:
+            # Idempotent: closing a closed run is what a double-click does, and
+            # it changed nothing, so it is not an error.
+            return await self.get_run_detail(run_id)
+        if not (run.lines or []):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Run {run.id} has no wage lines — freezing an empty run would "
+                f"lock a window in which nobody is paid. Recompute it first.")
+        await self.repo.close_run(run)
+        return await self.get_run_detail(run_id)
+
     async def recompute_run(self, run_id: uuid.UUID, *, user_name: str,
                             confirm_closed: bool = False) -> dict:
         """Re-run payroll for an EXISTING run's window, discarding its old lines.
 
-        WHY THIS IS SAFE, AND WHERE IT IS NOT
-            A closed run is a frozen snapshot: silently rewriting it means last
-            month's payslip no longer matches the cash that left the building.
-            That protection is preserved by making recompute EXPLICIT, GUARDED
-            and AUDITED, not by making it impossible:
-              • it targets one named run_id — never a side effect
-              • recomputing a CLOSED run requires confirm_closed=True (B6): the
-                caller must say, in the request, that they know they are
-                rewriting a document that was already paid against
-              • the run's own window is excluded from the overlap check, so it
-                cannot smuggle in a second payment for a different period
-              • the old lines are SNAPSHOT, then deleted, then RESTORED if the
-                repopulate fails (B6) — a crashed recompute can no longer leave a
-                CLOSED run with zero lines for a fortnight already in envelopes
-              • recompute_count / last_recomputed_at / last_recomputed_by are
-                stamped, so a payslip reprinted after a recompute is visibly a
-                different document from the one paid against
-              • it is DM/MD only (see router)
+        FREE ON A DRAFT (OPEN). On a CLOSED run it refuses and points at
+        `reopen_run` — see the freeze-contract note above. `confirm_closed=True`
+        remains as the one-call escape hatch for a caller that genuinely means it
+        (it still stamps the recompute), but the reopen door is the intended
+        route because it captures a REASON and the escape hatch does not.
 
-            WHAT IT STILL CANNOT PROTECT YOU FROM: cash already disbursed.
-            Recomputing on Monday changes the record, not the payment.
+          • it targets one named run_id — never a side effect
+          • the run's own window is excluded from the overlap check, so it
+            cannot smuggle in a second payment for a different period
+          • the run's stored SCOPE is reused, so a recompute cannot silently
+            widen a one-style run into a whole-factory one
+          • the old lines are SNAPSHOT, then deleted, then RESTORED if the
+            repopulate fails (B6) — a crashed recompute can no longer leave a
+            CLOSED run with zero lines for a fortnight already in envelopes
+          • recompute_count / last_recomputed_at / last_recomputed_by are
+            stamped, so a payslip reprinted after a recompute is visibly a
+            different document from the one paid against
+          • it is DM/MD only (see router)
         """
         run = await self.repo.get_run(run_id)
         if not run:
@@ -349,11 +433,15 @@ class WageService:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 f"Run {run.id} is CLOSED ({run.period_start}..{run.period_end}) and "
-                f"was already paid against. Re-send with confirm_closed=true to "
-                f"rewrite it; the run will be stamped as recomputed.")
+                f"was already paid against. Reopen it first — "
+                f"POST /wages/runs/{run.id}/reopen with a reason — then recompute "
+                f"and close it again. (A caller that genuinely wants to skip that "
+                f"may send confirm_closed=true, but no reason is recorded.)")
 
         gap_days = await self._validate_window(
-            run.period_start, run.period_end, replacing=run.id
+            run.period_start, run.period_end, replacing=run.id,
+            scope_order_number=run.scope_order_number,
+            scope_style_code=run.scope_style_code,
         )
 
         # B6: snapshot before destroying. clear_lines() commits, so without this
@@ -367,7 +455,12 @@ class WageService:
         await self.repo.clear_lines(run.id)
         try:
             payload = await self._populate_run(
-                run, run.period_start, run.period_end, gap_days=gap_days
+                run, run.period_start, run.period_end, gap_days=gap_days,
+                # A recompute re-freezes a run that was already CLOSED, and
+                # leaves a draft a draft. Anything else would either silently
+                # freeze a draft the manager was still editing, or quietly leave
+                # a paid period unfrozen.
+                freeze=(run.status == RunStatus.CLOSED),
             )
         except Exception:
             # Put the paid-against lines back before surfacing the failure.
@@ -380,13 +473,40 @@ class WageService:
         payload["recompute_count"] = run.recompute_count
         return payload
 
-    async def compute_run(self, period_start: date, period_end: date) -> dict:
-        """Compute and FREEZE payroll for a hand-entered window."""
-        gap_days = await self._validate_window(period_start, period_end)
-        run = await self.repo.create_run(period_start, period_end)
+    async def compute_run(self, period_start: date, period_end: date, *,
+                          freeze: bool = True,
+                          order_number: str | None = None,
+                          style_code: str | None = None) -> dict:
+        """Compute payroll for a hand-entered window, optionally scoped.
+
+        `freeze=False` leaves the run OPEN — a DRAFT the manager can recompute
+        freely and then close when the numbers are agreed. It defaults to True so
+        every existing caller keeps the shipped behaviour (compute-and-freeze).
+
+        `order_number` / `style_code` narrow the run to one order or one style.
+        The scope is STORED on the run, so a later recompute reproduces it.
+        """
+        style = await self._resolve_style(style_code) if style_code else None
+        order_id = None
+        if order_number:
+            order = await self.clients.get_order_by_number(order_number.strip())
+            if not order:
+                raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                    f"No order '{order_number}'")
+            order_id = order.id
+
+        gap_days = await self._validate_window(
+            period_start, period_end,
+            scope_order_number=order_number, scope_style_code=style_code)
+        run = await self.repo.create_run(
+            period_start, period_end,
+            scope_order_number=(order_number or None),
+            scope_style_code=(style["style_code"] if style else None))
         try:
             payload = await self._populate_run(
-                run, period_start, period_end, gap_days=gap_days
+                run, period_start, period_end, gap_days=gap_days, freeze=freeze,
+                style_ids=[style["style_id"]] if style else None,
+                order_id=order_id,
             )
         except Exception:
             await self.repo.delete_run(run)
@@ -396,13 +516,23 @@ class WageService:
         return payload
 
     async def _populate_run(self, run, period_start: date, period_end: date,
-                            *, gap_days: int) -> dict:
+                            *, gap_days: int, freeze: bool = True,
+                            style_ids=None, order_id=None) -> dict:
         """Shared body of compute_run and recompute_run.
 
         Extracted so recompute cannot drift from compute — two copies of payroll
         arithmetic is how a factory ends up with two different answers for the
         same fortnight depending on which button was pressed.
         """
+        # A recompute passes no scope: it reads it back off the run, which is
+        # what makes a recompute reproduce the SAME payment rather than silently
+        # widening a one-style run into a whole-factory one.
+        if style_ids is None and run.scope_style_code:
+            style_ids = [(await self._resolve_style(run.scope_style_code))["style_id"]]
+        if order_id is None and run.scope_order_number:
+            order = await self.clients.get_order_by_number(run.scope_order_number)
+            order_id = order.id if order else None
+        scoped = bool(style_ids or order_id)
         # H13: include LEAVERS. active_only=True dropped anyone deactivated
         # between working and payday — their pieces then failed the wage_type
         # lookup and vanished from payroll with no warning. A leaver's final
@@ -429,7 +559,8 @@ class WageService:
 
         # ── PIECE_RATE branch ────────────────────────────────────────────────
         rate_cache: dict[tuple[uuid.UUID, uuid.UUID, date], float | None] = {}
-        rows = await self.production.piece_counts(period_start, period_end)
+        rows = await self.production.piece_counts(
+            period_start, period_end, style_ids=style_ids, order_id=order_id)
         for emp_id, style_id, op_id, work_date, qty in rows:
             if wage_type_of.get(emp_id) is not WageType.PIECE_RATE:
                 continue
@@ -464,7 +595,15 @@ class WageService:
             ))
 
         # ── MONTHLY branch ───────────────────────────────────────────────────
-        for emp in employees:
+        # SKIPPED ENTIRELY ON A SCOPED RUN. A monthly salary is a fact about a
+        # PERSON, not about a style: there is no honest way to say what share of
+        # a fitter's salary belongs to CLERMONT rather than CARNABY. Emitting a
+        # full monthly line on a one-style run would pay that salary again for
+        # every other style run in the same window — the exact double-payment the
+        # window guard exists to prevent, arriving through the scope instead.
+        #
+        # So a scoped run pays PIECE-RATE work only, and says so on the response.
+        for emp in (employees if not scoped else []):
             if _as_wage_type(emp.wage_type) is not WageType.MONTHLY:
                 continue
             # H13: a monthly line for a deactivated worker is wrong — proration is
@@ -500,7 +639,8 @@ class WageService:
 
         await self.repo.add_lines(lines)
         await self.repo.persist_breakdown(run.id, breakdown)   # see repository
-        await self.repo.close_run(run)
+        if freeze:
+            await self.repo.close_run(run)
 
         unrated_out = await self._name_unrated(unrated)
         detail_lines = await self.repo.run_lines_detailed(run.id)
@@ -509,7 +649,13 @@ class WageService:
             "id": run.id,
             "period_start": period_start,
             "period_end": period_end,
-            "status": RunStatus.CLOSED,
+            "status": RunStatus.CLOSED if freeze else RunStatus.OPEN,
+            "scope_order_number": run.scope_order_number,
+            "scope_style_code": run.scope_style_code,
+            # True when the monthly branch was skipped because the run is scoped.
+            # The screen must say "piece-rate only" rather than let a manager
+            # believe a one-style run is a full payroll.
+            "piece_rate_only": bool(scoped),
             "total_amount": round(sum(float(ln.amount) for ln in lines), 2),
             "total_pieces": sum(int(ln.pieces) for ln in lines),
             "employee_count": len(lines),
@@ -585,6 +731,145 @@ class WageService:
     async def list_runs(self, limit: int = 50, offset: int = 0) -> list[dict]:
         return await self.repo.list_runs(limit, offset)
 
+    # ══════════════════════════════════════════════════════════════════════
+    # THE PAYROLL SCREENS (change-list item 3)
+    # ══════════════════════════════════════════════════════════════════════
+    async def list_orders(self, *, on: date | None = None,
+                          unpriced_only: bool = False) -> list[dict]:
+        """ORDER CARDS for the payroll landing screen.
+
+        The screen is order → style → rate sheet. It was style-first, which put
+        223 style cards from every order on one page with no way to tell which
+        order a card belonged to. `styles_priced / styles` is the card's badge —
+        the same "n of m priced" idea as the style card, one level up, so an
+        order with unpriced styles is visible before a run silently pays zero for
+        them.
+        """
+        on = on or date.today()
+        styles = await self.list_styles(on=on)
+        by_order: dict[str, dict] = {}
+        for s in styles:
+            card = by_order.setdefault(s["order_number"], {
+                "order_number": s["order_number"], "styles": 0,
+                "styles_priced": 0, "qty_ordered": 0, "sku_count": 0,
+                "style_codes": [],
+            })
+            card["styles"] += 1
+            card["styles_priced"] += 1 if s["fully_rated"] else 0
+            card["qty_ordered"] += int(s["qty_ordered"] or 0)
+            card["sku_count"] += int(s["sku_count"] or 0)
+            card["style_codes"].append(s["style_code"])
+        out = []
+        for card in by_order.values():
+            card["fully_priced"] = card["styles_priced"] >= card["styles"]
+            if unpriced_only and card["fully_priced"]:
+                continue
+            out.append(card)
+        return sorted(out, key=lambda c: c["order_number"])
+
+    async def run_breakdown(self, run_id: uuid.UUID) -> dict:
+        """A frozen run, folded three ways: per style, per stage, per employee.
+
+        ALL THREE ARE FOLDS OF THE SAME ROW SET (wage_line_detail), computed
+        here rather than by three separate queries, so the totals on the three
+        tabs of the payroll screen cannot disagree with each other or with the
+        run total. That disagreement is the classic payroll-screen bug and it is
+        purely an artefact of asking the database the same question three ways.
+        """
+        run = await self.repo.get_run(run_id)
+        if not run:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Wage run not found")
+        rows = await self.repo.run_breakdown(run_id)
+
+        by_style: dict[str, dict] = {}
+        by_stage: dict[str, dict] = {}
+        by_employee: dict[uuid.UUID, dict] = {}
+
+        for r in rows:
+            st = by_style.setdefault(r["style_code"] or str(r["style_id"]), {
+                "style_code": r["style_code"], "style_name": r["style_name"],
+                "pieces": 0, "amount": 0.0, "stages": {}, "employees": {},
+            })
+            st["pieces"] += r["pieces"]
+            st["amount"] = round(st["amount"] + r["amount"], 2)
+
+            # per stage WITHIN the style — the change list's "per style total
+            # amount, per stage how much amount".
+            stg = st["stages"].setdefault(r["operation_code"], {
+                "operation_code": r["operation_code"],
+                "operation_label": r["operation_label"],
+                "sequence": r["sequence"], "pieces": 0, "amount": 0.0,
+                "rate": r["rate"],
+            })
+            stg["pieces"] += r["pieces"]
+            stg["amount"] = round(stg["amount"] + r["amount"], 2)
+
+            emp_in_style = st["employees"].setdefault(str(r["employee_id"]), {
+                "employee_id": r["employee_id"], "employee_name": r["employee_name"],
+                "designation": r["designation"], "pieces": 0, "amount": 0.0,
+            })
+            emp_in_style["pieces"] += r["pieces"]
+            emp_in_style["amount"] = round(emp_in_style["amount"] + r["amount"], 2)
+
+            # factory-wide folds
+            fs = by_stage.setdefault(r["operation_code"], {
+                "operation_code": r["operation_code"],
+                "operation_label": r["operation_label"],
+                "sequence": r["sequence"], "pieces": 0, "amount": 0.0,
+            })
+            fs["pieces"] += r["pieces"]
+            fs["amount"] = round(fs["amount"] + r["amount"], 2)
+
+            fe = by_employee.setdefault(r["employee_id"], {
+                "employee_id": r["employee_id"], "employee_name": r["employee_name"],
+                "designation": r["designation"], "pieces": 0, "amount": 0.0,
+                "styles": [],
+            })
+            fe["pieces"] += r["pieces"]
+            fe["amount"] = round(fe["amount"] + r["amount"], 2)
+            if r["style_code"] not in fe["styles"]:
+                fe["styles"].append(r["style_code"])
+
+        styles_out = []
+        for st in by_style.values():
+            st["stages"] = sorted(st["stages"].values(), key=lambda x: x["sequence"])
+            st["employees"] = sorted(st["employees"].values(),
+                                     key=lambda x: -x["amount"])
+            styles_out.append(st)
+
+        return {
+            "run_id": run.id,
+            "period_start": run.period_start, "period_end": run.period_end,
+            "status": run.status,
+            "scope_order_number": run.scope_order_number,
+            "scope_style_code": run.scope_style_code,
+            "computed_at": run.created_at,
+            "recompute_count": run.recompute_count or 0,
+            "reopen_count": run.reopen_count or 0,
+            "total_amount": round(sum(s["amount"] for s in styles_out), 2),
+            "total_pieces": sum(s["pieces"] for s in styles_out),
+            "by_style": sorted(styles_out, key=lambda s: -s["amount"]),
+            "by_stage": sorted(by_stage.values(), key=lambda s: s["sequence"]),
+            "by_employee": sorted(by_employee.values(), key=lambda e: -e["amount"]),
+        }
+
+    async def run_pieces(self, run_id: uuid.UUID, *, style_code: str | None = None,
+                         limit: int = 500, offset: int = 0) -> dict:
+        """PER-PIECE payroll detail for a frozen run — garment, stage, worker,
+        their barcode, and what that piece paid. Frozen rates, never re-priced."""
+        run = await self.repo.get_run(run_id)
+        if not run:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Wage run not found")
+        out = await self.repo.run_piece_rows(
+            run_id, run, style_code=style_code, limit=limit, offset=offset)
+        out["run_id"] = run.id
+        out["status"] = run.status
+        return out
+
+    async def ledger(self, **filters) -> dict:
+        """Every computed run, latest first, searchable by order / style / date."""
+        return await self.repo.ledger(**filters)
+
     async def get_run_detail(self, run_id: uuid.UUID) -> dict:
         """Re-read a frozen run — payslip detail, no recomputation.
 
@@ -602,14 +887,23 @@ class WageService:
             "period_start": run.period_start,
             "period_end": run.period_end,
             "status": run.status,
+            "scope_order_number": run.scope_order_number,
+            "scope_style_code": run.scope_style_code,
+            "piece_rate_only": bool(run.scope_order_number or run.scope_style_code),
             "total_amount": round(sum(ln["amount"] for ln in lines), 2),
             "total_pieces": sum(ln["pieces"] for ln in lines),
             "employee_count": len(lines),
             "unrated_operations": [],
             "gap_days": 0,
-            "recomputed": run.recompute_count > 0,
-            "recompute_count": run.recompute_count,
+            "recomputed": (run.recompute_count or 0) > 0,
+            "recompute_count": run.recompute_count or 0,
             "last_recomputed_at": run.last_recomputed_at,
             "last_recomputed_by": run.last_recomputed_by,
+            # The unfreeze trail. A payslip reprinted from a run that has been
+            # unfrozen after payment must carry that fact and its reason.
+            "reopen_count": run.reopen_count or 0,
+            "last_reopened_at": run.last_reopened_at,
+            "last_reopened_by": run.last_reopened_by,
+            "last_reopen_reason": run.last_reopen_reason,
             "lines": lines,
         }
