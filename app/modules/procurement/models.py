@@ -45,24 +45,34 @@ class Submission(Base, UUIDMixin, TimestampMixin):
     order the CREATEs."""
     __tablename__ = "submission"
     client_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("client.id"), nullable=True, index=True
+        GUID(), ForeignKey("client.id", ondelete="SET NULL"), nullable=True, index=True
     )
     created_by: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("app_user.id"), nullable=True, index=True
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True, index=True
     )
     status: Mapped[str] = mapped_column(
         String(20), default=SubmissionStatus.OPEN.value, index=True
     )
+    # ondelete="SET NULL" on all three — these are SLOT POINTERS in a cycle, and
+    # `use_alter` above only ever fixed CREATE order, never DELETE. The two
+    # document slots say "the current order sheet / spec sheet is this one"; the
+    # membership FK (Document.submission_id) is what actually holds the set, so
+    # emptying a slot loses a pointer, not a document or a submission. Likewise
+    # the order pointer: a submission that produced an order outlives that order
+    # as an audit record of what was uploaded.
     order_document_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("document.id", use_alter=True, name="fk_submission_order_document"),
+        GUID(), ForeignKey("document.id", ondelete="SET NULL",
+                           use_alter=True, name="fk_submission_order_document"),
         nullable=True,
     )
     spec_document_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("document.id", use_alter=True, name="fk_submission_spec_document"),
+        GUID(), ForeignKey("document.id", ondelete="SET NULL",
+                           use_alter=True, name="fk_submission_spec_document"),
         nullable=True,
     )
     client_order_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("client_order.id"), nullable=True, index=True
+        GUID(), ForeignKey("client_order.id", ondelete="SET NULL"),
+        nullable=True, index=True
     )
     # Every document ever uploaded into this submission (incl. superseded), via the core
     # Document.submission_id membership FK. foreign_keys is pinned so SQLAlchemy doesn't

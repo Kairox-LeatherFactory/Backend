@@ -48,22 +48,43 @@ _FLOOR = require_roles(
     UserRole.STITCHING_MANAGER, UserRole.SUPERVISOR,
     UserRole.STORE_MANAGER)
 
-# Releasing a batch of garments into the next stage is a store decision — the
-# store manager and the DM/MD make it. A cutting or stitching manager may read
-# the list and scan parts in, but must not decide what leaves the store.
+# Releasing a batch of garments into the next stage is a store decision.
+#
+# WIDENED (change-list item 11): the STITCHING_MANAGER is now a sender.
+# THIS IS A DELIBERATE SCOPE CHANGE, NOT A TIDY-UP — record the reasoning.
+#   • Sending is what releases a batch into LINE_STITCHING. The person waiting on
+#     that batch is the stitching manager, and on the floor they are the one who
+#     walks to the store and takes the drawers. Requiring a DM/MD/store login to
+#     press the button made the store a bottleneck on a decision the stitching
+#     manager was already making physically.
+#   • It is a ROLE GRANT on the store surface, NOT a production permission. The
+#     stitching manager still cannot log a stage they do not own: STAGE_ROLE_ACCESS
+#     is untouched, and STORE_MANAGER remains absent from it, so store access and
+#     stage access stay two separate questions.
+#   • CUTTING/LINING managers are still excluded. They put parts IN; they do not
+#     decide what leaves.
 _SENDERS = require_roles(
     UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER,
-    UserRole.STORE_MANAGER)
+    UserRole.STORE_MANAGER, UserRole.STITCHING_MANAGER)
 
 
 @router.get("", response_model=schemas.DrawerLabelPage)
 async def list_drawers(
     state: str | None = Query(None, description="Filter by DrawerState, e.g. waiting"),
+    code: str | None = Query(
+        None, min_length=1, max_length=40,
+        description="Search by drawer code — case-insensitive CONTAINS, so '42' "
+                    "and 'drw-004' both work."),
     seq_from: int | None = Query(None, ge=1, description="Print a range: first seq."),
     seq_to: int | None = Query(None, ge=1, description="Print a range: last seq."),
     has_piece: bool | None = Query(None, description="Only drawers holding a garment."),
     sendable: bool | None = Query(
-        None, description="Only drawers ready to send (state=received) — the send queue."),
+        None, description="Only drawers ready to send — the send queue."),
+    sort: str = Query(
+        "seq", pattern="^(seq|recent)$",
+        description="seq = drawer order, for printing labels and finding a "
+                    "drawer in the rack (default). recent = most recently "
+                    "acted-on first, for the store screen's latest-drawers view."),
     limit: int = Query(500, ge=1, le=2000),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -76,8 +97,22 @@ async def list_drawers(
     defaults to 500 (a 200-drawer pool lists in one call); page with `offset`
     beyond that. `total` counts the filter, not the page.
 
-    `sendable=true` is the send queue: drawers that reached RECEIVED on their own
-    once both parts were scanned in, waiting for someone to tick and send them.
+    `sendable=true` is the send queue: drawers that hold everything their garment
+    needs, waiting for someone to tick and send them.
+
+    `code=` is the store screen's search box (change-list item 6): the production
+    view shows the 10 most recent drawers (`?sort=recent&limit=10`) and
+    everything else is reached by typing a code, rather than paging 430 rows.
+    `sort=recent` orders by the newest of sended_at / received_at / created_at —
+    "latest" has to mean most recently WORKED ON, because a bootstrapped pool
+    shares one creation timestamp and would otherwise return the same arbitrary
+    ten rows forever.
+
+    `needs_lining` on every row is the EFFECTIVE requirement, resolved from the
+    style/SKU/cut history — NOT the stored `piece.needs_lining` flag, which is
+    written once at upload and is wrong for most of a live order. `can_send`
+    applies the same rule POST /drawers/send enforces, so the queue can never
+    offer a row the server refuses.
 
     Encode `barcode` on a label. A row with `barcode: null` is a drawer with no
     registry code — it cannot be scanned, so print nothing for it and re-run
@@ -92,8 +127,128 @@ async def list_drawers(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             "seq_from must not exceed seq_to.")
     return await DrawerService(db).list_labels(
-        state=state, seq_from=seq_from, seq_to=seq_to, has_piece=has_piece,
-        sendable=sendable, limit=limit, offset=offset)
+        state=state, code=code, seq_from=seq_from, seq_to=seq_to,
+        has_piece=has_piece, sendable=sendable, sort=sort,
+        limit=limit, offset=offset)
+
+
+# ── THE DRAWER POOL (change-list item 9) ─────────────────────────────────────
+# Declared before /{drawer_id} — "pool" would otherwise be parsed as a UUID.
+@router.get("/pool")
+async def drawer_pool(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_FLOOR),
+):
+    """Pool size, free drawers, and how many minted pieces have NO drawer.
+
+    The pool is FIXED at 200 and only grows when a DM/MD says so. A release that
+    outruns it mints the pieces anyway — they keep their barcodes — but leaves
+    them unmerged. Those are `pieces_waiting_for_drawer`, and until they get a
+    drawer they cannot be stored and therefore cannot pass the merge gate.
+
+    `shortfall` is what a DM would have to add right now to clear the list.
+    """
+    from app.modules.imports.premint import drawer_pool_status
+    from app.core.database import SessionLocal
+    from starlette.concurrency import run_in_threadpool
+
+    def _read() -> dict:
+        s = SessionLocal()
+        try:
+            return drawer_pool_status(s)
+        finally:
+            s.close()
+    return await run_in_threadpool(_read)
+
+
+@router.post("/pool", status_code=201)
+async def grow_pool(
+    body: schemas.DrawerPoolGrow,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(
+        UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER)),
+):
+    """Add N NEW PERMANENT barcoded drawers, then drain the waiting list into them.
+
+    DM/MD ONLY, and it is one-way: the pool never shrinks. Each new drawer is
+    permanent from this moment and recycles like any other once its piece ships.
+
+    Print the returned codes — a drawer with no printed label cannot be scanned,
+    so it is a drawer that does not exist as far as the floor is concerned.
+    """
+    from app.modules.imports.premint import (allocate_waiting_pieces,
+                                             drawer_pool_status,
+                                             grow_drawer_pool)
+    from app.core.database import SessionLocal
+    from starlette.concurrency import run_in_threadpool
+
+    def _grow() -> dict:
+        s = SessionLocal()
+        try:
+            grown = grow_drawer_pool(s, body.add)
+            # Growing the pool with pieces still waiting and NOT merging them
+            # would leave the DM staring at empty drawers beside a waiting list.
+            drained = allocate_waiting_pieces(s)
+            s.commit()
+            return {**grown, **drained, "status": drawer_pool_status(s)}
+        except Exception:
+            s.rollback()
+            raise
+        finally:
+            s.close()
+
+    result = await run_in_threadpool(_grow)
+    result["by"] = user.name
+    return result
+
+
+@router.post("/allocate-waiting")
+async def allocate_waiting(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_SENDERS),
+):
+    """Merge drawer-less pieces into whatever drawers are currently free.
+
+    The waiting list drains itself as garments ship (PACKAGE_EXPORT recycles a
+    drawer to WAITING), but nothing merges the next waiting piece into it
+    automatically. This is that step — safe to call repeatedly and a no-op when
+    there is nothing to place.
+    """
+    from app.modules.imports.premint import (allocate_waiting_pieces,
+                                             drawer_pool_status)
+    from app.core.database import SessionLocal
+    from starlette.concurrency import run_in_threadpool
+
+    def _run() -> dict:
+        s = SessionLocal()
+        try:
+            out = allocate_waiting_pieces(s)
+            s.commit()
+            return {**out, "status": drawer_pool_status(s)}
+        except Exception:
+            s.rollback()
+            raise
+        finally:
+            s.close()
+    return await run_in_threadpool(_run)
+
+
+@router.get("/by-code/{code}", response_model=schemas.DrawerDetail)
+async def drawer_by_code(
+    code: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_FLOOR),
+):
+    """One drawer by its printed/scanned code — the store search box's target.
+
+    Same body as GET /drawers/{drawer_id}, so the row the search returns opens
+    exactly like a row clicked in the list (change-list item 6: the Send button
+    lives inside the drawer as well as outside it)."""
+    drawer = await DrawerService(db).get_by_code(code)
+    if drawer is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"No drawer with code '{code}'.")
+    return await DrawerService(db).drawer_detail(drawer.id)
 
 
 @router.post("/send", response_model=schemas.DrawerSendResult)
@@ -207,9 +362,7 @@ async def transition(
     drawer_id: uuid.UUID,
     body: schemas.DrawerTransition,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(
-        UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR,
-        UserRole.STORE_MANAGER)),
+    user: User = Depends(_SENDERS),
 ):
     """DEPRECATED — kept working for one release so a frontend mid-deploy does not
     break (the same courtesy /production/cutting was given).

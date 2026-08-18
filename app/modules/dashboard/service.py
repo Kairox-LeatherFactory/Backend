@@ -38,7 +38,7 @@ from app.modules.dashboard.schemas import (
     LiningProductionKPIs, MaterialCutterTrace, OrderProgressRow, OrderStageRow,
     OrderTracking, PieceConsumptionRow, PieceStageHistoryRow, PieceTrace,
     ProductionKPIs, StageBlock, StageDailyRow, StagePipelineNode,
-    StitchingCurrentStyle, StitchingDashboard,
+    StageProgressRow, StitchingCurrentStyle, StitchingDashboard,
     StitchingEmployeeRow, StitchingKPIs, StitchingStyleStage, StoreCurrentStyleRow,
     StoreDashboard, StoreHandoff, StoreKPIs, StyleStageRow, StyleTracking,
     UpcomingPieceRow,
@@ -197,10 +197,56 @@ def _material_type(leather_in: bool, lining_in: bool) -> str:
     return "NONE"
 
 
+# The stages the shared per-stage block reports, in pipeline order. Both cut
+# entries are included: LINING_CUTTING is off the linear leather chain but it is
+# real work on real pieces, and a progress table that omitted it would show a
+# lining-heavy order as further along than it is.
+_PROGRESS_STAGES: tuple[str, ...] = (
+    ProductionStage.LEATHER_CUTTING.value, ProductionStage.LINING_CUTTING.value,
+    ProductionStage.FUSING.value, ProductionStage.PASTING.value,
+    ProductionStage.LINE_STITCHING.value, ProductionStage.SHELL_STITCHING.value,
+    ProductionStage.FINAL_FINISH.value, ProductionStage.FINAL_INSPECTION.value,
+    ProductionStage.PACKAGE_EXPORT.value,
+)
+
+
 class DashboardService:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.repo = DashboardRepository(db)
+
+    # ══════════════════════════════ THE SHARED PER-STAGE PROGRESS BLOCK
+    async def _stage_progress(
+        self, *, client_scope: uuid.UUID | None,
+        order_id: uuid.UUID | None = None, style_id: uuid.UUID | None = None,
+    ) -> list[StageProgressRow]:
+        """`completed` / `pending` for every stage, on one denominator.
+
+        Attached to all four dashboards from this ONE method. The four screens
+        previously each derived their own stage arithmetic, which is how the
+        stitching page's "pending" (queue depth against the upstream stage) and
+        the DM page's "pending" (balance against the order) came to be different
+        numbers under the same word.
+
+        completed = a logged event AT that stage — a stage only counts when its
+                    own work is done.
+        pending   = total in scope − completed, i.e. the balance. A piece cut and
+                    waiting for fusing is pending at fusing.
+        """
+        total = await self.repo.scope_total_pieces(
+            client_scope=client_scope, order_id=order_id, style_id=style_id)
+        done = await self.repo.stage_progress(
+            stages=_PROGRESS_STAGES, client_scope=client_scope,
+            order_id=order_id, style_id=style_id)
+        return [
+            StageProgressRow(
+                stage=code, label=_FUNNEL_LABELS.get(
+                    code, code.replace("_", " ").title()),
+                total=total, completed=done.get(code, 0),
+                pending=max(total - done.get(code, 0), 0),
+                pct=round(done.get(code, 0) / total * 100, 1) if total else 0.0)
+            for code in _PROGRESS_STAGES
+        ]
 
     # ══════════════════════════════════════════════════════════════ CUTTING
     async def overview(
@@ -219,6 +265,8 @@ class DashboardService:
         lots = await self._leather_lots()
         progress = await self._order_progress(client_scope=client_scope, today=today)
         daily = await self._daily(client_scope=client_scope)
+        stage_progress = await self._stage_progress(
+            client_scope=client_scope, order_id=order_id)
 
         return CuttingDashboard(
             meta=DashboardMeta(generated_for=today, scope=_scope_label(client_scope),
@@ -233,6 +281,7 @@ class DashboardService:
             leather_lots=lots,
             order_progress=progress,
             daily_production=daily,
+            stage_progress=stage_progress,
         )
 
     async def _current_order(
@@ -389,6 +438,8 @@ class DashboardService:
         daily = await self._lining_daily(client_scope=client_scope)
         upcoming = await self._lining_upcoming(
             client_scope=client_scope, order_id=order_id)
+        stage_progress = await self._stage_progress(
+            client_scope=client_scope, order_id=order_id)
 
         return LiningDashboard(
             meta=DashboardMeta(generated_for=today, scope=_scope_label(client_scope),
@@ -404,6 +455,7 @@ class DashboardService:
             order_progress=progress,
             daily_production=daily,
             upcoming=upcoming,
+            stage_progress=stage_progress,
         )
 
     async def _lining_employees(
@@ -517,6 +569,23 @@ class DashboardService:
             _FINAL: ov(_SHELL),
         }
 
+        # THE DENOMINATOR FOR "PENDING" IS THE SCOPE TOTAL, NOT THE QUEUE.
+        #
+        # `pending_pieces` was `total_received − completed`, i.e. how many pieces
+        # the UPSTREAM stage had finished and this one had not. That is queue
+        # depth, and it is the right number for finding a bottleneck — which is
+        # why it is still available as `total_received − completed_pieces`, and
+        # why the DM pipeline still computes it that way for the bottleneck.
+        #
+        # It is the wrong number for "pending", because every stage then measures
+        # against a different denominator: a stage nobody has reached yet reports
+        # 0 pending (nothing is queued for it) while most of the order is in fact
+        # outstanding there. The floor's meaning, and the one asked for, is the
+        # BALANCE — of all the pieces in this order, how many still have to go
+        # through this stage. A piece cut and awaiting fusing is pending at
+        # fusing under that reading, and is invisible under the other.
+        scope_total = await self.repo.scope_total_pieces(
+            client_scope=client_scope, order_id=order_id)
         stages: list[StageBlock] = []
         for code in _STAGE_ORDER:
             label, section = _STAGE_META[code]
@@ -525,7 +594,9 @@ class DashboardService:
             stages.append(StageBlock(
                 stage=code, label=label, section=section,
                 total_received=rec, assigned_pieces=rec, completed_pieces=completed,
-                pending_pieces=max(rec - completed, 0),
+                total_pieces=scope_total,
+                pending_pieces=max(scope_total - completed, 0),
+                queue_pieces=max(rec - completed, 0),
                 rework_pieces=rework.get(code, 0),
                 daily_completed=td(code)))
 
@@ -552,12 +623,15 @@ class DashboardService:
             ready_for_stitching=line_ready,
             store_pending=handoff["holding"] + handoff["received"])
 
+        stage_progress = await self._stage_progress(
+            client_scope=client_scope, order_id=order_id)
+
         return StitchingDashboard(
             meta=DashboardMeta(generated_for=today, scope=_scope_label(client_scope),
                                unsupported=_STITCHING_UNSUPPORTED),
             kpis=kpis, stages=stages, store_handoff=store_handoff,
             current_style=cur_style, employees=employees, daily_production=daily,
-            order_progress=progress)
+            order_progress=progress, stage_progress=stage_progress)
 
     async def _stitching_current_style(
         self, *, client_scope, order_id,
@@ -937,13 +1011,15 @@ class DashboardService:
             drawers_sent=skpis["drawers_sent"],
             drawers_received=handoff["received"])
 
+        stage_progress = await self._stage_progress(client_scope=client_scope)
+
         return DirectManagerDashboard(
             meta=DashboardMeta(generated_for=today, scope=_scope_label(client_scope),
                                unsupported=self._DM_UNSUPPORTED),
             overall=overall, departments=departments, pipeline=pipeline,
             bottleneck=bottleneck, production_rate=rate, quality=quality,
             attendance=attendance, store=store, order_progress=progress,
-            daily_production=daily)
+            daily_production=daily, stage_progress=stage_progress)
 
     async def dm_order_tracking(
         self, *, order_id: uuid.UUID, client_scope: uuid.UUID | None = None,

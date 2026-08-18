@@ -20,6 +20,21 @@ DRAWERS RECYCLE.
     sended → (piece ships) → waiting. `code`/`seq` never change; `current_piece_id`
     and `state` move over the drawer's life. When PACKAGE_EXPORT logs, production
     calls release() and the drawer returns to WAITING for the next piece.
+
+COMPLETENESS NO LONGER TRUSTS THE STORED FLAG (the lining-bypass bug)
+    `complete = leather_in and (lining_in or not piece.needs_lining)` was reading
+    a flag written once at breakdown upload and never recomputed — and on the live
+    database that flag is wrong for most of an order. A KNIT jacket flagged False
+    was therefore "complete" on its leather alone: it received, it sent, the merge
+    gate opened, and the garment ran the whole chain to PACKAGE_EXPORT having
+    never had a lining cut.
+
+    Every completeness decision in this file now goes through
+    `_needs_lining()` / `_needs_lining_map()`, which resolve the requirement from
+    ALL available evidence (core/lining_rules.py) — the stored flag, the SKU's
+    lining colour, the style name, and any lining-cut event already on the piece.
+    Signals can only ADD a requirement, never remove one, so nothing that was
+    genuinely leather-only stops being sendable.
 ================================================================================
 """
 import uuid
@@ -31,8 +46,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import (BarcodeAuditAction, BarcodeType, DrawerPart,
                             DrawerState, ProductionStage)
+from app.core.lining_rules import (LINING_COLOUR_FIELDS, lining_required,
+                                   lining_required_sql, why_lining_required)
 from app.core.store_display import holding_label
 from app.modules.barcode.models import BarcodeRegistry, Drawer
+from app.modules.clients.models import SKU, Style
 from app.modules.production.models import Piece
 
 
@@ -40,6 +58,91 @@ from app.modules.production.models import Piece
 class DrawerService:
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    # ── THE LINING QUESTION — one answer, used by every gate in this file ─────
+    async def _needs_lining(self, piece: Piece | None) -> tuple[bool, str | None]:
+        """(does this garment take a lining?, why) for ONE piece.
+
+        Returns (True, reason) so a rejection can say WHY a garment whose stored
+        flag reads False is still waiting for a lining — otherwise the gate looks
+        to the operator like a system fault rather than an instruction.
+
+        A piece with no row at all (a drawer holding nothing) is treated as
+        needing a lining: unknown must never be the permissive answer at a gate
+        that releases garments into the line.
+        """
+        if piece is None:
+            return True, "the drawer holds no identified garment"
+
+        row = (await self.db.execute(
+            select(SKU, Style)
+            .join(Style, Style.id == SKU.style_id)
+            .where(SKU.id == piece.sku_id)
+        )).first()
+        sku, style = (row[0], row[1]) if row else (None, None)
+
+        has_cut = await self._has_lining_cut(piece.id)
+        colours = tuple(getattr(sku, f, None) for f in LINING_COLOUR_FIELDS) \
+            if sku is not None else ()
+        kwargs = {
+            "stored_flag": bool(getattr(piece, "needs_lining", False)),
+            "style_name": getattr(style, "name", None),
+            "style_article": getattr(style, "article", None),
+            "colour_values": colours,
+            "has_lining_cut_event": has_cut,
+            # The DM's release-time declaration, when the style has one. It
+            # decides in both directions and is the ONLY term that can answer
+            # False over a positive signal — see core/lining_rules.py.
+            "explicit": getattr(style, "needs_lining", None) if style is not None
+                        else None,
+        }
+        return lining_required(**kwargs), why_lining_required(**kwargs)
+
+    async def _has_lining_cut(self, piece_id: uuid.UUID) -> bool:
+        """Has a LINING_CUTTING event ever been logged for this piece?
+
+        The one signal that settles the question outright in the affirmative:
+        somebody physically cut a lining for this garment, so the garment has one,
+        whatever the breakdown sheet said.
+        """
+        from app.modules.production.repository import ProductionRepository
+        done = await ProductionRepository(self.db).completed_stage_codes(piece_id)
+        return ProductionStage.LINING_CUTTING.value in done
+
+    async def _needs_lining_map(self, piece_ids: list[uuid.UUID]) -> dict:
+        """Batch form of _needs_lining — {piece_id: bool}. Two queries, not N+1.
+
+        Used by list_labels, which renders up to 2000 drawers and must apply
+        exactly the predicate send_batch enforces.
+        """
+        ids = [p for p in dict.fromkeys(piece_ids) if p is not None]
+        if not ids:
+            return {}
+
+        rows = (await self.db.execute(
+            select(Piece.id, Piece.needs_lining, SKU.knit_color, SKU.nylon_color,
+                   Style.name, Style.article, Style.needs_lining)
+            .join(SKU, SKU.id == Piece.sku_id)
+            .join(Style, Style.id == SKU.style_id)
+            .where(Piece.id.in_(ids))
+        )).all()
+
+        from app.modules.production.models import Operation, ProductionEvent
+        cut_ids = set((await self.db.execute(
+            select(ProductionEvent.piece_id)
+            .join(Operation, Operation.id == ProductionEvent.operation_id)
+            .where(ProductionEvent.piece_id.in_(ids),
+                   func.upper(Operation.code) == ProductionStage.LINING_CUTTING.value)
+            .distinct()
+        )).scalars())
+
+        out = {pid: True for pid in ids}    # unknown piece → assume lined (safe)
+        for pid, flag, knit, nylon, sname, sarticle, declared in rows:
+            out[pid] = lining_required(
+                stored_flag=bool(flag), style_name=sname, style_article=sarticle,
+                colour_values=(knit, nylon), has_lining_cut_event=pid in cut_ids,
+                explicit=declared)
+        return out
 
     async def repo_commit(self) -> None:
         """Single commit seam for this module (F71). The drawers module has no
@@ -68,6 +171,8 @@ class DrawerService:
                           seq_from: int | None = None, seq_to: int | None = None,
                           has_piece: bool | None = None,
                           sendable: bool | None = None,
+                          code: str | None = None,
+                          sort: str = "seq",
                           limit: int = 500, offset: int = 0) -> dict:
         """Every drawer + its barcode + the garment inside it — the Drawers List.
 
@@ -84,9 +189,33 @@ class DrawerService:
         another type can never supply the code, and drawer codes are unique in the
         registry (uq_barcode_code) so one drawer yields at most one row.
         """
+        # The lining requirement as SQL — the SAME rule the Python pass below and
+        # send_batch apply, so the send queue can never offer a row the server
+        # then refuses. It omits the lining-cut-event term (that needs a
+        # correlated EXISTS); the Python pass adds it, and it can only ever ADD a
+        # requirement, so the SQL is safe in the one direction that matters.
+        lining_sql = lining_required_sql(
+            Piece.needs_lining, Style.name, Style.article,
+            (SKU.knit_color, SKU.nylon_color),
+            explicit_col=Style.needs_lining)
+
+        def _joins(stmt):
+            """Piece → SKU → Style, all OUTER: a drawer holding nothing must still
+            appear in a list that claims to be every drawer."""
+            return (stmt
+                    .outerjoin(Piece, Piece.id == Drawer.current_piece_id)
+                    .outerjoin(SKU, SKU.id == Piece.sku_id)
+                    .outerjoin(Style, Style.id == SKU.style_id))
+
         def _filtered(stmt):
             if state:
                 stmt = stmt.where(Drawer.state == state)
+            if code:
+                # Bug-list item 6: search by drawer code. Case-insensitive
+                # CONTAINS, not equality — the operator types "42" or "drw-004"
+                # off a label, not the exact zero-padded code.
+                stmt = stmt.where(func.upper(Drawer.code).like(
+                    f"%{code.strip().upper()}%"))
             if seq_from is not None:
                 stmt = stmt.where(Drawer.seq >= seq_from)
             if seq_to is not None:
@@ -100,15 +229,12 @@ class DrawerService:
             # queue the server disagrees with.
             #
             # That predicate is COMPLETENESS, not state == RECEIVED: a drawer
-            # holding both parts auto-receives, but a leather-only piece never
-            # gets a second part and so never reaches RECEIVED, while still being
-            # complete and perfectly sendable. Expressed in SQL here because the
-            # filter has to run in the database, with the same
-            # "leather AND (lining OR needs no lining)" shape used in Python below.
+            # holding both parts auto-receives, but a genuinely leather-only piece
+            # never gets a second part and so never reaches RECEIVED, while still
+            # being complete and perfectly sendable.
             complete_sql = and_(
                 Drawer.leather_in.is_(True),
-                or_(Drawer.lining_in.is_(True),
-                    Piece.needs_lining.is_(False)),
+                or_(Drawer.lining_in.is_(True), ~lining_sql),
             )
             not_gone = Drawer.state != DrawerState.SENDED.value
             if sendable is True:
@@ -117,18 +243,34 @@ class DrawerService:
                 stmt = stmt.where(~and_(complete_sql, not_gone))
             return stmt
 
-        # The COUNT joins Piece as well. `sendable` filters on Piece.needs_lining,
-        # so without the join here the count would reference a table it never
+        # The COUNT carries the same joins. `sendable` filters on style/SKU
+        # columns, so without them the count would reference tables it never
         # selected from — a cartesian product on Postgres and a different total
         # from the page it is supposed to be counting.
         total = int(await self.db.scalar(
-            _filtered(
-                select(func.count(Drawer.id))
-                .select_from(Drawer)
-                .outerjoin(Piece, Piece.id == Drawer.current_piece_id))) or 0)
+            _filtered(_joins(
+                select(func.count(Drawer.id)).select_from(Drawer)))) or 0)
+
+        # ── ORDERING: the print sheet and the store screen want opposite ends ──
+        # `seq` is the PRINT order — DRW-0001…DRW-0430, which is how labels are
+        # produced and how an operator finds a physical drawer in the rack.
+        #
+        # `recent` is the STORE SCREEN order (change-list item 6: "show the 10
+        # latest drawers"). "Latest" means most recently ACTED ON, not most
+        # recently created: a 200-drawer pool is bootstrapped in one transaction,
+        # so created_at is effectively constant across it and would return the
+        # same arbitrary ten every time. The activity timestamp is therefore the
+        # newest of sended_at / received_at, falling back to created_at for a
+        # drawer nothing has happened to yet.
+        activity = func.coalesce(Drawer.sended_at, Drawer.received_at,
+                                 Drawer.created_at)
+        if (sort or "seq").strip().lower() == "recent":
+            order_by = (activity.desc(), Drawer.seq.asc())
+        else:
+            order_by = (Drawer.seq.asc(),)
 
         rows = (await self.db.execute(
-            _filtered(
+            _filtered(_joins(
                 select(Drawer, BarcodeRegistry.id, BarcodeRegistry.code,
                        BarcodeRegistry.caption, BarcodeRegistry.status,
                        Piece.code.label("piece_code"), Piece.seq.label("piece_seq"),
@@ -137,17 +279,21 @@ class DrawerService:
                     BarcodeRegistry,
                     and_(BarcodeRegistry.drawer_id == Drawer.id,
                          BarcodeRegistry.type == BarcodeType.DRAWER.value))
-                .outerjoin(Piece, Piece.id == Drawer.current_piece_id)
-            )
-            .order_by(Drawer.seq.asc())
+            ))
+            .order_by(*order_by)
             .limit(limit).offset(offset)
         )).all()
+
+        # ONE batch resolution of the lining question for the whole page, adding
+        # the lining-cut-event term the SQL could not carry.
+        lining_map = await self._needs_lining_map(
+            [r[0].current_piece_id for r in rows])
 
         items = []
         for r in rows:
             drawer = r[0]
-            needs_lining = (True if r.needs_lining is None
-                            else bool(r.needs_lining))
+            pid = drawer.current_piece_id
+            needs_lining = lining_map.get(pid, True) if pid else True
             complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
             items.append({
                 "drawer_id": drawer.id,
@@ -158,6 +304,9 @@ class DrawerService:
                                          lining_in=drawer.lining_in),
                 "leather_in": bool(drawer.leather_in),
                 "lining_in": bool(drawer.lining_in),
+                # EFFECTIVE, not the stored flag — see _needs_lining_map.
+                "needs_lining": bool(needs_lining),
+                "lining_reason": None,
                 "complete": bool(complete),
                 # bug #13: the garment in the drawer, so the list is choosable.
                 "piece_id": drawer.current_piece_id,
@@ -281,7 +430,7 @@ class DrawerService:
         else:
             drawer.lining_in = True
 
-        needs_lining = bool(getattr(piece, "needs_lining", True))
+        needs_lining, lining_reason = await self._needs_lining(piece)
         complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
         # THE STATE NAMES WHAT IS PHYSICALLY IN THE DRAWER — nothing else.
         #   leather only            → HOLDING_LEATHER
@@ -355,6 +504,10 @@ class DrawerService:
         return {
             "drawer_code": drawer.code, "piece_code": piece.code,
             "state": drawer.state, "needs_lining": needs_lining,
+            # Why a lining is expected when the stored flag says otherwise. The
+            # operator must be able to tell "the system is confused" apart from
+            # "go and find the knit lining for this jacket".
+            "lining_reason": lining_reason,
             "awaiting": awaiting, "ready_for_received": complete,
             "part": part.value,
             # True when the bucket was decided by the server, not the operator —
@@ -406,7 +559,7 @@ class DrawerService:
         if not drawer:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Drawer not found.")
         piece = await self.db.get(Piece, drawer.current_piece_id) if drawer.current_piece_id else None
-        needs_lining = bool(getattr(piece, "needs_lining", True)) if piece else True
+        needs_lining, lining_reason = await self._needs_lining(piece)
         t = transition.upper()
 
         if t == "RECEIVED":
@@ -421,9 +574,11 @@ class DrawerService:
             complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
             if not complete:
                 missing = "lining" if needs_lining and not drawer.lining_in else "leather"
+                because = f" ({lining_reason})" if missing == "lining" and lining_reason else ""
                 raise HTTPException(
                     status.HTTP_409_CONFLICT,
-                    f"Cannot RECEIVE: still awaiting {missing} in drawer {drawer.code}.")
+                    f"Cannot RECEIVE: still awaiting {missing} in drawer "
+                    f"{drawer.code}{because}.")
             drawer.state = DrawerState.RECEIVED.value
             drawer.received_at = datetime.now(timezone.utc)
             action = BarcodeAuditAction.DRAWER_RECEIVED.value
@@ -466,12 +621,15 @@ class DrawerService:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Drawer not found.")
 
         piece_card = None
-        needs_lining = True
+        needs_lining, lining_reason = True, None
         if drawer.current_piece_id:
             from app.modules.barcode.service import BarcodeService
             piece_card = await BarcodeService(self.db)._piece_payload(
                 drawer.current_piece_id)
-            needs_lining = bool(piece_card.get("needs_lining", True))
+            # NOT piece_card["needs_lining"] — that is the stored flag, which is
+            # exactly what let a lined garment through the gate.
+            piece = await self.db.get(Piece, drawer.current_piece_id)
+            needs_lining, lining_reason = await self._needs_lining(piece)
 
         complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
         awaiting = []
@@ -488,6 +646,7 @@ class DrawerService:
             "leather_in": bool(drawer.leather_in),
             "lining_in": bool(drawer.lining_in),
             "needs_lining": needs_lining,
+            "lining_reason": lining_reason,
             "awaiting": awaiting,
             "complete": bool(complete),
             "received_at": drawer.received_at,
@@ -575,16 +734,26 @@ class DrawerService:
             # everything its garment needs? It SUBSUMES the old check — a drawer
             # only ever reached RECEIVED by being complete — so nothing that used
             # to be sendable stops being sendable, and the stranded case is freed.
-            needs_lining = bool(getattr(piece, "needs_lining", True)) if piece else True
+            #
+            # THIS IS THE GATE THE LINING BYPASS WALKED THROUGH. `needs_lining`
+            # here used to be the stored flag; a KNIT jacket flagged False was
+            # "complete" on its leather alone, so SEND set the drawer to SENDED,
+            # the production merge gate read SENDED and opened, and the garment
+            # ran to PACKAGE_EXPORT with no lining ever cut. _needs_lining()
+            # resolves the requirement from every signal instead.
+            needs_lining, lining_reason = await self._needs_lining(piece)
             complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
             if not complete:
                 missing = "leather" if not drawer.leather_in else "lining"
+                because = (f" This garment takes a lining because {lining_reason}."
+                           if missing == "lining" and lining_reason else "")
                 not_ready.append({
                     "drawer_id": str(did), "drawer_code": drawer.code,
                     "state": drawer.state,
+                    "needs_lining": bool(needs_lining),
                     "reason": (
                         f"Drawer {drawer.code} is still awaiting its {missing}. "
-                        f"Scan the missing part into it before sending.")})
+                        f"Scan the missing part into it before sending.{because}")})
                 continue
 
             drawer.state = DrawerState.SENDED.value

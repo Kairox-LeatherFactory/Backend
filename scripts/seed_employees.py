@@ -96,7 +96,7 @@ def digits(phone) -> str | None:
 # Add a new login by adding one dict here; nothing else changes.
 # ══════════════════════════════════════════════════════════════════════════
 STAFF = [
-    dict(name="PUNDARI PRASAD BARAL", designation="SECURITY",          salary=23100, phone="7302905187", email=None,                     role=UserRole.SECURITY),
+    dict(name="Ramesh", designation="SECURITY",          salary=23100, phone="7302905187", email=None,                     role=UserRole.SECURITY),
     dict(name="Abirami Arivazhagan",  designation="HR",                salary=25000, phone="8072753495", email="admin@ptexports.com",    role=UserRole.HR),
     dict(name="JAYASRI",              designation="HR",                salary=16000, phone="7603956073", email=None,                     role=UserRole.HR),
     dict(name="MOHAMMED TANZEEL",     designation="MERCHANDISER",      salary=32500, phone="9941346771", email="tanzeel@ptexports.com",  role=UserRole.MERCHANDISER),

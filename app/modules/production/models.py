@@ -78,7 +78,7 @@ class Piece(Base, UUIDMixin, TimestampMixin):
     seq: Mapped[int] = mapped_column(Integer)
     sku_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("sku.id"), index=True)
     current_operation_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("operation.id")
+        GUID(), ForeignKey("operation.id", ondelete="SET NULL")
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -90,8 +90,20 @@ class Piece(Base, UUIDMixin, TimestampMixin):
     # The drawer this piece is merged to (assigned at upload). One piece = one
     # drawer; the FK on the piece makes "which drawer holds this piece" a single
     # indexed read. FK target created by the barcode migration (drawer table).
+    #
+    # ondelete="SET NULL" — THIS IS ONE HALF OF THE piece↔drawer CYCLE.
+    # `drawer.current_piece_id` points back here, so without a delete rule the
+    # two rows are mutually undeletable: Postgres refuses to remove the drawer
+    # (a piece still references it) and refuses to remove the piece (a drawer
+    # still references it), with no order that resolves. SET NULL is not a
+    # concession — it is already a legal, handled state: a piece with
+    # `drawer_id IS NULL` is the "waiting for a drawer" case the pool allocator
+    # and analytics both speak about (see imports/premint.allocate_waiting_pieces
+    # and the `no_drawer` store bucket). Deleting a drawer returns its piece to
+    # that waiting list rather than deleting the garment's record.
     drawer_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("drawer.id"), nullable=True, index=True)
+        GUID(), ForeignKey("drawer.id", ondelete="SET NULL"),
+        nullable=True, index=True)
 
 
 class ProductionEvent(Base, UUIDMixin, TimestampMixin):
@@ -104,14 +116,14 @@ class ProductionEvent(Base, UUIDMixin, TimestampMixin):
     qty: Mapped[int] = mapped_column(Integer, default=1)     # always 1 for a piece event
     entered_by: Mapped[str | None] = mapped_column(String(120))
     piece_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("piece.id"), index=True
+        GUID(), ForeignKey("piece.id", ondelete="SET NULL"), index=True
     )
 
     # ── barcode-feature columns (cut stages only; null elsewhere) ────────────
     leather_lot_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("material_lot.id"), nullable=True, index=True)
+        GUID(), ForeignKey("material_lot.id", ondelete="SET NULL"), nullable=True, index=True)
     lining_lot_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("material_lot.id"), nullable=True, index=True)
+        GUID(), ForeignKey("material_lot.id", ondelete="SET NULL"), nullable=True, index=True)
     # dcm for leather, mtrs for lining — the lot's uom disambiguates.
     consumption_qty: Mapped[Decimal | None] = mapped_column(Numeric(12, 3))
 

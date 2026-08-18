@@ -179,6 +179,204 @@ class MaterialService:
         }
         return " · ".join(str(values[f]) for f in fields if values.get(f))
 
+    # ══════════════════════════════════════════════════════════════════════
+    # LOT CRUD (change-list item 7) — the stock-management screen
+    # ══════════════════════════════════════════════════════════════════════
+    # Create already existed; read, correct and retire did not, so a typo in an
+    # article code was permanent and a lot entered against the wrong material
+    # could only be worked around by creating another. These three close it.
+    #
+    # WHAT IS DELIBERATELY *NOT* EDITABLE: category, subtype, and on_hand.
+    #   • category/subtype decide the lot's UOM and its whole required-field set
+    #     (MATERIAL_SPEC). Changing LEATHER→LINING would leave a lot measured in
+    #     dcm claiming to be metres, and every cut event already pointing at it
+    #     would silently re-denominate. That is a delete-and-recreate, not a patch.
+    #   • on_hand is a LEDGER, not a field. It moves by receiving (POST
+    #     /materials/receive) and by cutting (the two cut stages decrement it).
+    #     A PATCH that set it directly would make the ledger and the stock
+    #     disagree with no record of who changed what. Corrections go through
+    #     `adjust` below, which is the same movement with a reason attached.
+
+    async def get_lot(self, lot_id: uuid.UUID) -> dict:
+        """One lot: identity, its three stock numbers, and its barcode."""
+        lot = await self.repo.get_lot(lot_id)
+        if not lot:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Material lot not found.")
+        reserved = await self.repo.active_reserved(lot_id)
+        barcodes = await self.repo.barcodes_by_lot([lot_id])
+        spec = resolve_spec(lot.category, lot.subtype) or {}
+        return {
+            "lot_id": lot.id, "barcode": barcodes.get(lot.id),
+            "category": lot.category, "subtype": lot.subtype,
+            "article": lot.article, "colour": lot.colour,
+            "thickness": lot.thickness, "size": lot.size, "uom": lot.uom,
+            "on_hand": float(lot.on_hand or 0),
+            "reserved": float(reserved),
+            "available": float((lot.on_hand or Decimal(0)) - reserved),
+            "attributes": dict(lot.attributes or {}),
+            "supplier_id": lot.supplier_id,
+            "is_active": bool(lot.is_active),
+            # Echoed so the edit form can render exactly this material's fields
+            # without a second call to /materials/spec.
+            "editable_fields": sorted(
+                {"article", "colour", "supplier_id"} | set(spec.get("filters", []))
+                - {"article", "colour"}),
+            "required_attributes": sorted(spec.get("required", [])),
+        }
+
+    async def update_lot(self, lot_id: uuid.UUID, patch: dict) -> dict:
+        """Correct a lot's IDENTITY — article, colour, thickness, size, supplier.
+
+        Re-runs the duplicate check: renaming a lot onto another lot's exact spec
+        would give the picker two rows a cutting manager cannot tell apart and
+        split one material's stock across both, which is the thing the
+        one-lot-per-spec rule exists to prevent.
+        """
+        lot = await self.repo.get_lot(lot_id)
+        if not lot:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Material lot not found.")
+
+        for blocked in ("category", "subtype", "on_hand", "uom"):
+            if patch.get(blocked) is not None:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    f"'{blocked}' cannot be patched — see the note in "
+                    f"MaterialService. Change stock with POST /materials/receive "
+                    f"or PATCH /materials/lots/{{id}}/adjust; change the material "
+                    f"class by retiring this lot and creating the right one.")
+
+        fields = {k: v for k, v in patch.items()
+                  if k in {"article", "colour", "thickness", "size", "supplier_id"}
+                  and v is not None}
+        if not fields:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "Nothing to update.")
+
+        candidate = {
+            "article": fields.get("article", lot.article),
+            "colour": fields.get("colour", lot.colour),
+            "thickness": fields.get("thickness", lot.thickness),
+            "size": fields.get("size", lot.size),
+        }
+        dup = await self.repo.find_duplicate_lot(
+            category=lot.category, subtype=lot.subtype, **candidate)
+        if dup is not None and dup.id != lot.id:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Another lot already holds that spec ({float(dup.on_hand)} "
+                f"{dup.uom} on hand). Material is one lot per spec — merge into "
+                f"it with POST /materials/receive lot_id={dup.id} instead.")
+
+        for key, value in fields.items():
+            setattr(lot, key, value)
+        # Keep the JSON attributes in step with the promoted columns, or the
+        # printed caption and the filter columns start telling different stories.
+        attrs = dict(lot.attributes or {})
+        for key in ("thickness", "size"):
+            if key in fields:
+                attrs[key] = fields[key]
+        lot.attributes = attrs
+        await self.db.commit()
+        await self.db.refresh(lot)
+        return await self.get_lot(lot_id)
+
+    async def adjust_lot(self, lot_id: uuid.UUID, *, delta: float, reason: str,
+                         actor_id=None) -> dict:
+        """A STOCK CORRECTION — a counted difference, with a reason, audited.
+
+        This is the honest form of "edit the quantity": it records a MOVEMENT
+        (+/- delta) rather than overwriting the number, so the ledger still adds
+        up and someone can ask later why 40 dcm disappeared.
+
+        Refuses to take on_hand below what is already reserved: that stock is
+        committed to a cut, and a negative available is not a number anyone can
+        act on.
+        """
+        lot = await self.repo.get_lot(lot_id)
+        if not lot:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Material lot not found.")
+        reason = (reason or "").strip()
+        if len(reason) < 3:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Give a reason for a stock adjustment — it is the only record of "
+                "why the counted stock and the system disagreed.")
+        try:
+            change = Decimal(str(delta))
+        except Exception:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "delta must be a number.")
+        if change == 0:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "delta must be non-zero.")
+
+        reserved = await self.repo.active_reserved(lot_id)
+        new_on_hand = (lot.on_hand or Decimal(0)) + change
+        if new_on_hand < 0:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"That would take {lot.article} to {new_on_hand} {lot.uom}. "
+                f"Stock cannot go negative.")
+        if new_on_hand < reserved:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"{float(reserved)} {lot.uom} of {lot.article} is reserved for a "
+                f"cut. Adjusting to {float(new_on_hand)} would leave less stock "
+                f"than is already committed. Release the reservation first.")
+
+        before = float(lot.on_hand or 0)
+        lot.on_hand = new_on_hand
+        await self._audit(actor_id, "MATERIAL_STOCK_ADJUSTED", lot.id, {
+            "article": lot.article, "colour": lot.colour, "uom": lot.uom,
+            "before": before, "delta": float(change), "after": float(new_on_hand),
+            "reason": reason})
+        await self.db.commit()
+        return await self.get_lot(lot_id)
+
+    async def retire_lot(self, lot_id: uuid.UUID, *, actor_id=None) -> dict:
+        """DEACTIVATE a lot and retire its barcode. Never a hard delete.
+
+        Same principle as an employee leaving (CLAUDE.md §6): you remove the
+        SCANNABLE CODE, never the record. Cut events point at this lot — deleting
+        the row would orphan the consumption history that the costing and the
+        traceability screens are built on.
+
+        Refuses while stock is reserved: that stock is promised to a cut which
+        would then have nothing to consume.
+        """
+        lot = await self.repo.get_lot(lot_id)
+        if not lot:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Material lot not found.")
+        reserved = await self.repo.active_reserved(lot_id)
+        if reserved > 0:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"{float(reserved)} {lot.uom} of {lot.article} is still reserved "
+                f"for a cut. Release the reservation before retiring the lot.")
+
+        lot.is_active = False
+        retired = await self.barcodes.retire_lot_code_nocommit(lot.id)
+        await self._audit(actor_id, "MATERIAL_LOT_RETIRED", lot.id, {
+            "article": lot.article, "colour": lot.colour,
+            "on_hand_at_retirement": float(lot.on_hand or 0),
+            "barcode_retired": retired})
+        await self.db.commit()
+        return {
+            "lot_id": lot.id, "is_active": False, "barcode_retired": retired,
+            "on_hand": float(lot.on_hand or 0),
+            "history_preserved": True,
+            "message": (f"{lot.article} is retired. Its barcode no longer scans "
+                        f"(410 Gone) and it is hidden from the lot picker; every "
+                        f"cut recorded against it is untouched."),
+        }
+
+    async def _audit(self, actor_id, action: str, entity_id, after: dict) -> None:
+        from datetime import datetime, timezone
+        from app.core.models import AuditLog
+        self.db.add(AuditLog(
+            actor_user_id=actor_id, action=action, entity_type="material_lot",
+            entity_id=entity_id, after=after, at=datetime.now(timezone.utc)))
+
     # ── stock check ──────────────────────────────────────────────────────────
     async def available_for_lot(self, lot_id: uuid.UUID) -> float:
         lot = await self.repo.get_lot(lot_id)

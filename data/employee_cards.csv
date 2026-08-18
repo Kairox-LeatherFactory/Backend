@@ -1,12 +1,12 @@
 name,designation,wage_type,barcode,role
-Abirami Arivazhagan,HR,monthly,EMP-000001,hr
-JAYASRI,HR,monthly,EMP-000002,hr
-Zahoor Ahmed C,MANAGER,monthly,EMP-000003,direct_manager
-K Niyamathullah,STITCHING_MANAGER,monthly,EMP-000004,stitching_manager
-Apsar Khan J,STITCHING_MANAGER,monthly,EMP-000005,stitching_manager
-Ragavan L,CUTTING_MANAGER,monthly,EMP-000006,cutting_manager
-Pakkar Tanveer,MANAGING_DIRECTOR,monthly,EMP-000007,managing_director
-Pakkar Mufaiz,MANAGING_DIRECTOR,monthly,EMP-000008,managing_director
+Ramesh,SECURITY,monthly,EMP-000001,security
+Abirami Arivazhagan,HR,monthly,EMP-000002,hr
+JAYASRI,HR,monthly,EMP-000003,hr
+MOHAMMED TANZEEL,MERCHANDISER,monthly,EMP-000004,merchandiser
+Zahoor Ahmed C,MANAGER,monthly,EMP-000005,direct_manager
+K Niyamathullah,STITCHING_MANAGER,monthly,EMP-000006,stitching_manager
+Apsar Khan J,STITCHING_MANAGER,monthly,EMP-000007,stitching_manager
+Ragavan L,CUTTING_MANAGER,monthly,EMP-000008,cutting_manager
 A Raheena,TAILOR,monthly,EMP-000009,
 GOMATHI,TAILOR,monthly,EMP-000010,
 H S VIJAYA,TRIMMER,monthly,EMP-000011,

@@ -85,13 +85,13 @@ class SpecSheet(Base, UUIDMixin, TimestampMixin):
     # Nullable: a submission-anchored spec sheet is parsed BEFORE a client is resolved
     # (the client comes off the order sheet at MD approval). Mirrors Bom.client_id.
     client_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("client.id"), nullable=True, index=True
+        GUID(), ForeignKey("client.id", ondelete="SET NULL"), nullable=True, index=True
     )
     style_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("style.id"), nullable=True, index=True
+        GUID(), ForeignKey("style.id", ondelete="SET NULL"), nullable=True, index=True
     )
     source_document_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("document.id"), nullable=True, index=True
+        GUID(), ForeignKey("document.id", ondelete="SET NULL"), nullable=True, index=True
     )
     spec_type: Mapped[str] = mapped_column(String(30))          # SpecType value
     season: Mapped[str | None] = mapped_column(String(20))
@@ -122,17 +122,17 @@ class Bom(Base, UUIDMixin, TimestampMixin):
     # never collide. submission_id is the opaque link back to procurement (FK by table
     # name only — no Python import, no layering break).
     submission_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("submission.id"), nullable=True, index=True
+        GUID(), ForeignKey("submission.id", ondelete="SET NULL"), nullable=True, index=True
     )
     style_signature: Mapped[str | None] = mapped_column(String(120), index=True)
     client_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("client.id"), nullable=True, index=True
+        GUID(), ForeignKey("client.id", ondelete="SET NULL"), nullable=True, index=True
     )
     client_order_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("client_order.id"), nullable=True, index=True
+        GUID(), ForeignKey("client_order.id", ondelete="SET NULL"), nullable=True, index=True
     )
     style_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("style.id"), nullable=True, index=True
+        GUID(), ForeignKey("style.id", ondelete="SET NULL"), nullable=True, index=True
     )
     # The parsed order-sheet snapshot (order_number, refs, per-size qty, colour lines,
     # season, price). What _resolve_identity + breakdown materialisation read while
@@ -145,29 +145,29 @@ class Bom(Base, UUIDMixin, TimestampMixin):
     order_qty: Mapped[int | None] = mapped_column(Integer)
     revision: Mapped[int] = mapped_column(Integer, default=1)
     approved_by: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("app_user.id"), nullable=True
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
     )
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rejected_by: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("app_user.id"), nullable=True
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
     )
     rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rejection_reason: Mapped[str | None] = mapped_column(Text)
     export_document_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("document.id"), nullable=True
+        GUID(), ForeignKey("document.id", ondelete="SET NULL"), nullable=True
     )
     exported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cutting_confirmed_by: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("app_user.id"), nullable=True
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
     )
     cutting_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     garment_type_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("garment_type.id"), nullable=True
+        GUID(), ForeignKey("garment_type.id", ondelete="SET NULL"), nullable=True
     )
     dcm_base_size: Mapped[str | None] = mapped_column(String(10))
     source_document_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("document.id"), nullable=True
+        GUID(), ForeignKey("document.id", ondelete="SET NULL"), nullable=True
     )
     items: Mapped[list["BomItem"]] = relationship(
         back_populates="bom", cascade="all, delete-orphan"
@@ -222,7 +222,7 @@ class PomDictionary(Base, UUIDMixin, TimestampMixin):
     source_term: Mapped[str] = mapped_column(String(160), index=True)
     pom_code: Mapped[str] = mapped_column(String(40), index=True)
     garment_type_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("garment_type.id"), nullable=True
+        GUID(), ForeignKey("garment_type.id", ondelete="SET NULL"), nullable=True
     )
     weight: Mapped[int] = mapped_column(Integer, default=1)
 
@@ -260,22 +260,22 @@ class StyleConsumptionTemplate(Base, UUIDMixin, TimestampMixin):
     # Nullable: the DCM memory can be back-filled from a still-client-less BOM (the
     # client is resolved at approval). Mirrors Bom.client_id / SpecSheet.client_id.
     client_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("client.id"), nullable=True, index=True
+        GUID(), ForeignKey("client.id", ondelete="SET NULL"), nullable=True, index=True
     )
     style_signature: Mapped[str] = mapped_column(String(120), index=True)
     garment_type_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("garment_type.id"), nullable=True
+        GUID(), ForeignKey("garment_type.id", ondelete="SET NULL"), nullable=True
     )
     material_category: Mapped[str] = mapped_column(String(20))
     size: Mapped[str] = mapped_column(String(10))
     dcm_value: Mapped[Decimal] = mapped_column(Numeric(12, 3))
     uom: Mapped[str | None] = mapped_column(String(20))
     confirmed_by: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("app_user.id"), nullable=True
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
     )
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     source_bom_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("bom.id"), nullable=True
+        GUID(), ForeignKey("bom.id", ondelete="SET NULL"), nullable=True
     )
 
 class PatternReference(Base, UUIDMixin, TimestampMixin):
@@ -285,18 +285,18 @@ class PatternReference(Base, UUIDMixin, TimestampMixin):
     # Nullable: a pattern reference can be recorded on a still-client-less BOM (the
     # client is resolved at approval). Mirrors Bom.client_id / SpecSheet.client_id.
     client_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("client.id"), nullable=True, index=True
+        GUID(), ForeignKey("client.id", ondelete="SET NULL"), nullable=True, index=True
     )
     spec_sheet_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("spec_sheet.id"), nullable=True, index=True
+        GUID(), ForeignKey("spec_sheet.id", ondelete="SET NULL"), nullable=True, index=True
     )
     pattern_code: Mapped[str] = mapped_column(String(120), index=True)
     base_size: Mapped[str | None] = mapped_column(String(10))
     resolved_style_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("style.id"), nullable=True
+        GUID(), ForeignKey("style.id", ondelete="SET NULL"), nullable=True
     )
     resolved_template_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("style_consumption_template.id"), nullable=True
+        GUID(), ForeignKey("style_consumption_template.id", ondelete="SET NULL"), nullable=True
     )
     notes: Mapped[str | None] = mapped_column(Text)
     
@@ -324,7 +324,7 @@ class SpecExtraction(Base, UUIDMixin, TimestampMixin):
     # The source upload this came from. Nullable for the rare flow where the
     # bytes were passed in without a corresponding Document row (tests).
     source_document_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("document.id"), nullable=True, index=True,
+        GUID(), ForeignKey("document.id", ondelete="SET NULL"), nullable=True, index=True,
     )
     # Engine that produced raw_payload. Matches ExtractedSpec.extracted_by
     # ('gemini' | 'groq' | 'manual'). Kept as String(20) for back-compat with old
@@ -352,7 +352,7 @@ class SpecExtraction(Base, UUIDMixin, TimestampMixin):
     # (and pom_measurement). Two columns so we can audit "extracted but not
     # promoted" (orphan) and "extracted AND promoted to X" cases.
     promoted_to_spec_sheet_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("spec_sheet.id"), nullable=True, index=True,
+        GUID(), ForeignKey("spec_sheet.id", ondelete="SET NULL"), nullable=True, index=True,
     )
     promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -365,7 +365,7 @@ class OrderExtraction(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "order_extraction"
 
     source_document_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("document.id"), nullable=True, index=True,
+        GUID(), ForeignKey("document.id", ondelete="SET NULL"), nullable=True, index=True,
     )
     extracted_by: Mapped[str] = mapped_column(String(20), index=True)
     confidence_overall: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
@@ -386,7 +386,7 @@ class OrderExtraction(Base, UUIDMixin, TimestampMixin):
     # Promoted into a Bom (and eventually a client_order at MD approval — but
     # bom.id is the immediate target). NULL until the service writes the Bom row.
     promoted_to_bom_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("bom.id"), nullable=True, index=True,
+        GUID(), ForeignKey("bom.id", ondelete="SET NULL"), nullable=True, index=True,
     )
     promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     
@@ -406,14 +406,14 @@ class PatternExtraction(Base, UUIDMixin, TimestampMixin):
     # Nullable client_id mirrors Bom/SpecSheet — a pattern can land before the client is
     # resolved (client comes off the order sheet at approval).
     client_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("client.id"), nullable=True, index=True
+        GUID(), ForeignKey("client.id", ondelete="SET NULL"), nullable=True, index=True
     )
     style_signature: Mapped[str] = mapped_column(String(120), index=True)
     garment_type_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("garment_type.id"), nullable=True
+        GUID(), ForeignKey("garment_type.id", ondelete="SET NULL"), nullable=True
     )
     source_document_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("document.id"), nullable=True
+        GUID(), ForeignKey("document.id", ondelete="SET NULL"), nullable=True
     )
     # parser provenance / detected facts
     source_system: Mapped[str | None] = mapped_column(String(20))     # creacompo|lectra|gerber|unknown
@@ -464,10 +464,10 @@ class DxfYieldObservation(Base, UUIDMixin, TimestampMixin):
     confirmed_dcm_sf: Mapped[Decimal] = mapped_column(Numeric(12, 3))
     implied_yield: Mapped[Decimal] = mapped_column(Numeric(6, 3))
     source_bom_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("bom.id"), nullable=True
+        GUID(), ForeignKey("bom.id", ondelete="SET NULL"), nullable=True
     )
     confirmed_by: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("app_user.id"), nullable=True
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
     )
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -536,7 +536,7 @@ class OrderStyle(Base, UUIDMixin, TimestampMixin):
                          name="uq_order_style_submission_style"),
     )
     client_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("client.id"), nullable=True, index=True)
+        GUID(), ForeignKey("client.id", ondelete="SET NULL"), nullable=True, index=True)
     submission_id: Mapped[uuid.UUID] = mapped_column(
         GUID(), ForeignKey("submission.id"), nullable=False, index=True)
     style_signature: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
@@ -548,14 +548,15 @@ class OrderStyle(Base, UUIDMixin, TimestampMixin):
 
     # Guided matching state — suggestions are pre-filled, confirmation is human.
     spec_document_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("document.id"))
+        GUID(), ForeignKey("document.id", ondelete="SET NULL"))
     spec_match_status: Mapped[str] = mapped_column(       # suggested|confirmed|none
         String(20), nullable=False, default="none")
     pattern_reference_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("pattern_reference.id"))
+        GUID(), ForeignKey("pattern_reference.id", ondelete="SET NULL"))
     dxf_match_status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="none")
-    bom_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("bom.id"))
+    bom_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("bom.id", ondelete="SET NULL"))
 
     colors: Mapped[list["OrderStyleColor"]] = relationship(
         back_populates="style", cascade="all, delete-orphan",

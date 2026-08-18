@@ -57,8 +57,8 @@ class User(Base, UUIDMixin, TimestampMixin):
 
     # Optional links to the role-specific record this login represents.
     employee_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("employee.id"), nullable=True, index=True
+        GUID(), ForeignKey("employee.id", ondelete="SET NULL"), nullable=True, index=True
     )
     client_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("client.id"), nullable=True, index=True
+        GUID(), ForeignKey("client.id", ondelete="SET NULL"), nullable=True, index=True
     )

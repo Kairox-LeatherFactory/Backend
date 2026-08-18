@@ -40,6 +40,9 @@ class StoreScanResult(BaseModel):
     piece_code: str
     state: str
     needs_lining: bool
+    # Set when the effective lining requirement disagrees with the stored flag —
+    # e.g. "its style name contains 'KNIT'". Display it verbatim beside `awaiting`.
+    lining_reason: str | None = None
     awaiting: list[str]
     ready_for_received: bool
     part: str                       # the bucket used (LEATHER | LINING)
@@ -110,6 +113,11 @@ class DrawerLabel(BaseModel):
     holding: str          # HOLDING LEATHER | HOLDING LINING | HOLDING BOTH | EMPTY
     leather_in: bool = False
     lining_in: bool = False
+    # The EFFECTIVE lining requirement, resolved from every signal — not the
+    # stored piece.needs_lining flag, which is written once at upload and is
+    # wrong for most of a live order. See core/lining_rules.py.
+    needs_lining: bool = True
+    lining_reason: str | None = None   # why, when it disagrees with the flag
     complete: bool = False
     piece_id: uuid.UUID | None = None
     piece_code: str | None = None
@@ -119,6 +127,15 @@ class DrawerLabel(BaseModel):
     barcode: str | None = None
     caption: str | None = None
     barcode_status: str | None = None
+
+
+class DrawerPoolGrow(BaseModel):
+    """Add N permanent drawers to the pool. DM/MD only; one-way.
+
+    Capped at 1000 per call — not a technical limit but a typo guard: `add: 20000`
+    would mint 20,000 permanent barcoded drawers and there is no un-mint.
+    """
+    add: int = Field(ge=1, le=1000)
 
 
 class DrawerLabelPage(BaseModel):
@@ -136,7 +153,8 @@ class DrawerDetail(BaseModel):
     holding: str
     leather_in: bool
     lining_in: bool
-    needs_lining: bool
+    needs_lining: bool           # EFFECTIVE requirement, not the stored flag
+    lining_reason: str | None = None
     awaiting: list[str] = Field(default_factory=list)
     complete: bool
     received_at: datetime | None = None
