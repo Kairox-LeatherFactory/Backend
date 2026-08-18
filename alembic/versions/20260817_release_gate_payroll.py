@@ -61,7 +61,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260817_release_payroll"
-down_revision = "20260813_drop_drawer_sent_to"
+down_revision = "20260813_drop_sent_to"
 branch_labels = None
 depends_on = None
 

@@ -102,13 +102,13 @@ class PurchaseOrder(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "purchase_order"
     po_number: Mapped[str | None] = mapped_column(String(40), index=True)   # allocated AT SEND (§2d)
     supplier_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("supplier.id"), nullable=True, index=True
+        GUID(), ForeignKey("supplier.id", ondelete="SET NULL"), nullable=True, index=True
     )
     bom_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("bom.id"), nullable=True, index=True
+        GUID(), ForeignKey("bom.id", ondelete="SET NULL"), nullable=True, index=True
     )
     client_order_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("client_order.id"), nullable=True, index=True
+        GUID(), ForeignKey("client_order.id", ondelete="SET NULL"), nullable=True, index=True
     )
     buyer_ref: Mapped[str | None] = mapped_column(String(120))
     issue_date: Mapped[date | None] = mapped_column(Date)
@@ -129,20 +129,20 @@ class PurchaseOrder(Base, UUIDMixin, TimestampMixin):
     candidates: Mapped[dict | None] = mapped_column(JSON_VARIANT)
     revision: Mapped[int] = mapped_column(Integer, default=1)
     created_by: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("app_user.id"), nullable=True
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
     )
     approved_by: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("app_user.id"), nullable=True
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
     )
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rejected_by: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("app_user.id"), nullable=True
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
     )
     rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rejection_reason: Mapped[str | None] = mapped_column(Text)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     pdf_document_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("document.id"), nullable=True
+        GUID(), ForeignKey("document.id", ondelete="SET NULL"), nullable=True
     )
     tracking_token: Mapped[str | None] = mapped_column(String(64), index=True)
     first_opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -174,10 +174,10 @@ class PoItem(Base, UUIDMixin, TimestampMixin):
     unit_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     inventory_item_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("inventory_item.id"), nullable=True
+        GUID(), ForeignKey("inventory_item.id", ondelete="SET NULL"), nullable=True
     )
     bom_item_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("bom_item.id"), nullable=True
+        GUID(), ForeignKey("bom_item.id", ondelete="SET NULL"), nullable=True
     )
     purchase_order: Mapped["PurchaseOrder"] = relationship(back_populates="items")
 
@@ -208,7 +208,7 @@ class PoTrackingEvent(Base, UUIDMixin, TimestampMixin):
         GUID(), ForeignKey("purchase_order.id"), index=True
     )
     po_response_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("po_response.id"), nullable=True
+        GUID(), ForeignKey("po_response.id", ondelete="SET NULL"), nullable=True
     )
     tracking_token: Mapped[str | None] = mapped_column(String(64), index=True)
     event_type: Mapped[str] = mapped_column(String(20))         # POTrackingEventType value
@@ -232,7 +232,7 @@ class ProductionTracking(Base, UUIDMixin, TimestampMixin):
     )
     style_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("style.id"), index=True)
     bom_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("bom.id"), nullable=True
+        GUID(), ForeignKey("bom.id", ondelete="SET NULL"), nullable=True
     )
     status: Mapped[str] = mapped_column(
         String(30), default=ProductionTrackingStatus.AWAITING_BOM.value, index=True
@@ -242,5 +242,5 @@ class ProductionTracking(Base, UUIDMixin, TimestampMixin):
     material_ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_by: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("app_user.id"), nullable=True
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
     )

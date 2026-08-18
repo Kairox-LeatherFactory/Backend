@@ -99,7 +99,7 @@ class Document(Base, UUIDMixin, TimestampMixin):
     so the link runs the other way (`client_order.source_document_id` → document)."""
     __tablename__ = "document"
     client_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("client.id"), nullable=True, index=True
+        GUID(), ForeignKey("client.id", ondelete="SET NULL"), nullable=True, index=True
     )
     kind: Mapped[str] = mapped_column(String(30), index=True)   # DocumentKind value
     filename: Mapped[str] = mapped_column(String(300))
@@ -108,10 +108,17 @@ class Document(Base, UUIDMixin, TimestampMixin):
     sha256: Mapped[str] = mapped_column(String(64), index=True)
     page_count: Mapped[int | None] = mapped_column(Integer)
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("app_user.id"), nullable=True, index=True
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # The membership FK that puts this document in a submission. It closes the
+    # document → submission → client_order → document cycle, so it needs a delete
+    # rule of its own: without one a submission is undeletable for as long as any
+    # document ever uploaded into it survives. SET NULL, never CASCADE — a
+    # document is an artifact with its own sha256, storage_url and extraction
+    # history, and deleting the intake folder must not destroy the files.
     submission_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("submission.id"), nullable=True, index=True
+        GUID(), ForeignKey("submission.id", ondelete="SET NULL"),
+        nullable=True, index=True
     )
     size_bytes: Mapped[int | None] = mapped_column(Integer)
     validation_status: Mapped[str] = mapped_column(
@@ -136,10 +143,10 @@ class Notification(Base, UUIDMixin, TimestampMixin):
     escalation. `supplier_id` FKs the supplier_po table by name."""
     __tablename__ = "notification"
     recipient_user_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("app_user.id"), nullable=True, index=True
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True, index=True
     )
     supplier_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("supplier.id"), nullable=True, index=True
+        GUID(), ForeignKey("supplier.id", ondelete="SET NULL"), nullable=True, index=True
     )
     channel: Mapped[str] = mapped_column(String(20))            # NotificationChannel value
     type: Mapped[str] = mapped_column(String(40), index=True)   # NotificationType value
@@ -151,8 +158,12 @@ class Notification(Base, UUIDMixin, TimestampMixin):
     scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Self-referential escalation chain → a one-table cycle, undeletable without
+    # a rule. SET NULL: purging an old first-notice must not cascade-delete the
+    # escalations that were sent because nobody answered it; the escalation just
+    # becomes chain-less.
     parent_notification_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("notification.id"), nullable=True
+        GUID(), ForeignKey("notification.id", ondelete="SET NULL"), nullable=True
     )
 
 
@@ -162,7 +173,7 @@ class AuditLog(Base, UUIDMixin, TimestampMixin):
     domain row keeps its own approved_by/at + revision."""
     __tablename__ = "audit_log"
     actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("app_user.id"), nullable=True, index=True
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True, index=True
     )
     action: Mapped[str] = mapped_column(String(40), index=True)  # BOM_APPROVE, PO_SEND, ...
     entity_type: Mapped[str | None] = mapped_column(String(60), index=True)
