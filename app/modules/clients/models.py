@@ -121,6 +121,19 @@ class Style(Base, UUIDMixin, TimestampMixin):
     )
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     released_by: Mapped[str | None] = mapped_column(String(120))
+    # ── THE LINING DECLARATION (asked at release) ───────────────────────────
+    # "Does this style take a lining?", answered by the DM at the moment they
+    # release the style into production, and authoritative from then on — see
+    # core/lining_rules.py for why an explicit answer outranks the name/colour
+    # inference in BOTH directions.
+    #
+    # NULLABLE, AND THE NULL IS LOAD-BEARING: it means NOBODY HAS BEEN ASKED,
+    # which is true of every style released before this column existed. Those
+    # fall back to inference and keep exactly the verdict they have today, so
+    # adding this column changes nothing retroactively for garments already on
+    # the floor. A three-state answer needs three states; a NOT NULL default of
+    # False would silently declare 1,400 live pieces leather-only.
+    needs_lining: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     client_order: Mapped["ClientOrder"] = relationship(back_populates="styles")
     skus: Mapped[list["SKU"]] = relationship(
         back_populates="style", cascade="all, delete-orphan"

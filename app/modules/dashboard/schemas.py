@@ -42,6 +42,30 @@ class DashboardMeta(BaseModel):
 # ══════════════════════════════════════════════════════════════════════════
 # CUTTING  (original — preserved verbatim)
 # ══════════════════════════════════════════════════════════════════════════
+class StageProgressRow(BaseModel):
+    """One stage of the pipeline: how many pieces have cleared it, out of how many.
+
+    THE SHARED PER-STAGE BLOCK. Every dashboard (cutting, lining, stitching, DM)
+    returns this same list under `stage_progress`, computed by one repository
+    method, so the four screens cannot report different numbers for the same
+    stage — which they could while each derived its own.
+
+    completed  distinct pieces with a logged event AT THIS STAGE. A stage counts
+               only when its own work is done: a piece that has finished cutting
+               and is waiting for fusing has NOT completed fusing.
+    pending    the BALANCE — total in scope minus completed. The piece above is
+               pending at fusing, which is what the floor means by pending.
+    total      Σ SKU.qty_ordered in scope. The SAME denominator for every stage,
+               so the rows reconcile against the order quantity.
+    """
+    stage: str
+    label: str
+    total: int
+    completed: int
+    pending: int
+    pct: float
+
+
 class ProductionKPIs(BaseModel):
     total_order_pieces: int
     minted_pieces: int
@@ -49,6 +73,7 @@ class ProductionKPIs(BaseModel):
     assigned_today: int
     completed_today: int
     overall_completed: int
+    cut_today: int = 0                # distinct pieces cut today
     pending_today: int
     overall_pending: int
     damage_pieces: int = 0            # unsupported → 0 (see meta)
@@ -178,6 +203,7 @@ class CuttingDashboard(BaseModel):
     leather_lots: list[LeatherLotRow]
     order_progress: list[OrderProgressRow]
     daily_production: list[DailyRow]
+    stage_progress: list[StageProgressRow] = []
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -284,6 +310,7 @@ class LiningDashboard(BaseModel):
     order_progress: list[OrderProgressRow]
     daily_production: list[DailyRow]
     upcoming: list[UpcomingPieceRow]
+    stage_progress: list[StageProgressRow] = []
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -305,14 +332,30 @@ class StitchingKPIs(BaseModel):
 
 
 class StageBlock(BaseModel):
-    """One post-cut stitching stage (Pasting/Fusing/Line/Shell/Final)."""
+    """One post-cut stitching stage (Pasting/Fusing/Line/Shell/Final).
+
+    TWO DIFFERENT "NOT DONE YET" NUMBERS, BOTH REAL, DELIBERATELY BOTH PRESENT:
+
+      pending_pieces  the BALANCE — total_pieces − completed_pieces. How much of
+                      this order still has to pass through this stage. This is
+                      what the floor means by pending, and it reconciles across
+                      every stage because they share one denominator.
+      queue_pieces    the QUEUE — total_received − completed_pieces. How much
+                      work is physically waiting in front of this stage right
+                      now. This is the bottleneck measure.
+
+    They answer different questions and used to share the name `pending_pieces`,
+    which is why the stitching page and the DM page disagreed.
+    """
     stage: str
     label: str
     section: str                      # PRE_STORE | POST_STORE
     total_received: int               # predecessor complete (or merge-gate for line)
     assigned_pieces: int              # pool handed to the stage (== received)
     completed_pieces: int             # distinct pieces with an event at this stage
-    pending_pieces: int               # received − completed
+    total_pieces: int = 0             # Σ qty_ordered in scope — the denominator
+    pending_pieces: int               # BALANCE: total_pieces − completed
+    queue_pieces: int = 0             # QUEUE: received − completed (bottleneck)
     damage_pieces: int = 0            # unsupported → 0
     rework_pieces: int
     daily_target: int | None = None   # no target column (flagged)
@@ -380,6 +423,7 @@ class StitchingDashboard(BaseModel):
     employees: list[StitchingEmployeeRow]
     daily_production: list[StageDailyRow]
     order_progress: list[OrderProgressRow]
+    stage_progress: list[StageProgressRow] = []
 
 
 class PieceStageHistoryRow(BaseModel):
@@ -649,6 +693,7 @@ class DirectManagerDashboard(BaseModel):
     store: DMStore
     order_progress: list[OrderProgressRow]
     daily_production: list[DailyRow]
+    stage_progress: list[StageProgressRow] = []
 
 
 class OrderStageRow(BaseModel):

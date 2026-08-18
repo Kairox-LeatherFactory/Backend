@@ -80,6 +80,11 @@ async def list_drawers(
     has_piece: bool | None = Query(None, description="Only drawers holding a garment."),
     sendable: bool | None = Query(
         None, description="Only drawers ready to send — the send queue."),
+    sort: str = Query(
+        "seq", pattern="^(seq|recent)$",
+        description="seq = drawer order, for printing labels and finding a "
+                    "drawer in the rack (default). recent = most recently "
+                    "acted-on first, for the store screen's latest-drawers view."),
     limit: int = Query(500, ge=1, le=2000),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -96,8 +101,12 @@ async def list_drawers(
     needs, waiting for someone to tick and send them.
 
     `code=` is the store screen's search box (change-list item 6): the production
-    view shows the 10 most recent drawers (`limit=10`) and everything else is
-    reached by typing a code, rather than paging 430 rows.
+    view shows the 10 most recent drawers (`?sort=recent&limit=10`) and
+    everything else is reached by typing a code, rather than paging 430 rows.
+    `sort=recent` orders by the newest of sended_at / received_at / created_at —
+    "latest" has to mean most recently WORKED ON, because a bootstrapped pool
+    shares one creation timestamp and would otherwise return the same arbitrary
+    ten rows forever.
 
     `needs_lining` on every row is the EFFECTIVE requirement, resolved from the
     style/SKU/cut history — NOT the stored `piece.needs_lining` flag, which is
@@ -119,7 +128,8 @@ async def list_drawers(
                             "seq_from must not exceed seq_to.")
     return await DrawerService(db).list_labels(
         state=state, code=code, seq_from=seq_from, seq_to=seq_to,
-        has_piece=has_piece, sendable=sendable, limit=limit, offset=offset)
+        has_piece=has_piece, sendable=sendable, sort=sort,
+        limit=limit, offset=offset)
 
 
 # ── THE DRAWER POOL (change-list item 9) ─────────────────────────────────────

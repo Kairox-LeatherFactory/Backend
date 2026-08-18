@@ -90,6 +90,11 @@ class DrawerService:
             "style_article": getattr(style, "article", None),
             "colour_values": colours,
             "has_lining_cut_event": has_cut,
+            # The DM's release-time declaration, when the style has one. It
+            # decides in both directions and is the ONLY term that can answer
+            # False over a positive signal — see core/lining_rules.py.
+            "explicit": getattr(style, "needs_lining", None) if style is not None
+                        else None,
         }
         return lining_required(**kwargs), why_lining_required(**kwargs)
 
@@ -116,7 +121,7 @@ class DrawerService:
 
         rows = (await self.db.execute(
             select(Piece.id, Piece.needs_lining, SKU.knit_color, SKU.nylon_color,
-                   Style.name, Style.article)
+                   Style.name, Style.article, Style.needs_lining)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
             .where(Piece.id.in_(ids))
@@ -132,10 +137,11 @@ class DrawerService:
         )).scalars())
 
         out = {pid: True for pid in ids}    # unknown piece → assume lined (safe)
-        for pid, flag, knit, nylon, sname, sarticle in rows:
+        for pid, flag, knit, nylon, sname, sarticle, declared in rows:
             out[pid] = lining_required(
                 stored_flag=bool(flag), style_name=sname, style_article=sarticle,
-                colour_values=(knit, nylon), has_lining_cut_event=pid in cut_ids)
+                colour_values=(knit, nylon), has_lining_cut_event=pid in cut_ids,
+                explicit=declared)
         return out
 
     async def repo_commit(self) -> None:
@@ -166,6 +172,7 @@ class DrawerService:
                           has_piece: bool | None = None,
                           sendable: bool | None = None,
                           code: str | None = None,
+                          sort: str = "seq",
                           limit: int = 500, offset: int = 0) -> dict:
         """Every drawer + its barcode + the garment inside it — the Drawers List.
 
@@ -189,7 +196,8 @@ class DrawerService:
         # requirement, so the SQL is safe in the one direction that matters.
         lining_sql = lining_required_sql(
             Piece.needs_lining, Style.name, Style.article,
-            (SKU.knit_color, SKU.nylon_color))
+            (SKU.knit_color, SKU.nylon_color),
+            explicit_col=Style.needs_lining)
 
         def _joins(stmt):
             """Piece → SKU → Style, all OUTER: a drawer holding nothing must still
@@ -243,6 +251,24 @@ class DrawerService:
             _filtered(_joins(
                 select(func.count(Drawer.id)).select_from(Drawer)))) or 0)
 
+        # ── ORDERING: the print sheet and the store screen want opposite ends ──
+        # `seq` is the PRINT order — DRW-0001…DRW-0430, which is how labels are
+        # produced and how an operator finds a physical drawer in the rack.
+        #
+        # `recent` is the STORE SCREEN order (change-list item 6: "show the 10
+        # latest drawers"). "Latest" means most recently ACTED ON, not most
+        # recently created: a 200-drawer pool is bootstrapped in one transaction,
+        # so created_at is effectively constant across it and would return the
+        # same arbitrary ten every time. The activity timestamp is therefore the
+        # newest of sended_at / received_at, falling back to created_at for a
+        # drawer nothing has happened to yet.
+        activity = func.coalesce(Drawer.sended_at, Drawer.received_at,
+                                 Drawer.created_at)
+        if (sort or "seq").strip().lower() == "recent":
+            order_by = (activity.desc(), Drawer.seq.asc())
+        else:
+            order_by = (Drawer.seq.asc(),)
+
         rows = (await self.db.execute(
             _filtered(_joins(
                 select(Drawer, BarcodeRegistry.id, BarcodeRegistry.code,
@@ -254,7 +280,7 @@ class DrawerService:
                     and_(BarcodeRegistry.drawer_id == Drawer.id,
                          BarcodeRegistry.type == BarcodeType.DRAWER.value))
             ))
-            .order_by(Drawer.seq.asc())
+            .order_by(*order_by)
             .limit(limit).offset(offset)
         )).all()
 

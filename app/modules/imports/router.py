@@ -26,8 +26,10 @@ import tempfile
 import uuid
 import zipfile
 
+from decimal import Decimal
+
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import SessionLocal, get_db
@@ -150,24 +152,120 @@ async def commit_import(
 # ══════════════════════════════════════════════════════════════════════════════
 # THE BREAKDOWN TABLE + THE RELEASE GATE  (change-list item 9)
 # ══════════════════════════════════════════════════════════════════════════════
+class StylePatch(BaseModel):
+    """Correct the STYLE behind a DRAFT breakdown line.
+
+    Everything the breakdown sheet can get wrong about a style, not just the two
+    fields the table happened to display. The sheets are hand-made from a client
+    order and a spec sheet, so the article number, the thickness, the season and
+    the unit price are all routinely wrong on the first pass — and re-uploading
+    the whole workbook to fix a thickness is not a correction workflow.
+
+    `needs_lining` is here as well as on release: a DM who realises mid-review
+    that a style has no lining should be able to say so without waiting for the
+    release dialog.
+    """
+    name: str | None = None
+    article: str | None = None
+    code: str | None = None
+    gender: str | None = None
+    label: str | None = None
+    thickness: str | None = None
+    season: str | None = None
+    customer_ref: str | None = None
+    internal_ref: str | None = None
+    unit_price: Decimal | None = Field(default=None, ge=0)
+    currency: str | None = Field(default=None, max_length=3)
+    needs_lining: bool | None = None
+
+
 class SkuPatch(BaseModel):
-    """Correct one DRAFT breakdown line. Send only the fields you are changing."""
+    """Correct one DRAFT breakdown line — and, optionally, its parent style.
+
+    ONE CALL FOR ONE SCREEN. The breakdown table shows a style and its SKUs
+    together in one editable row group, so editing them took two round trips to
+    two endpoints with two failure modes: a 200 on the SKU and a 409 on the style
+    left the operator's screen half-saved with no way to tell which half. Both
+    now move, or neither does.
+    """
     qty_ordered: int | None = Field(default=None, ge=0)
     color_name: str | None = None
     color_code: str | None = None
     size: str | None = None
     knit_color: str | None = None
     nylon_color: str | None = None
+    # The parent style's fields, nested so there is no ambiguity about which
+    # entity a bare `name` or `code` belongs to.
+    style: StylePatch | None = None
+
+
+class ReleaseStyle(BaseModel):
+    """One style the DM is releasing, and their answer to the lining question."""
+    style_id: uuid.UUID
+    # null is NOT "no" — it means unanswered, and release will reject it. Three
+    # states, because "we never asked" is a real and different state from "no".
+    needs_lining: bool | None = None
 
 
 class ReleaseRequest(BaseModel):
-    """The DM names the styles that go to production."""
-    style_ids: list[uuid.UUID] = Field(min_length=1)
+    """The DM names the styles that go to production, and declares their lining.
+
+    TWO SHAPES, ONE OF THEM DEPRECATED.
+
+        styles: [{style_id, needs_lining}]     ← the contract. Every style
+                                                 carries its lining answer.
+        style_ids: [uuid, ...]                 ← DEPRECATED. Releases on the
+                                                 name/colour INFERENCE instead of
+                                                 a human answer.
+
+    The legacy field is accepted for ONE RELEASE so a frontend mid-deploy is not
+    broken by this change, and it is not a silent fallback: every style released
+    that way comes back with `lining_declared: false`, and the response message
+    names them. Remove it once the release screen sends `styles`.
+    """
+    styles: list[ReleaseStyle] | None = None
+    style_ids: list[uuid.UUID] | None = Field(
+        default=None, deprecated=True,
+        description="DEPRECATED — use `styles` so each style carries its lining "
+                    "answer. Releasing through this field falls back to inferring "
+                    "the lining requirement from the style name.")
     # Growing the drawer pool is a separate, explicit decision (POST /drawers/pool).
     # Setting this true releases AND mints the shortfall of drawers in one step —
     # offered because a DM who has just seen "230 pieces have no drawer" should not
     # have to make two calls, but it is opt-in so the pool never grows by accident.
     grow_drawer_pool: bool = False
+
+    @model_validator(mode="after")
+    def _one_shape(self):
+        if not self.styles and not self.style_ids:
+            raise ValueError(
+                "Send `styles: [{style_id, needs_lining}]` — one entry per style "
+                "you are releasing, each declaring whether that style takes a "
+                "lining.")
+        if self.styles and self.style_ids:
+            raise ValueError(
+                "Send either `styles` (preferred) or the deprecated `style_ids`, "
+                "not both — two lists of styles in one request have no defined "
+                "precedence.")
+        if self.styles:
+            unanswered = [str(s.style_id) for s in self.styles
+                          if s.needs_lining is None]
+            if unanswered:
+                raise ValueError(
+                    f"{len(unanswered)} style(s) have no lining answer: "
+                    f"{', '.join(unanswered)}. Set `needs_lining` true or false on "
+                    f"every style — it decides whether the garment needs a lining "
+                    f"cut and whether its drawer must hold both parts before "
+                    f"line-stitching, and it cannot be changed after release.")
+        return self
+
+    def resolved(self) -> tuple[list[uuid.UUID], dict[uuid.UUID, bool]]:
+        """(style ids in order, {style_id: lining answer}). One reading of the
+        body, so the router and the service cannot interpret it differently."""
+        if self.styles:
+            return ([s.style_id for s in self.styles],
+                    {s.style_id: bool(s.needs_lining) for s in self.styles})
+        return (list(self.style_ids or []), {})
 
 
 class StyleIdsRequest(BaseModel):
@@ -201,15 +299,42 @@ async def patch_breakdown_sku(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_DM),
 ):
-    """Correct one DRAFT line — quantity, colour or size.
+    """Correct one DRAFT line — the SKU, its parent style, or both at once.
+
+    Send `style: {...}` alongside the SKU fields to edit the style in the same
+    call; the two are written in ONE transaction, so the screen can never end up
+    with the colour saved and the article not.
 
     409 once the style is RELEASED: its pieces carry printed barcodes, and
     rewriting the breakdown behind a garment already on the floor is how a
     factory loses traceability. To make MORE of a released style, raise the
     quantity on a new upload and release again — release tops up.
     """
+    patch = body.model_dump(exclude_unset=True)
+    style_patch = patch.pop("style", None)
     return await BreakdownService(db).update_sku(
-        sku_id, body.model_dump(exclude_unset=True))
+        sku_id, patch, style_patch=style_patch)
+
+
+@router.patch("/breakdown/styles/{style_id}")
+async def patch_breakdown_style(
+    style_id: uuid.UUID,
+    body: StylePatch,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_DM),
+):
+    """Correct a DRAFT style on its own — name, article, code, thickness, price,
+    season, refs, or its lining declaration.
+
+    The style-only door. `PATCH /breakdown/skus/{sku_id}` edits a style through
+    its SKU, which is what the table row does; this is for the style header,
+    which has no SKU to hang off. Same DRAFT-only rule, same audit row.
+
+    A style `code` collision is a 409, not a 500: the column is unique because
+    the code is what a barcode caption and a rate card resolve through.
+    """
+    return await BreakdownService(db).update_style(
+        style_id, body.model_dump(exclude_unset=True))
 
 
 @router.delete("/breakdown/skus/{sku_id}")
@@ -247,6 +372,27 @@ async def release_breakdown_styles(
     (compact PC-XXXXXX + the long alias), and the drawer merge for each. Stamps
     each style RELEASED with the actor and the time, and writes an audit_log row.
 
+    EVERY STYLE MUST DECLARE ITS LINING:
+
+        {"styles": [{"style_id": "…", "needs_lining": true},
+                    {"style_id": "…", "needs_lining": false}]}
+
+    That answer is stamped on the style, copied onto every piece it mints, and
+    from then on decides two things: whether the garment has a LINING_CUTTING
+    stage at all, and whether its drawer must hold BOTH parts before the piece
+    may enter line-stitching. A style declared `false` skips the lining cut and
+    clears the store on its leather alone.
+
+    IT OUTRANKS THE SYSTEM'S OWN GUESS, IN BOTH DIRECTIONS — including declaring
+    a style named "…KNIT" as leather-only. That is the point of asking: inference
+    off a style name cannot know that a particular wool shell has no lining, and
+    the DM holding the spec sheet can. The declaration is audited with the actor
+    and the time, which is what makes switching a lining requirement OFF a
+    traceable decision rather than a silent one.
+
+    IT CANNOT BE CHANGED AFTER RELEASE. Pieces are minted against it and their
+    barcodes are printed. Fix it before releasing (PATCH the style), not after.
+
     PARTIAL ACCEPT: an already-released style comes back in `rejected` with its
     reason; the rest still release. Read `minted`, not the HTTP status.
 
@@ -256,6 +402,8 @@ async def release_breakdown_styles(
     up or the pool is grown. Send `grow_drawer_pool: true`, or call
     POST /drawers/pool, to clear it.
     """
+    style_ids, lining_by_style = body.resolved()
     return await BreakdownService(db).release_styles(
-        order_number, body.style_ids, user_name=user.name,
-        allow_pool_growth=body.grow_drawer_pool)
+        order_number, style_ids, user_name=user.name,
+        allow_pool_growth=body.grow_drawer_pool,
+        lining_by_style=lining_by_style)

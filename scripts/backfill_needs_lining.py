@@ -96,14 +96,14 @@ def backfill(db: Session, *, order_number: str | None = None,
     to remove.
     """
     stats = {"skus": 0, "pieces_seen": 0, "flipped_true": 0, "flipped_false": 0,
-             "unchanged": 0}
+            "unchanged": 0}
     per_style: dict[str, dict[str, int]] = defaultdict(
         lambda: {"->True": 0, "->False": 0, "same": 0})
 
     sku_q = select(SKU).join(Style, Style.id == SKU.style_id)
     if order_number:
         sku_q = sku_q.join(ClientOrder, ClientOrder.id == Style.client_order_id) \
-                     .where(ClientOrder.order_number == order_number)
+                    .where(ClientOrder.order_number == order_number)
 
     pending = 0
     for sku in db.scalars(sku_q).all():

@@ -172,8 +172,34 @@ class ProductionService:
     # ═════════════════════════════════════════════════════════ GATE 4: merge
     async def _merge_ok(self, piece: Piece,
                         stage: ProductionStage) -> tuple[bool, str | None]:
-        """Only LINE_STITCHING is gated on completeness. The drawer must be SENDED
-        (leather + lining both merged and the store released it).
+        """Only LINE_STITCHING is gated on completeness. The drawer must BOTH
+        hold everything the garment needs AND have been sent by the store.
+
+        TWO CONDITIONS, CHECKED SEPARATELY — and that is the fix, not belt-and-
+        braces. This used to test `state == SENDED` alone and take it as proof of
+        completeness, on the reasoning that a drawer can only reach SENDED by
+        passing the completeness check in send_batch. That reasoning holds only
+        as long as send_batch is the sole way into the state, and it is not:
+        `transition()` sets it, the deprecated single-drawer route reaches that,
+        and a repair script or a stale row can leave it there. Every one of those
+        is a path to LINE_STITCHING on a garment whose lining was never cut —
+        which is the bug this whole gate exists to stop, arriving by a different
+        door.
+
+        So the parts are re-read here, at the gate, from the drawer's own
+        leather_in / lining_in booleans:
+
+            leather_in AND (lining_in OR this garment needs no lining)
+
+        For a LINED garment that is HOLDING_BOTH, exactly as asked: both parts
+        physically in the drawer before the piece may enter line-stitching. For a
+        garment declared leather-only at release, leather alone completes it —
+        HOLDING_BOTH is unreachable for it, and requiring it would strand the
+        drawer forever.
+
+        THE LINING QUESTION IS ANSWERED BY DrawerService._needs_lining, not by
+        `piece.needs_lining`. One resolver for the store gate, the send queue and
+        this gate, so a piece cannot be sendable in the store and blocked here.
 
         THE MESSAGE NAMES THE DRAWER. "its drawer must hold leather + lining" told
         an operator holding a garment nothing they could act on — the whole point
@@ -186,13 +212,30 @@ class ProductionService:
         from app.modules.drawers.service import DrawerService
         drawers = DrawerService(self.db)
         drawer = await drawers.drawer_for_piece(piece.id)
-        if drawer is not None and drawer.state == DrawerState.SENDED.value:
-            return True, None
-        where = f"drawer {drawer.code}" if drawer is not None else "its drawer"
-        return False, (
-            f"{piece.code} is not ready for {stage.value} — {where} must hold "
-            f"leather + lining and be marked SENDED (send it from the Drawers "
-            f"List).")
+        if drawer is None:
+            return False, (
+                f"{piece.code} is not ready for {stage.value} — it has no drawer, "
+                f"so its parts were never stored. It is on the waiting list until "
+                f"a drawer frees up or DM/MD grows the pool.")
+
+        needs_lining, lining_reason = await drawers._needs_lining(piece)
+        complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
+        if not complete:
+            missing = "leather" if not drawer.leather_in else "lining"
+            because = (f" This garment takes a lining because {lining_reason}."
+                       if missing == "lining" and lining_reason else "")
+            return False, (
+                f"{piece.code} is not ready for {stage.value} — drawer "
+                f"{drawer.code} is still awaiting its {missing}. Scan the missing "
+                f"part into the drawer before line-stitching.{because}")
+
+        if drawer.state != DrawerState.SENDED.value:
+            held = "holding both parts" if drawer.lining_in else "complete"
+            return False, (
+                f"{piece.code} is not ready for {stage.value} — drawer "
+                f"{drawer.code} is {held} but has not been sent. Select it in the "
+                f"Drawers List and send it to release the piece.")
+        return True, None
 
     # ═══════════════════════════════════════════════════════════════ presence
     async def _assert_present(self, employee_id: uuid.UUID, work_date: date) -> None:
@@ -918,6 +961,14 @@ class ProductionService:
         # drawer code on every checklist row, so a manager on any stage can see
         # where the garment is without opening the Store hub.
         drawers = await self.repo.drawers_for_pieces(piece_ids)
+        # THE EFFECTIVE LINING REQUIREMENT, batched — not `p.needs_lining`. The
+        # stored flag is a per-piece copy taken at mint time; the style's
+        # declaration is the authority and can have been corrected since. Reading
+        # the flag here drew "awaiting lining" captions on garments the store gate
+        # considers complete, which is the screen and the gate disagreeing about
+        # the same piece. Two queries for the whole checklist, not per row.
+        from app.modules.drawers.service import DrawerService
+        lining_map = await DrawerService(self.db)._needs_lining_map(piece_ids)
 
         pieces = []
         for p, scode, slabel, _ in rows:
@@ -933,7 +984,7 @@ class ProductionService:
             disp = display_stage(
                 current_event_stage=scode,
                 drawer_state=(drawer or {}).get("state"),
-                needs_lining=bool(getattr(p, "needs_lining", True)),
+                needs_lining=lining_map.get(p.id, True),
             )
             pieces.append({
                 "piece_id": p.id, "code": p.code, "seq": p.seq,
@@ -947,6 +998,10 @@ class ProductionService:
                 "current_stage_label": disp["label"],
                 "in_store": disp["in_store"],
                 "store_status": disp["store_status"],
+                # The EFFECTIVE requirement (style declaration first), so the
+                # checklist can grey out the lining column for a style released
+                # as leather-only instead of showing it as perpetually pending.
+                "needs_lining": lining_map.get(p.id, True),
                 # bug #12: the assigned drawer, on every row.
                 "drawer": drawer,
                 "drawer_code": (drawer or {}).get("code"),

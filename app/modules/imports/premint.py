@@ -86,6 +86,13 @@ from app.core.lining_rules import (  # noqa: E402
 def _sku_needs_lining(sku: SKU, db: Session | None = None) -> bool:
     """Lining detection for one SKU.
 
+    THE DM'S DECLARATION SHORT-CIRCUITS ALL OF THIS. Since the release gate asks
+    the question outright, `Style.needs_lining` is normally already answered by
+    the time a piece is minted, and that answer is authoritative in both
+    directions (core/lining_rules.py). Everything below is the fallback for the
+    styles nobody was asked about — pre-release-gate data, and the seed/test
+    paths that call premint_order directly.
+
     POSITIVE EVIDENCE ONLY, and that is deliberate: no signal means NOT lined.
     Defaulting to True would wedge a leather-only piece's drawer at the
     completeness gate forever, blocking line-stitching for the whole order.
@@ -111,13 +118,21 @@ def _sku_needs_lining(sku: SKU, db: Session | None = None) -> bool:
     the whole reason the completeness gate exists — never fired once in
     production. Source 2 is what makes it fire.
     """
+    # `db` is optional so source 1 stays a pure, session-free predicate (see
+    # tests/unit/test_premint_lining_pure.py). Source 2 needs the style row.
+    style = db.get(Style, sku.style_id) if db is not None and sku.style_id else None
+
+    # SOURCE 0 — the human answer, when there is one. Checked BEFORE the colour
+    # columns because it is the only source that can legitimately say "no" to a
+    # style whose sheet carries a knit colour, and the DM has seen the garment.
+    declared = getattr(style, "needs_lining", None) if style is not None else None
+    if declared is not None:
+        return bool(declared)
+
     for attr in LINING_COLOUR_FIELDS:
         if not _blank(getattr(sku, attr, None)):
             return True
 
-    # `db` is optional so source 1 stays a pure, session-free predicate (see
-    # tests/unit/test_premint_lining_pure.py). Source 2 needs the style row.
-    style = db.get(Style, sku.style_id) if db is not None and sku.style_id else None
     if style is not None and name_signals_lining(style.name, style.article):
         return True
     return False

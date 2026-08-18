@@ -118,11 +118,27 @@ class BreakdownService:
                 "released_by": st.released_by,
                 "editable": (st.production_status
                              or ProductionReleaseStatus.DRAFT.value) in _RELEASABLE,
-                # The effective lining verdict for the whole style, so the DM sees
-                # BEFORE releasing whether these garments will need a lining leg
-                # in the store. Same rule the completeness gate applies.
-                "needs_lining": lining_required(
+                # ── THE LINING QUESTION, IN THREE FIELDS ─────────────────────
+                # These are three different things and collapsing them into one
+                # is what let a guess be read as a fact:
+                #
+                #   needs_lining            the DM's ANSWER. null = not yet asked,
+                #                           and the release screen must render
+                #                           that as an unanswered question, not
+                #                           as "no".
+                #   needs_lining_suggested  what the system INFERS from the style
+                #                           name / article. A default to
+                #                           pre-select, never a verdict.
+                #   lining_answered         whether anyone has actually answered.
+                #
+                # The DM's answer, once given, outranks the suggestion in both
+                # directions — including saying NO to a style named KNIT, which
+                # is the case inference cannot get right and the whole reason the
+                # question is asked (core/lining_rules.py).
+                "needs_lining": st.needs_lining,
+                "needs_lining_suggested": lining_required(
                     style_name=st.name, style_article=st.article),
+                "lining_answered": st.needs_lining is not None,
                 "sku_count": len(skus),
                 "qty_ordered": sum(int(s.qty_ordered or 0) for s in skus),
                 "minted_pieces": int(minted.get(st.id, 0)),
@@ -153,16 +169,37 @@ class BreakdownService:
                 "qty_ordered": sum(s["qty_ordered"] for s in styles),
                 "qty_draft": sum(s["qty_ordered"] for s in drafts),
                 "minted_pieces": sum(s["minted_pieces"] for s in styles),
+                # How many DRAFT styles still have no lining answer. The release
+                # screen should not let the DM tick a style through without one —
+                # this is the badge that says so before they try.
+                "styles_awaiting_lining_answer": sum(
+                    1 for s in drafts if not s["lining_answered"]),
             },
         }
 
     # ── CRUD on the DRAFT sheet ──────────────────────────────────────────────
-    async def update_sku(self, sku_id: uuid.UUID, patch: dict) -> dict:
-        """Correct one line of a DRAFT breakdown. 409 once the style is released.
+    # Which STYLE fields a DRAFT correction may touch. Everything the sheet
+    # actually gets wrong, and nothing structural: `client_order_id` (which order
+    # a style belongs to) and `base_style_id` are deliberately absent — moving a
+    # style between orders is a re-upload, not an edit, because the order is what
+    # scopes its SKU codes, its rates and its client visibility.
+    _STYLE_EDITABLE = {
+        "name", "article", "code", "gender", "label", "thickness", "season",
+        "customer_ref", "internal_ref", "unit_price", "currency", "needs_lining",
+    }
 
-        Only the four fields a breakdown sheet actually gets wrong are editable:
-        quantity, colour name/code, and size. Anything structural (which style a
-        SKU belongs to) is a re-upload, not an edit.
+    async def update_sku(self, sku_id: uuid.UUID, patch: dict,
+                         *, style_patch: dict | None = None) -> dict:
+        """Correct one line of a DRAFT breakdown, and optionally its parent style.
+
+        409 once the style is released. The SKU fields are the ones a breakdown
+        sheet gets wrong — quantity, colour name/code, size, lining colours.
+        Anything structural (which style a SKU belongs to) is a re-upload.
+
+        BOTH HALVES COMMIT TOGETHER. The style edit is applied on the same
+        session and the same commit as the SKU edit, so a unique-code collision
+        on the style rolls the colour change back with it rather than leaving the
+        operator's row half-written.
         """
         sku, style = await self._sku_with_style(sku_id)
         self._assert_draft(style, "edit")
@@ -182,17 +219,125 @@ class BreakdownService:
             setattr(sku, key, value)
             changed[key] = value
 
-        if not changed:
+        style_changed = await self._apply_style_patch(style, style_patch or {})
+
+        if not changed and not style_changed:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 "Nothing to update.")
-        await self._audit("BREAKDOWN_SKU_UPDATED", sku.id,
-                          {"style_id": str(style.id), "changed": changed})
-        await self.db.commit()
+        if changed:
+            await self._audit("BREAKDOWN_SKU_UPDATED", sku.id,
+                              {"style_id": str(style.id), "changed": changed})
+        if style_changed:
+            await self._audit("BREAKDOWN_STYLE_UPDATED", style.id,
+                              {"style_code": style.code, "changed": style_changed})
+        await self._commit_unique_safe(style)
         await self.db.refresh(sku)
+        await self.db.refresh(style)
         return {"sku_id": sku.id, "sku_code": sku.code,
                 "qty_ordered": int(sku.qty_ordered or 0),
                 "colour": sku.color_name or sku.color_code, "size": sku.size,
-                "changed": changed}
+                "changed": changed,
+                "style": {
+                    "style_id": style.id, "style_code": style.code,
+                    "style_name": style.name, "article": style.article,
+                    "needs_lining": style.needs_lining,
+                    "changed": style_changed,
+                }}
+
+    async def update_style(self, style_id: uuid.UUID, patch: dict) -> dict:
+        """Correct a DRAFT style on its own. 409 once it is released."""
+        style = await self.db.get(Style, style_id)
+        if style is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Style not found.")
+        self._assert_draft(style, "edit")
+
+        changed = await self._apply_style_patch(style, patch)
+        if not changed:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "Nothing to update.")
+        await self._audit("BREAKDOWN_STYLE_UPDATED", style.id,
+                          {"style_code": style.code, "changed": changed})
+        await self._commit_unique_safe(style)
+        await self.db.refresh(style)
+        return {
+            "style_id": style.id, "style_code": style.code,
+            "style_name": style.name, "article": style.article,
+            "thickness": style.thickness, "season": style.season,
+            "unit_price": (float(style.unit_price)
+                           if style.unit_price is not None else None),
+            "currency": style.currency,
+            "needs_lining": style.needs_lining,
+            "lining_answered": style.needs_lining is not None,
+            "production_status": style.production_status
+                                 or ProductionReleaseStatus.DRAFT.value,
+            "changed": changed,
+        }
+
+    async def _apply_style_patch(self, style: Style, patch: dict) -> dict:
+        """Write the allowed style fields onto `style`; return what changed.
+
+        `needs_lining` is handled apart from the rest because None is MEANINGFUL
+        for it — "not asked" is a real third state, distinct from true and false
+        (see Style.needs_lining). Every other field treats None as "not sent",
+        the normal PATCH convention. A single `if value is None: continue` loop
+        would make it impossible to ever clear the lining answer back to unasked,
+        and would silently drop `needs_lining: false` — the exact value that
+        matters most here.
+        """
+        changed: dict = {}
+        for key, value in (patch or {}).items():
+            if key not in self._STYLE_EDITABLE:
+                continue
+            if key == "needs_lining":
+                # `patch` is built with exclude_unset=True, so this key is
+                # present only because the caller actually sent it — an explicit
+                # null therefore means "put it back to unanswered", not "no
+                # value supplied".
+                style.needs_lining = None if value is None else bool(value)
+                changed[key] = style.needs_lining
+                continue
+            if value is None:
+                continue
+            if key == "code":
+                value = str(value).strip().upper()
+                if not value:
+                    raise HTTPException(
+                        status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        "Style code cannot be blank — it is what barcode "
+                        "captions and rate cards resolve through.")
+                clash = await self.db.scalar(
+                    select(Style.id).where(Style.code == value,
+                                           Style.id != style.id))
+                if clash is not None:
+                    raise HTTPException(
+                        status.HTTP_409_CONFLICT,
+                        f"Style code '{value}' is already used by another style. "
+                        f"Codes are unique across the factory because a barcode "
+                        f"caption and a wage rate both resolve through them.")
+            if key == "unit_price" and float(value) < 0:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                    "unit_price cannot be negative.")
+            setattr(style, key, value)
+            changed[key] = (float(value) if key == "unit_price" else value)
+        return changed
+
+    async def _commit_unique_safe(self, style: Style) -> None:
+        """Commit, turning the style-code unique violation into a 409.
+
+        The pre-check in _apply_style_patch loses to a concurrent edit: two DMs
+        renaming two styles to the same code in the same second both pass the
+        SELECT and one loses at COMMIT. Without this that surfaces as a 500 on a
+        perfectly ordinary conflict.
+        """
+        from sqlalchemy.exc import IntegrityError
+        try:
+            await self.db.commit()
+        except IntegrityError as exc:
+            await self.db.rollback()
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Could not save style '{style.name}' — its code collides with "
+                f"another style. Reload the breakdown and try again.") from exc
 
     async def delete_sku(self, sku_id: uuid.UUID) -> dict:
         """Drop a line the sheet should not have had. DRAFT only.
@@ -252,8 +397,23 @@ class BreakdownService:
     # ── THE RELEASE ──────────────────────────────────────────────────────────
     async def release_styles(self, order_number: str, style_ids: list[uuid.UUID],
                              *, user_name: str,
-                             allow_pool_growth: bool = False) -> dict:
+                             allow_pool_growth: bool = False,
+                             lining_by_style: dict[uuid.UUID, bool] | None = None,
+                             ) -> dict:
         """Release named styles into production: mint pieces, barcodes, drawers.
+
+        THE LINING QUESTION IS ASKED HERE, AND THIS IS THE ONLY PLACE IT CAN BE
+        ASKED. Release is the moment a style stops being a spreadsheet row and
+        becomes barcoded garments in drawers, so it is the last moment anyone can
+        answer "does this take a lining?" before the answer starts governing what
+        may move. `lining_by_style` carries the DM's per-style answer; it is
+        stamped on Style.needs_lining, copied down to every minted piece, and
+        from then on outranks the name/colour inference in BOTH directions
+        (core/lining_rules.py).
+
+        A style with NO answer still releases and falls back to inference. That
+        is a deliberate one-release grace period for the frontend, not the
+        intended path — see the router's `styles` field.
 
         PARTIAL ACCEPT, like every other batch surface in this codebase. One
         already-released style must not lose the four the DM ticked with it, so
@@ -306,9 +466,16 @@ class BreakdownService:
                     "message": "Nothing released — see `rejected` for each reason."}
 
         # THE MINT. Sync, in a worker thread, on its own Session — same pattern
-        # as the loader (imports/router.py). It commits itself.
+        # as the loader (imports/router.py). It commits itself. The lining
+        # declarations go WITH it because they have to be stamped on the style
+        # BEFORE premint reads them to set each piece's flag; splitting the two
+        # across sessions would mint a batch of pieces against the previous
+        # answer.
+        declared = {sid: bool(v) for sid, v in (lining_by_style or {}).items()
+                    if v is not None}
         stats = await run_in_threadpool(
-            _release_sync, order.id, releasable, user_name, allow_pool_growth)
+            _release_sync, order.id, releasable, user_name, allow_pool_growth,
+            declared)
 
         released = []
         for sid in releasable:
@@ -316,21 +483,50 @@ class BreakdownService:
             await self.db.refresh(style)
             released.append({"style_id": str(sid), "style_code": style.code,
                              "style_name": style.name,
-                             "production_status": style.production_status})
+                             "production_status": style.production_status,
+                             "needs_lining": style.needs_lining,
+                             # True when the DM answered; False when this style
+                             # released on inference and the store gate will be
+                             # guessing. The screen should be able to show that
+                             # difference rather than presenting both as facts.
+                             "lining_declared": sid in declared})
             await self._audit("BREAKDOWN_STYLE_RELEASED", sid, {
                 "style_code": style.code, "order_number": order.order_number,
-                "by": user_name, "pieces_minted": stats.get("pieces_minted", 0)})
+                "by": user_name, "pieces_minted": stats.get("pieces_minted", 0),
+                # THE DECLARATION IS AUDITED, and that audit is what replaces the
+                # old one-directional safety rule: an explicit False is the only
+                # way a lining requirement can now be switched OFF, so the record
+                # has to name who switched it and when.
+                "needs_lining": style.needs_lining,
+                "lining_declared": sid in declared})
         await self.db.commit()
 
         waiting = int(stats.get("pieces_waiting_for_drawer", 0))
         message = (f"Released {len(released)} style(s); "
                    f"{stats.get('pieces_minted', 0)} piece barcode(s) minted.")
+        lined = [r["style_code"] for r in released if r["needs_lining"]]
+        if lined:
+            message += (f" {len(lined)} style(s) take a lining — their drawers "
+                        f"must hold BOTH parts before line-stitching.")
+        # The deprecated style_ids path releases without a human answer. Say so
+        # out loud: a garment whose lining requirement was guessed is exactly the
+        # class that walked to PACKAGE_EXPORT unlined, and a silent fallback is
+        # how it stayed invisible for an entire order.
+        guessed = [r["style_code"] for r in released if not r["lining_declared"]]
+        if guessed:
+            message += (f" WARNING: {len(guessed)} style(s) were released with NO "
+                        f"lining declaration ({', '.join(guessed[:5])}"
+                        f"{'…' if len(guessed) > 5 else ''}) — their lining "
+                        f"requirement was INFERRED from the style name. Release "
+                        f"through `styles: [{{style_id, needs_lining}}]` instead.")
         if waiting:
             message += (f" {waiting} piece(s) have NO DRAWER — the pool is full. "
                         f"They cannot be stored until a drawer frees up or DM/MD "
                         f"adds drawers (POST /drawers/pool).")
         return {"order_number": order.order_number, "released": released,
-                "rejected": rejected, "minted": stats, "message": message}
+                "rejected": rejected, "minted": stats,
+                "styles_released_without_lining_answer": guessed,
+                "message": message}
 
     # ── helpers ──────────────────────────────────────────────────────────────
     async def _order(self, order_number: str) -> ClientOrder:
@@ -372,12 +568,19 @@ class BreakdownService:
 
 
 def _release_sync(order_id, style_ids, user_name: str,
-                  allow_pool_growth: bool) -> dict:
+                  allow_pool_growth: bool,
+                  lining_by_style: dict | None = None) -> dict:
     """The mint itself, on a synchronous Session, in one transaction.
 
     Stamping the style RELEASED and minting its pieces MUST be atomic: a crash
     between them leaves either barcodes nobody released or a released style with
     no garments. Both are worse than the upload failing.
+
+    THE LINING DECLARATION IS STAMPED FIRST, BEFORE premint_order RUNS. premint
+    reads `Style.needs_lining` to set each new piece's own flag
+    (_sku_needs_lining), so writing it afterwards would mint the whole style
+    against the PREVIOUS answer and leave the pieces disagreeing with the style
+    they belong to — the exact stale-flag class of bug that started this work.
     """
     from app.core.database import SessionLocal
     from app.modules.imports.premint import premint_order
@@ -385,9 +588,18 @@ def _release_sync(order_id, style_ids, user_name: str,
     db = SessionLocal()
     try:
         order = db.get(ClientOrder, order_id)
+        now = datetime.now(timezone.utc)
+        declared = lining_by_style or {}
+        for sid in style_ids:
+            style = db.get(Style, sid)
+            if sid in declared:
+                style.needs_lining = bool(declared[sid])
+        # Flush the declarations so premint's db.get(Style, ...) sees them in
+        # this same transaction rather than the pre-write values.
+        db.flush()
+
         stats = premint_order(db, order, style_ids=style_ids,
                               allow_pool_growth=allow_pool_growth)
-        now = datetime.now(timezone.utc)
         for sid in style_ids:
             style = db.get(Style, sid)
             style.production_status = ProductionReleaseStatus.RELEASED.value
