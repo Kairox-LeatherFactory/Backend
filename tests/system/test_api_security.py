@@ -136,7 +136,7 @@ async def test_an_unknown_operation_code_names_the_known_ones(
     db.add(order)
     await db.flush()
     db.add(Style(client_order_id=order.id, name="OPSTYLE", article="OP1",
-                 code="OPSTYLE"))
+                 code="OPSTYLE", production_status="RELEASED"))
     await db.commit()
 
     as_role(UserRole.DIRECT_MANAGER)

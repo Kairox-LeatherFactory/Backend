@@ -37,7 +37,7 @@ async def _seed_min(db):
     """
     client = cm.Client(name="C"); db.add(client); await db.flush()
     po = cm.ClientOrder(client_id=client.id, order_number="PO1"); db.add(po); await db.flush()
-    style = cm.Style(client_order_id=po.id, name="CARNABY"); db.add(style); await db.flush()
+    style = cm.Style(client_order_id=po.id, name="CARNABY", production_status="RELEASED"); db.add(style); await db.flush()
     sku = cm.SKU(style_id=style.id, color_code="57", size="M", qty_ordered=10,
                  code="PO1-CARNABY-57-M")
     db.add(sku); await db.flush()

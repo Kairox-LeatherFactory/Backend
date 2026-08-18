@@ -178,37 +178,31 @@ class WageRepository:
         await self.db.flush()
         return r
 
-    async def overlapping_closed_run(self, start: date, end: date,
-                                     *, exclude_run_id: uuid.UUID | None = None,
-                                     scope_order_number: str | None = None,
-                                     scope_style_code: str | None = None):
-        """Any run — CLOSED **or OPEN** — whose window AND SCOPE intersect.
+    async def runs_in_window(self, start: date, end: date,
+                             *, exclude_run_id: uuid.UUID | None = None):
+        """Every run — CLOSED **or OPEN** — whose date window intersects [start, end].
 
-        SCOPE-AWARE SINCE runs can be narrowed to one style or one order
-        (change-list item 3). Two runs over the same fortnight are only a
-        double-payment risk if they can pay the same pieces:
+        DATES ONLY. This deliberately does NOT decide whether the runs conflict;
+        it returns the candidates and the service compares the actual sets of
+        styles each one pays. See WageService._validate_window for why that
+        separation matters — the guard is about PIECES, and a repository method
+        that also resolved order numbers to style ids would be answering a
+        business question with a name that says it answers a date question.
 
-            unscoped  vs anything   → CONFLICT (the unscoped run pays everything)
-            style A   vs style A    → CONFLICT
-            style A   vs style B    → fine, disjoint pieces
-            order X   vs order X    → CONFLICT
-            order X   vs order Y    → fine
-            style     vs order      → CONFLICT, conservatively: the style may
-                                      belong to that order, and answering that
-                                      properly needs a join we should not make the
-                                      guard depend on. Over-blocking here costs a
-                                      manager one re-typed window; under-blocking
-                                      costs a worker a double payment.
+        Replaces `overlapping_closed_run`, which compared SCOPE KEYS as strings
+        and therefore got two cases wrong:
+          • an order-scoped run blocked EVERY style-scoped run in the window,
+            including styles belonging to a completely different order, because
+            the rule was a conservative `scope_style_code IS NOT NULL`;
+          • it could not see that a style-scoped run and an order-scoped run for
+            THAT style's order really do collide, except by that same blunt rule.
+        Both are answered exactly by comparing style-id sets instead.
 
-        B7: this used to filter status == CLOSED. create_run() commits the run as
-        OPEN before a single line is written, and add_lines() commits separately,
-        so a run that died mid-population left committed money sitting in an OPEN
-        run that this guard could not see. The same fortnight could then be run
-        again with no 409, and with no UNIQUE(wage_run_id, employee_id) (B5) to
-        catch it downstream. An OPEN run in the window is either in progress or
-        wreckage; either way a second run over the same days must not start.
-
-        Name kept for call-site compatibility (service._validate_window).
+        B7 (kept): OPEN runs are included. create_run() commits the run as OPEN
+        before a single line is written and add_lines() commits separately, so a
+        run that died mid-population leaves committed money in an OPEN run. An
+        OPEN run in the window is either in progress or wreckage; either way a
+        second run over the same pieces must not start silently.
         """
         stmt = select(WageRun).where(
             WageRun.period_start <= end,
@@ -216,25 +210,9 @@ class WageRepository:
         )
         if exclude_run_id:
             stmt = stmt.where(WageRun.id != exclude_run_id)
-
-        if scope_style_code or scope_order_number:
-            # A scoped run only clashes with unscoped runs and with runs carrying
-            # the same scope key. See the table in the docstring.
-            unscoped = and_(WageRun.scope_style_code.is_(None),
-                            WageRun.scope_order_number.is_(None))
-            same_scope = []
-            if scope_style_code:
-                same_scope.append(WageRun.scope_style_code == scope_style_code)
-                # style-vs-order: conservative clash
-                same_scope.append(WageRun.scope_order_number.isnot(None))
-            if scope_order_number:
-                same_scope.append(WageRun.scope_order_number == scope_order_number)
-                same_scope.append(WageRun.scope_style_code.isnot(None))
-            from sqlalchemy import or_ as _or
-            stmt = stmt.where(_or(unscoped, *same_scope))
-
-        return await self.db.scalar(
-            stmt.order_by(WageRun.status.desc()).limit(1))
+        # CLOSED first: when several runs clash, name the one that actually paid.
+        stmt = stmt.order_by(WageRun.status.desc(), WageRun.period_start)
+        return list((await self.db.scalars(stmt)).all())
 
     async def last_closed_run(self, *, exclude_run_id: uuid.UUID | None = None):
         """Latest CLOSED run — genuinely CLOSED-only: this feeds the gap_days

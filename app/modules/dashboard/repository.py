@@ -50,7 +50,9 @@ from sqlalchemy import and_, case, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import ProductionStage
-from app.modules.clients.models import SKU, Client, ClientOrder, Style
+from app.modules.clients.models import (
+    SKU, Client, ClientOrder, Style, style_in_production,
+)
 from app.modules.employees.models import Employee
 from app.modules.production.models import Operation, Piece, ProductionEvent
 
@@ -146,6 +148,7 @@ class DashboardRepository:
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .outerjoin(Operation, Operation.id == Piece.current_operation_id)
             .outerjoin(
@@ -164,6 +167,7 @@ class DashboardRepository:
             select(func.coalesce(func.sum(SKU.qty_ordered), 0))
             .select_from(SKU)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
         )
         if order_id is not None:
@@ -236,6 +240,7 @@ class DashboardRepository:
             .join(Operation, Operation.id == ProductionEvent.operation_id)
             .join(SKU, SKU.id == ProductionEvent.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(func.upper(Operation.code).in_(stages))
             .group_by(func.upper(Operation.code))
@@ -262,6 +267,7 @@ class DashboardRepository:
             select(func.coalesce(func.sum(SKU.qty_ordered), 0))
             .select_from(SKU)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
         )
         if order_id is not None:
@@ -293,6 +299,7 @@ class DashboardRepository:
             .join(Operation, Operation.id == ProductionEvent.operation_id)
             .join(SKU, SKU.id == ProductionEvent.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(Operation.code.in_(stages))
         )
@@ -322,6 +329,7 @@ class DashboardRepository:
             .join(Operation, Operation.id == ProductionEvent.operation_id)
             .join(SKU, SKU.id == ProductionEvent.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(ProductionEvent.piece_id.isnot(None))
         )
@@ -412,6 +420,7 @@ class DashboardRepository:
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .outerjoin(Operation, Operation.id == Piece.current_operation_id)
             .where(Style.client_order_id == oid, Piece.is_active.is_(True))
             .group_by(Style.id, Style.name, Style.article, Style.thickness,
@@ -508,6 +517,7 @@ class DashboardRepository:
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .outerjoin(Operation, Operation.id == Piece.current_operation_id)
             .where(Piece.is_active.is_(True))
@@ -523,6 +533,7 @@ class DashboardRepository:
             select(Style.id, func.coalesce(func.sum(SKU.qty_ordered), 0))
             .select_from(SKU)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(*([ClientOrder.client_id == client_scope] if client_scope else []))
             .group_by(Style.id)
@@ -555,6 +566,7 @@ class DashboardRepository:
             .join(Operation, Operation.id == ProductionEvent.operation_id)
             .join(SKU, SKU.id == ProductionEvent.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(ProductionEvent.work_date >= start,
                    ProductionEvent.work_date <= end)
@@ -616,6 +628,7 @@ class DashboardRepository:
             .join(Piece, Piece.id == ProductionEvent.piece_id)
             .join(SKU, SKU.id == ProductionEvent.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .outerjoin(MaterialLot, MaterialLot.id == lot_col)
             .where(Operation.code == stage)
@@ -651,6 +664,7 @@ class DashboardRepository:
             .join(Piece, Piece.id == ProductionEvent.piece_id)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .outerjoin(Operation, Operation.id == Piece.current_operation_id)
             .where(ProductionEvent.employee_id == employee_id,
@@ -704,6 +718,7 @@ class DashboardRepository:
             .join(Operation, Operation.id == ProductionEvent.operation_id)
             .join(SKU, SKU.id == ProductionEvent.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(Operation.code.in_(stages))
         )
@@ -725,6 +740,7 @@ class DashboardRepository:
             .join(Operation, Operation.id == ProductionEvent.operation_id)
             .join(SKU, SKU.id == ProductionEvent.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(Operation.code == stage, ProductionEvent.work_date == today)
         )
@@ -759,6 +775,7 @@ class DashboardRepository:
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(Piece.is_active.is_(True), Piece.needs_lining.is_(True))
         )
@@ -802,6 +819,7 @@ class DashboardRepository:
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(Piece.is_active.is_(True), or_(colour_signal, name_signal))
         )
@@ -820,6 +838,7 @@ class DashboardRepository:
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(Piece.is_active.is_(True))
         )
@@ -843,6 +862,7 @@ class DashboardRepository:
             select(Piece.id)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .where(Style.client_order_id == ClientOrder.id,
                    Piece.is_active.is_(True))
             .exists()
@@ -886,6 +906,7 @@ class DashboardRepository:
             select(func.coalesce(func.sum(SKU.qty_ordered), 0))
             .select_from(SKU)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
         )
         if order_id is not None:
@@ -992,6 +1013,7 @@ class DashboardRepository:
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .join(leather_pieces, leather_pieces.c.piece_id == Piece.id)
             .outerjoin(lined_pieces, lined_pieces.c.piece_id == Piece.id)
@@ -1031,6 +1053,7 @@ class DashboardRepository:
             .join(Operation, Operation.id == ProductionEvent.operation_id)
             .join(SKU, SKU.id == ProductionEvent.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(Operation.code.in_(_STITCH_FUNNEL_OPS))
         )
@@ -1057,6 +1080,7 @@ class DashboardRepository:
             .join(Operation, Operation.id == ProductionEvent.operation_id)
             .join(SKU, SKU.id == ProductionEvent.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(Operation.code.in_(_STITCH_STAGES),
                    ProductionEvent.piece_id.isnot(None))
@@ -1097,6 +1121,7 @@ class DashboardRepository:
             .join(Operation, Operation.id == ProductionEvent.operation_id)
             .join(SKU, SKU.id == ProductionEvent.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(ProductionEvent.work_date >= start,
                    ProductionEvent.work_date <= end,
@@ -1126,6 +1151,7 @@ class DashboardRepository:
             .join(Operation, Operation.id == ProductionEvent.operation_id)
             .join(SKU, SKU.id == ProductionEvent.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .where(Style.client_order_id == oid,
                    Operation.code.in_(_STITCH_FUNNEL_OPS))
             .group_by(Style.id, Style.name, Style.article, Operation.code)
@@ -1136,6 +1162,7 @@ class DashboardRepository:
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .where(Style.client_order_id == oid, Piece.is_active.is_(True))
             .group_by(Style.id)
         )).all()
@@ -1180,6 +1207,8 @@ class DashboardRepository:
                 .join(Piece, Piece.id == Drawer.current_piece_id)
                 .join(SKU, SKU.id == Piece.sku_id)
                 .join(Style, Style.id == SKU.style_id)
+                .where(style_in_production())
+            .where(style_in_production())
                 .join(ClientOrder, ClientOrder.id == Style.client_order_id)
                 .where(ClientOrder.client_id == client_scope)
             )
@@ -1220,6 +1249,8 @@ class DashboardRepository:
                 .join(Piece, Piece.id == Drawer.current_piece_id)
                 .join(SKU, SKU.id == Piece.sku_id)
                 .join(Style, Style.id == SKU.style_id)
+                .where(style_in_production())
+            .where(style_in_production())
                 .join(ClientOrder, ClientOrder.id == Style.client_order_id)
                 .where(ClientOrder.client_id == client_scope)
             )
@@ -1257,6 +1288,12 @@ class DashboardRepository:
                 SKU.color_name, SKU.size,
             )
             .select_from(Drawer)
+            # DELIBERATELY NOT RELEASE-FILTERED. Every other query here counts
+            # WORK, and unreleased work is not on the floor yet. This one reports
+            # what is PHYSICALLY IN A DRAWER, and a garment in a drawer is in that
+            # drawer whatever its style's release state says. Filtering here would
+            # render an occupied drawer as empty and send someone to put a second
+            # piece in it.
             .outerjoin(Piece, Piece.id == Drawer.current_piece_id)
             .outerjoin(SKU, SKU.id == Piece.sku_id)
             .outerjoin(Style, Style.id == SKU.style_id)
@@ -1308,6 +1345,7 @@ class DashboardRepository:
             .join(Piece, Piece.id == Drawer.current_piece_id)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(in_store)
         )
@@ -1333,6 +1371,12 @@ class DashboardRepository:
                 SKU.color_name, SKU.size,
             )
             .select_from(Drawer)
+            # DELIBERATELY NOT RELEASE-FILTERED. Every other query here counts
+            # WORK, and unreleased work is not on the floor yet. This one reports
+            # what is PHYSICALLY IN A DRAWER, and a garment in a drawer is in that
+            # drawer whatever its style's release state says. Filtering here would
+            # render an occupied drawer as empty and send someone to put a second
+            # piece in it.
             .outerjoin(Piece, Piece.id == Drawer.current_piece_id)
             .outerjoin(SKU, SKU.id == Piece.sku_id)
             .outerjoin(Style, Style.id == SKU.style_id)
@@ -1407,6 +1451,7 @@ class DashboardRepository:
             .join(Piece, Piece.id == ProductionEvent.piece_id)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .outerjoin(Drawer, Drawer.id == Piece.drawer_id)
             .where(Operation.code.in_(stages))
@@ -1471,6 +1516,7 @@ class DashboardRepository:
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .outerjoin(Operation, Operation.id == Piece.current_operation_id)
             .outerjoin(Drawer, Drawer.current_piece_id == Piece.id)
@@ -1583,6 +1629,7 @@ class DashboardRepository:
             .join(Operation, Operation.id == ProductionEvent.operation_id)
             .join(SKU, SKU.id == ProductionEvent.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(Operation.code.in_(ops))
         )
@@ -1633,6 +1680,7 @@ class DashboardRepository:
             .join(Operation, Operation.id == ProductionEvent.operation_id)
             .join(SKU, SKU.id == ProductionEvent.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
         )
         stmt = self._scope(stmt, client_scope)
@@ -1673,6 +1721,8 @@ class DashboardRepository:
                 .select_from(ProductionEvent)
                 .join(SKU, SKU.id == ProductionEvent.sku_id)
                 .join(Style, Style.id == SKU.style_id)
+                .where(style_in_production())
+            .where(style_in_production())
                 .join(ClientOrder, ClientOrder.id == Style.client_order_id),
                 client_scope,
             )
@@ -1707,7 +1757,13 @@ class DashboardRepository:
                 func.coalesce(func.sum(SKU.qty_ordered), 0),
             )
             .select_from(ClientOrder)
-            .outerjoin(Style, Style.client_order_id == ClientOrder.id)
+            # RELEASED-ONLY, AND IN THE **ON** CLAUSE, NOT A WHERE. As a WHERE it
+            # would turn this outer join inner and make an order whose styles are
+            # all still DRAFT vanish entirely — 404ing a page that should show an
+            # order with an empty funnel. In the ON clause the order survives and
+            # its unreleased styles simply contribute 0 to the total.
+            .outerjoin(Style, and_(Style.client_order_id == ClientOrder.id,
+                                   style_in_production()))
             .outerjoin(SKU, SKU.style_id == Style.id)
             .where(ClientOrder.id == order_id)
             .group_by(ClientOrder.order_number)

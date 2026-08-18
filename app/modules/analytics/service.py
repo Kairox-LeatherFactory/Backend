@@ -26,7 +26,9 @@ from app.core.config import settings
 from app.core.enums import DrawerState, ProductionStage, ShipMode
 from app.core.store_display import display_stage, holding_label
 from app.modules.analytics.barcode_ext import BarcodeAnalyticsMixin
-from app.modules.clients.models import SKU, Client, ClientOrder, Style
+from app.modules.clients.models import (
+    SKU, Client, ClientOrder, Style, style_in_production,
+)
 from app.modules.clients.service import sku_label
 from app.modules.employees.models import Employee
 from app.modules.production.models import Operation, Piece, ProductionEvent
@@ -126,6 +128,7 @@ class AnalyticsService(BarcodeAnalyticsMixin):
             select(func.coalesce(func.sum(SKU.qty_ordered), 0))
             .select_from(SKU)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
         )
         ordered = int(await self.db.scalar(self._apply_scope(
@@ -137,6 +140,7 @@ class AnalyticsService(BarcodeAnalyticsMixin):
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
         )
         minted = int(await self.db.scalar(self._apply_scope(
@@ -150,6 +154,7 @@ class AnalyticsService(BarcodeAnalyticsMixin):
             .join(Piece, Piece.id == ProductionEvent.piece_id)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(func.upper(Operation.code) == _TERMINAL_STAGE)
         )
@@ -190,6 +195,7 @@ class AnalyticsService(BarcodeAnalyticsMixin):
             .join(Piece, Piece.id == ProductionEvent.piece_id)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .group_by(func.upper(Operation.code))
         )
@@ -225,6 +231,7 @@ class AnalyticsService(BarcodeAnalyticsMixin):
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .join(Drawer, Drawer.id == Piece.drawer_id)
             .group_by(Drawer.state)
@@ -242,6 +249,7 @@ class AnalyticsService(BarcodeAnalyticsMixin):
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .where(Piece.drawer_id.is_(None))
         )
@@ -415,7 +423,11 @@ class AnalyticsService(BarcodeAnalyticsMixin):
         styles = (await self.db.execute(
             select(Style.id, Style.name, Style.article, Style.code,
                    Style.production_status, Style.needs_lining)
-            .where(Style.client_order_id == order_id)
+            # RELEASED ONLY. A style still in a DRAFT breakdown sheet has no
+            # pieces, so it rendered here as an all-zero row for work that has
+            # not started — the order explorer's job is to report production, and
+            # the release screen (imports/breakdown.py) is where DRAFT is shown.
+            .where(Style.client_order_id == order_id, style_in_production())
             .order_by(Style.name)
         )).all()
 
@@ -425,6 +437,7 @@ class AnalyticsService(BarcodeAnalyticsMixin):
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .outerjoin(Operation, Operation.id == Piece.current_operation_id)
             .where(Style.client_order_id == order_id)
             .group_by(Style.id, Operation.code)
@@ -442,6 +455,7 @@ class AnalyticsService(BarcodeAnalyticsMixin):
             select(SKU.style_id, func.coalesce(func.sum(SKU.qty_ordered), 0))
             .select_from(SKU)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .where(Style.client_order_id == order_id)
             .group_by(SKU.style_id)
         )).all()
@@ -454,6 +468,7 @@ class AnalyticsService(BarcodeAnalyticsMixin):
             .join(Piece, Piece.id == ProductionEvent.piece_id)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .where(Style.client_order_id == order_id,
                    func.upper(Operation.code) == _TERMINAL_STAGE)
             .group_by(SKU.style_id)
@@ -655,6 +670,7 @@ class AnalyticsService(BarcodeAnalyticsMixin):
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .join(Client, Client.id == ClientOrder.client_id)
             .outerjoin(Drawer, Drawer.id == Piece.drawer_id)
@@ -851,6 +867,8 @@ class AnalyticsService(BarcodeAnalyticsMixin):
             ordered = await self.db.scalar(
                 select(func.coalesce(func.sum(SKU.qty_ordered), 0))
                 .join(Style, Style.id == SKU.style_id)
+                .where(style_in_production())
+            .where(style_in_production())
                 .where(Style.client_order_id == order.id)
             ) or 0
             finished = await self.db.scalar(
@@ -858,6 +876,8 @@ class AnalyticsService(BarcodeAnalyticsMixin):
                 .select_from(ProductionEvent)
                 .join(SKU, SKU.id == ProductionEvent.sku_id)
                 .join(Style, Style.id == SKU.style_id)
+                .where(style_in_production())
+            .where(style_in_production())
                 .join(Operation, Operation.id == ProductionEvent.operation_id)
                 .where(Style.client_order_id == order.id, Operation.sequence == last_seq)
             ) or 0
@@ -921,6 +941,7 @@ class AnalyticsService(BarcodeAnalyticsMixin):
             .join(Employee, Employee.id == ProductionEvent.employee_id)
             .join(SKU, SKU.id == ProductionEvent.sku_id)
             .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
             .join(Operation, Operation.id == ProductionEvent.operation_id)
             .where(ProductionEvent.work_date >= start,
                    ProductionEvent.work_date <= end)

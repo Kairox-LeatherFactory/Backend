@@ -64,7 +64,7 @@ def _order(db: Session, *, tag: str, style_name: str,
     order = ClientOrder(client_id=client.id, order_number=f"ORD-{tag}")
     db.add(order); db.flush()
     style = Style(client_order_id=order.id, name=style_name, article="ART",
-                  code=f"STY-{tag}")
+                  code=f"STY-{tag}", production_status="RELEASED")
     style.needs_lining = declared
     db.add(style); db.flush()
     db.add(SKU(style_id=style.id, color_code="PINE", color_name="PINE GREEN",

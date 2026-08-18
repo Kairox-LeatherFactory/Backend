@@ -57,7 +57,7 @@ async def fortnight(db):
     db.add(order)
     await db.flush()
     style = Style(client_order_id=order.id, name="CLERMONT", article="CL1",
-                  code="CLERMONT")
+                  code="CLERMONT", production_status="RELEASED")
     db.add(style)
     await db.flush()
     sku = SKU(style_id=style.id, color_code="PINE", color_name="PINE GREEN",

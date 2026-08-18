@@ -62,7 +62,7 @@ async def _order_with_style(db, *, style_name: str, article: str = "A1",
     order = ClientOrder(client_id=client.id, order_number=f"ORD-{style_name[:6]}")
     db.add(order)
     await db.flush()
-    style = Style(client_order_id=order.id, name=style_name, article=article)
+    style = Style(client_order_id=order.id, name=style_name, article=article, production_status="RELEASED")
     db.add(style)
     await db.flush()
     sku = SKU(style_id=style.id, color_code="BLK", color_name="BLACK", size="M",

@@ -30,7 +30,7 @@ from app.modules.wages.service import WageService
 async def test_one_employee_multiple_operations(db):
     client = cm.Client(name="C"); db.add(client); await db.flush()
     po = cm.ClientOrder(client_id=client.id, order_number="PO1"); db.add(po); await db.flush()
-    carnaby = cm.Style(client_order_id=po.id, name="CARNABY", code="CARNABY"); db.add(carnaby); await db.flush()
+    carnaby = cm.Style(client_order_id=po.id, name="CARNABY", code="CARNABY", production_status="RELEASED"); db.add(carnaby); await db.flush()
     sku = cm.SKU(style_id=carnaby.id, color_code="57", size="M", qty_ordered=50)
     db.add(sku); await db.flush()
     cut = pm.Operation(code="CUTTING", label="Cutting", sequence=1)

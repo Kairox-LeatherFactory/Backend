@@ -14,7 +14,9 @@ from sqlalchemy import select ,func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.modules.clients.models import SKU, Client, ClientOrder, Style
+from app.modules.clients.models import (
+    SKU, Client, ClientOrder, Style, style_in_production,
+)
 from app.modules.clients.utlis import make_sku_code,make_style_code
 
 
@@ -277,6 +279,11 @@ class ClientRepository:
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .outerjoin(SKU, SKU.style_id == Style.id)
             .where(Style.code.is_not(None))
+            # RELEASED ONLY. This picker feeds the payroll landing screen, and a
+            # style still sitting in a DRAFT breakdown sheet has no pieces, no
+            # scanned work and therefore nothing to pay — offering it a rate card
+            # invites a manager to price work that does not exist yet.
+            .where(style_in_production())
             .group_by(Style.id, Style.code, Style.name, Style.article,
                       ClientOrder.order_number)
         )
@@ -291,3 +298,16 @@ class ClientRepository:
              "sku_count": int(r[5]), "qty_ordered": int(r[6])}
             for r in (await self.db.execute(stmt)).all()
         ]
+    async def style_ids_for_order(self, order_id: uuid.UUID) -> list[uuid.UUID]:
+        """Every style id belonging to one client order.
+
+        Used by the payroll overlap guard to turn "scope: order KJ2451" into the
+        concrete set of styles that run pays, so two runs can be compared by the
+        pieces they touch rather than by whether their scope STRINGS happen to
+        match. Not release-filtered: the guard is asking "could these two runs pay
+        the same piece", and a style's release state does not change which order
+        it belongs to.
+        """
+        rows = await self.db.execute(
+            select(Style.id).where(Style.client_order_id == order_id))
+        return [r[0] for r in rows.all()]

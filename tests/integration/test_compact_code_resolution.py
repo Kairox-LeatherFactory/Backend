@@ -50,7 +50,7 @@ def _seed_and_premint(sync_db: Session, *, qty=4, order_number="JP-PO2"):
     order = ClientOrder(client_id=client.id, order_number=order_number)
     sync_db.add(order); sync_db.flush()
     style = Style(client_order_id=order.id, name="CARNABY", article="CB9",
-                  code=f"{order_number}-CARNABY")
+                  code=f"{order_number}-CARNABY", production_status="RELEASED")
     sync_db.add(style); sync_db.flush()
     sync_db.add(SKU(style_id=style.id, color_code="BLK", color_name="BLACK",
                     size="L", qty_ordered=qty, code=f"{order_number}-CARNABY-BLK-L"))
