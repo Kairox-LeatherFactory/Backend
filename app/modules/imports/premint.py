@@ -543,10 +543,27 @@ def drawer_pool_status(db: Session) -> dict:
 
 
 def _caption_prefix(db: Session, sku: SKU) -> str:
-    """'CLERMONT · PINE GREEN · M' — the part of a piece caption that is the same
-    for every piece of a SKU. Resolved once per SKU; the seq is appended at the
-    call site."""
+    """'CLERMONT · GOAT SUEDE · PINE GREEN · M' — the part of a piece caption
+    that is the same for every piece of a SKU. Resolved once per SKU; the seq is
+    appended at the call site.
+
+    THE CAPTION IS WHAT THE STICKER PRINTS. The whole reason the compact `PC-…`
+    code exists is that the barcode carries a small unique id while the sticker
+    carries the business identity (see barcode/repository.py, SHORT_CODE_PREFIX),
+    and that split was introduced because "the client also wants ARTICLE on the
+    sticker". The article was then never actually added here — the caption read
+    style · colour · size, and the one field the change was made for was the one
+    missing from it.
+
+    ARTICLE IS OMITTED WHEN ABSENT rather than printed as 'NA', matching
+    make_style_code: a placeholder segment on a physical label is noise a cutter
+    has to read past every time.
+    """
     style = db.get(Style, sku.style_id)
     colour = sku.color_name or sku.color_code or "NA"
-    return " · ".join(str(p) for p in
-                      [style.name if style else "NA", colour, sku.size or "NA"])
+    article = (getattr(style, "article", None) or "").strip() if style else ""
+    parts = [style.name if style else "NA"]
+    if article:
+        parts.append(article)
+    parts += [colour, sku.size or "NA"]
+    return " · ".join(str(p) for p in parts)

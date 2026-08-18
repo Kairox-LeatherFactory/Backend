@@ -94,7 +94,16 @@ class ClientRepository:
             client_order_id=co.id, name=str(style.get("name") or "UNSPECIFIED")[:120],
             customer_ref=style.get("customer_ref"), internal_ref=style.get("internal_ref"),
             season=style.get("season"), unit_price=style.get("unit_price"),
-            currency=style.get("currency"), code=make_style_code(co.order_number, str(style.get("name") or "UNSPECIFIED")[:120]),
+            currency=style.get("currency"),
+            # ARTICLE WAS BEING DROPPED ON THIS PATH ENTIRELY — the caller passes
+            # a style dict and every other key was read, so a style created from
+            # a BOM had `article = NULL` and no way to ever show one on a label.
+            # It is stored AND fed to the code maker, so both creation paths
+            # produce the same shape of code.
+            article=style.get("article"),
+            code=make_style_code(co.order_number,
+                                 str(style.get("name") or "UNSPECIFIED")[:120],
+                                 style.get("article")),
         )
         self.db.add(st)
         await self.db.flush()
@@ -119,7 +128,7 @@ class ClientRepository:
                             # (i.e. every real order). Use the persisted ORM value,
                             # matching make_style_code above which already uses co.
                             code=make_sku_code(co.order_number, st.name,
-                                color_name or color_code, size),))
+                                color_name or color_code, size, st.article),))
         await self.db.commit()
         return co.id, st.id
     

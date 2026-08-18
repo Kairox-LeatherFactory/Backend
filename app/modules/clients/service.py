@@ -18,27 +18,15 @@ from fastapi import HTTPException, status          # add
 from sqlalchemy.exc import IntegrityError
 
 
-def _slug(s: str | None) -> str:
-    """UPPER, runs of non-alnum -> single '_', trimmed. '' -> 'NA'."""
-    out = re.sub(r"[^A-Za-z0-9]+", "_", (s or "").strip()).strip("_").upper()
-    return out or "NA"
- 
- 
-def make_sku_code(order_number: str | None, style_name: str | None,
-                  colour: str | None, size: str | None) -> str:
-    """Deterministic, globally-unique, readable SKU code.
-    e.g. make_sku_code('JP','CLERMONT + VEST','DARK BROWN','46')
-         -> 'JP-CLERMONT_VEST-DARK_BROWN-46'
-    Deterministic => idempotent across re-imports (survives delete+recreate)."""
-    return "-".join((
-        _slug(order_number), _slug(style_name), _slug(colour), _slug(size),
-    ))
- 
- 
-# sku_label (display name) is UNCHANGED — keep it:
-def sku_label(style_name, color_name, color_code, size) -> str:
-    colour = color_name or color_code or "NA"
-    return " · ".join(p for p in (style_name or "NA", colour, size or "NA"))
+# THE CODE MAKERS LIVE IN utlis.py — re-exported here, never redefined.
+# This module used to carry its own `_slug` + `make_sku_code`, byte-identical to
+# the pair in utlis.py, and imports/load_to_db.py imported THIS copy while
+# clients/repository.py imported the other. A format change (adding the article
+# segment) would have landed in one import path and not the other, so half the
+# codes in one upload would carry the article and half would not.
+from app.modules.clients.utlis import (        # noqa: F401  (re-export)
+    _slug, make_sku_code, make_style_code, sku_label,
+)
 
 # app/modules/clients/service.py
 from sqlalchemy import select
