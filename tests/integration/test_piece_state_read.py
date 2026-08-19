@@ -181,8 +181,11 @@ async def test_the_lining_cut_is_not_applicable_to_an_unlined_piece(
 # ══════════════════════════════════════════════ bug #12 — the drawer, everywhere
 @pytest.mark.asyncio
 async def test_the_drawer_travels_with_the_piece(db, operations, pieces, cutter,
-                                                 cutting_mgr):
+                                                 cutting_mgr, ready_for_store):
     piece, drawer = pieces[0]
+    # Leather side only, so the inferred bucket is unambiguously LEATHER: a piece
+    # whose lining is also cut would be read as the LINING arriving first.
+    await ready_for_store(piece, lining=False)
     await DrawerService(db).store_scan(drawer_id=drawer.id, piece_id=piece.id)
 
     state = await ProductionService(db).piece_state(piece.id, user=cutting_mgr)
@@ -417,13 +420,15 @@ async def test_the_verify_agrees_with_what_the_log_then_does(
 
 @pytest.mark.asyncio
 async def test_a_finished_piece_is_not_ready_and_says_why(
-    db, operations, pieces, cutter, tailor, dm, leather_lot
+    db, operations, pieces, cutter, tailor, dm, leather_lot, ready_for_store
 ):
     piece, drawer = pieces[0]
     svc = ProductionService(db)
     await svc.log_batch(user=dm, employee_id=cutter[0].id, piece_ids=[piece.id],
                         work_date=TODAY, screen=ScreenContext.LEATHER_CUT,
                         leather_lot_id=leather_lot.id, consumption_qty=12.0)
+    # Both cut paths must be finished before either half may be stored.
+    await ready_for_store(piece)
     drawers = DrawerService(db)
     for part in (DrawerPart.LEATHER, DrawerPart.LINING):
         await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id, part=part)

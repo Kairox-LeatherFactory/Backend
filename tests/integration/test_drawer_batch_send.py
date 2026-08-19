@@ -50,14 +50,25 @@ async def _fill(db, piece, drawer, *parts):
 # ══════════════════════════════════════════════ bug #18 — the bucket is inferred
 @pytest.mark.asyncio
 async def test_an_empty_drawer_takes_leather_then_lining_without_being_told(
-    db, pieces
+    db, pieces, ready_for_store
 ):
+    """Each part is bucketed off the piece's own history, with no operator input.
+
+    The sides are made ready ONE AT A TIME because that is the order the floor
+    works in and the only order that pins the inference: a piece that has already
+    finished both cuts is legitimately ambiguous on an empty drawer, and
+    infer_part answers LINING there (rule 1 reads the lining cut first). Walking
+    the sides in sequence asserts the thing this test is named for — that the
+    bucket follows the evidence — instead of asserting a tie-break.
+    """
     piece, drawer = pieces[0]
     svc = DrawerService(db)
 
+    await ready_for_store(piece, lining=False)          # leather side done only
     first = await svc.store_scan(drawer_id=drawer.id, piece_id=piece.id)
     assert first["part"] == "LEATHER" and first["part_inferred"] is True
 
+    await ready_for_store(piece, leather=False)         # now the lining cut lands
     second = await svc.store_scan(drawer_id=drawer.id, piece_id=piece.id)
     assert second["part"] == "LINING" and second["part_inferred"] is True
     assert second["holding"] == "HOLDING BOTH"
@@ -65,11 +76,11 @@ async def test_an_empty_drawer_takes_leather_then_lining_without_being_told(
 
 @pytest.mark.asyncio
 async def test_a_piece_that_has_had_its_lining_cut_is_read_as_lining(
-    db, operations, pieces, lining_cutter, lining_mgr
+    db, operations, cut_pieces, lining_cutter, lining_mgr
 ):
     """The piece's own history is the first and best evidence: it has been
     through the lining cut, so what is arriving in the store is the lining."""
-    piece, drawer = pieces[0]
+    piece, drawer = cut_pieces[0]
     await ProductionService(db).log_batch(
         user=lining_mgr, employee_id=lining_cutter[0].id, piece_ids=[piece.id],
         work_date=TODAY, screen=ScreenContext.LINING_CUT)
@@ -80,16 +91,16 @@ async def test_a_piece_that_has_had_its_lining_cut_is_read_as_lining(
 
 
 @pytest.mark.asyncio
-async def test_an_explicit_part_still_overrides_the_inference(db, pieces):
-    piece, drawer = pieces[0]
+async def test_an_explicit_part_still_overrides_the_inference(db, cut_pieces):
+    piece, drawer = cut_pieces[0]
     out = await DrawerService(db).store_scan(
         drawer_id=drawer.id, piece_id=piece.id, part=DrawerPart.LINING)
     assert out["part"] == "LINING" and out["part_inferred"] is False
 
 
 @pytest.mark.asyncio
-async def test_a_full_drawer_refuses_a_third_scan(db, pieces):
-    piece, drawer = pieces[0]
+async def test_a_full_drawer_refuses_a_third_scan(db, cut_pieces):
+    piece, drawer = cut_pieces[0]
     svc = DrawerService(db)
     await _fill(db, piece, drawer, DrawerPart.LEATHER, DrawerPart.LINING)
     with pytest.raises(HTTPException) as exc:
@@ -99,8 +110,8 @@ async def test_a_full_drawer_refuses_a_third_scan(db, pieces):
 
 # ══════════════════════════════════════════════ bug #13 — completeness auto-receives
 @pytest.mark.asyncio
-async def test_completeness_advances_to_received_by_itself(db, pieces, dm):
-    piece, drawer = pieces[0]
+async def test_completeness_advances_to_received_by_itself(db, cut_pieces, dm):
+    piece, drawer = cut_pieces[0]
     svc = DrawerService(db)
 
     half = await svc.store_scan(drawer_id=drawer.id, piece_id=piece.id,
@@ -117,10 +128,10 @@ async def test_completeness_advances_to_received_by_itself(db, pieces, dm):
 
 
 @pytest.mark.asyncio
-async def test_scanning_in_is_not_completion(db, pieces):
+async def test_scanning_in_is_not_completion(db, cut_pieces):
     """BUG #15 stated as an assertion: after the last part is scanned, the piece
     is still in the drawer and the response says what has to happen next."""
-    piece, drawer = pieces[0]
+    piece, drawer = cut_pieces[0]
     await _fill(db, piece, drawer, DrawerPart.LEATHER)
     out = await DrawerService(db).store_scan(
         drawer_id=drawer.id, piece_id=piece.id, part=DrawerPart.LINING)
@@ -133,10 +144,10 @@ async def test_scanning_in_is_not_completion(db, pieces):
 # ══════════════════════════════════════════════ bugs #13/#14 — the batch send
 @pytest.mark.asyncio
 async def test_many_drawers_go_in_one_action_and_release_their_pieces(
-    db, operations, pieces, dm
+    db, operations, cut_pieces, dm
 ):
     svc = DrawerService(db)
-    chosen = pieces[:3]
+    chosen = cut_pieces[:3]
     for piece, drawer in chosen:
         await _fill(db, piece, drawer, DrawerPart.LEATHER, DrawerPart.LINING)
 
@@ -152,14 +163,14 @@ async def test_many_drawers_go_in_one_action_and_release_their_pieces(
 
 
 @pytest.mark.asyncio
-async def test_one_unready_drawer_never_loses_the_ready_ones(db, pieces, dm):
+async def test_one_unready_drawer_never_loses_the_ready_ones(db, cut_pieces, dm):
     """PARTIAL ACCEPT — the same rule that makes the production gates per-piece."""
     svc = DrawerService(db)
-    ready = pieces[0]
+    ready = cut_pieces[0]
     await _fill(db, ready[0], ready[1], DrawerPart.LEATHER, DrawerPart.LINING)
-    half_full = pieces[1]
+    half_full = cut_pieces[1]
     await _fill(db, half_full[0], half_full[1], DrawerPart.LEATHER)
-    untouched = pieces[2]
+    untouched = cut_pieces[2]
 
     out = await svc.send_batch(
         drawer_ids=[ready[1].id, half_full[1].id, untouched[1].id], actor_id=dm.id)
@@ -176,7 +187,7 @@ async def test_one_unready_drawer_never_loses_the_ready_ones(db, pieces, dm):
 
 
 @pytest.mark.asyncio
-async def test_sending_takes_nothing_but_the_drawers(db, pieces, dm):
+async def test_sending_takes_nothing_but_the_drawers(db, cut_pieces, dm):
     """THERE IS NO DESTINATION TO CHOOSE, and the API must not ask for one.
 
     The store sits at exactly one point in the pipeline: lining is cut and then
@@ -193,7 +204,7 @@ async def test_sending_takes_nothing_but_the_drawers(db, pieces, dm):
         "send_batch must not ask which way to send — there is only one way")
     assert set(params) == {"drawer_ids", "actor_id"}
 
-    piece, drawer = pieces[0]
+    piece, drawer = cut_pieces[0]
     await _fill(db, piece, drawer, DrawerPart.LEATHER, DrawerPart.LINING)
     out = await svc.send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
 
@@ -205,9 +216,9 @@ async def test_sending_takes_nothing_but_the_drawers(db, pieces, dm):
 
 
 @pytest.mark.asyncio
-async def test_a_resent_drawer_is_reported_not_double_counted(db, pieces, dm):
+async def test_a_resent_drawer_is_reported_not_double_counted(db, cut_pieces, dm):
     svc = DrawerService(db)
-    piece, drawer = pieces[0]
+    piece, drawer = cut_pieces[0]
     await _fill(db, piece, drawer, DrawerPart.LEATHER, DrawerPart.LINING)
     await svc.send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
 
@@ -217,10 +228,10 @@ async def test_a_resent_drawer_is_reported_not_double_counted(db, pieces, dm):
 
 
 @pytest.mark.asyncio
-async def test_a_duplicate_selection_is_collapsed(db, pieces, dm):
+async def test_a_duplicate_selection_is_collapsed(db, cut_pieces, dm):
     """Ticking the same row twice must not send it twice."""
     svc = DrawerService(db)
-    piece, drawer = pieces[0]
+    piece, drawer = cut_pieces[0]
     await _fill(db, piece, drawer, DrawerPart.LEATHER, DrawerPart.LINING)
 
     out = await svc.send_batch(drawer_ids=[drawer.id, drawer.id, drawer.id], actor_id=dm.id)
@@ -228,10 +239,10 @@ async def test_a_duplicate_selection_is_collapsed(db, pieces, dm):
 
 
 @pytest.mark.asyncio
-async def test_an_unknown_drawer_is_bucketed_not_fatal(db, pieces, dm):
+async def test_an_unknown_drawer_is_bucketed_not_fatal(db, cut_pieces, dm):
     import uuid as _uuid
     svc = DrawerService(db)
-    piece, drawer = pieces[0]
+    piece, drawer = cut_pieces[0]
     await _fill(db, piece, drawer, DrawerPart.LEATHER, DrawerPart.LINING)
 
     ghost = _uuid.uuid4()
@@ -249,9 +260,9 @@ async def test_an_empty_selection_is_422(db, dm):
 
 # ══════════════════════════════════════════════ bug #13 — the list and the detail
 @pytest.mark.asyncio
-async def test_the_list_shows_the_garment_and_the_send_queue(db, pieces, dm):
+async def test_the_list_shows_the_garment_and_the_send_queue(db, cut_pieces, dm):
     svc = DrawerService(db)
-    ready, other = pieces[0], pieces[1]
+    ready, other = cut_pieces[0], cut_pieces[1]
     await _fill(db, ready[0], ready[1], DrawerPart.LEATHER, DrawerPart.LINING)
     await _fill(db, other[0], other[1], DrawerPart.LEATHER)
 
@@ -272,8 +283,8 @@ async def test_the_list_shows_the_garment_and_the_send_queue(db, pieces, dm):
 
 
 @pytest.mark.asyncio
-async def test_drawer_detail_reports_what_it_is_waiting_for(db, pieces):
-    piece, drawer = pieces[0]
+async def test_drawer_detail_reports_what_it_is_waiting_for(db, cut_pieces):
+    piece, drawer = cut_pieces[0]
     await _fill(db, piece, drawer, DrawerPart.LEATHER)
 
     detail = await DrawerService(db).drawer_detail(drawer.id)
@@ -286,11 +297,11 @@ async def test_drawer_detail_reports_what_it_is_waiting_for(db, pieces):
 
 
 @pytest.mark.asyncio
-async def test_a_recycled_drawer_comes_back_clean(db, operations, pieces, dm):
+async def test_a_recycled_drawer_comes_back_clean(db, operations, cut_pieces, dm):
     """A drawer that recycles must carry nothing from the garment that just left,
     or the NEXT piece inherits a state it never earned."""
     svc = DrawerService(db)
-    piece, drawer = pieces[0]
+    piece, drawer = cut_pieces[0]
     await _fill(db, piece, drawer, DrawerPart.LEATHER, DrawerPart.LINING)
     await svc.send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
 

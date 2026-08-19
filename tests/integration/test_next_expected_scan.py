@@ -65,10 +65,10 @@ async def test_a_piece_whose_drawer_is_still_filling_asks_for_the_drawer(db, pie
 
 
 @pytest.mark.asyncio
-async def test_a_piece_whose_drawer_is_full_asks_for_no_further_scan(db, pieces):
+async def test_a_piece_whose_drawer_is_full_asks_for_no_further_scan(db, cut_pieces):
     """Not a failure to answer — there IS no pairing scan left. The piece's next
     move is a production stage, which the same payload now reports."""
-    piece, drawer = pieces[0]
+    piece, drawer = cut_pieces[0]
     svc = DrawerService(db)
     for part in (DrawerPart.LEATHER, DrawerPart.LINING):
         await svc.store_scan(drawer_id=drawer.id, piece_id=piece.id, part=part)
@@ -130,7 +130,8 @@ async def test_the_merge_gate_is_reported_and_names_the_drawer(
 
 @pytest.mark.asyncio
 async def test_a_finished_piece_says_so_instead_of_going_quiet(
-    db, operations, pieces, cutter, tailor, cutting_mgr, dm, leather_lot
+    db, operations, pieces, cutter, paster, tailor, cutting_mgr, stitching_mgr,
+    dm, leather_lot, ready_for_store
 ):
     piece, drawer = pieces[0]
     svc = ProductionService(db)
@@ -138,6 +139,14 @@ async def test_a_finished_piece_says_so_instead_of_going_quiet(
                         piece_ids=[piece.id], work_date=TODAY,
                         screen=ScreenContext.LEATHER_CUT,
                         leather_lot_id=leather_lot.id, consumption_qty=12.0)
+    # The leather side must reach PASTING before it may be stored, and the lining
+    # must be cut before ITS half may go in — the store is the merge point of the
+    # two cut paths, not a stop on the way through the first one.
+    for _ in range(2):      # FUSING then PASTING
+        await svc.log_batch(user=stitching_mgr, employee_id=paster[0].id,
+                            piece_ids=[piece.id], work_date=TODAY,
+                            screen=ScreenContext.PIPELINE)
+    await ready_for_store(piece, leather=False)
     drawers = DrawerService(db)
     for part in (DrawerPart.LEATHER, DrawerPart.LINING):
         await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id, part=part)
