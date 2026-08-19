@@ -170,7 +170,7 @@ async def test_one_out_of_sequence_piece_does_not_lose_the_good_ones(
 @pytest.mark.asyncio
 async def test_line_stitching_is_blocked_until_the_drawer_is_sended(
     db, operations, pieces, cutter, paster, cutting_mgr, stitching_mgr,
-    leather_lot
+    leather_lot, ready_for_store
 ):
     piece, drawer = pieces[0]
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
@@ -185,6 +185,8 @@ async def test_line_stitching_is_blocked_until_the_drawer_is_sended(
     drawers = DrawerService(db)
     await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
                              part=DrawerPart.LEATHER)
+    # The lining half may only go in once the lining is actually cut.
+    await ready_for_store(piece, leather=False)
     await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
                              part=DrawerPart.LINING)
     await drawers.transition(drawer.id, "RECEIVED", actor_id=None)
@@ -297,7 +299,7 @@ async def test_an_empty_batch_is_400(db, operations, cutter, cutting_mgr):
 @pytest.mark.asyncio
 async def test_package_export_recycles_the_drawer(
     db, operations, pieces, cutter, paster, tailor, cutting_mgr, stitching_mgr,
-    md, leather_lot
+    md, leather_lot, ready_for_store
 ):
     """The ONLY point a drawer frees: the piece has shipped."""
     piece, drawer = pieces[0]
@@ -308,6 +310,7 @@ async def test_package_export_recycles_the_drawer(
     await _log(db, stitching_mgr, paster, [piece.id])           # PASTING
     await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
                              part=DrawerPart.LEATHER)
+    await ready_for_store(piece, leather=False)                 # the lining cut
     await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
                              part=DrawerPart.LINING)
     await drawers.transition(drawer.id, "RECEIVED", actor_id=None)
@@ -326,13 +329,16 @@ async def test_package_export_recycles_the_drawer(
 # ══════════════════════════════════════════════════ reads
 @pytest.mark.asyncio
 async def test_the_piece_checklist_returns_its_envelope(
-    db, operations, pieces, order_tree, cutter, cutting_mgr, leather_lot
+    db, operations, pieces, order_tree, cutter, cutting_mgr, leather_lot,
+    ready_for_store,
 ):
     """GET /production/skus/{id}/pieces — the STORE-overlay edit dropped this
     function's `return` and mis-unpacked its 4-tuple rows, so the endpoint
     answered `null` (and 500'd on the unpack). The envelope is the contract."""
     piece, drawer = pieces[0]
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
+    # Cut is not enough to store: the leather side hands off at PASTING.
+    await ready_for_store(piece, lining=False)
     await DrawerService(db).store_scan(drawer_id=drawer.id, piece_id=piece.id,
                                        part=DrawerPart.LEATHER)
 
@@ -355,7 +361,8 @@ async def test_the_piece_checklist_returns_its_envelope(
 
 @pytest.mark.asyncio
 async def test_the_checklist_marks_eligibility_against_an_operation(
-    db, operations, pieces, order_tree, cutter, cutting_mgr, leather_lot
+    db, operations, pieces, order_tree, cutter, cutting_mgr, leather_lot,
+    ready_for_store,
 ):
     done_piece, _ = pieces[0]
     await _cut(db, cutting_mgr, cutter, done_piece, leather_lot)
@@ -374,7 +381,8 @@ async def test_the_checklist_marks_eligibility_against_an_operation(
 
 @pytest.mark.asyncio
 async def test_style_progress_404s_for_another_clients_style(
-    db, operations, pieces, order_tree, cutter, cutting_mgr, leather_lot
+    db, operations, pieces, order_tree, cutter, cutting_mgr, leather_lot,
+    ready_for_store,
 ):
     """Tenancy: a scoped WHERE returning {} told a CLIENT the id was real.
     Existence itself is information — invisible or unknown is a 404."""

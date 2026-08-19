@@ -50,11 +50,11 @@ async def test_line_stitch_blocked_until_sended(db, operations, pieces, cutter, 
 
 
 @pytest.mark.asyncio
-async def test_store_scan_and_full_merge_then_line_stitch(db, operations, pieces,
+async def test_store_scan_and_full_merge_then_line_stitch(db, operations, cut_pieces,
                                                           cutter, lining_cutter, paster,
                                                           tailor, cutting_mgr, lining_mgr,
                                                           stitching_mgr, dm, leather_lot):
-    piece, drawer = pieces[0]
+    piece, drawer = cut_pieces[0]
     drawers = DrawerService(db)
 
     # store leather → holding_leather
@@ -180,11 +180,14 @@ async def test_role_gate_is_still_a_403_when_no_stage_in_the_batch_is_owned(
 
 
 @pytest.mark.asyncio
-async def test_leather_only_piece_complete_on_leather(db, operations, pieces, dm):
+async def test_leather_only_piece_complete_on_leather(db, operations, pieces, dm,
+                                                     ready_for_store):
     piece, drawer = pieces[0]
     # mark this piece leather-only
     piece.needs_lining = False
     await db.commit()
+    # Leather side only: a logged lining cut would outrank needs_lining=False.
+    await ready_for_store(piece, lining=False)
     drawers = DrawerService(db)
     r = await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
                                  part=DrawerPart.LEATHER)
@@ -202,7 +205,7 @@ async def test_received_requires_completeness(db, operations, pieces, dm):
 
 
 @pytest.mark.asyncio
-async def test_sended_requires_received(db, operations, pieces, dm):
+async def test_sended_requires_received(db, operations, pieces, dm, ready_for_store):
     """A drawer that is not complete cannot be sent.
 
     The leather-only shortcut this test used to take no longer works: a piece
@@ -214,6 +217,8 @@ async def test_sended_requires_received(db, operations, pieces, dm):
     piece, drawer = pieces[0]
     piece.needs_lining = True
     await db.commit()
+    # Leather pasted, lining NOT cut — exactly the drawer this test is about.
+    await ready_for_store(piece, lining=False)
     await DrawerService(db).store_scan(drawer_id=drawer.id, piece_id=piece.id,
                                        part=DrawerPart.LEATHER)
 

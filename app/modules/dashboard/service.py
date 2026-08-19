@@ -914,9 +914,12 @@ class DashboardService:
         ),
         "lining_measured_against_lining_required": (
             "LINING_CUTTING (kind=PARALLEL) has no predecessor, so its `total` "
-            "is the pieces whose breakdown says needs_lining, NOT the order "
-            "quantity — read its pct against that. Excluded from bottleneck / "
-            "blocked_stage: a lining backlog surfaces one node later as drawers "
+            "is the pieces that actually take a lining per core/lining_rules "
+            "(the DM's release declaration, else the stored flag / SKU lining "
+            "colour / style-name marker, plus any piece already lining-cut), NOT "
+            "the order quantity — read its pct against that. Excluded from "
+            "bottleneck / blocked_stage: a lining backlog surfaces one node "
+            "later as drawers "
             "holding leather in the store. Detail: /dashboard/lining."
         ),
         "pipeline_sequence_is_display_order": (

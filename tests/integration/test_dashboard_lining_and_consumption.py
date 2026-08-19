@@ -243,13 +243,16 @@ async def test_per_lot_totals_only_count_their_own_cut_stage(
 # ══════════════════════════════════════════════ #5 — shared piece tracking
 @pytest.mark.asyncio
 async def test_the_piece_trace_carries_consumption_and_the_drawer(
-    db, operations, pieces, cutter, cutting_mgr, leather_lot
+    db, operations, pieces, cutter, cutting_mgr, leather_lot, ready_for_store
 ):
     piece, drawer = pieces[0]
     await ProductionService(db).log_batch(
         user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[piece.id],
         work_date=TODAY, screen=ScreenContext.LEATHER_CUT,
         leather_lot_id=leather_lot.id, consumption_qty=12.5)
+    # Leather side only: the trace below asserts HOLDING LEATHER, and a cut
+    # lining would both open the other bucket and make it the inferred one.
+    await ready_for_store(piece, lining=False)
     await DrawerService(db).store_scan(drawer_id=drawer.id, piece_id=piece.id)
 
     t = await DashboardService(db).piece_trace(piece_code=piece.code)

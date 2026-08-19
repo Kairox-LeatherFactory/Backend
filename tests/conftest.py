@@ -179,6 +179,73 @@ async def _make_employee(db, name, designation, wage_type=WageType.PIECE_RATE,
     return emp, bc
 
 
+# ── put a piece in the state the STORE actually accepts ──────────────────────
+# The store is the merge point of the two cut paths, and DrawerService now
+# enforces that at the WRITE (core/store_display.STORE_ENTRY_STAGE):
+#
+#     leather may enter a drawer only after PASTING
+#     lining  may enter a drawer only after LINING_CUTTING
+#
+# The `pieces` fixture deliberately hands back "the state after breakdown
+# upload, before any cutting", so every test that scans into a drawer has to
+# walk the piece up to its hand-off first. This does that with raw event rows
+# rather than through ProductionService, because these tests are exercising
+# DRAWER behaviour — routing them through the production gates would make a
+# drawer test fail for a skill/role/attendance reason that has nothing to do
+# with what it is asserting.
+async def _log_stage(db, operations, piece, employee_id, code):
+    from app.modules.production.models import ProductionEvent
+    db.add(ProductionEvent(
+        sku_id=piece.sku_id, operation_id=operations[code].id,
+        employee_id=employee_id, work_date=date.today(), qty=1,
+        piece_id=piece.id, entered_by="test"))
+
+
+async def _ready_for_store(db, operations, piece, employee_id, *,
+                           leather=True, lining=True):
+    """Log the cut-side stages that let `piece` be scanned into its drawer.
+
+    leather=True  → LEATHER_CUTTING, FUSING, PASTING (the whole leather side, so
+                    the piece's history is realistic and not just the one stage
+                    the gate happens to read)
+    lining=True   → LINING_CUTTING
+    """
+    if leather:
+        for code in ("LEATHER_CUTTING", "FUSING", "PASTING"):
+            await _log_stage(db, operations, piece, employee_id, code)
+    if lining:
+        await _log_stage(db, operations, piece, employee_id, "LINING_CUTTING")
+    await db.commit()
+
+
+@pytest_asyncio.fixture
+async def ready_for_store(db, operations, cutter):
+    """`await ready_for_store(piece)` → that piece may now be stored.
+
+    Pass leather=False / lining=False to leave one side unfinished, which is how
+    a test asserts the store-entry gate actually fires.
+    """
+    async def _f(piece, *, leather=True, lining=True):
+        await _ready_for_store(db, operations, piece, cutter[0].id,
+                               leather=leather, lining=lining)
+    return _f
+
+
+@pytest_asyncio.fixture
+async def cut_pieces(db, operations, cutter, pieces):
+    """`pieces`, but every one of them already through BOTH cut paths.
+
+    The drawer/store tests are asserting what a drawer does with parts that
+    arrive; they are not asserting how a piece gets to the store. This is that
+    prerequisite as a fixture, so those tests read `cut_pieces` and stay about
+    drawers. Tests that are specifically probing the store-entry gate should take
+    `pieces` + `ready_for_store` instead and control each side themselves.
+    """
+    for piece, _drawer in pieces:
+        await _ready_for_store(db, operations, piece, cutter[0].id)
+    return pieces
+
+
 @pytest_asyncio.fixture
 async def mark_present(db):
     """Factory for tests that create their own employees: `await mark_present(id)`."""

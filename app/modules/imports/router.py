@@ -29,7 +29,7 @@ import zipfile
 from decimal import Decimal
 
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import SessionLocal, get_db
@@ -210,25 +210,49 @@ class ReleaseStyle(BaseModel):
 class ReleaseRequest(BaseModel):
     """The DM names the styles that go to production, and declares their lining.
 
-    TWO SHAPES, ONE OF THEM DEPRECATED.
+    THREE SHAPES, ONE OF THEM DEPRECATED.
 
         styles: [{style_id, needs_lining}]     ← the contract. Every style
-                                                 carries its lining answer.
-        style_ids: [uuid, ...]                 ← DEPRECATED. Releases on the
-                                                 name/colour INFERENCE instead of
-                                                 a human answer.
+                                                 carries its own lining answer.
+        style_ids + needs_lining               ← BROADCAST. One answer covering
+                                                 every id in the list. A real
+                                                 answer from a human, so these
+                                                 styles are DECLARED, not guessed.
+        style_ids: [uuid, ...]                 ← DEPRECATED, and only without a
+                                                 top-level `needs_lining`.
+                                                 Releases on the name/colour
+                                                 INFERENCE instead of an answer.
 
     The legacy field is accepted for ONE RELEASE so a frontend mid-deploy is not
     broken by this change, and it is not a silent fallback: every style released
     that way comes back with `lining_declared: false`, and the response message
     names them. Remove it once the release screen sends `styles`.
+
+    WHY `extra="forbid"`. A top-level `needs_lining` used to be accepted by the
+    HTTP layer and dropped on the floor: Pydantic ignores unknown keys by
+    default, so a DM who sent `{style_ids: [...], needs_lining: true}` got a 200,
+    a NULL declaration, and the "released with NO lining declaration" warning
+    describing a request that had answered the question. Forbidding extras turns
+    every misspelt or misplaced field into a 422 that names it, instead of a
+    silent no-op on the one field this endpoint exists to capture.
     """
+    model_config = ConfigDict(extra="forbid")
+
     styles: list[ReleaseStyle] | None = None
     style_ids: list[uuid.UUID] | None = Field(
         default=None, deprecated=True,
         description="DEPRECATED — use `styles` so each style carries its lining "
-                    "answer. Releasing through this field falls back to inferring "
-                    "the lining requirement from the style name.")
+                    "answer, or pair this with a top-level `needs_lining` when "
+                    "one answer covers the whole list. Alone, it falls back to "
+                    "inferring the lining requirement from the style name.")
+    # THE BROADCAST ANSWER. Same three states as the per-style field: null is
+    # "not answered", not "no". Per-style answers WIN over it, so a body may
+    # carry the common case here and override the exceptions in `styles`.
+    needs_lining: bool | None = Field(
+        default=None,
+        description="One lining answer applied to every style in this request. "
+                    "A per-style `needs_lining` in `styles` overrides it. Counts "
+                    "as a DECLARATION (lining_declared: true), not an inference.")
     # Growing the drawer pool is a separate, explicit decision (POST /drawers/pool).
     # Setting this true releases AND mints the shortfall of drawers in one step —
     # offered because a DM who has just seen "230 pieces have no drawer" should not
@@ -247,25 +271,48 @@ class ReleaseRequest(BaseModel):
                 "Send either `styles` (preferred) or the deprecated `style_ids`, "
                 "not both — two lists of styles in one request have no defined "
                 "precedence.")
-        if self.styles:
+        # A top-level `needs_lining` answers every style that did not answer for
+        # itself, so it settles this check too — the requirement is that each
+        # style HAS an answer, not that it carried its own.
+        if self.styles and self.needs_lining is None:
             unanswered = [str(s.style_id) for s in self.styles
                           if s.needs_lining is None]
             if unanswered:
                 raise ValueError(
                     f"{len(unanswered)} style(s) have no lining answer: "
                     f"{', '.join(unanswered)}. Set `needs_lining` true or false on "
-                    f"every style — it decides whether the garment needs a lining "
+                    f"every style (or once at the top level to cover them all) — "
+                    f"it decides whether the garment needs a lining "
                     f"cut and whether its drawer must hold both parts before "
                     f"line-stitching, and it cannot be changed after release.")
         return self
 
     def resolved(self) -> tuple[list[uuid.UUID], dict[uuid.UUID, bool]]:
         """(style ids in order, {style_id: lining answer}). One reading of the
-        body, so the router and the service cannot interpret it differently."""
+        body, so the router and the service cannot interpret it differently.
+
+        A style id lands in the map ONLY when a human actually answered for it,
+        because the service reads presence-in-the-map as `lining_declared` — the
+        flag that separates a declaration from a guess in the response, the audit
+        row and core/lining_rules. Never default a missing answer to False here:
+        that would record the DM as having declared "no lining" on a style nobody
+        was asked about, which is the one direction the inference cannot recover
+        from.
+        """
         if self.styles:
-            return ([s.style_id for s in self.styles],
-                    {s.style_id: bool(s.needs_lining) for s in self.styles})
-        return (list(self.style_ids or []), {})
+            ids = [s.style_id for s in self.styles]
+            answers = {s.style_id: bool(s.needs_lining) for s in self.styles
+                       if s.needs_lining is not None}
+            if self.needs_lining is not None:
+                # Per-style wins; the broadcast fills only the gaps.
+                answers = {sid: answers.get(sid, bool(self.needs_lining))
+                           for sid in ids}
+            return ids, answers
+
+        ids = list(self.style_ids or [])
+        if self.needs_lining is None:
+            return ids, {}          # the deprecated inference path, unchanged
+        return ids, {sid: bool(self.needs_lining) for sid in ids}
 
 
 class StyleIdsRequest(BaseModel):
@@ -376,6 +423,15 @@ async def release_breakdown_styles(
 
         {"styles": [{"style_id": "…", "needs_lining": true},
                     {"style_id": "…", "needs_lining": false}]}
+
+    When ONE answer covers the whole batch, send it once at the top level:
+
+        {"style_ids": ["…", "…"], "needs_lining": true}
+
+    That is a declaration, not a guess — `lining_declared` comes back true. A
+    per-style answer in `styles` overrides the top-level one, so the common case
+    can be broadcast and the exceptions named. `style_ids` WITHOUT a top-level
+    answer is the deprecated inference path and still warns.
 
     That answer is stamped on the style, copied onto every piece it mints, and
     from then on decides two things: whether the garment has a LINING_CUTTING

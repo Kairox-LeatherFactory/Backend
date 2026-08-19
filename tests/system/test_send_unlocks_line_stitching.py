@@ -52,8 +52,21 @@ async def _scan_in(api_client, as_role, drawer, piece, emp, part=None):
     return await api_client.post(f"{API}/drawers/store-scan", json=body)
 
 
-async def _to_the_store(api_client, as_role, piece, cutter, paster, lot):
-    """Cut, fuse and paste one piece so it is ready for the store."""
+async def _to_the_store(api_client, as_role, piece, cutter, paster, lot,
+                        lining_cutter=None):
+    """Run BOTH cut paths to their ends, so the piece is ready for the store.
+
+    Both, not just the leather one: the store is where the two paths meet, and
+    each half is only admitted once its own path is finished — leather after
+    PASTING, lining after LINING_CUTTING. Cutting the leather and stopping was
+    enough when the drawer accepted anything; it now buys a 409 on the lining
+    scan.
+
+    Pass lining_cutter=None for a genuinely leather-only garment. Do NOT log a
+    lining cut for one: a cut lining is a physical fact that outranks
+    needs_lining=False (core/lining_rules), so it would silently re-line the very
+    piece the test is about.
+    """
     r = await _log(api_client, as_role, UserRole.CUTTING_MANAGER, piece, cutter,
                    screen="LEATHER_CUT", lot=lot)
     assert r.status_code == 201, r.text
@@ -61,15 +74,21 @@ async def _to_the_store(api_client, as_role, piece, cutter, paster, lot):
         r = await _log(api_client, as_role, UserRole.STITCHING_MANAGER, piece,
                        paster)
         assert r.status_code == 201, r.text
+    if lining_cutter is None:
+        return          # leather-only garment: there is no second path to run
+    r = await _log(api_client, as_role, UserRole.LINING_MANAGER, piece,
+                   lining_cutter, screen="LINING_CUT")
+    assert r.status_code == 201, r.text
 
 
 # ══════════════════════════════════════════════ the happy path, whole
 async def test_line_stitching_opens_only_after_the_drawer_is_sent(
-    api_client, as_role, operations, pieces, cutter, paster, tailor, leather_lot
+    api_client, as_role, operations, pieces, cutter, lining_cutter, paster, tailor,
+    leather_lot
 ):
     piece, drawer = pieces[0]
     await _to_the_store(api_client, as_role, piece, cutter[0], paster[0],
-                        leather_lot)
+                        leather_lot, lining_cutter[0])
 
     # 1 · both parts in — the drawer receives itself, and is NOT yet sent
     r = await _scan_in(api_client, as_role, drawer, piece, cutter[0], "LEATHER")
@@ -115,13 +134,14 @@ async def test_line_stitching_opens_only_after_the_drawer_is_sent(
 
 
 async def test_a_batch_send_releases_every_piece_in_it(
-    api_client, as_role, operations, pieces, cutter, paster, tailor, leather_lot
+    api_client, as_role, operations, pieces, cutter, lining_cutter, paster, tailor,
+    leather_lot
 ):
     """The whole point of the batch: many drawers, one action, all released."""
     chosen = pieces[:3]
     for piece, drawer in chosen:
         await _to_the_store(api_client, as_role, piece, cutter[0], paster[0],
-                            leather_lot)
+                            leather_lot, lining_cutter[0])
         for part in ("LEATHER", "LINING"):
             r = await _scan_in(api_client, as_role, drawer, piece, cutter[0], part)
             assert r.status_code == 200, r.text
@@ -140,12 +160,13 @@ async def test_a_batch_send_releases_every_piece_in_it(
 
 # ══════════════════════════════════════════════ the request shape
 async def test_send_takes_only_drawer_ids(api_client, as_role, pieces, cutter,
-                                          paster, leather_lot, operations):
+                                          lining_cutter, paster, leather_lot,
+                                          operations):
     """No destination. Sending the old body must not be required, and sending an
     unexpected extra field must not break the call."""
     piece, drawer = pieces[0]
     await _to_the_store(api_client, as_role, piece, cutter[0], paster[0],
-                        leather_lot)
+                        leather_lot, lining_cutter[0])
     for part in ("LEATHER", "LINING"):
         await _scan_in(api_client, as_role, drawer, piece, cutter[0], part)
 
@@ -164,7 +185,8 @@ async def test_an_empty_selection_is_refused(api_client, as_role, pieces):
 
 # ══════════════════════════════════════════════ the case that strands a garment
 async def test_a_piece_needing_no_lining_can_still_reach_line_stitching(
-    api_client, as_role, operations, pieces, cutter, paster, tailor, leather_lot,
+    api_client, as_role, operations, pieces, cutter, lining_cutter, paster, tailor,
+    leather_lot,
     db
 ):
     """THE ONE THAT BREAKS THE FLOOR IF IT REGRESSES.
@@ -182,7 +204,7 @@ async def test_a_piece_needing_no_lining_can_still_reach_line_stitching(
     await db.commit()
 
     await _to_the_store(api_client, as_role, piece, cutter[0], paster[0],
-                        leather_lot)
+                        leather_lot)          # leather side only — see the helper
     r = await _scan_in(api_client, as_role, drawer, piece, cutter[0], "LEATHER")
     assert r.status_code == 200, r.text
     body = r.json()

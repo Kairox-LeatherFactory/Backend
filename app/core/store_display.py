@@ -66,6 +66,30 @@ _D_SENDED = "sended"
 # After either of these (and before LINE_STITCHING), the piece is "in store".
 _CUT_SIDE_TERMINALS = {_PASTING, _LINING_CUT}
 
+# THE SAME HAND-OFF, PER PART — and the WRITE gate, not just the read overlay.
+#
+# `_CUT_SIDE_TERMINALS` said which stages put a piece in store; this says which
+# stage a given PART must have reached before it may be scanned INTO one. They
+# are the same rule read from two ends, and they were only ever enforced at one:
+# display_stage() would not show a piece as "in store" until PASTING or
+# LINING_CUTTING, while DrawerService.store_scan accepted any merged piece at any
+# time — so leather could be scanned into a drawer straight off the breakdown
+# upload, before it was cut, and the drawer read HOLDING LEATHER over an empty
+# slot. The store screen believed it, the merge gate opened on it, and the
+# garment reached LINE_STITCHING having never been pasted.
+#
+# Keyed by DrawerPart VALUE (plain strings) so core imports nothing from
+# app.modules — the core-independence contract.
+#
+#   LEATHER  PASTING          the leather side's last stage: cut → fused →
+#                             pasted. Only then is there a leather part to store.
+#   LINING   LINING_CUTTING   the lining side is one stage long, so its cut IS
+#                             its hand-off.
+STORE_ENTRY_STAGE: dict[str, str] = {
+    "LEATHER": _PASTING,
+    "LINING": _LINING_CUT,
+}
+
 
 # Human sub-labels for the store sub-status. Drives the caption managers read.
 _STORE_SUBLABEL = {
