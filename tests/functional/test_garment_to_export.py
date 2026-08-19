@@ -102,7 +102,23 @@ async def test_one_lined_jacket_walks_the_whole_chain_and_recycles_its_drawer(
         select(MaterialLot.on_hand).where(MaterialLot.id == leather_lot.id))
     ) == pytest.approx(leather_before - 14.0)
 
-    # ── 2 · storage: drawer first, then each part ────────────────────────────
+    # ── 2 · the leather side finishes its run: fusing, then pasting ─────────
+    # THIS COMES BEFORE STORAGE, and that ordering is the point. The store is
+    # where the two cut PATHS meet, not a stop part-way along one of them:
+    # leather reaches its drawer after PASTING, lining after LINING_CUTTING.
+    # DrawerService enforces it (core/store_display.STORE_ENTRY_STAGE), so a
+    # scan attempted here — with the leather merely cut — is a 409.
+    r = await svc.log_batch(user=stitching_mgr, employee_id=cutter[0].id,
+                            piece_ids=[piece.id], work_date=TODAY,
+                            screen=ScreenContext.PIPELINE)
+    assert r["stage"] == "FUSING" and r["count_logged"] == 1
+
+    r = await svc.log_batch(user=stitching_mgr, employee_id=paster[0].id,
+                            piece_ids=[piece.id], work_date=TODAY,
+                            screen=ScreenContext.PIPELINE)
+    assert r["stage"] == "PASTING" and r["count_logged"] == 1
+
+    # ── 3 · storage: drawer first, then each part ────────────────────────────
     s = await drawers.store_scan(drawer_id=drawer_id, piece_id=piece.id,
                                  part=DrawerPart.LEATHER)
     assert s["state"] == DrawerState.HOLDING_LEATHER.value
@@ -115,17 +131,6 @@ async def test_one_lined_jacket_walks_the_whole_chain_and_recycles_its_drawer(
     assert s["state"] == DrawerState.RECEIVED.value
     assert s["ready_for_received"] is True
     assert s["sent"] is False        # bug #15: still in the store
-
-    # ── 3 · the leather chain up to the merge gate ───────────────────────────
-    r = await svc.log_batch(user=stitching_mgr, employee_id=cutter[0].id,
-                            piece_ids=[piece.id], work_date=TODAY,
-                            screen=ScreenContext.PIPELINE)
-    assert r["stage"] == "FUSING" and r["count_logged"] == 1
-
-    r = await svc.log_batch(user=stitching_mgr, employee_id=paster[0].id,
-                            piece_ids=[piece.id], work_date=TODAY,
-                            screen=ScreenContext.PIPELINE)
-    assert r["stage"] == "PASTING" and r["count_logged"] == 1
 
     # ── 4 · the gate holds while the drawer is merely complete ──────────────
     r = await svc.log_batch(user=stitching_mgr, employee_id=tailor[0].id,
@@ -208,6 +213,16 @@ async def test_a_leather_only_garment_never_waits_for_a_lining(
                         piece_ids=[piece.id], work_date=TODAY,
                         screen=ScreenContext.LEATHER_CUT,
                         leather_lot_id=leather_lot.id, consumption_qty=11.0)
+    # An unlined garment still has to finish the leather side before it may be
+    # stored: needs_lining=False removes the OTHER path, not this one's stages.
+    # So fusing and pasting happen here, ahead of the drawer, and not after the
+    # send as they used to — the store is the end of the leather run.
+    await svc.log_batch(user=stitching_mgr, employee_id=cutter[0].id,
+                        piece_ids=[piece.id], work_date=TODAY,
+                        screen=ScreenContext.PIPELINE)          # FUSING
+    await svc.log_batch(user=stitching_mgr, employee_id=paster[0].id,
+                        piece_ids=[piece.id], work_date=TODAY,
+                        screen=ScreenContext.PIPELINE)          # PASTING
 
     s = await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
                                  part=DrawerPart.LEATHER)
@@ -217,12 +232,6 @@ async def test_a_leather_only_garment_never_waits_for_a_lining(
     await drawers.transition(drawer.id, "RECEIVED", dm.id)
     await drawers.transition(drawer.id, "SENDED", dm.id)
 
-    await svc.log_batch(user=stitching_mgr, employee_id=cutter[0].id,
-                        piece_ids=[piece.id], work_date=TODAY,
-                        screen=ScreenContext.PIPELINE)          # FUSING
-    await svc.log_batch(user=stitching_mgr, employee_id=paster[0].id,
-                        piece_ids=[piece.id], work_date=TODAY,
-                        screen=ScreenContext.PIPELINE)          # PASTING
     r = await svc.log_batch(user=stitching_mgr, employee_id=tailor[0].id,
                             piece_ids=[piece.id], work_date=TODAY,
                             screen=ScreenContext.PIPELINE)

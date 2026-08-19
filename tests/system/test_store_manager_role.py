@@ -35,9 +35,9 @@ def _emp_code(emp) -> str:
 # ══════════════════════════════════════════════ what the store manager CAN do
 @pytest.mark.asyncio
 async def test_the_store_manager_runs_the_whole_store_hub(
-    api_client, as_role, pieces, cutter
+    api_client, as_role, cut_pieces, cutter
 ):
-    piece, drawer = pieces[0]
+    piece, drawer = cut_pieces[0]
     as_role(UserRole.STORE_MANAGER)
 
     # the list
@@ -99,11 +99,11 @@ async def test_the_store_manager_cannot_reach_the_production_reads(
 
 @pytest.mark.asyncio
 async def test_a_floor_manager_may_scan_but_may_not_release(
-    api_client, as_role, pieces, cutter
+    api_client, as_role, cut_pieces, cutter
 ):
     """The other side of the boundary: the cutting manager fills drawers and
     reads the list, but does not decide what leaves the store."""
-    piece, drawer = pieces[0]
+    piece, drawer = cut_pieces[0]
     as_role(UserRole.CUTTING_MANAGER)
 
     assert (await api_client.get(f"{API}/drawers")).status_code == 200

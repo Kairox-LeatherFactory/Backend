@@ -48,7 +48,7 @@ from app.core.enums import (BarcodeAuditAction, BarcodeType, DrawerPart,
                             DrawerState, ProductionStage)
 from app.core.lining_rules import (LINING_COLOUR_FIELDS, lining_required,
                                    lining_required_sql, why_lining_required)
-from app.core.store_display import holding_label
+from app.core.store_display import STORE_ENTRY_STAGE, holding_label
 from app.modules.barcode.models import BarcodeRegistry, Drawer
 from app.modules.clients.models import SKU, Style
 from app.modules.production.models import Piece
@@ -326,8 +326,51 @@ class DrawerService:
             })
         return {"total": total, "count": len(items), "items": items}
 
+    # ── MAY THIS PART GO IN A DRAWER AT ALL? (the store-entry gate) ──────────
+    async def _assert_ready_for_store(self, piece: Piece, part: DrawerPart,
+                                      done: set[str]) -> None:
+        """The piece's cut side must be FINISHED before that part may be stored.
+
+            LEATHER  requires PASTING          (cut → fused → pasted)
+            LINING   requires LINING_CUTTING
+
+        WHY THIS EXISTS. The store is the merge point of the two cut paths, and
+        core/store_display.py has always said so — `_CUT_SIDE_TERMINALS` is the
+        set of stages after which a piece reads as "in store". But that was a
+        READ overlay only: store_scan checked the merge map and the drawer's
+        lifecycle state, and nothing at all about the piece's own progress. A
+        piece minted an hour ago with zero production events could be scanned
+        straight into its drawer, which then read HOLDING LEATHER over an empty
+        slot. Nothing downstream could tell that apart from a real one: the
+        drawer auto-RECEIVED on HOLDING_BOTH, the DM sent it, and the merge gate
+        opened LINE_STITCHING for a garment that had never been pasted.
+
+        So the rule is now enforced where it is WRITTEN, not only where it is
+        displayed, and both ends read the same constant.
+
+        IT APPLIES TO AN EXPLICIT `part` TOO, not just an inferred one. A gate
+        that a caller can skip by naming the bucket itself is not a gate — and
+        the explicit path is the one the barcode screen uses.
+        """
+        required = STORE_ENTRY_STAGE[part.value]
+        if required in done:
+            return
+        side = "leather" if part is DrawerPart.LEATHER else "lining"
+        # Name what the piece HAS done: "not pasted yet" is actionable, "rejected"
+        # is not, and the operator standing at the drawer is the person who has to
+        # work out where the garment actually is.
+        progress = (f"it has completed {', '.join(sorted(done))}"
+                    if done else "it has no logged production yet")
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"{piece.code} cannot be stored as {side} yet — {required} has not "
+            f"been logged for it ({progress}). The store is where the two cut "
+            f"paths meet: leather goes in after PASTING, lining after "
+            f"LINING_CUTTING. Log the missing stage first.")
+
     # ── which bucket does this scan belong in? (bug #18) ─────────────────────
-    async def infer_part(self, drawer: Drawer, piece: Piece) -> DrawerPart:
+    async def infer_part(self, drawer: Drawer, piece: Piece,
+                         *, done: set[str] | None = None) -> DrawerPart:
         """Work out whether this scan is the LEATHER or the LINING arriving.
 
         BUG #18 — the operator used to click "Hold Leather" or "Hold Lining" by
@@ -340,14 +383,25 @@ class DrawerService:
 
           1. The piece has a LINING_CUTTING event and the drawer has no lining in
              → this is that lining arriving.
-          2. The piece has a leather-side event and no leather in → the leather.
-          3. Neither is decisive → fill whichever side is still empty.
+          2. The piece has PASTING and no leather in → the leather.
+          3. Neither side is READY → fill whichever is still empty, and let
+             _assert_ready_for_store reject it by name.
           4. Both sides already in → 409; there is nothing left to put anywhere.
 
-        Rule 3 matters more than it looks: a factory that has not yet started
-        logging its cut events would otherwise have no inferable answer at all,
-        and the store screen would be unusable. The drawer's own emptiness is
-        always a valid signal.
+        RULE 2 NOW ASKS FOR PASTING, NOT "any leather-side event". It used to
+        accept LEATHER_CUTTING or FUSING as evidence that the leather had
+        arrived, which is how a piece that was cut but not yet pasted could be
+        bucketed as leather and stored. The store-entry gate is the authority on
+        WHETHER a part may go in; this only picks WHICH side a legal scan fills,
+        and the two must agree on what "the leather is ready" means or inference
+        would keep proposing buckets the gate then refuses.
+
+        Rule 3 no longer papers over a factory that logs no events: it picks the
+        empty side so the rejection can name the stage that is actually missing,
+        rather than choosing arbitrarily and reporting the wrong one.
+
+        `done` is passed in by store_scan so the piece's history is read ONCE per
+        scan and the bucket and the gate cannot see different histories.
         """
         if drawer.leather_in and drawer.lining_in:
             raise HTTPException(
@@ -355,15 +409,13 @@ class DrawerService:
                 f"Drawer {drawer.code} already holds both leather and lining for "
                 f"{piece.code} — there is nothing further to scan in.")
 
-        from app.modules.production.repository import ProductionRepository
-        done = await ProductionRepository(self.db).completed_stage_codes(piece.id)
+        if done is None:
+            from app.modules.production.repository import ProductionRepository
+            done = await ProductionRepository(self.db).completed_stage_codes(piece.id)
 
         if ProductionStage.LINING_CUTTING.value in done and not drawer.lining_in:
             return DrawerPart.LINING
-        leather_side = {ProductionStage.LEATHER_CUTTING.value,
-                        ProductionStage.FUSING.value,
-                        ProductionStage.PASTING.value}
-        if (done & leather_side) and not drawer.leather_in:
+        if ProductionStage.PASTING.value in done and not drawer.leather_in:
             return DrawerPart.LEATHER
         return DrawerPart.LEATHER if not drawer.leather_in else DrawerPart.LINING
 
@@ -421,9 +473,22 @@ class DrawerService:
         # BUG #18: no manual Hold Leather / Hold Lining button. An explicit part
         # still wins (a screen that genuinely knows), otherwise the system reads
         # it off the piece's history and the drawer's contents.
+        #
+        # ONE read of the piece's history, shared by the bucket choice and the
+        # gate below: two reads could disagree if an event landed between them,
+        # and the pair would then store a part the gate had just approved for the
+        # other side.
+        from app.modules.production.repository import ProductionRepository
+        done = await ProductionRepository(self.db).completed_stage_codes(piece.id)
+
         inferred = part is None
         if part is None:
-            part = await self.infer_part(drawer, piece)
+            part = await self.infer_part(drawer, piece, done=done)
+
+        # THE STORE-ENTRY GATE. Leather may not enter a drawer before PASTING,
+        # lining before LINING_CUTTING — checked for the explicit part as well as
+        # the inferred one, or naming the bucket would skip the gate.
+        await self._assert_ready_for_store(piece, part, done)
 
         if part is DrawerPart.LEATHER:
             drawer.leather_in = True

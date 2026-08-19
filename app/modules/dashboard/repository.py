@@ -50,6 +50,7 @@ from sqlalchemy import and_, case, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import ProductionStage
+from app.core.lining_rules import lining_required_sql
 from app.core.store_display import STORE as STORE_DISPLAY_STAGE
 from app.modules.clients.models import (
     SKU, Client, ClientOrder, Style, style_in_production,
@@ -291,12 +292,51 @@ class DashboardRepository:
         """How many MINTED pieces in scope actually need a lining. ONE query.
 
         THE DENOMINATOR FOR THE LINING NODE, and the reason that node cannot use
-        the order quantity like every chain stage does. `needs_lining` is set per
-        piece from the breakdown at upload, so a run that is half leather-only
-        would sit permanently at ~50% "lining complete" if it were measured
-        against the whole order. Counted over minted pieces (not Σ qty_ordered)
-        because needs_lining only exists once the piece exists.
+        the order quantity like every chain stage does. A run that is half
+        leather-only would sit permanently at ~50% "lining complete" if it were
+        measured against the whole order. Counted over minted pieces (not
+        Σ qty_ordered) because the lining question can only be asked of a piece
+        that exists.
+
+        IT ASKS core/lining_rules, NOT `Piece.needs_lining` ALONE. The stored flag
+        is written once by imports/premint.py at mint time and never recomputed,
+        so it goes stale: on the live database two orders holding the SAME 17
+        styles came out 925-flagged and 0-flagged (see lining_required_pieces
+        below). Read as a denominator that produced the impossible node
+        `completed=1, total=0` — a lining cut logged against a population the
+        dashboard said was empty. Pricing the node off the live rule instead means
+        the number cannot go stale again the moment premint's heuristic moves.
+
+        THE LINING-CUT EXISTS TERM IS ADDED HERE, and it is what makes the node
+        self-consistent. `lining_required_sql` deliberately omits it (it needs a
+        correlated EXISTS, and its other callers apply it in Python over history
+        they have already loaded); this one has no Python pass to add it in. With
+        it, every piece the funnel counts as lining-CUT is by construction inside
+        this population, so `completed <= total` always holds. It also matches
+        lining_required()'s order of authority: a logged lining cut is a physical
+        fact and outranks the DM's declaration, hence OR-ed OVER the CASE that
+        `explicit_col` builds rather than folded inside it.
+
+        The merge gate still reads the stored flag, so a gap between this and
+        lining_required_pieces still means the DATA wants
+        scripts/backfill_needs_lining.py — this makes the dashboard stop
+        MIS-REPORTING the gap, it does not close it.
         """
+        lining_cut_logged = (
+            select(literal(1))
+            .select_from(ProductionEvent)
+            .join(Operation, Operation.id == ProductionEvent.operation_id)
+            .where(ProductionEvent.piece_id == Piece.id,
+                   Operation.code == _LINING_CUT)
+            .exists()
+        )
+        needs_lining = or_(
+            lining_cut_logged,
+            lining_required_sql(
+                Piece.needs_lining, Style.name, Style.article,
+                (SKU.knit_color, SKU.nylon_color),
+                explicit_col=Style.needs_lining),
+        )
         stmt = (
             select(func.count(Piece.id))
             .select_from(Piece)
@@ -304,7 +344,7 @@ class DashboardRepository:
             .join(Style, Style.id == SKU.style_id)
             .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
-            .where(Piece.needs_lining.is_(True))
+            .where(needs_lining)
         )
         if order_id is not None:
             stmt = stmt.where(ClientOrder.id == order_id)
@@ -1691,7 +1731,8 @@ class DashboardRepository:
     # Two of these nodes are not ordinary chain links, and each carries its kind
     # so the service prices it correctly and the frontend can render it:
     #   PARALLEL  LINING_CUTTING — measured against the lining-REQUIRED
-    #             population (pieces with needs_lining), not against the leather
+    #             population (core/lining_rules, NOT the stored needs_lining flag
+    #             alone — see lining_required_total), not against the leather
     #             cut, which would report a leather-only order as behind on
     #             lining forever.
     #   STORE     not a ProductionEvent at all (core/store_display.py). It is the

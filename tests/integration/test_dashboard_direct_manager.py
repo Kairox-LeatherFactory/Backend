@@ -119,7 +119,8 @@ async def test_the_pipeline_is_a_funnel_and_the_bottleneck_is_its_deepest_queue(
 
 @pytest.mark.asyncio
 async def test_a_department_counts_a_garment_once_however_many_of_its_stages_it_passed(
-    db, operations, pieces, cutter, tailor, cutting_mgr, dm, leather_lot
+    db, operations, pieces, cutter, tailor, cutting_mgr, dm, leather_lot,
+    ready_for_store
 ):
     """THE COUNT THAT IS EASY TO GET WRONG. Stitching folds three stages. A piece
     through all three is ONE garment stitched, not three — which is why the
@@ -132,6 +133,7 @@ async def test_a_department_counts_a_garment_once_however_many_of_its_stages_it_
     from app.core.enums import DrawerPart
     from app.modules.drawers.service import DrawerService
     drawers = DrawerService(db)
+    await ready_for_store(piece, leather=False)   # _walk covers the leather side
     for part in (DrawerPart.LEATHER, DrawerPart.LINING):
         await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id, part=part)
     await drawers.send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
@@ -274,7 +276,8 @@ async def test_style_tracking_reports_the_lining_cut_and_the_store(
 
 @pytest.mark.asyncio
 async def test_a_piece_held_in_the_store_is_counted_as_pending_there(
-    db, operations, pieces, order_tree, cutter, cutting_mgr, dm, leather_lot
+    db, operations, pieces, order_tree, cutter, cutting_mgr, dm, leather_lot,
+    ready_for_store
 ):
     """The number the DM actually wants: garments sitting in a drawer.
 
@@ -287,6 +290,9 @@ async def test_a_piece_held_in_the_store_is_counted_as_pending_there(
     piece, sku = pieces[0]
     await _walk(db, piece, cutter=cutter, tailor=None, cutting_mgr=cutting_mgr,
                 dm=dm, leather_lot=leather_lot, stages=1)
+    # …and on to PASTING, which is where the leather side hands off to the store.
+    # `_walk` cannot take it further here (it has no tailor to log with).
+    await ready_for_store(piece, lining=False)
     await DrawerService(db).store_scan(
         drawer_id=piece.drawer_id, piece_id=piece.id,
         part=DrawerPart.LEATHER, actor_id=dm.id)
