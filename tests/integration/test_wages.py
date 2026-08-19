@@ -62,12 +62,20 @@ async def test_carnaby_wage_matches_card(db):
                                   qty=s.qty_ordered))
     await db.commit()
 
-    run = await ws.compute_run(date(2026, 3, 1), date(2026, 3, 31))
-    detail = await ws.get_run_detail(run["id"])
+    # THE FORTNIGHT IS TWO RUNS. A piece run must name the work it pays for; a
+    # monthly run is priced from the calendar and takes no paying scope. Together
+    # they are the whole payroll, and neither can pay the other's people.
+    piece = await ws.compute_run(date(2026, 3, 1), date(2026, 3, 31),
+                                 run_kind="piece", style_code="CARNABY")
+    salaries = await ws.compute_run(date(2026, 3, 1), date(2026, 3, 31),
+                                    run_kind="monthly")
+
     amounts = {}
-    for line in detail["lines"]:
-        e = await db.get(em.Employee, line["employee_id"])
-        amounts[e.name] = float(line["amount"])
+    for run in (piece, salaries):
+        detail = await ws.get_run_detail(run["id"])
+        for line in detail["lines"]:
+            e = await db.get(em.Employee, line["employee_id"])
+            amounts[e.name] = float(line["amount"])
     assert amounts["Cutter1"] == 152 * 80     # 12160, matches the card
     assert amounts["Monthly1"] == 18000       # monthly independent of production
 
@@ -94,11 +102,17 @@ async def test_compute_run_returns_employee_level_lines(db):
                               employee_id=cutter.id, work_date=date(2026, 3, 23), qty=10))
     await db.commit()
 
-    run = await ws.compute_run(date(2026, 3, 1), date(2026, 3, 31))
+    run = await ws.compute_run(date(2026, 3, 1), date(2026, 3, 31),
+                               run_kind="piece", style_code="CARNABY")
+    salaries = await ws.compute_run(date(2026, 3, 1), date(2026, 3, 31),
+                                    run_kind="monthly")
 
     assert run["lines"]
     assert any(line["employee_name"] == "Cutter1" for line in run["lines"])
-    assert any(line["employee_name"] == "Monthly1" for line in run["lines"])
+    # Monthly1 is on the OTHER run — that separation is the contract, not an
+    # omission, so assert both halves of it.
+    assert not any(line["employee_name"] == "Monthly1" for line in run["lines"])
+    assert any(line["employee_name"] == "Monthly1" for line in salaries["lines"])
     cutter_line = next(line for line in run["lines"] if line["employee_name"] == "Cutter1")
     assert cutter_line["pieces"] == 10
     assert cutter_line["amount"] == 800

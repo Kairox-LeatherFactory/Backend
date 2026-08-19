@@ -41,7 +41,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import (BarcodeAuditAction, BarcodeType, DrawerPart,
@@ -53,6 +53,23 @@ from app.modules.barcode.models import BarcodeRegistry, Drawer
 from app.modules.clients.models import SKU, Style
 from app.modules.production.models import Piece
 
+
+
+# ── THE STORE SCREEN'S ACTIVITY CLOCK ────────────────────────────────────────
+# Every act on a drawer stamps `last_activity_at` through this one function, so
+# there is exactly one place that decides what "recently used" means. Inlining
+# `drawer.last_activity_at = now` at the five mutation sites is how the previous
+# ordering (`coalesce(sended_at, received_at, created_at)`) drifted: two of those
+# three columns are CLEARED on release, and neither the merge nor the part scan
+# wrote any timestamp at all.
+#
+# It is deliberately NOT reset by release_nocommit. A drawer that has just
+# shipped its garment is the single most recently worked-on drawer in the
+# building, and the old ordering buried it.
+def _touch(drawer, kind: str, *, now=None) -> None:
+    """Record that something just happened to this drawer, and what."""
+    drawer.last_activity_at = now or datetime.now(timezone.utc)
+    drawer.last_activity_kind = kind
 
 
 class DrawerService:
@@ -172,7 +189,8 @@ class DrawerService:
                           has_piece: bool | None = None,
                           sendable: bool | None = None,
                           code: str | None = None,
-                          sort: str = "seq",
+                          sort: str = "recent",
+                          pin_codes: list[str] | None = None,
                           limit: int = 500, offset: int = 0) -> dict:
         """Every drawer + its barcode + the garment inside it — the Drawers List.
 
@@ -255,26 +273,67 @@ class DrawerService:
         # `seq` is the PRINT order — DRW-0001…DRW-0430, which is how labels are
         # produced and how an operator finds a physical drawer in the rack.
         #
-        # `recent` is the STORE SCREEN order (change-list item 6: "show the 10
-        # latest drawers"). "Latest" means most recently ACTED ON, not most
-        # recently created: a 200-drawer pool is bootstrapped in one transaction,
-        # so created_at is effectively constant across it and would return the
-        # same arbitrary ten every time. The activity timestamp is therefore the
-        # newest of sended_at / received_at, falling back to created_at for a
-        # drawer nothing has happened to yet.
-        activity = func.coalesce(Drawer.sended_at, Drawer.received_at,
+        # `recent` is the STORE SCREEN order, and it is now the DEFAULT: a store
+        # operator opens this list many times a day to see what the floor is
+        # working on, and prints labels rarely. The print sheet asks for
+        # `sort=seq` explicitly.
+        #
+        # WHAT "LATEST" USED TO MEAN, AND WHY IT WAS WRONG.
+        #     coalesce(sended_at, received_at, created_at)
+        # got all three of the cases this screen exists for:
+        #   • A MERGED drawer has neither sended_at nor received_at, so a garment
+        #     merged into it seconds ago fell through to created_at.
+        #   • A STORE SCAN writes neither column — it moves leather_in/lining_in
+        #     and state — so the single most common act on a drawer was invisible.
+        #   • release_nocommit NULLS both columns, so the drawer that had JUST
+        #     shipped sorted to the very bottom.
+        # And created_at cannot be the fallback that saves it: a 200-drawer pool
+        # is bootstrapped in one transaction and shares one timestamp, so it
+        # returns the same arbitrary ten rows forever.
+        #
+        # `last_activity_at` is stamped by every act (see _touch and premint) and
+        # is never cleared. `updated_at` backfills it for rows written before this
+        # column existed — TimestampMixin sets onupdate=func.now(), so any drawer
+        # ever touched by the ORM already carries a true activity time.
+        activity = func.coalesce(Drawer.last_activity_at, Drawer.updated_at,
                                  Drawer.created_at)
-        if (sort or "seq").strip().lower() == "recent":
-            order_by = (activity.desc(), Drawer.seq.asc())
-        else:
+
+        # PINNED CODES — the "recently searched" band (change-list item: drawers).
+        # A search is a fact about one operator's SESSION, not about the factory,
+        # so it is not stored: the client keeps its own recent-search list and
+        # replays it here as `pin_codes`. That keeps a read endpoint a read
+        # endpoint (the alternative wrote a row to the database on every list
+        # call) and it costs one CASE expression.
+        #
+        # Pinned rows sort ABOVE everything, in the order the client sent them —
+        # the client's list is already most-recent-first, and re-sorting it here
+        # would throw that away.
+        pinned = [c.strip().upper() for c in (pin_codes or []) if c and c.strip()]
+        pin_rank = None
+        if pinned:
+            pin_rank = case(
+                {c: i for i, c in enumerate(pinned)},
+                value=func.upper(Drawer.code),
+                else_=len(pinned),
+            )
+
+        if (sort or "recent").strip().lower() == "seq":
             order_by = (Drawer.seq.asc(),)
+        else:
+            # seq is the tiebreaker, not decoration: drawers merged in one
+            # transaction share a timestamp to the microsecond, and without a
+            # stable second key they reshuffle between pages of the same list.
+            order_by = (activity.desc(), Drawer.seq.asc())
+        if pin_rank is not None:
+            order_by = (pin_rank.asc(),) + order_by
 
         rows = (await self.db.execute(
             _filtered(_joins(
                 select(Drawer, BarcodeRegistry.id, BarcodeRegistry.code,
                        BarcodeRegistry.caption, BarcodeRegistry.status,
                        Piece.code.label("piece_code"), Piece.seq.label("piece_seq"),
-                       Piece.needs_lining)
+                       Piece.needs_lining,
+                       activity.label("activity_at"))
                 .outerjoin(
                     BarcodeRegistry,
                     and_(BarcodeRegistry.drawer_id == Drawer.id,
@@ -289,6 +348,7 @@ class DrawerService:
         lining_map = await self._needs_lining_map(
             [r[0].current_piece_id for r in rows])
 
+        pin_set = set(pinned)
         items = []
         for r in rows:
             drawer = r[0]
@@ -323,6 +383,12 @@ class DrawerService:
                 "barcode": r[2],
                 "caption": r[3],
                 "barcode_status": r[4],
+                # WHEN this drawer was last worked on, and WHY it is where it is
+                # in the list. A row at the top saying "sent · 2 min ago" is
+                # self-explaining; a bare timestamp is not.
+                "last_activity_at": r.activity_at,
+                "last_activity": drawer.last_activity_kind,
+                "pinned": bool(pinned) and (drawer.code or "").upper() in pin_set,
             })
         return {"total": total, "count": len(items), "items": items}
 
@@ -494,6 +560,9 @@ class DrawerService:
             drawer.leather_in = True
         else:
             drawer.lining_in = True
+        # The part scan is the event the store screen most needs to see and the
+        # only one that previously wrote NO timestamp anywhere.
+        _touch(drawer, "scanned")
 
         needs_lining, lining_reason = await self._needs_lining(piece)
         complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
@@ -549,6 +618,7 @@ class DrawerService:
         if drawer.leather_in and drawer.lining_in:
             drawer.state = DrawerState.RECEIVED.value
             drawer.received_at = datetime.now(timezone.utc)
+            _touch(drawer, "received", now=drawer.received_at)
             auto_received = True
             await self._audit(
                 actor_id, BarcodeAuditAction.DRAWER_RECEIVED.value, drawer.id,
@@ -646,6 +716,7 @@ class DrawerService:
                     f"{drawer.code}{because}.")
             drawer.state = DrawerState.RECEIVED.value
             drawer.received_at = datetime.now(timezone.utc)
+            _touch(drawer, "received", now=drawer.received_at)
             action = BarcodeAuditAction.DRAWER_RECEIVED.value
 
         elif t == "SENDED":
@@ -655,6 +726,7 @@ class DrawerService:
                     "Cannot SEND before RECEIVED. Set RECEIVED first.")
             drawer.state = DrawerState.SENDED.value
             drawer.sended_at = datetime.now(timezone.utc)
+            _touch(drawer, "sent", now=drawer.sended_at)
             action = BarcodeAuditAction.DRAWER_SENDED.value
         else:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -823,6 +895,7 @@ class DrawerService:
 
             drawer.state = DrawerState.SENDED.value
             drawer.sended_at = now
+            _touch(drawer, "sent", now=now)
             # A complete drawer that never passed through RECEIVED (the
             # leather-only case) is received at the moment it is sent — otherwise
             # the audit trail would show a garment released with no record of it
@@ -872,6 +945,13 @@ class DrawerService:
             drawer.lining_in = False
             drawer.received_at = None
             drawer.sended_at = None
+            # STAMPED, NOT CLEARED. received_at/sended_at are wiped because the
+            # drawer is being handed back to the pool empty, but the fact that
+            # something happened to it a second ago is exactly what the store
+            # screen's "latest" list is asking about — and clearing those two
+            # columns is precisely what used to bury a just-shipped drawer at the
+            # bottom of it.
+            _touch(drawer, "released")
         # F11: clear BOTH sides of the piece↔drawer link. Previously only
         # drawer.current_piece_id was nulled, so after release the piece still
         # pointed at a drawer that no longer claimed it — the barcode payload and

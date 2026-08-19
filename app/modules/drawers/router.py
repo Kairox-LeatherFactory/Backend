@@ -81,10 +81,19 @@ async def list_drawers(
     sendable: bool | None = Query(
         None, description="Only drawers ready to send — the send queue."),
     sort: str = Query(
-        "seq", pattern="^(seq|recent)$",
-        description="seq = drawer order, for printing labels and finding a "
-                    "drawer in the rack (default). recent = most recently "
-                    "acted-on first, for the store screen's latest-drawers view."),
+        "recent", pattern="^(seq|recent)$",
+        description="recent = most recently acted-on first (DEFAULT) — the "
+                    "store screen's working list. seq = drawer order "
+                    "(DRW-0001…), for printing labels and finding a drawer in "
+                    "the rack; pass it explicitly on the print sheet."),
+    pin_codes: list[str] | None = Query(
+        None, max_length=20,
+        description="Drawer codes to float to the TOP of the page, in the order "
+                    "given — the store screen's recently-searched band. The "
+                    "client holds this list (it is a fact about one operator's "
+                    "session, not about the factory); send it most-recent-first "
+                    "and it is preserved. Repeat the param: "
+                    "?pin_codes=DRW-0042&pin_codes=DRW-0117"),
     limit: int = Query(500, ge=1, le=2000),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -100,13 +109,23 @@ async def list_drawers(
     `sendable=true` is the send queue: drawers that hold everything their garment
     needs, waiting for someone to tick and send them.
 
-    `code=` is the store screen's search box (change-list item 6): the production
-    view shows the 10 most recent drawers (`?sort=recent&limit=10`) and
-    everything else is reached by typing a code, rather than paging 430 rows.
-    `sort=recent` orders by the newest of sended_at / received_at / created_at —
-    "latest" has to mean most recently WORKED ON, because a bootstrapped pool
-    shares one creation timestamp and would otherwise return the same arbitrary
-    ten rows forever.
+    ORDERED MOST-RECENTLY-WORKED-ON FIRST BY DEFAULT (`sort=recent`), so the ten
+    drawers the floor is actually handling are the ten at the top. "Worked on"
+    means the newest of: merged to a garment, part scanned in, received, sent, or
+    released back to the pool — every one of those stamps `last_activity_at`, and
+    each row carries `last_activity_at` + `last_activity` ("merged" / "scanned" /
+    "received" / "sent" / "released") so a row explains why it is where it is.
+
+    This replaces an ordering that could not see three of those five events:
+    a merge and a store scan wrote no timestamp at all, and a release NULLED
+    received_at/sended_at, so the drawer that had just shipped sank to the
+    bottom. Pass `sort=seq` for the print sheet.
+
+    `code=` is the store screen's search box: a case-insensitive CONTAINS, so
+    "42" and "drw-004" both work. `pin_codes=` is the companion — the client's
+    own recently-searched list, replayed to float those drawers above everything
+    else. Nothing about a search is stored server-side; it is one operator's
+    session, not a fact about the factory.
 
     `needs_lining` on every row is the EFFECTIVE requirement, resolved from the
     style/SKU/cut history — NOT the stored `piece.needs_lining` flag, which is
@@ -129,7 +148,7 @@ async def list_drawers(
     return await DrawerService(db).list_labels(
         state=state, code=code, seq_from=seq_from, seq_to=seq_to,
         has_piece=has_piece, sendable=sendable, sort=sort,
-        limit=limit, offset=offset)
+        pin_codes=pin_codes, limit=limit, offset=offset)
 
 
 # ── THE DRAWER POOL (change-list item 9) ─────────────────────────────────────

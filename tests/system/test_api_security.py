@@ -200,7 +200,10 @@ async def test_a_payroll_window_typed_backwards_is_refused_at_the_api(
     """The money guard, through the router rather than the service
     (wages/service.py:285-289)."""
     as_role(UserRole.DIRECT_MANAGER)
+    # run_kind=monthly on purpose: a PIECE run with no style is ALSO a 422 now,
+    # and these two tests must fail on the WINDOW, not pass for the wrong reason.
     r = await api_client.post(f"{API}/wages/runs", json={
+        "run_kind": "monthly",
         "period_start": "2026-07-14", "period_end": "2026-07-01"})
     assert r.status_code == 422
 
@@ -209,9 +212,20 @@ async def test_a_payroll_window_typed_backwards_is_refused_at_the_api(
 async def test_a_future_payroll_window_is_refused_at_the_api(api_client, as_role):
     as_role(UserRole.DIRECT_MANAGER)
     r = await api_client.post(f"{API}/wages/runs", json={
+        "run_kind": "monthly",
         "period_start": "2030-01-01", "period_end": "2030-01-14"})
     assert r.status_code == 422
     assert "future" in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_a_piece_run_with_no_style_is_refused_at_the_api(api_client, as_role):
+    """THE RESTRICTION, at the router. Dates alone no longer compute piece pay."""
+    as_role(UserRole.DIRECT_MANAGER)
+    r = await api_client.post(f"{API}/wages/runs", json={
+        "period_start": "2026-07-01", "period_end": "2026-07-14"})
+    assert r.status_code == 422
+    assert "style_code" in r.text
 
 
 # ══════════════════════════════════════════════ no internals in an error body

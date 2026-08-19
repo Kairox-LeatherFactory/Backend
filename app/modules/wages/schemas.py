@@ -25,7 +25,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.core.enums import RunStatus
+from app.core.enums import RunStatus, WageRunKind
 
 
 # ── style picker ────────────────────────────────────────────────────────────
@@ -126,29 +126,63 @@ class OrderRateCard(BaseModel):
 
 # ── runs ────────────────────────────────────────────────────────────────────
 class RunRequest(BaseModel):
-    """The manager types both dates. Nothing is derived.
+    """The manager types both dates AND says which payroll this is.
+
+    `run_kind` IS THE FIRST DECISION, and the two kinds are priced by
+    incompatible rules (see core.enums.WageRunKind):
+
+      piece    (DEFAULT) Pays PIECE_RATE workers. **REQUIRES order_number or
+               style_code.** A piece wage is earned on a specific garment, so
+               naming that garment's style is what the run IS, not a filter on
+               it. Dates alone used to be accepted here, and that is how a
+               manager pays the whole factory's piece work under a window they
+               meant to narrow.
+
+      monthly  Pays salaried staff, priced by the calendar alone. Needs no
+               scope — but it MAY carry an order_number / style_code purely as a
+               LABEL for the payroll screen ("the month we ran CLERMONT"). The
+               label is stored and displayed; it changes nothing about who is
+               paid or how much, and the overlap guard ignores it, so two
+               monthly runs over one window still collide no matter how they are
+               labelled.
+
+    A piece run and a monthly run over the SAME window do not conflict — their
+    employee populations are disjoint, and together they are one full payroll.
 
     `freeze=False` computes a DRAFT (status OPEN) the manager can recompute
-    freely and then close. Default True preserves the shipped compute-and-freeze
-    behaviour for every existing caller.
-
-    `order_number` / `style_code` narrow the run. A SCOPED RUN PAYS PIECE-RATE
-    WORK ONLY — a monthly salary is a fact about a person, not a style, so
-    emitting it on a one-style run would pay it again on the next one.
+    freely and then close.
     """
 
     period_start: date
     period_end: date
     freeze: bool = True
+    run_kind: WageRunKind = WageRunKind.PIECE
     order_number: str | None = None
     style_code: str | None = None
 
     @model_validator(mode="after")
-    def _one_scope(self):
+    def _scope_rules(self):
         if self.order_number and self.style_code:
             raise ValueError(
                 "Scope a run by order_number OR style_code, not both — a style "
                 "already belongs to exactly one order.")
+        if self.run_kind is WageRunKind.COMBINED:
+            raise ValueError(
+                "run_kind 'combined' marks runs computed before piece and "
+                "monthly payroll were split; it cannot be created. Compute a "
+                "'piece' run (naming an order or style) and a 'monthly' run for "
+                "the same window instead.")
+        # THE RESTRICTION, enforced at the schema so it is visible in the OpenAPI
+        # contract and the frontend can grey out the compute button before the
+        # round trip. The service repeats it, because a rule only the HTTP layer
+        # knows is a rule that vanishes the moment anything else calls compute.
+        if self.run_kind is WageRunKind.PIECE and not (
+                self.order_number or self.style_code):
+            raise ValueError(
+                "A piece-rate run must name the work it pays for: send "
+                "`style_code` or `order_number`. Two dates alone would pay every "
+                "piece of every order in that window. To pay salaries instead, "
+                "send run_kind='monthly'.")
         return self
 
 
@@ -160,6 +194,30 @@ class RecomputeRequest(BaseModel):
     the intended route is POST /runs/{id}/reopen first.
     """
     confirm_closed: bool = False
+
+
+class DeleteRunRequest(BaseModel):
+    """Optional body on DELETE /wages/runs/{id}.
+
+    `confirm_closed` is required to delete a FROZEN run, because that run is the
+    document its payments were counted against — removing it destroys the only
+    record of money that already left the building. The ordinary case (clearing
+    an OPEN draft, or wreckage from a compute that died halfway and left a
+    committed run occupying the window) needs no flag."""
+    confirm_closed: bool = False
+
+
+class DeleteRunResult(BaseModel):
+    id: uuid.UUID
+    deleted: bool = True
+    period_start: date
+    period_end: date
+    status: RunStatus
+    run_kind: WageRunKind | None = None
+    scope_order_number: str | None = None
+    scope_style_code: str | None = None
+    lines_deleted: int = 0
+    message: str = ""
 
 
 class ReopenRequest(BaseModel):
@@ -223,13 +281,23 @@ class WageRunSummary(BaseModel):
     period_start: date
     period_end: date
     status: RunStatus
-    # NULL = the whole factory. Set when the run was narrowed (change-list item 3).
+    # WHICH payroll this run is. 'combined' means it pre-dates the split and paid
+    # both populations from one window.
+    run_kind: WageRunKind = WageRunKind.COMBINED
+    # The order / style this run is ABOUT. On a piece run these narrow what was
+    # paid; on a monthly run they are a label (see scope_is_label). NULL on
+    # neither = the whole factory.
     scope_order_number: str | None = None
     scope_style_code: str | None = None
-    # True when the monthly branch was skipped because the run is scoped. The
-    # screen must say "piece-rate only" rather than let a manager read a
+    # TRUE when the two fields above are DECORATION, not a narrowing — i.e. on a
+    # monthly run. The screen must not print "CLERMONT payroll" over a sheet
+    # that paid every salaried person in the building.
+    scope_is_label: bool = False
+    # This run pays piece work only — say so, rather than let a manager read a
     # one-style run as a full payroll.
     piece_rate_only: bool = False
+    # …and its mirror: a salaries-only sheet with no piece work on it.
+    monthly_only: bool = False
     total_amount: float
     total_pieces: int
     employee_count: int
@@ -238,13 +306,16 @@ class WageRunSummary(BaseModel):
     gap_days: int = 0
     recomputed: bool = False
     recompute_count: int = 0
+    # Present on list rows so the run history can be sorted and audited without
+    # opening each run. NULL on a freshly computed payload.
+    reopen_count: int = 0
+    computed_at: datetime | None = None
 
 
 class WageRunDetail(WageRunSummary):
     lines: list[WageLineDetail]
     last_recomputed_at: datetime | None = None
     last_recomputed_by: str | None = None
-    reopen_count: int = 0
     last_reopened_at: datetime | None = None
     last_reopened_by: str | None = None
     last_reopen_reason: str | None = None

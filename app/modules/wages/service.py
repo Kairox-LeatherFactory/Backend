@@ -49,9 +49,12 @@ from collections import defaultdict
 from datetime import date
 
 from fastapi import HTTPException, status
+# Alias for the handful of scopes where a `status` PARAMETER shadows the
+# module — list_runs filters by run status and needs both names at once.
+from fastapi import status as _http
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import RunStatus, WageType
+from app.core.enums import RunStatus, WageRunKind, WageType
 from app.modules.attendance.service import AttendanceService
 from app.modules.clients.service import ClientService
 from app.modules.employees.service import EmployeeService
@@ -307,10 +310,39 @@ class WageService:
             return True               # an unscoped run pays everything
         return bool(a & b)
 
+    @staticmethod
+    def _kinds_collide(mine: str, theirs: str) -> bool:
+        """Can two runs of these kinds pay the same money twice?
+
+        THE FORK IS THE POPULATION, so two runs can only double-pay if their
+        employee populations overlap:
+
+            PIECE    vs PIECE     - yes, if their STYLES also intersect.
+            MONTHLY  vs MONTHLY   - ALWAYS, on dates alone. A monthly run's
+                                    order/style is a LABEL (scope_is_label), so
+                                    two monthly runs over one fortnight pay the
+                                    same salaried people twice no matter what
+                                    each one is labelled with. Comparing their
+                                    labels would let "August - CLERMONT" and
+                                    "August - CARNABY" both pay every salary.
+            PIECE    vs MONTHLY   - NEVER. Disjoint populations: the piece branch
+                                    skips anyone not PIECE_RATE and the monthly
+                                    branch skips anyone not MONTHLY. That is what
+                                    lets the two runs coexist in one window,
+                                    which is the whole point of the fork.
+            COMBINED vs anything  - yes (subject to styles). A legacy combined run
+                                    really did pay both populations.
+        """
+        C = WageRunKind.COMBINED.value
+        if mine == C or theirs == C:
+            return True
+        return mine == theirs
+
     async def _validate_window(self, period_start: date, period_end: date,
                                *, replacing: uuid.UUID | None = None,
                                scope_order_number: str | None = None,
-                               scope_style_code: str | None = None) -> int:
+                               scope_style_code: str | None = None,
+                               run_kind: str = WageRunKind.COMBINED.value) -> int:
         """Guards for a hand-typed window. Returns gap_days.
 
         `replacing` is the run being recomputed — its own window must not count
@@ -350,15 +382,26 @@ class WageService:
                 "cannot run payroll for future dates",
             )
 
-        mine = await self._scope_style_ids(
+        monthly = run_kind == WageRunKind.MONTHLY.value
+        # A MONTHLY run's order/style is decoration. Resolving it to a style-id
+        # set here would make the guard believe the run only pays that style's
+        # people, and two monthly runs labelled with different styles would then
+        # both pay every salary in the window.
+        mine = None if monthly else await self._scope_style_ids(
             order_number=scope_order_number, style_code=scope_style_code)
 
         candidates = await self.repo.runs_in_window(
             period_start, period_end, exclude_run_id=replacing)
         for clash in candidates:
-            theirs = await self._scope_style_ids(
-                order_number=clash.scope_order_number,
-                style_code=clash.scope_style_code)
+            clash_kind = (getattr(clash, "run_kind", None)
+                          or WageRunKind.COMBINED.value)
+            if not self._kinds_collide(run_kind, clash_kind):
+                continue
+            theirs = None if (getattr(clash, "scope_is_label", False)
+                              or clash_kind == WageRunKind.MONTHLY.value) else (
+                await self._scope_style_ids(
+                    order_number=clash.scope_order_number,
+                    style_code=clash.scope_style_code))
             if not self._scopes_collide(mine, theirs):
                 continue
             state = ("closed" if clash.status == RunStatus.CLOSED
@@ -367,17 +410,41 @@ class WageService:
                            or "the whole factory")
             mine_scope = (scope_style_code or scope_order_number
                           or "the whole factory")
+            if monthly and clash_kind == WageRunKind.MONTHLY.value:
+                # Say plainly that the label did not narrow anything, or a
+                # manager who just typed a different style into a monthly run
+                # reads this 409 as a bug.
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    f"A MONTHLY run already covers {clash.period_start}.."
+                    f"{clash.period_end} ({state} run {clash.id}), so this one "
+                    f"would pay the same salaries twice. A monthly run's "
+                    f"order/style is only a LABEL for the payroll screen — it "
+                    f"does not narrow who is paid, so labelling this run with a "
+                    f"different style does not make it a different payroll. "
+                    f"Recompute run {clash.id} instead (POST /wages/runs/"
+                    f"{clash.id}/recompute), move the window, or delete that run "
+                    f"(DELETE /wages/runs/{clash.id}) if it is wreckage from a "
+                    f"failed compute.")
             # Name the overlap in the terms the manager typed, and say what to do.
             shared = "every style" if (mine is None or theirs is None) else (
                 f"{len(mine & theirs)} shared style(s)")
+            kind_note = ("" if clash_kind != WageRunKind.COMBINED.value else
+                         " That run pre-dates the piece/monthly split, so it paid "
+                         "BOTH piece-rate and salaried staff for the whole "
+                         "factory — which is why a narrower run still collides "
+                         "with it.")
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
-                f"This run ({mine_scope}) would pay work already covered by "
-                f"{state} run {clash.id} ({clash.period_start}..{clash.period_end}, "
-                f"scope: {clash_scope}) — {shared} in common over the same dates, "
-                f"so those garments would be paid twice. Runs for DIFFERENT "
-                f"orders or styles over the same dates are allowed; narrow this "
-                f"run, move the window, or delete that run if it is wreckage "
+                f"This {run_kind.upper()} run ({mine_scope}) would pay work "
+                f"already covered by {state} {clash_kind.upper()} run {clash.id} "
+                f"({clash.period_start}..{clash.period_end}, scope: {clash_scope}) "
+                f"— {shared} in common over the same dates, so those garments "
+                f"would be paid twice.{kind_note} Runs for DIFFERENT orders or "
+                f"styles over the same dates are allowed, and a PIECE run never "
+                f"collides with a MONTHLY one. Narrow this run, move the window, "
+                f"recompute run {clash.id} (POST /wages/runs/{clash.id}/recompute), "
+                f"or delete it (DELETE /wages/runs/{clash.id}) if it is wreckage "
                 f"from a failed compute.",
             )
 
@@ -499,8 +566,13 @@ class WageService:
                 f"and close it again. (A caller that genuinely wants to skip that "
                 f"may send confirm_closed=true, but no reason is recorded.)")
 
+        # THE KIND IS READ OFF THE RUN, never re-supplied by the caller — for the
+        # same reason the scope is. A recompute that could change a PIECE run into
+        # a MONTHLY one would rewrite who was paid, under a run id somebody has
+        # already printed payslips against.
         gap_days = await self._validate_window(
             run.period_start, run.period_end, replacing=run.id,
+            run_kind=getattr(run, "run_kind", None) or WageRunKind.COMBINED.value,
             scope_order_number=run.scope_order_number,
             scope_style_code=run.scope_style_code,
         )
@@ -536,17 +608,58 @@ class WageService:
 
     async def compute_run(self, period_start: date, period_end: date, *,
                           freeze: bool = True,
+                          run_kind: str = WageRunKind.PIECE.value,
                           order_number: str | None = None,
                           style_code: str | None = None) -> dict:
-        """Compute payroll for a hand-entered window, optionally scoped.
+        """Compute one payroll for a hand-entered window.
+
+        `run_kind` IS NOW THE FIRST QUESTION, and it is not a filter — it decides
+        which of two incompatible pricing rules applies (see WageRunKind):
+
+          PIECE    pays PIECE_RATE workers and REQUIRES an order or a style. A
+                   piece wage is earned on a specific garment, so naming that
+                   garment's style is the definition of what is being paid, not a
+                   convenience. Two dates alone used to be enough to compute here,
+                   and that is exactly how a manager pays the whole factory's
+                   piece work under a window they meant to narrow.
+
+          MONTHLY  pays salaried staff and takes no paying scope. It MAY carry an
+                   order_number / style_code, stored with `scope_is_label=True`
+                   and shown on the payroll screen so a manager can see at a
+                   glance which order the month was spent on — but it changes
+                   NOTHING about who is paid or how much. A salary is a fact
+                   about a person and a period; splitting it across styles has no
+                   honest arithmetic behind it.
+
+        A PIECE run and a MONTHLY run over the SAME window do not collide, by
+        design: their employee populations are disjoint, so the pair of them is
+        one complete payroll for that fortnight.
 
         `freeze=False` leaves the run OPEN — a DRAFT the manager can recompute
-        freely and then close when the numbers are agreed. It defaults to True so
-        every existing caller keeps the shipped behaviour (compute-and-freeze).
-
-        `order_number` / `style_code` narrow the run to one order or one style.
-        The scope is STORED on the run, so a later recompute reproduces it.
+        freely and then close when the numbers are agreed.
         """
+        kind = (run_kind or WageRunKind.PIECE.value).strip().lower()
+        if kind not in {k.value for k in WageRunKind}:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"run_kind must be 'piece' or 'monthly', not {run_kind!r}.")
+        if kind == WageRunKind.COMBINED.value:
+            # COMBINED is a description of history, not a thing you can ask for.
+            # Creating one would re-open the exact hole the fork closes: an
+            # unscoped run that pays every piece of every style in the window.
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "run_kind 'combined' is a legacy marker on runs computed before "
+                "piece and monthly payroll were split. It cannot be created. "
+                "Compute a PIECE run (naming an order or style) and a MONTHLY "
+                "run for the same window instead — together they pay everybody, "
+                "and neither can pay anyone twice.")
+
+        is_monthly = kind == WageRunKind.MONTHLY.value
+
+        # Both codes are validated on BOTH kinds. A label that names a style
+        # nobody can find is worse than no label: it prints on the payroll screen
+        # looking authoritative.
         style = await self._resolve_style(style_code) if style_code else None
         order_id = None
         if order_number:
@@ -556,18 +669,36 @@ class WageService:
                                     f"No order '{order_number}'")
             order_id = order.id
 
+        # THE RESTRICTION. Dates alone no longer compute a piece-rate payroll.
+        if not is_monthly and not (style or order_id):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "A PIECE run must name the work it is paying for: send "
+                "`style_code` or `order_number`. Piece wages are earned on "
+                "specific garments, so a window with no style behind it pays "
+                "every piece of every order in those dates — which is how the "
+                "same garment ends up on two payslips. If you meant to pay "
+                "salaries, send run_kind='monthly' (no scope needed; an "
+                "order/style there is just a label for the screen).")
+
         gap_days = await self._validate_window(
-            period_start, period_end,
+            period_start, period_end, run_kind=kind,
             scope_order_number=order_number, scope_style_code=style_code)
         run = await self.repo.create_run(
             period_start, period_end,
+            run_kind=kind,
+            scope_is_label=is_monthly,
             scope_order_number=(order_number or None),
             scope_style_code=(style["style_code"] if style else None))
         try:
             payload = await self._populate_run(
                 run, period_start, period_end, gap_days=gap_days, freeze=freeze,
-                style_ids=[style["style_id"]] if style else None,
-                order_id=order_id,
+                # A MONTHLY run passes NO style/order filter downstream. Its codes
+                # were stored for display and must not reach the piece query, or
+                # the label would quietly become a filter after all.
+                style_ids=(None if is_monthly
+                           else ([style["style_id"]] if style else None)),
+                order_id=(None if is_monthly else order_id),
             )
         except Exception:
             await self.repo.delete_run(run)
@@ -575,6 +706,57 @@ class WageService:
         payload["recomputed"] = False
         payload["recompute_count"] = 0
         return payload
+
+    async def delete_run(self, run_id: uuid.UUID, *, user_name: str,
+                         confirm_closed: bool = False) -> dict:
+        """Delete a run outright. THE ESCAPE HATCH THE 409 HAS ALWAYS NAMED.
+
+        The overlap guard tells a blocked manager to "delete that run if it is
+        wreckage from a failed compute", and until now there was no route that
+        could: `delete_run` existed on the repository but was only reachable from
+        compute_run's own failure path. A manager whose compute died halfway
+        therefore had a committed OPEN run permanently occupying the window, no
+        way to remove it, and a 409 pointing at an action the API did not offer.
+
+        REFUSES A CLOSED RUN by default. That run is the document the cash was
+        counted against; deleting it destroys the only record of a payment that
+        actually happened. `confirm_closed=True` is the deliberate override and
+        it is DM/MD-gated at the router, for the rare genuine case (a run frozen
+        against the wrong fortnight, before anyone was paid from it).
+
+        The lines and the frozen breakdown rows go with it — WageRun.lines
+        cascades delete-orphan, and the detail rows are cleared explicitly
+        because they hang off the run id rather than off the relationship.
+        """
+        run = await self.repo.get_run(run_id)
+        if not run:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Wage run not found")
+        if run.status == RunStatus.CLOSED and not confirm_closed:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Run {run.id} is CLOSED ({run.period_start}..{run.period_end}) "
+                f"and is the document its payments were counted against — "
+                f"deleting it destroys the record of money that already left the "
+                f"building. If you are certain nobody was paid from it, resend "
+                f"with confirm_closed=true. To CHANGE a frozen run instead, "
+                f"reopen it (POST /wages/runs/{run.id}/reopen) and recompute.")
+        snapshot = {
+            "id": run.id,
+            "period_start": run.period_start,
+            "period_end": run.period_end,
+            "status": run.status,
+            "run_kind": getattr(run, "run_kind", None),
+            "scope_order_number": run.scope_order_number,
+            "scope_style_code": run.scope_style_code,
+            "lines_deleted": len(run.lines or []),
+        }
+        await self.repo.purge_run(run)
+        snapshot["deleted"] = True
+        snapshot["message"] = (
+            f"Run {snapshot['id']} deleted. The window "
+            f"{snapshot['period_start']}..{snapshot['period_end']} is free to "
+            f"compute again.")
+        return snapshot
 
     async def _populate_run(self, run, period_start: date, period_end: date,
                             *, gap_days: int, freeze: bool = True,
@@ -585,14 +767,28 @@ class WageService:
         arithmetic is how a factory ends up with two different answers for the
         same fortnight depending on which button was pressed.
         """
+        kind = getattr(run, "run_kind", None) or WageRunKind.COMBINED.value
+        is_monthly_run = kind == WageRunKind.MONTHLY.value
+        is_piece_run = kind == WageRunKind.PIECE.value
+
         # A recompute passes no scope: it reads it back off the run, which is
         # what makes a recompute reproduce the SAME payment rather than silently
         # widening a one-style run into a whole-factory one.
-        if style_ids is None and run.scope_style_code:
-            style_ids = [(await self._resolve_style(run.scope_style_code))["style_id"]]
-        if order_id is None and run.scope_order_number:
-            order = await self.clients.get_order_by_number(run.scope_order_number)
-            order_id = order.id if order else None
+        #
+        # EXCEPT ON A MONTHLY RUN, where those codes are a LABEL. Reading them
+        # back as a filter is the one way this fork could quietly break: the
+        # compute path is careful to pass None, and a recompute that re-derived
+        # them from the row would price the second run differently from the
+        # first for the same stored scope.
+        if not is_monthly_run:
+            if style_ids is None and run.scope_style_code:
+                style_ids = [
+                    (await self._resolve_style(run.scope_style_code))["style_id"]]
+            if order_id is None and run.scope_order_number:
+                order = await self.clients.get_order_by_number(run.scope_order_number)
+                order_id = order.id if order else None
+        else:
+            style_ids, order_id = None, None
         scoped = bool(style_ids or order_id)
         # H13: include LEAVERS. active_only=True dropped anyone deactivated
         # between working and payday — their pieces then failed the wage_type
@@ -619,8 +815,13 @@ class WageService:
         unrated: dict[tuple, int] = defaultdict(int)
 
         # ── PIECE_RATE branch ────────────────────────────────────────────────
+        # SKIPPED ENTIRELY ON A MONTHLY RUN. Not filtered to zero rows - skipped,
+        # so the query never runs. A monthly run pays salaries; if it also picked
+        # up piece work it would pay a piece-rate cutter on the same window a
+        # PIECE run pays them, which is the double payment the fork exists to
+        # make impossible.
         rate_cache: dict[tuple[uuid.UUID, uuid.UUID, date], float | None] = {}
-        rows = await self.production.piece_counts(
+        rows = [] if is_monthly_run else await self.production.piece_counts(
             period_start, period_end, style_ids=style_ids, order_id=order_id)
         for emp_id, style_id, op_id, work_date, qty in rows:
             if wage_type_of.get(emp_id) is not WageType.PIECE_RATE:
@@ -656,15 +857,23 @@ class WageService:
             ))
 
         # ── MONTHLY branch ───────────────────────────────────────────────────
-        # SKIPPED ENTIRELY ON A SCOPED RUN. A monthly salary is a fact about a
-        # PERSON, not about a style: there is no honest way to say what share of
-        # a fitter's salary belongs to CLERMONT rather than CARNABY. Emitting a
-        # full monthly line on a one-style run would pay that salary again for
-        # every other style run in the same window — the exact double-payment the
-        # window guard exists to prevent, arriving through the scope instead.
+        # WHO RUNS THIS BRANCH:
+        #   MONTHLY   yes - this is its whole job.
+        #   PIECE     no. A monthly salary is a fact about a PERSON, not a style:
+        #             there is no honest way to say what share of a fitter's
+        #             salary belongs to CLERMONT rather than CARNABY. A full
+        #             monthly line on a one-style run would be paid again by every
+        #             other style run in the same window.
+        #   COMBINED  yes when unscoped - the legacy behaviour, preserved so a
+        #             recompute of an old run reproduces what it originally paid.
         #
-        # So a scoped run pays PIECE-RATE work only, and says so on the response.
-        for emp in (employees if not scoped else []):
+        # The old test was `not scoped`, which read the SCOPE to answer a question
+        # about the POPULATION. That worked only because scope and population
+        # happened to line up; it is why a monthly run could not carry a style
+        # label at all, since the label would have switched the salaries off.
+        pays_monthly = is_monthly_run or (kind == WageRunKind.COMBINED.value
+                                          and not scoped)
+        for emp in (employees if pays_monthly else []):
             if _as_wage_type(emp.wage_type) is not WageType.MONTHLY:
                 continue
             # H13: a monthly line for a deactivated worker is wrong — proration is
@@ -700,10 +909,18 @@ class WageService:
 
         await self.repo.add_lines(lines)
         await self.repo.persist_breakdown(run.id, breakdown)   # see repository
+
+        # FREEZE THE WARNING WITH THE RUN. `unrated_operations` used to live only
+        # in the HTTP response of the compute call: every later read hardcoded
+        # [], so a manager who reopened the payslip screen saw an empty list and
+        # no way to tell it apart from "everything was rated". It is a property
+        # of the run, so it is stored on the run.
+        unrated_out = await self._name_unrated(unrated)
+        await self.repo.persist_unrated(run, unrated_out)
+
         if freeze:
             await self.repo.close_run(run)
 
-        unrated_out = await self._name_unrated(unrated)
         detail_lines = await self.repo.run_lines_detailed(run.id)
 
         return {
@@ -711,12 +928,20 @@ class WageService:
             "period_start": period_start,
             "period_end": period_end,
             "status": RunStatus.CLOSED if freeze else RunStatus.OPEN,
+            "run_kind": kind,
             "scope_order_number": run.scope_order_number,
             "scope_style_code": run.scope_style_code,
-            # True when the monthly branch was skipped because the run is scoped.
-            # The screen must say "piece-rate only" rather than let a manager
-            # believe a one-style run is a full payroll.
-            "piece_rate_only": bool(scoped),
+            # On a MONTHLY run the codes above are DECORATION. The screen must be
+            # able to tell them apart from a real narrowing, or it will print
+            # "CLERMONT payroll" over a sheet that paid every salaried person in
+            # the building.
+            "scope_is_label": bool(getattr(run, "scope_is_label", False)),
+            # True when this run pays piece work only, so the screen says
+            # "piece-rate only" rather than letting a manager read a one-style
+            # run as a full payroll.
+            "piece_rate_only": bool(is_piece_run or (scoped and not pays_monthly)),
+            # The mirror image: a salaries-only sheet with no piece work on it.
+            "monthly_only": bool(is_monthly_run),
             "total_amount": round(sum(float(ln.amount) for ln in lines), 2),
             "total_pieces": sum(int(ln.pieces) for ln in lines),
             "employee_count": len(lines),
@@ -789,8 +1014,41 @@ class WageService:
 
         return out
 
-    async def list_runs(self, limit: int = 50, offset: int = 0) -> list[dict]:
-        return await self.repo.list_runs(limit, offset)
+    async def list_runs(self, *, limit: int = 50, offset: int = 0,
+                        run_kind: str | None = None,
+                        order_number: str | None = None,
+                        style_code: str | None = None,
+                        date_from: date | None = None,
+                        date_to: date | None = None,
+                        status: str | None = None) -> list[dict]:
+        """THE RUN LIST — every run with the order/style it paid for, filterable.
+
+        This is the route back to a run_id. A manager who wants to recompute
+        last fortnight's CLERMONT piece payroll filters by style and window here,
+        reads the id off the row, and posts it to /recompute. Before, the list
+        returned neither the style nor the order on any row (the query never
+        selected them), so the id was unreachable without opening runs one by
+        one."""
+        if status:
+            valid = {r.value for r in RunStatus}
+            if status.strip().lower() not in valid:
+                raise HTTPException(
+                    _http.HTTP_422_UNPROCESSABLE_ENTITY,
+                    f"status must be one of {sorted(valid)}.")
+        if run_kind:
+            valid_k = {k.value for k in WageRunKind}
+            if run_kind.strip().lower() not in valid_k:
+                raise HTTPException(
+                    _http.HTTP_422_UNPROCESSABLE_ENTITY,
+                    f"run_kind must be one of {sorted(valid_k)}.")
+        if date_from and date_to and date_to < date_from:
+            raise HTTPException(
+                _http.HTTP_422_UNPROCESSABLE_ENTITY,
+                "date_to is before date_from.")
+        return await self.repo.list_runs(
+            limit=limit, offset=offset, run_kind=run_kind,
+            order_number=order_number, style_code=style_code,
+            date_from=date_from, date_to=date_to, status=status)
 
     # ══════════════════════════════════════════════════════════════════════
     # THE PAYROLL SCREENS (change-list item 3)
@@ -943,18 +1201,32 @@ class WageService:
         if not run:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Wage run not found")
         lines = await self.repo.run_lines_detailed(run_id)
+        kind = getattr(run, "run_kind", None) or WageRunKind.COMBINED.value
+        scope_is_label = bool(getattr(run, "scope_is_label", False))
         return {
             "id": run.id,
             "period_start": run.period_start,
             "period_end": run.period_end,
             "status": run.status,
+            "run_kind": kind,
             "scope_order_number": run.scope_order_number,
             "scope_style_code": run.scope_style_code,
-            "piece_rate_only": bool(run.scope_order_number or run.scope_style_code),
+            "scope_is_label": scope_is_label,
+            # A MONTHLY run's codes are a label, so it is NOT "piece rate only"
+            # just because it names a style — it is the opposite. Deriving this
+            # from the presence of a scope, as it used to, now gets monthly runs
+            # exactly backwards.
+            "piece_rate_only": kind == WageRunKind.PIECE.value or (
+                kind == WageRunKind.COMBINED.value
+                and bool(run.scope_order_number or run.scope_style_code)),
+            "monthly_only": kind == WageRunKind.MONTHLY.value,
             "total_amount": round(sum(ln["amount"] for ln in lines), 2),
             "total_pieces": sum(ln["pieces"] for ln in lines),
             "employee_count": len(lines),
-            "unrated_operations": [],
+            # THE FROZEN WARNING, not a hardcoded []. See _populate_run: work
+            # that went unpaid because its style/operation had no rate is a
+            # property of the run and must survive being re-read.
+            "unrated_operations": list(getattr(run, "unrated_snapshot", None) or []),
             "gap_days": 0,
             "recomputed": (run.recompute_count or 0) > 0,
             "recompute_count": run.recompute_count or 0,

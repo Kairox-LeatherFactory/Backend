@@ -34,7 +34,7 @@ from app.core.enums import RunStatus, WageType
 from app.modules.clients import models as cm
 from app.modules.employees import models as em
 from app.modules.production import models as pm
-from app.modules.wages.models import Rate
+from app.modules.wages.models import Rate, WageRun
 from app.modules.wages.service import WageService
 
 pytestmark = pytest.mark.asyncio
@@ -81,7 +81,8 @@ async def test_a_draft_run_stays_open_and_recomputes_freely(db):
     await _world(db)
     svc = WageService(db)
 
-    draft = await svc.compute_run(START, END, freeze=False)
+    draft = await svc.compute_run(START, END, freeze=False,
+                                  run_kind="piece", style_code="CARNABY")
     assert draft["status"] == RunStatus.OPEN, "freeze=False must leave a DRAFT"
 
     again = await svc.recompute_run(draft["id"], user_name="DM")
@@ -94,7 +95,8 @@ async def test_a_draft_run_stays_open_and_recomputes_freely(db):
 async def test_a_closed_run_refuses_a_recompute_and_names_the_route(db):
     await _world(db)
     svc = WageService(db)
-    run = await svc.compute_run(START, END)          # default: freeze
+    run = await svc.compute_run(START, END, run_kind="piece",
+                                style_code="CARNABY")   # default: freeze
     assert run["status"] == RunStatus.CLOSED
 
     with pytest.raises(HTTPException) as exc:
@@ -107,7 +109,8 @@ async def test_a_closed_run_refuses_a_recompute_and_names_the_route(db):
 async def test_reopen_demands_a_reason_and_stamps_it(db):
     await _world(db)
     svc = WageService(db)
-    run = await svc.compute_run(START, END)
+    run = await svc.compute_run(START, END, run_kind="piece",
+                                style_code="CARNABY")
 
     with pytest.raises(HTTPException) as exc:
         await svc.reopen_run(run["id"], user_name="DM", reason="x")
@@ -137,7 +140,8 @@ async def test_reopen_recompute_close_is_three_deliberate_steps(db):
     """
     await _world(db)
     svc = WageService(db)
-    run = await svc.compute_run(START, END)
+    run = await svc.compute_run(START, END, run_kind="piece",
+                                style_code="CARNABY")
     await svc.reopen_run(run["id"], user_name="DM", reason="corrected a rate")
 
     out = await svc.recompute_run(run["id"], user_name="DM")
@@ -169,7 +173,8 @@ async def test_confirm_closed_recompute_leaves_a_frozen_run_frozen(db):
     """
     await _world(db)
     svc = WageService(db)
-    run = await svc.compute_run(START, END)
+    run = await svc.compute_run(START, END, run_kind="piece",
+                                style_code="CARNABY")
 
     out = await svc.recompute_run(run["id"], user_name="DM", confirm_closed=True)
     assert out["recompute_count"] == 1
@@ -181,7 +186,8 @@ async def test_confirm_closed_recompute_leaves_a_frozen_run_frozen(db):
 async def test_reopening_an_open_run_is_a_409(db):
     await _world(db)
     svc = WageService(db)
-    draft = await svc.compute_run(START, END, freeze=False)
+    draft = await svc.compute_run(START, END, freeze=False,
+                                  run_kind="piece", style_code="CARNABY")
     with pytest.raises(HTTPException) as exc:
         await svc.reopen_run(draft["id"], user_name="DM",
                              reason="nothing to unfreeze here")
@@ -192,7 +198,8 @@ async def test_reopening_an_open_run_is_a_409(db):
 async def test_closing_a_draft_freezes_it_and_is_idempotent(db):
     await _world(db)
     svc = WageService(db)
-    draft = await svc.compute_run(START, END, freeze=False)
+    draft = await svc.compute_run(START, END, freeze=False,
+                                  run_kind="piece", style_code="CARNABY")
 
     closed = await svc.close_run(draft["id"], user_name="DM")
     assert closed["status"] == RunStatus.CLOSED
@@ -213,9 +220,12 @@ async def test_a_style_scoped_run_pays_piece_rate_only(db):
     w = await _world(db)
     svc = WageService(db)
 
-    run = await svc.compute_run(START, END, freeze=False, style_code="CARNABY")
+    run = await svc.compute_run(START, END, freeze=False, run_kind="piece",
+                                style_code="CARNABY")
     assert run["scope_style_code"] == "CARNABY"
     assert run["piece_rate_only"] is True
+    # The style NARROWS this run, so it is not a label.
+    assert run["scope_is_label"] is False
 
     names = {ln["employee_name"] for ln in run["lines"]}
     assert "FREEZE-CUTTER" in names
@@ -236,17 +246,134 @@ async def test_two_scoped_runs_for_different_styles_may_share_a_window(db):
     await db.commit()
 
     svc = WageService(db)
-    a = await svc.compute_run(START, END, freeze=False, style_code="CARNABY")
-    b = await svc.compute_run(START, END, freeze=False, style_code="ISLAY")
+    a = await svc.compute_run(START, END, freeze=False, run_kind="piece",
+                              style_code="CARNABY")
+    b = await svc.compute_run(START, END, freeze=False, run_kind="piece",
+                              style_code="ISLAY")
     assert a["id"] != b["id"]
 
 
-async def test_an_unscoped_run_still_blocks_a_scoped_one_in_the_same_window(db):
-    """The unscoped run pays everything, including that style's pieces."""
+async def test_a_legacy_combined_run_still_blocks_a_scoped_one(db):
+    """A pre-fork run paid everything, including that style's pieces.
+
+    Unscoped runs can no longer be CREATED (see the next test), but rows written
+    before the split are real and still sit in the table carrying
+    run_kind='combined'. The guard must keep treating them as paying the whole
+    factory, or the first scoped run after the upgrade re-pays a fortnight that
+    was already settled."""
     await _world(db)
     svc = WageService(db)
-    await svc.compute_run(START, END, freeze=False)
+    legacy = WageRun(period_start=START, period_end=END, status=RunStatus.OPEN)
+    db.add(legacy)
+    await db.commit()
+    assert legacy.run_kind == "combined", "the backfill value for pre-fork rows"
 
     with pytest.raises(HTTPException) as exc:
-        await svc.compute_run(START, END, freeze=False, style_code="CARNABY")
+        await svc.compute_run(START, END, freeze=False, run_kind="piece",
+                              style_code="CARNABY")
     assert exc.value.status_code == 409
+    assert "combined" in str(exc.value.detail).lower()
+
+
+async def test_a_piece_run_must_name_the_work_it_pays_for(db):
+    """THE RESTRICTION. Two dates alone no longer compute a piece-rate payroll.
+
+    A piece wage is earned on a specific garment, so a window with no style
+    behind it pays every piece of every order in those dates — which is how one
+    garment lands on two payslips."""
+    await _world(db)
+    svc = WageService(db)
+
+    with pytest.raises(HTTPException) as exc:
+        await svc.compute_run(START, END, freeze=False, run_kind="piece")
+    assert exc.value.status_code == 422
+    assert "style_code" in str(exc.value.detail)
+
+
+async def test_a_piece_run_and_a_monthly_run_share_a_window(db):
+    """The pair IS the fortnight's payroll, and neither pays the other's people.
+
+    This is what the mandatory scope buys: piece work is priced per style, and
+    salaries are priced per person by the calendar, so the two runs can coexist
+    over identical dates without the overlap guard having anything to complain
+    about."""
+    await _world(db)
+    svc = WageService(db)
+
+    piece = await svc.compute_run(START, END, freeze=False, run_kind="piece",
+                                  style_code="CARNABY")
+    monthly = await svc.compute_run(START, END, freeze=False,
+                                    run_kind="monthly")
+
+    assert piece["id"] != monthly["id"]
+    assert piece["piece_rate_only"] is True
+    assert monthly["monthly_only"] is True
+    assert "FREEZE-SALARIED" in {ln["employee_name"] for ln in monthly["lines"]}
+    assert "FREEZE-SALARIED" not in {ln["employee_name"] for ln in piece["lines"]}
+
+
+async def test_a_monthly_runs_style_is_a_label_and_does_not_narrow_it(db):
+    """A monthly run may name a style for the payroll screen — and it changes
+    NOTHING about who is paid.
+
+    Both halves matter. The label has to be stored and echoed (that is the point
+    of allowing it), and it must not act as a filter: a second monthly run over
+    the same window with a DIFFERENT label still collides, because both of them
+    pay every salary in those dates."""
+    w = await _world(db)
+    other = cm.Style(client_order_id=w["style"].client_order_id, name="ISLAY",
+                     code="ISLAY", production_status="RELEASED")
+    db.add(other)
+    await db.commit()
+    svc = WageService(db)
+
+    run = await svc.compute_run(START, END, freeze=False, run_kind="monthly",
+                                style_code="CARNABY")
+    assert run["scope_style_code"] == "CARNABY"
+    assert run["scope_is_label"] is True, "a monthly run's style is decoration"
+    assert run["piece_rate_only"] is False
+    assert "FREEZE-SALARIED" in {ln["employee_name"] for ln in run["lines"]}
+
+    with pytest.raises(HTTPException) as exc:
+        await svc.compute_run(START, END, freeze=False, run_kind="monthly",
+                              style_code="ISLAY")
+    assert exc.value.status_code == 409
+    assert "label" in str(exc.value.detail).lower()
+
+
+async def test_a_deleted_run_frees_its_window(db):
+    """The escape hatch the 409 has always named, and never had a route for.
+
+    create_run commits an OPEN run BEFORE any line is written, so a compute that
+    died halfway left a committed run occupying the window forever."""
+    await _world(db)
+    svc = WageService(db)
+    wreck = await svc.compute_run(START, END, freeze=False, run_kind="piece",
+                                  style_code="CARNABY")
+
+    with pytest.raises(HTTPException):
+        await svc.compute_run(START, END, freeze=False, run_kind="piece",
+                              style_code="CARNABY")
+
+    out = await svc.delete_run(wreck["id"], user_name="MD")
+    assert out["deleted"] is True
+
+    again = await svc.compute_run(START, END, freeze=False, run_kind="piece",
+                                  style_code="CARNABY")
+    assert again["id"] != wreck["id"]
+
+
+async def test_deleting_a_frozen_run_needs_explicit_confirmation(db):
+    """A CLOSED run is the document the cash was counted against."""
+    await _world(db)
+    svc = WageService(db)
+    run = await svc.compute_run(START, END, run_kind="piece",
+                                style_code="CARNABY")
+
+    with pytest.raises(HTTPException) as exc:
+        await svc.delete_run(run["id"], user_name="MD")
+    assert exc.value.status_code == 409
+    assert "confirm_closed" in str(exc.value.detail)
+
+    out = await svc.delete_run(run["id"], user_name="MD", confirm_closed=True)
+    assert out["deleted"] is True

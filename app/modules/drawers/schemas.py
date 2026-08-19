@@ -127,6 +127,20 @@ class DrawerLabel(BaseModel):
     barcode: str | None = None
     caption: str | None = None
     barcode_status: str | None = None
+    # ── WHY THIS ROW IS WHERE IT IS IN THE LIST ─────────────────────────────
+    # `last_activity_at` is the sort key under the default `sort=recent`;
+    # `last_activity` names the act that set it — "merged" | "scanned" |
+    # "received" | "sent" | "released". Render them together ("sent · 2 min
+    # ago"): a timestamp with no verb tells the operator when something
+    # happened but not what, which is the half they need to decide whether to
+    # open the drawer.
+    last_activity_at: datetime | None = None
+    last_activity: str | None = None
+    # True when this row was floated up by `pin_codes` (the operator's own
+    # recently-searched list) rather than by its activity time — the UI should
+    # band these separately, or a pinned drawer from last week looks like the
+    # busiest drawer on the floor.
+    pinned: bool = False
 
 
 class DrawerPoolGrow(BaseModel):

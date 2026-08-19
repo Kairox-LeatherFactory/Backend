@@ -145,14 +145,45 @@ async def set_rates_bulk(
 # ── runs ────────────────────────────────────────────────────────────────────
 @router.get("/runs", response_model=list[schemas.WageRunSummary])
 async def list_runs(
+    run_kind: str | None = Query(
+        None, description="piece | monthly | combined (legacy)."),
+    order_number: str | None = Query(
+        None, description="Runs whose scope names this order."),
+    style_code: str | None = Query(
+        None, description="Runs whose scope names this style."),
+    date_from: date | None = Query(
+        None, description="Runs whose window ends on/after this date."),
+    date_to: date | None = Query(
+        None, description="Runs whose window starts on/before this date."),
+    status: str | None = Query(None, description="open | closed"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_PAYROLL_READERS),
 ):
-    """Run history, newest first. Without this a run_id is unreachable once the tab
-    that created it is closed."""
-    return await WageService(db).list_runs(limit, offset)
+    """QUERY. RUN HISTORY — newest COMPUTED first, and the route back to a run_id.
+
+    EVERY ROW NOW CARRIES WHAT THE RUN PAID FOR: `run_kind`, `scope_order_number`,
+    `scope_style_code`, `scope_is_label`, `computed_at`, `recompute_count`,
+    `reopen_count` and the frozen `unrated_operations`. The query used not to
+    select the scope columns at all, so every row came back with both nulls —
+    including runs that were scoped — which made the list a wall of
+    indistinguishable rows and the run_id effectively unreachable.
+
+    THE RECOMPUTE WORKFLOW this exists for: filter by `style_code` (or
+    `order_number`) plus `date_from`/`date_to`, read the id off the matching row,
+    then POST /wages/runs/{id}/recompute. The filters overlap-match on dates, so
+    a fortnight that straddles the month boundary still comes back.
+
+    `scope_is_label: true` means the order/style on that row is DECORATION — the
+    row is a MONTHLY run that was tagged for readability and paid every salaried
+    person in the window, not just that style's people. Render it differently
+    from a genuine narrowing.
+    """
+    return await WageService(db).list_runs(
+        limit=limit, offset=offset, run_kind=run_kind,
+        order_number=order_number, style_code=style_code,
+        date_from=date_from, date_to=date_to, status=status)
 
 
 @router.post("/runs", response_model=schemas.WageRunSummary, status_code=201)
@@ -161,26 +192,70 @@ async def compute_run(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
 ):
-    """COMMAND. Computes payroll for the window the manager typed.
+    """COMMAND. Computes ONE payroll for the window the manager typed.
 
-    THE RUN ENGINE. Two things it now accepts that it did not before:
+    `run_kind` IS THE FIRST FIELD, and it is not a filter — it selects which of
+    two incompatible pricing rules applies:
 
-      • `freeze` (default true). Send `false` to compute a DRAFT — an OPEN run you
-        can recompute as often as you like, then freeze with
-        POST /runs/{id}/close once the numbers are agreed. Recomputing a FROZEN
-        run needs an explicit reopen; see POST /runs/{id}/reopen.
-      • `order_number` / `style_code`. Narrow the run to one order or one style.
-        A SCOPED RUN PAYS PIECE-RATE WORK ONLY (`piece_rate_only: true` on the
-        response) — a monthly salary belongs to a person, not to a style, and
-        emitting it on a one-style run would pay it again on the next one.
+      • **piece** (default) — pays PIECE_RATE workers. **`style_code` or
+        `order_number` is REQUIRED**; a request with only dates is a 422. A piece
+        wage is earned on a specific garment, so the style IS the run. This is
+        the restriction that stops a manager typing two dates, pressing compute,
+        and paying every garment in the factory for that window.
 
-    Side-effecting and non-idempotent. Two runs over the same window for the same
-    scope is a 409, because the same pieces would be paid twice. Check
+      • **monthly** — pays salaried staff, priced from the calendar alone. No
+        scope required. It MAY carry `order_number` / `style_code` as a **label**
+        for the payroll screen; the response echoes it with
+        `scope_is_label: true` to say it did not narrow anything. Two monthly
+        runs over one window still collide however they are labelled.
+
+    A PIECE RUN AND A MONTHLY RUN OVER THE SAME WINDOW DO NOT CONFLICT. Their
+    employee populations are disjoint, so the pair is one complete payroll for
+    that fortnight — compute both.
+
+    `freeze` (default true): send `false` for a DRAFT (OPEN) you can recompute
+    freely, then POST /runs/{id}/close. Recomputing a FROZEN run needs an
+    explicit reopen; see POST /runs/{id}/reopen.
+
+    Side-effecting and non-idempotent. Two runs that would pay the same money
+    twice is a 409 naming the run that blocks you and what to do about it. Check
     `unrated_operations` and `gap_days` before paying anyone.
     """
     return await WageService(db).compute_run(
         body.period_start, body.period_end, freeze=body.freeze,
+        run_kind=body.run_kind.value,
         order_number=body.order_number, style_code=body.style_code)
+
+
+@router.delete("/runs/{run_id}", response_model=schemas.DeleteRunResult)
+async def delete_run(
+    run_id: uuid.UUID,
+    body: schemas.DeleteRunRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_roles(UserRole.DIRECT_MANAGER,
+                                       UserRole.MANAGING_DIRECTOR)),
+):
+    """COMMAND. Delete a run and its lines outright.
+
+    THE ESCAPE HATCH THE 409 HAS ALWAYS NAMED. The overlap guard tells a blocked
+    manager to "delete that run if it is wreckage from a failed compute" — and
+    until now no route could. `create_run` commits an OPEN run BEFORE any line is
+    written, so a compute that died halfway left a committed, empty run
+    permanently occupying that window, blocking every later run over those dates,
+    with no way to clear it.
+
+    REFUSES A CLOSED RUN unless `confirm_closed: true`. A frozen run is the
+    document the cash was counted against; deleting it destroys the record of a
+    payment that actually happened. To CHANGE a frozen run, reopen and recompute
+    instead — that keeps the audit trail. Deleting is for runs that should never
+    have existed.
+
+    DM/MD only, like recompute and reopen: HR reads payroll, DM/MD authorise
+    changes to it.
+    """
+    return await WageService(db).delete_run(
+        run_id, user_name=user.name,
+        confirm_closed=bool(body and body.confirm_closed))
 
 
 @router.post("/runs/{run_id}/recompute", response_model=schemas.WageRunDetail)

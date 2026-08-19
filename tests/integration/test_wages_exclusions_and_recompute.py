@@ -97,6 +97,19 @@ def _line(payload, name):
 
 
 # ═══════════════════════════════ H13 · the leaver's final fortnight
+# ── THE PIECE / MONTHLY FORK ────────────────────────────────────────────────
+# A payroll window is now paid by TWO runs: a PIECE run that must name the work
+# it pays for, and a MONTHLY run priced from the calendar. Each test below picks
+# the run whose population it is actually about.
+async def _piece_run(db, **kw):
+    return await WageService(db).compute_run(
+        START, END, run_kind="piece", style_code="ASHFORD", **kw)
+
+
+async def _monthly_run(db, **kw):
+    return await WageService(db).compute_run(START, END, run_kind="monthly", **kw)
+
+
 @pytest.mark.asyncio
 async def test_a_deactivated_piece_worker_is_still_paid_for_what_they_cut(db):
     """H13 (service.py:406-410): `active_only=True` used to drop anyone
@@ -110,7 +123,7 @@ async def test_a_deactivated_piece_worker_is_still_paid_for_what_they_cut(db):
     await _rate(db, w, value=12.5, effective_from=START)
     await _log(db, w, qty=40, on=WORK_DAY, employee=w["leaver_piece"])
 
-    payload = await WageService(db).compute_run(START, END)
+    payload = await _piece_run(db)
     line = _line(payload, "LEAVER_PIECE")
 
     assert line is not None, "a leaver's piece money was dropped from payroll"
@@ -126,7 +139,7 @@ async def test_a_deactivated_monthly_worker_is_not_paid_a_salary(db):
     leaver a prorated salary pays someone who did not work. The asymmetry is the
     correct behaviour, so it is asserted rather than assumed."""
     w = await _world(db)
-    payload = await WageService(db).compute_run(START, END)
+    payload = await _monthly_run(db)
 
     assert _line(payload, "LEAVER_SALARIED") is None
     assert _line(payload, "SALARIED") is not None, "an active monthly worker was dropped"
@@ -140,7 +153,7 @@ async def test_a_monthly_worker_with_no_salary_is_reported_not_zeroed(db):
     employee is excluded and NAMED under `unrated_operations` with
     kind='monthly_salary_missing', so someone fixes the record."""
     w = await _world(db)
-    payload = await WageService(db).compute_run(START, END)
+    payload = await _monthly_run(db)
 
     assert _line(payload, "NOSALARY") is None, "a NULL salary produced a payslip line"
 
@@ -188,7 +201,7 @@ async def test_an_out_of_vocabulary_wage_type_crashes_payroll_instead_of_excludi
     db.expire_all()
 
     with pytest.raises(LookupError, match="not among the defined enum values"):
-        await WageService(db).compute_run(START, END)
+        await _monthly_run(db)
 
 
 @pytest.mark.asyncio
@@ -197,7 +210,7 @@ async def test_the_untyped_exclusion_channel_reports_nobody_on_a_clean_roster(db
     exclusion list is empty. Together they show the channel is well-formed but
     unreachable — it is not that the roster happens to be clean."""
     await _world(db)
-    payload = await WageService(db).compute_run(START, END)
+    payload = await _monthly_run(db)
     assert payload["excluded_untyped_employees"] == []
 
 
@@ -209,9 +222,15 @@ async def test_unpriced_work_is_reported_against_a_style_code_not_a_uuid(db):
     w = await _world(db)
     await _log(db, w, qty=17, on=WORK_DAY, employee=w["piece"])   # no rate set
 
-    payload = await WageService(db).compute_run(START, END)
+    payload = await _piece_run(db)
     unrated = [u for u in payload["unrated_operations"]
                if u.get("kind") == "unrated_operation"]
+
+    # AND it survives a re-read. The warning used to live only in this response;
+    # every later read hardcoded [], so reopening the payslip screen lost it.
+    reread = await WageService(db).get_run_detail(payload["id"])
+    assert reread["unrated_operations"] == payload["unrated_operations"], (
+        "the unpaid-work warning did not survive being re-read")
 
     assert len(unrated) == 1
     assert unrated[0]["style_code"] == "ASHFORD"
@@ -238,7 +257,7 @@ async def test_a_blended_rate_line_reconciles_pieces_times_rate_to_amount(db):
     await _log(db, w, qty=10, on=day_a, employee=w["piece"])
     await _log(db, w, qty=10, on=day_b, employee=w["piece"])
 
-    payload = await WageService(db).compute_run(START, END)
+    payload = await _piece_run(db)
     line = _line(payload, "PIECEWORKER")
 
     assert line["pieces"] == 20
@@ -258,7 +277,7 @@ async def test_recompute_of_a_closed_run_requires_explicit_confirmation(db):
     w = await _world(db)
     await _rate(db, w, value=10.0, effective_from=START)
     await _log(db, w, qty=5, on=WORK_DAY, employee=w["piece"])
-    first = await WageService(db).compute_run(START, END)
+    first = await _piece_run(db)
 
     with pytest.raises(HTTPException) as exc:
         await WageService(db).recompute_run(first["id"], user_name="DM")
@@ -278,7 +297,7 @@ async def test_a_recompute_stamps_who_did_it_so_a_reprint_is_identifiable(db):
     w = await _world(db)
     await _rate(db, w, value=10.0, effective_from=START)
     await _log(db, w, qty=5, on=WORK_DAY, employee=w["piece"])
-    run = await WageService(db).compute_run(START, END)
+    run = await _piece_run(db)
 
     await WageService(db).recompute_run(run["id"], user_name="AUDITOR",
                                         confirm_closed=True)
@@ -304,7 +323,7 @@ async def test_a_failed_recompute_restores_the_lines_it_deleted(db):
     await _log(db, w, qty=5, on=WORK_DAY, employee=w["piece"])
 
     svc = WageService(db)
-    run = await svc.compute_run(START, END)
+    run = await _piece_run(db)
     before = await db.scalar(
         select(func.count(WageLine.id)).where(WageLine.wage_run_id == run["id"]))
     assert before > 0
@@ -345,7 +364,7 @@ async def test_a_failed_compute_leaves_no_orphan_run_blocking_the_window(db):
 
     svc._populate_run = boom
     with pytest.raises(RuntimeError):
-        await svc.compute_run(START, END)
+        await svc.compute_run(START, END, run_kind="piece", style_code="ASHFORD")
 
     orphans = await db.scalar(
         select(func.count(WageRun.id))
@@ -353,5 +372,5 @@ async def test_a_failed_compute_leaves_no_orphan_run_blocking_the_window(db):
     assert orphans == 0, "a failed run was left behind and now blocks its own window"
 
     # and the retry succeeds
-    payload = await WageService(db).compute_run(START, END)
+    payload = await _piece_run(db)
     assert payload["status"] == RunStatus.CLOSED

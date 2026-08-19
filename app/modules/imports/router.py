@@ -28,7 +28,8 @@ import zipfile
 
 from decimal import Decimal
 
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
+from fastapi import (APIRouter, Body, Depends, File, Form, HTTPException, Query,
+                     UploadFile)
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
@@ -140,6 +141,12 @@ async def commit_import(
     `release_required: true` and `pieces_minted: 0` to say so.
 
     Next call: GET /imports/breakdown/{order_number}.
+
+    THE ORDER NUMBER IN THIS RESPONSE IS A RECEIPT, NOT THE ONLY COPY. The order
+    is a permanent row (this endpoint 404s rather than create one), and every
+    order is listed at GET /imports/orders with its breakdown status and a
+    `breakdown_url`. Losing this response loses nothing — re-open the order from
+    that index.
     """
     await _require_order(db, order_number)
     path = _save_upload(file)
@@ -317,6 +324,71 @@ class ReleaseRequest(BaseModel):
 
 class StyleIdsRequest(BaseModel):
     style_ids: list[uuid.UUID] = Field(min_length=1)
+
+
+# ── THE ORDER INDEX ──────────────────────────────────────────────────────────
+# Declared BEFORE /breakdown/{order_number}: it is a different path segment, so
+# there is no capture conflict, but keeping the index next to the table it opens
+# is how the two stay readable as one screen flow.
+@router.get("/orders")
+async def list_orders(
+    q: str | None = Query(
+        None, min_length=1, max_length=80,
+        description="Search order number OR client name — case-insensitive "
+                    "CONTAINS, so '1579' and 'jack' both work."),
+    client_id: uuid.UUID | None = Query(None, description="One client's orders."),
+    status: str | None = Query(
+        None,
+        description="NOT_UPLOADED | DRAFT | PARTIALLY_RELEASED | RELEASED | "
+                    "CANCELLED — the breakdown rollup, not the order's own state."),
+    has_breakdown: bool | None = Query(
+        None, description="true = orders whose breakdown sheet is committed; "
+                          "false = orders still waiting for one."),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_DM),
+):
+    """QUERY. EVERY ORDER, PERMANENTLY — the index the breakdown screen opens from.
+
+    POST /imports/commit answers with the order number, and that response used to
+    be the only place it appeared: close the tab and
+    GET /imports/breakdown/{order_number} was unreachable unless somebody had
+    written the number down. Nothing was ever actually lost — `client_order` is a
+    permanent table, and commit REQUIRES the order to already exist so it never
+    creates one — but there was no way to LIST orders:
+    GET /clients/{client_id}/orders needs a client id you may not have, and the
+    analytics explorer returns a nested tree rather than a clickable index.
+
+    Click a row, call the `breakdown_url` it carries, and you are on the
+    breakdown table for that order.
+
+    `breakdown_status` is rolled up from the order's styles, so the list says
+    what still needs doing without opening anything:
+
+      NOT_UPLOADED        the order exists; no breakdown sheet committed yet
+      DRAFT               sheet uploaded, nothing released, nothing minted
+      PARTIALLY_RELEASED  some styles in production, some still editable
+      RELEASED            every live style released and minting pieces
+      CANCELLED           every style on the order was cancelled
+
+    ORDERED MOST-RECENTLY-WORKED-ON FIRST — the newest of the order's creation
+    and its last-written style — so an order whose sheet landed this morning
+    outranks one raised months ago and never touched. `order_date` is the
+    client's date and says nothing about what the factory is handling now.
+
+    `pieces_minted` is the count of real barcoded garments behind the order, so a
+    RELEASED row can be told apart from one that released and produced nothing.
+    """
+    if status:
+        valid = {"NOT_UPLOADED", "DRAFT", "PARTIALLY_RELEASED", "RELEASED",
+                 "CANCELLED"}
+        if status.strip().upper() not in valid:
+            raise HTTPException(
+                422, f"status must be one of {sorted(valid)}.")
+    return await BreakdownService(db).list_orders(
+        q=q, client_id=client_id, status=status, has_breakdown=has_breakdown,
+        limit=limit, offset=offset)
 
 
 @router.get("/breakdown/{order_number}")

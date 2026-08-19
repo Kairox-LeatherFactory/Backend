@@ -20,7 +20,7 @@ from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.enums import RunStatus
+from app.core.enums import RunStatus, WageRunKind
 from app.modules.wages.models import Rate, WageLine, WageLineDetailRow, WageRun
 
 
@@ -273,17 +273,51 @@ class WageRepository:
         await self.db.commit()
 
     async def create_run(self, period_start: date, period_end: date, *,
+                         run_kind: str = WageRunKind.COMBINED.value,
+                         scope_is_label: bool = False,
                          scope_order_number: str | None = None,
                          scope_style_code: str | None = None) -> WageRun:
         """Opens a run. Callers MUST validate the window before calling this —
-        it commits, so a rejection afterwards strands an OPEN row."""
+        it commits, so a rejection afterwards strands an OPEN row.
+
+        `scope_is_label` travels WITH the codes rather than being re-derived from
+        run_kind later: it is what the overlap guard reads to decide whether the
+        stored order/style narrows the run or merely decorates it, and a guard
+        that had to infer that would be one refactor away from treating a monthly
+        run's label as a filter."""
         run = WageRun(period_start=period_start, period_end=period_end,
+                      run_kind=run_kind,
+                      scope_is_label=scope_is_label,
                       scope_order_number=scope_order_number,
                       scope_style_code=scope_style_code)
         self.db.add(run)
         await self.db.commit()
         await self.db.refresh(run)
         return run
+
+    async def persist_unrated(self, run: WageRun, unrated: list[dict]) -> None:
+        """Freeze the run's unpaid-work warning onto the run itself.
+
+        Stored as JSON rather than a child table on purpose: it is a rendered
+        WARNING, already resolved to codes and labels by _name_unrated, and
+        nothing ever queries across it. A table would buy joins nobody makes and
+        cost a migration every time the warning's shape grows a field."""
+        run.unrated_snapshot = list(unrated or [])
+        await self.db.commit()
+
+    async def purge_run(self, run: WageRun) -> None:
+        """Delete a run and everything hanging off it.
+
+        `WageRun.lines` cascades (delete-orphan), but WageLineDetailRow does NOT
+        — it is keyed to wage_run_id with no relationship on WageRun, so the ORM
+        cascade never sees it. Deleting the run without this leaves the frozen
+        per-(style, operation) breakdown rows behind as orphans that the payroll
+        reporting surface would still read and fold into its totals."""
+        await self.db.execute(
+            delete(WageLineDetailRow).where(
+                WageLineDetailRow.wage_run_id == run.id))
+        await self.db.delete(run)
+        await self.db.commit()
 
     async def get_run(self, run_id: uuid.UUID) -> WageRun | None:
         stmt = (
@@ -307,42 +341,105 @@ class WageRepository:
         await self.db.delete(run)
         await self.db.commit()
 
-    async def list_runs(self, limit: int = 50, offset: int = 0) -> list[dict]:
-        """Run summaries, newest first. Totals aggregated in SQL — loading every
-        line of every run to sum them in Python does not survive two years of
-        payroll."""
+    async def list_runs(self, *, limit: int = 50, offset: int = 0,
+                        run_kind: str | None = None,
+                        order_number: str | None = None,
+                        style_code: str | None = None,
+                        date_from: date | None = None,
+                        date_to: date | None = None,
+                        status: str | None = None) -> list[dict]:
+        """Run summaries, newest COMPUTED first, filterable by what the run paid.
+
+        TWO BUGS FIXED HERE, and the first one is why a manager could not find
+        their own run again:
+
+        1. THE SCOPE WAS NEVER SELECTED. scope_order_number / scope_style_code
+           were absent from this query, and WageRunSummary declares them with
+           `default=None` — so every row in the list came back with both fields
+           null, INCLUDING runs that were scoped to a style. The list was
+           therefore a wall of identical-looking rows and the only way to tell
+           them apart was to open each one. `piece_rate_only` was false for the
+           same reason.
+
+        2. `ORDER BY period_end DESC` is not "newest". Recompute a fortnight
+           three times and all four runs share a period_end, so they came back in
+           whatever order the database felt like — and the run you just computed
+           was not reliably at the top. Ordered by created_at now: the question
+           this list answers is "what did we just run".
+
+        The filters mirror GET /wages/ledger's, deliberately: two listing
+        surfaces over the same table that took different filter names would be
+        two things to keep in step forever.
+        """
+        conds = []
+        if run_kind:
+            conds.append(WageRun.run_kind == run_kind.strip().lower())
+        if order_number:
+            conds.append(func.upper(WageRun.scope_order_number)
+                         == order_number.strip().upper())
+        if style_code:
+            conds.append(func.upper(WageRun.scope_style_code)
+                         == style_code.strip().upper())
+        # Window OVERLAP, not containment: "runs covering August" must return a
+        # run for 25 Jul..7 Aug. Containment would hide exactly the runs whose
+        # boundaries a manager is trying to reconcile.
+        if date_from:
+            conds.append(WageRun.period_end >= date_from)
+        if date_to:
+            conds.append(WageRun.period_start <= date_to)
+        if status:
+            conds.append(WageRun.status == RunStatus(status.strip().lower()))
+
+        grouped = (
+            WageRun.id, WageRun.period_start, WageRun.period_end, WageRun.status,
+            WageRun.run_kind, WageRun.scope_is_label,
+            WageRun.scope_order_number, WageRun.scope_style_code,
+            WageRun.unrated_snapshot,
+            WageRun.recompute_count, WageRun.reopen_count, WageRun.created_at,
+        )
         stmt = (
             select(
-                WageRun.id,
-                WageRun.period_start,
-                WageRun.period_end,
-                WageRun.status,
+                *grouped,
                 func.coalesce(func.sum(WageLine.amount), 0),
                 func.coalesce(func.sum(WageLine.pieces), 0),
                 func.count(WageLine.id),
             )
             .outerjoin(WageLine, WageLine.wage_run_id == WageRun.id)
-            .group_by(
-                WageRun.id, WageRun.period_start, WageRun.period_end, WageRun.status
-            )
-            .order_by(WageRun.period_end.desc())
+            .group_by(*grouped)
+            .order_by(WageRun.created_at.desc(), WageRun.period_end.desc())
             .limit(limit)
             .offset(offset)
         )
-        return [
-            {
+        if conds:
+            stmt = stmt.where(and_(*conds))
+
+        out = []
+        for r in (await self.db.execute(stmt)).all():
+            kind = r[4] or WageRunKind.COMBINED.value
+            out.append({
                 "id": r[0],
                 "period_start": r[1],
                 "period_end": r[2],
                 "status": r[3],
-                "total_amount": float(r[4]),
-                "total_pieces": int(r[5]),
-                "employee_count": int(r[6]),
-                "unrated_operations": [],
+                "run_kind": kind,
+                "scope_is_label": bool(r[5]),
+                "scope_order_number": r[6],
+                "scope_style_code": r[7],
+                # Same derivation as get_run_detail. A MONTHLY run that names a
+                # style is NOT piece-rate-only — its style is a label.
+                "piece_rate_only": kind == WageRunKind.PIECE.value or (
+                    kind == WageRunKind.COMBINED.value and bool(r[6] or r[7])),
+                "monthly_only": kind == WageRunKind.MONTHLY.value,
+                "unrated_operations": list(r[8] or []),
+                "recompute_count": int(r[9] or 0),
+                "reopen_count": int(r[10] or 0),
+                "computed_at": r[11],
+                "total_amount": float(r[12]),
+                "total_pieces": int(r[13]),
+                "employee_count": int(r[14]),
                 "gap_days": 0,
-            }
-            for r in (await self.db.execute(stmt)).all()
-        ]
+            })
+        return out
 
     async def run_lines_detailed(self, run_id: uuid.UUID) -> list[dict]:
         """Lines joined to the employee, each carrying its style/operation
