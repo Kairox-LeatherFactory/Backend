@@ -275,6 +275,38 @@ class WageService:
         }
 
     # ── runs ────────────────────────────────────────────────────────────────
+    async def _scope_style_ids(self, *, order_number: str | None,
+                               style_code: str | None) -> set | None:
+        """The concrete set of styles a run pays. `None` means EVERY style.
+
+        This is what makes the overlap guard correct. A run's scope is stored as
+        a human code, but two runs collide on PIECES, not on strings:
+
+            unscoped        -> None          (all styles, present and future)
+            style_code A    -> {id(A)}
+            order_number X  -> {every style id in X}
+
+        A style belongs to exactly one order, so this mapping is total and
+        unambiguous — which is precisely what the old string comparison could not
+        express, and why it had to fall back to a conservative
+        "any order-scoped run blocks any style-scoped run".
+        """
+        if style_code:
+            return {(await self._resolve_style(style_code))["style_id"]}
+        if order_number:
+            order = await self.clients.get_order_by_number(order_number.strip())
+            if not order:
+                return set()          # unknown order pays nothing
+            return set(await self.clients.style_ids_for_order(order.id))
+        return None
+
+    @staticmethod
+    def _scopes_collide(a: set | None, b: set | None) -> bool:
+        """Do two runs pay any style in common? `None` = the whole factory."""
+        if a is None or b is None:
+            return True               # an unscoped run pays everything
+        return bool(a & b)
+
     async def _validate_window(self, period_start: date, period_end: date,
                                *, replacing: uuid.UUID | None = None,
                                scope_order_number: str | None = None,
@@ -284,9 +316,28 @@ class WageService:
         `replacing` is the run being recomputed — its own window must not count
         as an overlap with itself, or recompute would always 409.
 
-        The scope is threaded through so two runs over the same fortnight for
-        DIFFERENT styles are allowed (they pay disjoint pieces) while an
-        unscoped run still blocks everything in its window.
+        THE OVERLAP GUARD IS ABOUT PIECES, NOT DATES.
+            The rule a factory actually needs is "no garment is paid twice", and
+            two runs can only do that if they share BOTH a date window AND a
+            style. Dates alone are not a conflict: computing order KJ2451 and
+            order KJ2452 for the same fortnight pays two disjoint sets of
+            garments, and refusing the second is refusing correct work.
+
+            This used to compare the runs' scope STRINGS, which could not tell
+            whether a style belonged to an order and so blocked conservatively:
+            ANY order-scoped run in the window killed ANY style-scoped run, even
+            for a style in a different order. Now each scope is resolved to its
+            real style-id set (`_scope_style_ids`) and the guard fires only on a
+            genuine intersection.
+
+            WHAT STILL BLOCKS, AND WHY IT MUST:
+                unscoped vs anything  — an unscoped run already paid every style
+                                        in the window, so a scoped re-run over
+                                        those same days pays those pieces again.
+                order X vs order X    — same styles.
+                order X vs style A    — only when A actually belongs to X.
+            WHAT NO LONGER BLOCKS:
+                order X vs order Y, style A vs style B, order X vs style B.
         """
         if period_end < period_start:
             raise HTTPException(
@@ -299,25 +350,35 @@ class WageService:
                 "cannot run payroll for future dates",
             )
 
-        # B7: overlapping_closed_run now returns any CLOSED **or OPEN** run in the
-        # window, so a run that died mid-population can no longer hide from this.
-        clash = await self.repo.overlapping_closed_run(
-            period_start, period_end, exclude_run_id=replacing,
-            scope_order_number=scope_order_number,
-            scope_style_code=scope_style_code,
-        )
-        if clash:
+        mine = await self._scope_style_ids(
+            order_number=scope_order_number, style_code=scope_style_code)
+
+        candidates = await self.repo.runs_in_window(
+            period_start, period_end, exclude_run_id=replacing)
+        for clash in candidates:
+            theirs = await self._scope_style_ids(
+                order_number=clash.scope_order_number,
+                style_code=clash.scope_style_code)
+            if not self._scopes_collide(mine, theirs):
+                continue
             state = ("closed" if clash.status == RunStatus.CLOSED
                      else "OPEN (a draft, in progress, or abandoned mid-compute)")
             clash_scope = (clash.scope_style_code or clash.scope_order_number
                            or "the whole factory")
+            mine_scope = (scope_style_code or scope_order_number
+                          or "the whole factory")
+            # Name the overlap in the terms the manager typed, and say what to do.
+            shared = "every style" if (mine is None or theirs is None) else (
+                f"{len(mine & theirs)} shared style(s)")
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
-                f"Period overlaps {state} run {clash.id} "
-                f"({clash.period_start}..{clash.period_end}, scope: {clash_scope}). "
-                f"Payroll windows must not intersect for the same pieces — they "
-                f"would be paid twice. Narrow one run to a different style/order, "
-                f"or delete that run if it is wreckage from a failed compute.",
+                f"This run ({mine_scope}) would pay work already covered by "
+                f"{state} run {clash.id} ({clash.period_start}..{clash.period_end}, "
+                f"scope: {clash_scope}) — {shared} in common over the same dates, "
+                f"so those garments would be paid twice. Runs for DIFFERENT "
+                f"orders or styles over the same dates are allowed; narrow this "
+                f"run, move the window, or delete that run if it is wreckage "
+                f"from a failed compute.",
             )
 
         last = await self.repo.last_closed_run(exclude_run_id=replacing)

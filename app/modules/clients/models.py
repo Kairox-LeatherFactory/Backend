@@ -157,6 +157,45 @@ class Style(Base, UUIDMixin, TimestampMixin):
     )
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# THE ONE DEFINITION OF "THIS STYLE IS IN PRODUCTION"
+# ══════════════════════════════════════════════════════════════════════════════
+# Uploading a breakdown sheet is NOT production. The sheet lands as DRAFT rows
+# that mint nothing, consume no drawers, and must be invisible to every service
+# that reports on the factory floor — dashboard counts, payroll landing screens,
+# analytics. Only a style the DM has explicitly RELEASED has pieces, barcodes and
+# workers against it, and only then does it become something the business can be
+# asked questions about.
+#
+# WHY THIS IS ONE SHARED EXPRESSION AND NOT A `.where()` REPEATED PER QUERY.
+# The bug that produced it: the dashboard totalled `SUM(SKU.qty_ordered)` over
+# every style regardless of status, while `minted_pieces` counted Piece rows that
+# only exist after release. Uploading a 1,425-piece sheet therefore added 1,425
+# to the order total immediately, and releasing it added 1,425 more pieces — the
+# same garments counted twice, in two figures that no longer described the same
+# population. Any query that counts work must apply the SAME predicate, so the
+# predicate gets exactly one home.
+#
+# RELEASED ONLY — deliberately not "anything except DRAFT". A CANCELLED style is
+# work that was pulled; its history (production events, wage lines) stays intact
+# and still pays, but it must drop out of the live counts, or a cancelled order
+# inflates the floor's targets forever.
+def style_in_production():
+    """SQL predicate: this Style is released into production.
+
+    Use in any query that counts, totals, or lists factory work:
+
+        stmt = stmt.join(Style, ...).where(style_in_production())
+    """
+    return Style.production_status == ProductionReleaseStatus.RELEASED.value
+
+
+# The same answer for a Style object already in memory.
+def is_in_production(style) -> bool:
+    return (getattr(style, "production_status", None)
+            == ProductionReleaseStatus.RELEASED.value)
+
+
 class StyleComponent(Base, UUIDMixin, TimestampMixin):
     """An add-on / combined-style component. Jackie's split prices ("66+8", "39+7")
     and "+ DETACH" / "+ VEST" add-ons can't live in a single price column."""

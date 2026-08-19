@@ -4,7 +4,9 @@ modules/attendance/service.py — Attendance business rules (async)
 ================================================================================
 
 WHAT THIS FILE OWNS
-  - Geofence validation BEFORE any database write (the spec's hard rule).
+  - Server-side identity + shift policy for every punch. THERE IS NO
+    LOCATION CHECK ANY MORE: the geofence was removed, so a check-in needs
+    no factory position and no device position (see geofence.py).
   - Server-side timestamps (block client-side clock manipulation — spec).
   - Late / short / overtime flags computed at write time (so dashboards never
     recompute on read).
@@ -37,7 +39,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import UserRole, WageType
 from app.modules.attendance import schemas
-from app.modules.attendance.geofence import within_geofence
+# GEOFENCE DISABLED — the pure distance rule is commented out in geofence.py.
+# from app.modules.attendance.geofence import within_geofence
 from app.modules.attendance.models import (
     AttendanceLog, AttendanceSource, ShiftConfig,
 )
@@ -59,18 +62,27 @@ class AttendanceService:
     async def _config(self) -> ShiftConfig:
         return await self.repo.get_config()
 
-    async def _enforce_geofence(self, lat: float, lon: float) -> float:
-        """Spec: distance > radius -> block with a clear error."""
-        cfg = await self._config()
-        ok, dist = within_geofence(lat, lon, float(cfg.factory_lat),
-                                float(cfg.factory_lon), cfg.radius_m)
-        if not ok:
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN,
-                f"You must be within {cfg.radius_m} meters of the factory "
-                f"(you are {dist:.0f} m away).",
-            )
-        return dist
+    # ── GEOFENCE DISABLED ───────────────────────────────────────────────
+    # Location tracking is switched off: attendance no longer knows where the
+    # factory is and no longer asks the device where the worker is. Every
+    # punch is authorised by IDENTITY alone — an operator login scanning a
+    # card (or typing the employee in). `distance_m` is therefore always None
+    # on new rows; historical rows keep whatever distance they were written
+    # with. Uncomment this method AND the four call sites below to restore the
+    # 100-metre rule.
+    #
+    # async def _enforce_geofence(self, lat: float, lon: float) -> float:
+    #     """Spec: distance > radius -> block with a clear error."""
+    #     cfg = await self._config()
+    #     ok, dist = within_geofence(lat, lon, float(cfg.factory_lat),
+    #                             float(cfg.factory_lon), cfg.radius_m)
+    #     if not ok:
+    #         raise HTTPException(
+    #             status.HTTP_403_FORBIDDEN,
+    #             f"You must be within {cfg.radius_m} meters of the factory "
+    #             f"(you are {dist:.0f} m away).",
+    #         )
+    #     return dist
 
     def _now(self) -> datetime:
         """SERVER timestamp in UTC (spec: 'blocking client-side time manipulation').
@@ -140,6 +152,29 @@ class AttendanceService:
             is_ot = worked_h > std
         return is_late, is_short, is_ot
 
+    @staticmethod
+    def _as_read(log: AttendanceLog, name: str) -> schemas.AttendanceRead:
+        """AttendanceLog -> AttendanceRead. ONE shaping path.
+
+        `AttendanceRead.name` is REQUIRED and lives on Employee, not on the log,
+        so `model_validate(log)` can never satisfy it — the two self-service
+        routes returned the ORM row directly and FastAPI raised
+        ResponseValidationError (a 500) on every call. Building the payload here
+        means the four write paths and the roster cannot drift apart again.
+        """
+        return schemas.AttendanceRead(
+            id=log.id, employee_id=log.employee_id, name=name,
+            work_date=log.work_date, check_in_at=log.check_in_at,
+            check_out_at=log.check_out_at, source=log.source,
+            is_late=log.is_late, is_short=log.is_short,
+            is_overtime=log.is_overtime, distance_m=log.distance_m,
+        )
+
+    async def _read_for(self, log: AttendanceLog) -> schemas.AttendanceRead:
+        """As _as_read, looking the employee's name up from the log."""
+        emp = await self.employees.get(log.employee_id)
+        return self._as_read(log, emp.name if emp else "")
+
     def _shift_end_at(self, cfg: ShiftConfig, check_in: datetime) -> datetime:
         """When the shift is 'complete' for this punch, as a UTC instant.
 
@@ -152,23 +187,32 @@ class AttendanceService:
     # ══════════════════════════════════════════════════════════════════
     # Flow A — Self-service check-in / check-out
     # ══════════════════════════════════════════════════════════════════
-    async def self_check_in(self, user: User, body: schemas.CheckInRequest) -> AttendanceLog:
+    async def self_check_in(self, user: User,
+                            body: schemas.CheckInRequest | None = None,
+                            ) -> schemas.AttendanceRead:
         """The acting user IS the person being marked — an OPERATOR (SECURITY /
         HR / MD / DM) recording their own arrival. Shop-floor workers hold no
-        login, so they never take this path; they are scanned in instead."""
-        if user.employee_id is None:
-            raise HTTPException(400, "This login is not linked to an employee record.")
-        dist = await self._enforce_geofence(body.lat, body.lon)
-        return await self._open_or_reject(
-            employee_id=user.employee_id, source=AttendanceSource.SELF,
-            recorded_by=None, distance_m=dist,
-        )
+        login, so they never take this path; they are scanned in instead.
 
-    async def self_check_out(self, user: User, body: schemas.CheckOutRequest) -> AttendanceLog:
+        `body` is optional now that there is nothing required in it: the punch
+        is identified by the token, and the timestamp is server-side."""
         if user.employee_id is None:
             raise HTTPException(400, "This login is not linked to an employee record.")
-        await self._enforce_geofence(body.lat, body.lon)
-        return await self._close(employee_id=user.employee_id)
+        # GEOFENCE DISABLED — was: dist = await self._enforce_geofence(body.lat, body.lon)
+        log = await self._open_or_reject(
+            employee_id=user.employee_id, source=AttendanceSource.SELF,
+            recorded_by=None, distance_m=None,
+        )
+        return await self._read_for(log)
+
+    async def self_check_out(self, user: User,
+                             body: schemas.CheckOutRequest | None = None,
+                             ) -> schemas.AttendanceRead:
+        if user.employee_id is None:
+            raise HTTPException(400, "This login is not linked to an employee record.")
+        # GEOFENCE DISABLED — was: await self._enforce_geofence(body.lat, body.lon)
+        log = await self._close(employee_id=user.employee_id)
+        return await self._read_for(log)
 
 
     async def barcode_scan(self, *, employee_id: uuid.UUID, actor: User,direction: str,
@@ -178,35 +222,35 @@ class AttendanceService:
 
         `actor` is always an operator (SECURITY / HR / MD / DM) — enforced in the
         router before this is called. Workers have no login and cannot reach it.
+
+        `lat` / `lon` / `reason` are accepted and IGNORED — location tracking is
+        removed; they remain in the signature so callers need not change.
         """
         emp = await self.employees.get(employee_id)
         if not emp:
             raise HTTPException(404, "Employee not found.")
-        # F34 / H6: a MISSING GPS fix must NOT be recorded as distance_m = 0.0,
-        # which is indistinguishable from "standing at the gate". When
-        # coordinates are present we enforce the fence as normal.
+        # ── GEOFENCE DISABLED ──────────────────────────────────────────────
+        # The scan is authorised by the operator's login and the card itself —
+        # no position is requested, none is required and none is stored. `lat`
+        # and `lon` are still ACCEPTED on the wire (so an older frontend build
+        # keeps working) and are simply ignored. The block below is the old
+        # rule: enforce the fence when coordinates are present, and allow an
+        # unverified scan only as a supervised exception carrying a reason.
         #
-        # H6: when they are absent we no longer just wave the scan through.
-        # Indoor/metal-roof floors can genuinely lack a fix, so this is not a
-        # hard fail — but "omit two JSON keys and attendance is unverifiable
-        # from anywhere" is a bypass, and the resulting row satisfies
-        # is_present_today(), which unlocks production logging. So an
-        # unverified scan is allowed only as a SUPERVISED exception: it must
-        # carry a reason, and PROXY scans (a supervisor standing on the floor)
-        # must always carry coordinates.
-        if lat is not None and lon is not None:
-            dist = await self._enforce_geofence(lat, lon)
-        else:
-            if proxy:
-                raise HTTPException(
-                    status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    "A proxy scan must include the supervisor's GPS position.")
-            if not (reason or "").strip():
-                raise HTTPException(
-                    status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    "Location unavailable — send `reason` to record an "
-                    "unverified check-in for supervisor review.")
-            dist = None
+        # if lat is not None and lon is not None:
+        #     dist = await self._enforce_geofence(lat, lon)
+        # else:
+        #     if proxy:
+        #         raise HTTPException(
+        #             status.HTTP_422_UNPROCESSABLE_ENTITY,
+        #             "A proxy scan must include the supervisor's GPS position.")
+        #     if not (reason or "").strip():
+        #         raise HTTPException(
+        #             status.HTTP_422_UNPROCESSABLE_ENTITY,
+        #             "Location unavailable — send `reason` to record an "
+        #             "unverified check-in for supervisor review.")
+        #     dist = None
+        dist = None
         source = AttendanceSource.PROXY if proxy else AttendanceSource.SELF
         if direction == "in":
             log = await self._open_or_reject(
@@ -221,7 +265,10 @@ class AttendanceService:
             "check_in_at": log.check_in_at.isoformat() if log.check_in_at else None,
             "check_out_at": log.check_out_at.isoformat() if log.check_out_at else None,
             "is_late": log.is_late, "present_today": present,
-            "location_unverified": dist is None,
+            # GEOFENCE DISABLED — kept in the payload (always True) so a
+            # frontend still reading this key does not crash. It no longer
+            # means "we could not verify the position": nothing is verified.
+            "location_unverified": True,
         }
 
     # ══════════════════════════════════════════════════════════════════
@@ -231,7 +278,8 @@ class AttendanceService:
         self, operator: User, body: schemas.ProxyMarkRequest
     ) -> list[schemas.AttendanceRead]:
 
-        dist = await self._enforce_geofence(body.lat, body.lon)
+        # GEOFENCE DISABLED — was: dist = await self._enforce_geofence(body.lat, body.lon)
+        dist = None
 
         out: list[schemas.AttendanceRead] = []
 
@@ -249,22 +297,7 @@ class AttendanceService:
                 distance_m=dist,
             )
 
-            # ✅ FIX: return schema instead of model
-            out.append(
-                schemas.AttendanceRead(
-                    id=log.id,
-                    employee_id=log.employee_id,
-                    name=emp.name,  # 🔥 ADD THIS
-                    work_date=log.work_date,
-                    check_in_at=log.check_in_at,
-                    check_out_at=log.check_out_at,
-                    source=log.source,
-                    is_late=log.is_late,
-                    is_short=log.is_short,
-                    is_overtime=log.is_overtime,
-                    distance_m=log.distance_m,
-                )
-            )
+            out.append(self._as_read(log, emp.name))
 
         return out
 
@@ -272,7 +305,7 @@ class AttendanceService:
         self, operator: User, body: schemas.ProxyMarkRequest
     ) -> list[schemas.AttendanceRead]:
 
-        await self._enforce_geofence(body.lat, body.lon)
+        # GEOFENCE DISABLED — was: await self._enforce_geofence(body.lat, body.lon)
 
         out: list[schemas.AttendanceRead] = []
 
@@ -285,21 +318,7 @@ class AttendanceService:
 
             log = await self._close(employee_id=emp_id)
 
-            out.append(
-                schemas.AttendanceRead(
-                    id=log.id,
-                    employee_id=log.employee_id,
-                    name=emp.name,  # 🔥 REQUIRED FIX
-                    work_date=log.work_date,
-                    check_in_at=log.check_in_at,
-                    check_out_at=log.check_out_at,
-                    source=log.source,
-                    is_late=log.is_late,
-                    is_short=log.is_short,
-                    is_overtime=log.is_overtime,
-                    distance_m=log.distance_m,
-                )
-            )
+            out.append(self._as_read(log, emp.name))
 
         return out
 
@@ -331,7 +350,8 @@ class AttendanceService:
     # Open / close primitives (used by both flows)
     # ══════════════════════════════════════════════════════════════════
     async def _open_or_reject(self, *, employee_id: uuid.UUID, source: AttendanceSource,
-                            recorded_by: uuid.UUID | None, distance_m: float) -> AttendanceLog:
+                            recorded_by: uuid.UUID | None,
+                            distance_m: float | None = None) -> AttendanceLog:
         cfg = await self._config()
         now = self._now()
         today = now.astimezone(self._tz(cfg)).date()    # factory-local calendar day
@@ -400,22 +420,8 @@ class AttendanceService:
     async def today_roster(self) -> list[schemas.AttendanceRead]:
         rows = await self.repo.by_day(await self._local_today())
 
-        return [
-            schemas.AttendanceRead(
-                id=log.id,
-                employee_id=log.employee_id,
-                name=name,  # 👈 IMPORTANT (comes from join)
-                work_date=log.work_date,
-                check_in_at=log.check_in_at,
-                check_out_at=log.check_out_at,
-                source=log.source,
-                is_late=log.is_late,
-                is_short=log.is_short,
-                is_overtime=log.is_overtime,
-                distance_m=log.distance_m,
-            )
-            for log, name in rows
-        ]
+        # `name` comes from the repository's join, so no per-row lookup here.
+        return [self._as_read(log, name) for log, name in rows]
 
     async def my_status(self, user: User) -> schemas.ShiftStatus:
         """Server-anchored data for the frontend live countdown.

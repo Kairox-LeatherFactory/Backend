@@ -60,8 +60,8 @@ async def _seed_catalog(db) -> dict:
                            sea_cutoff_date=date(2026, 7, 15))
     db.add(order); await db.flush()
 
-    carnaby = cm.Style(client_order_id=order.id, name="CARNABY")
-    clermont = cm.Style(client_order_id=order.id, name="CLERMONT")
+    carnaby = cm.Style(client_order_id=order.id, name="CARNABY", production_status="RELEASED")
+    clermont = cm.Style(client_order_id=order.id, name="CLERMONT", production_status="RELEASED")
     db.add_all([carnaby, clermont]); await db.flush()
 
     sku_carnaby = cm.SKU(style_id=carnaby.id, color_code="57",

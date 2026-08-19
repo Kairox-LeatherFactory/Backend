@@ -64,7 +64,7 @@ async def _tree(db, *, style_name: str, declared: bool | None, tag: str,
     db.add(order)
     await db.flush()
     style = Style(client_order_id=order.id, name=style_name, article=f"ART-{tag}",
-                  code=f"STY-{tag}")
+                  code=f"STY-{tag}", production_status="RELEASED")
     style.needs_lining = declared
     db.add(style)
     await db.flush()

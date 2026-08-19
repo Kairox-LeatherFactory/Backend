@@ -14,7 +14,9 @@ from sqlalchemy import select ,func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.modules.clients.models import SKU, Client, ClientOrder, Style
+from app.modules.clients.models import (
+    SKU, Client, ClientOrder, Style, style_in_production,
+)
 from app.modules.clients.utlis import make_sku_code,make_style_code
 
 
@@ -22,12 +24,50 @@ class ClientRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    async def list_clients(self) -> list[Client]:
-        res = await self.db.execute(select(Client).order_by(Client.name))
+    async def list_clients(self, *, include_inactive: bool = False) -> list[Client]:
+        stmt = select(Client).order_by(Client.name)
+        if not include_inactive:
+            # `isnot(False)`, not `is_(True)`: identical today (the column is
+            # NOT NULL — see the baseline migration) and it stays correct if the
+            # column is ever relaxed, because a NULL there would mean "never
+            # deactivated", i.e. active. `== True` would silently hide those.
+            stmt = stmt.where(Client.is_active.isnot(False))
+        res = await self.db.execute(stmt)
         return list(res.scalars())
 
     async def get_client(self, client_id: uuid.UUID) -> Client | None:
         return await self.db.get(Client, client_id)
+
+    async def get_client_by_code(self, code: str) -> Client | None:
+        """Lookup on the unique `code` column — the friendly pre-check for a
+        PATCH that would collide."""
+        return (await self.db.execute(
+            select(Client).where(Client.code == code).limit(1)
+        )).scalar_one_or_none()
+
+    async def update_client(self, client: Client, data: dict) -> Client:
+        """Apply an already-validated partial update. Caller owns the rules."""
+        for k, v in data.items():
+            setattr(client, k, v)
+        await self.db.commit()
+        await self.db.refresh(client)
+        return client
+
+    async def count_orders_for_client(self, client_id: uuid.UUID) -> int:
+        """Orders on a client — the precondition for a hard delete."""
+        return int((await self.db.execute(
+            select(func.count(ClientOrder.id))
+            .where(ClientOrder.client_id == client_id)
+        )).scalar_one() or 0)
+
+    async def delete_client(self, client: Client) -> None:
+        """Hard delete. The service refuses this while the client has orders,
+        which is what keeps the `all, delete-orphan` cascade on `client_orders`
+        from reaching styles and SKUs that produced pieces (Piece.sku_id is a
+        plain FK — the database would refuse, mid-cascade, with a constraint
+        error rather than anything a user could act on)."""
+        await self.db.delete(client)
+        await self.db.commit()
 
     async def create_client(self, name: str, country: str | None) -> Client:
         c = Client(name=name, country=country)
@@ -92,7 +132,16 @@ class ClientRepository:
             client_order_id=co.id, name=str(style.get("name") or "UNSPECIFIED")[:120],
             customer_ref=style.get("customer_ref"), internal_ref=style.get("internal_ref"),
             season=style.get("season"), unit_price=style.get("unit_price"),
-            currency=style.get("currency"), code=make_style_code(co.order_number, str(style.get("name") or "UNSPECIFIED")[:120]),
+            currency=style.get("currency"),
+            # ARTICLE WAS BEING DROPPED ON THIS PATH ENTIRELY — the caller passes
+            # a style dict and every other key was read, so a style created from
+            # a BOM had `article = NULL` and no way to ever show one on a label.
+            # It is stored AND fed to the code maker, so both creation paths
+            # produce the same shape of code.
+            article=style.get("article"),
+            code=make_style_code(co.order_number,
+                                 str(style.get("name") or "UNSPECIFIED")[:120],
+                                 style.get("article")),
         )
         self.db.add(st)
         await self.db.flush()
@@ -117,7 +166,7 @@ class ClientRepository:
                             # (i.e. every real order). Use the persisted ORM value,
                             # matching make_style_code above which already uses co.
                             code=make_sku_code(co.order_number, st.name,
-                                color_name or color_code, size),))
+                                color_name or color_code, size, st.article),))
         await self.db.commit()
         return co.id, st.id
     
@@ -277,6 +326,11 @@ class ClientRepository:
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .outerjoin(SKU, SKU.style_id == Style.id)
             .where(Style.code.is_not(None))
+            # RELEASED ONLY. This picker feeds the payroll landing screen, and a
+            # style still sitting in a DRAFT breakdown sheet has no pieces, no
+            # scanned work and therefore nothing to pay — offering it a rate card
+            # invites a manager to price work that does not exist yet.
+            .where(style_in_production())
             .group_by(Style.id, Style.code, Style.name, Style.article,
                       ClientOrder.order_number)
         )
@@ -291,3 +345,16 @@ class ClientRepository:
              "sku_count": int(r[5]), "qty_ordered": int(r[6])}
             for r in (await self.db.execute(stmt)).all()
         ]
+    async def style_ids_for_order(self, order_id: uuid.UUID) -> list[uuid.UUID]:
+        """Every style id belonging to one client order.
+
+        Used by the payroll overlap guard to turn "scope: order KJ2451" into the
+        concrete set of styles that run pays, so two runs can be compared by the
+        pieces they touch rather than by whether their scope STRINGS happen to
+        match. Not release-filtered: the guard is asking "could these two runs pay
+        the same piece", and a style's release state does not change which order
+        it belongs to.
+        """
+        rows = await self.db.execute(
+            select(Style.id).where(Style.client_order_id == order_id))
+        return [r[0] for r in rows.all()]

@@ -95,7 +95,7 @@ async def test_johnpeter_load_into_clients(db):
         style = styles.get(line.style)
         if style is None:
             style = cm.Style(client_order_id=order.id, name=line.style,
-                             article=line.article)
+                             article=line.article, production_status="RELEASED")
             db.add(style); await db.flush()
             styles[line.style] = style
         for size, qty in line.sizes.items():

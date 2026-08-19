@@ -126,7 +126,7 @@ async def order_tree(db):
     order = ClientOrder(client_id=client.id, order_number="JP-PO")
     db.add(order)
     await db.flush()
-    style = Style(client_order_id=order.id, name="CLERMONT", article="CL1")
+    style = Style(client_order_id=order.id, name="CLERMONT", article="CL1", production_status="RELEASED")
     db.add(style)
     await db.flush()
     sku = SKU(style_id=style.id, color_code="PINE", color_name="PINE GREEN",
@@ -413,7 +413,7 @@ async def seed_min(db, operations):
     order = ClientOrder(client_id=client.id, order_number="SEED-PO")
     db.add(order)
     await db.flush()
-    style = Style(client_order_id=order.id, name="SEEDSTYLE", article="SS1")
+    style = Style(client_order_id=order.id, name="SEEDSTYLE", article="SS1", production_status="RELEASED")
     db.add(style)
     await db.flush()
     sku = SKU(style_id=style.id, color_code="BLK", color_name="BLACK",

@@ -97,7 +97,7 @@ async def scene(fk_db):
     order = ClientOrder(client_id=client.id, order_number="FK-AUDIT-1")
     fk_db.add(order); await fk_db.flush()
     style = Style(client_order_id=order.id, name="CLERMONT", article="CL1",
-                  code="FKA-CL")
+                  code="FKA-CL", production_status="RELEASED")
     fk_db.add(style); await fk_db.flush()
     sku = SKU(style_id=style.id, color_code="P", color_name="PINE", size="M",
               qty_ordered=1, code="FKA-CL-P-M")

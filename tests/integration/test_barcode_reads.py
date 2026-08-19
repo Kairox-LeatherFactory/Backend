@@ -31,8 +31,8 @@ async def jp_order(db):
     c = Client(name="John Peter"); db.add(c); await db.flush()
     o = ClientOrder(client_id=c.id, order_number="JP-READS"); db.add(o); await db.flush()
 
-    stA = Style(client_order_id=o.id, name="CLERMONT", code="JPR-CLERMONT")
-    stB = Style(client_order_id=o.id, name="VEST", code="JPR-VEST")
+    stA = Style(client_order_id=o.id, name="CLERMONT", code="JPR-CLERMONT", production_status="RELEASED")
+    stB = Style(client_order_id=o.id, name="VEST", code="JPR-VEST", production_status="RELEASED")
     db.add_all([stA, stB]); await db.flush()
 
     skA1 = SKU(style_id=stA.id, code="JPR-CLERMONT-PINE-M", color_code="PINE", color_name="PINE",

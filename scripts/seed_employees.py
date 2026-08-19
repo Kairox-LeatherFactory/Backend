@@ -104,6 +104,7 @@ STAFF = [
     dict(name="K Niyamathullah",      designation="STITCHING_MANAGER", salary=35750, phone="9629542708", email=None,                     role=UserRole.STITCHING_MANAGER),
     dict(name="Apsar Khan J",         designation="STITCHING_MANAGER", salary=40000, phone="9843430881", email=None,                     role=UserRole.STITCHING_MANAGER),
     dict(name="Ragavan L",            designation="CUTTING_MANAGER",   salary=47465, phone="8825935258", email=None,                     role=UserRole.CUTTING_MANAGER),
+    dict(name="Nasuruddin",            designation="LINING_MANAGER",   salary=25322, phone="9884227592", email=None,                     role=UserRole.LINING_MANAGER),
     # NOTE: no salary on record for the two MDs. They are stored MONTHLY with a
     # NULL salary, which the wage run reports as `monthly_salary_missing`
     # (wages/service.py:479) rather than paying a 0.00 payslip. Correct, but it

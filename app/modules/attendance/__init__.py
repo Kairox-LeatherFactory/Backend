@@ -1,5 +1,10 @@
 """
-attendance — geofenced punch-in/out, shift policy, piece-rate floor hours.
+attendance — punch-in/out, shift policy, piece-rate floor hours.
+
+LOCATION TRACKING IS REMOVED: there is no geofence, no factory coordinate
+and no device coordinate on any write path. A punch is authorised by the
+operator's login plus the employee's card. See geofence.py for the disabled
+implementation and how to switch it back on.
 
 Three flows from the spec:
   A. Self-service (managers / HR / permanent workers)

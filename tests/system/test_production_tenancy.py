@@ -45,7 +45,7 @@ async def two_clients(db):
         db.add(order)
         await db.flush()
         style = Style(client_order_id=order.id, name=f"{tag}STYLE",
-                      article=f"{tag}1", code=f"{tag}STYLE")
+                      article=f"{tag}1", code=f"{tag}STYLE", production_status="RELEASED")
         db.add(style)
         await db.flush()
         sku = SKU(style_id=style.id, color_code="BLK", color_name="BLACK",
