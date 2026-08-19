@@ -24,12 +24,50 @@ class ClientRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    async def list_clients(self) -> list[Client]:
-        res = await self.db.execute(select(Client).order_by(Client.name))
+    async def list_clients(self, *, include_inactive: bool = False) -> list[Client]:
+        stmt = select(Client).order_by(Client.name)
+        if not include_inactive:
+            # `isnot(False)`, not `is_(True)`: identical today (the column is
+            # NOT NULL — see the baseline migration) and it stays correct if the
+            # column is ever relaxed, because a NULL there would mean "never
+            # deactivated", i.e. active. `== True` would silently hide those.
+            stmt = stmt.where(Client.is_active.isnot(False))
+        res = await self.db.execute(stmt)
         return list(res.scalars())
 
     async def get_client(self, client_id: uuid.UUID) -> Client | None:
         return await self.db.get(Client, client_id)
+
+    async def get_client_by_code(self, code: str) -> Client | None:
+        """Lookup on the unique `code` column — the friendly pre-check for a
+        PATCH that would collide."""
+        return (await self.db.execute(
+            select(Client).where(Client.code == code).limit(1)
+        )).scalar_one_or_none()
+
+    async def update_client(self, client: Client, data: dict) -> Client:
+        """Apply an already-validated partial update. Caller owns the rules."""
+        for k, v in data.items():
+            setattr(client, k, v)
+        await self.db.commit()
+        await self.db.refresh(client)
+        return client
+
+    async def count_orders_for_client(self, client_id: uuid.UUID) -> int:
+        """Orders on a client — the precondition for a hard delete."""
+        return int((await self.db.execute(
+            select(func.count(ClientOrder.id))
+            .where(ClientOrder.client_id == client_id)
+        )).scalar_one() or 0)
+
+    async def delete_client(self, client: Client) -> None:
+        """Hard delete. The service refuses this while the client has orders,
+        which is what keeps the `all, delete-orphan` cascade on `client_orders`
+        from reaching styles and SKUs that produced pieces (Piece.sku_id is a
+        plain FK — the database would refuse, mid-cascade, with a constraint
+        error rather than anything a user could act on)."""
+        await self.db.delete(client)
+        await self.db.commit()
 
     async def create_client(self, name: str, country: str | None) -> Client:
         c = Client(name=name, country=country)

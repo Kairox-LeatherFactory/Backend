@@ -50,6 +50,7 @@ from sqlalchemy import and_, case, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import ProductionStage
+from app.core.store_display import STORE as STORE_DISPLAY_STAGE
 from app.modules.clients.models import (
     SKU, Client, ClientOrder, Style, style_in_production,
 )
@@ -68,6 +69,12 @@ _FINAL_FINISH = ProductionStage.FINAL_FINISH.value
 _FINAL_INSPECTION = ProductionStage.FINAL_INSPECTION.value
 
 _CUT_STAGES = (_LEATHER_CUT, _LINING_CUT)
+
+# The VIRTUAL store stage. Not a ProductionStage member and not an Operation row
+# — a piece never "works" at STORE, it SITS there while its drawer fills. Sourced
+# from core/store_display.py so the dashboard, the barcode screen and the piece
+# trace all name it with the same string.
+_STORE_STAGE = STORE_DISPLAY_STAGE
 
 # WHICH LOT COLUMN BELONGS TO WHICH CUT STAGE — one binding, not a per-call
 # argument the caller can get wrong.
@@ -276,6 +283,82 @@ class DashboardRepository:
             stmt = stmt.where(Style.id == style_id)
         stmt = self._scope(stmt, client_scope)
         return int((await self.db.execute(stmt)).scalar_one() or 0)
+
+    async def lining_required_total(
+        self, *, client_scope: uuid.UUID | None,
+        order_id: uuid.UUID | None = None, style_id: uuid.UUID | None = None,
+    ) -> int:
+        """How many MINTED pieces in scope actually need a lining. ONE query.
+
+        THE DENOMINATOR FOR THE LINING NODE, and the reason that node cannot use
+        the order quantity like every chain stage does. `needs_lining` is set per
+        piece from the breakdown at upload, so a run that is half leather-only
+        would sit permanently at ~50% "lining complete" if it were measured
+        against the whole order. Counted over minted pieces (not Σ qty_ordered)
+        because needs_lining only exists once the piece exists.
+        """
+        stmt = (
+            select(func.count(Piece.id))
+            .select_from(Piece)
+            .join(SKU, SKU.id == Piece.sku_id)
+            .join(Style, Style.id == SKU.style_id)
+            .where(style_in_production())
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .where(Piece.needs_lining.is_(True))
+        )
+        if order_id is not None:
+            stmt = stmt.where(ClientOrder.id == order_id)
+        if style_id is not None:
+            stmt = stmt.where(Style.id == style_id)
+        stmt = self._scope(stmt, client_scope)
+        return int((await self.db.execute(stmt)).scalar_one() or 0)
+
+    async def store_pipeline_counts(
+        self, *, client_scope: uuid.UUID | None,
+        order_id: uuid.UUID | None = None, style_id: uuid.UUID | None = None,
+    ) -> dict:
+        """Pieces sitting in / released from the STORE, by drawer state. ONE query.
+
+        STORE has no production events (core/store_display.py), so its node is
+        priced from the drawer instead:
+            waiting   parts are arriving — drawer is holding_leather/lining/both
+            received  DM has confirmed the drawer is complete, not yet released
+            released  DM has SENDED it; the piece may pass to line-stitching
+
+        Read through Drawer.current_piece_id (the LIVE CLAIM), matching
+        store_kpis and store_handoff. That pointer is nulled when the garment
+        ships and the drawer recycles to WAITING, so an exported piece is NOT in
+        `released` here — the service adds the exported count back, which is why
+        the two never double-count the same piece.
+        """
+        from app.modules.barcode.models import Drawer
+
+        stmt = select(
+            func.coalesce(func.sum(
+                case((Drawer.state.in_(_D_HOLDING), 1), else_=0)), 0).label("waiting"),
+            func.coalesce(func.sum(
+                case((Drawer.state == _D_RECEIVED, 1), else_=0)), 0).label("received"),
+            func.coalesce(func.sum(
+                case((Drawer.state == _D_SENDED, 1), else_=0)), 0).label("released"),
+        ).select_from(Drawer).join(Piece, Piece.id == Drawer.current_piece_id)
+        if client_scope is not None or order_id is not None or style_id is not None:
+            stmt = (
+                stmt.join(SKU, SKU.id == Piece.sku_id)
+                .join(Style, Style.id == SKU.style_id)
+                .where(style_in_production())
+                .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            )
+            if order_id is not None:
+                stmt = stmt.where(ClientOrder.id == order_id)
+            if style_id is not None:
+                stmt = stmt.where(Style.id == style_id)
+            stmt = self._scope(stmt, client_scope)
+        r = (await self.db.execute(stmt)).one()
+        return {
+            "waiting": int(r.waiting or 0),
+            "received": int(r.received or 0),
+            "released": int(r.released or 0),
+        }
 
     async def _assigned_count(
         self, *, today: date, client_scope: uuid.UUID | None,
@@ -1583,13 +1666,49 @@ class DashboardRepository:
         ("Inspection", (_FINAL_INSPECTION,)),
         ("Packing", (_TERMINAL_STAGE,)),
     )
-    # The full factory chain, in order, for the pipeline + bottleneck view.
-    # LINING_CUTTING is absent on purpose: it is a PARALLEL entry that rejoins at
-    # the drawer, so putting it in a linear funnel would compare it against a
-    # predecessor it does not have.
+    # THE LINEAR LEATHER CHAIN, in order. This is the *arithmetic* backbone of
+    # the pipeline: each node's queue depth is `upstream_completed − completed`,
+    # which only means anything where one stage genuinely feeds the next.
+    #
+    # LINING_CUTTING is absent HERE on purpose — it is a PARALLEL entry that
+    # rejoins at the drawer, so it has no predecessor to subtract from. It is
+    # NOT absent from the dashboard: see _DM_DISPLAY_PIPELINE below, which is
+    # what the DM screen and order/style tracking actually render.
     _DM_PIPELINE = (
         _LEATHER_CUT, _FUSING, _PASTING, _LINE_STITCHING,
         _SHELL_STITCHING, _FINAL_FINISH, _FINAL_INSPECTION, _TERMINAL_STAGE,
+    )
+    # Every op the DM funnel needs a completed-count for. Adds the lining cut so
+    # the parallel branch has real numbers behind it.
+    _DM_FUNNEL_OPS = (_LINING_CUT, *_DM_PIPELINE)
+
+    # WHAT THE DM ACTUALLY SEES — the user-facing pipeline, in real factory order:
+    #
+    #   LEATHER_CUTTING → FUSING → PASTING ─┐
+    #                                        ├─► STORE ─► LINE_STITCHING → …
+    #   LINING_CUTTING ──────────────────────┘
+    #
+    # Two of these nodes are not ordinary chain links, and each carries its kind
+    # so the service prices it correctly and the frontend can render it:
+    #   PARALLEL  LINING_CUTTING — measured against the lining-REQUIRED
+    #             population (pieces with needs_lining), not against the leather
+    #             cut, which would report a leather-only order as behind on
+    #             lining forever.
+    #   STORE     not a ProductionEvent at all (core/store_display.py). It is the
+    #             drawer's state, so its numbers come from store_pipeline_counts
+    #             rather than from the event funnel.
+    _K_CHAIN, _K_PARALLEL, _K_STORE = "CHAIN", "PARALLEL", "STORE"
+    _DM_DISPLAY_PIPELINE = (
+        (_LEATHER_CUT, _K_CHAIN),
+        (_LINING_CUT, _K_PARALLEL),
+        (_FUSING, _K_CHAIN),
+        (_PASTING, _K_CHAIN),
+        (_STORE_STAGE, _K_STORE),
+        (_LINE_STITCHING, _K_CHAIN),
+        (_SHELL_STITCHING, _K_CHAIN),
+        (_FINAL_FINISH, _K_CHAIN),
+        (_FINAL_INSPECTION, _K_CHAIN),
+        (_TERMINAL_STAGE, _K_CHAIN),
     )
 
     async def operation_meta(self) -> dict[str, tuple[str, int]]:

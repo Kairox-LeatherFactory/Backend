@@ -876,16 +876,20 @@ class DashboardService:
 
     # ══════════════════════════════════════════════════════ DIRECT MANAGER
     # The DM screen is the whole factory in one view: overall production,
-    # department performance, the stage pipeline + bottleneck, production rate,
-    # quality, attendance and store send/receive, plus order and style
-    # drill-downs.
+    # department performance, the FULL stage pipeline + bottleneck (leather
+    # chain, the parallel lining cut AND the store), production rate, quality,
+    # attendance and store send/receive, plus order and style drill-downs.
     #
     # IT COMPOSES THE OTHER DASHBOARDS' AGGREGATES rather than recomputing them.
     # That is the point: if this screen and the cutting screen ever disagreed
     # about how many pieces were cut, both would be untrustworthy, and the MD's
     # is the one people act on.
     #
-    # QUERY BUDGET — roughly 15 grouped round trips for the entire control panel.
+    # QUERY BUDGET — roughly 17 grouped round trips for the entire control
+    # panel. The store and lining-required denominators behind the two
+    # non-chain pipeline nodes are one grouped query each; the funnel that
+    # used to be read separately here is now read once, inside the shared
+    # pipeline builder, and `quality.inspected` comes off its nodes.
     _DM_UNSUPPORTED = {
         "quality_rejection": (
             "No quality/rejection table exists. produced / inspected / event-based "
@@ -904,15 +908,105 @@ class DashboardService:
             "concern owned by the wages module — both null here."
         ),
         "store_is_drawer_state": (
-            "Store send/receive counts are derived from drawer state "
-            "(received/sended), not from a STORE production event."
+            "The STORE node (kind=STORE) is drawer state, not a production "
+            "event: completed = released by the DM plus pieces already "
+            "exported, whose drawers have recycled; pending = still in a drawer."
         ),
-        "lining_cut_excluded_from_pipeline": (
-            "The pipeline funnel is the linear leather chain. LINING_CUTTING is a "
-            "PARALLEL entry that rejoins at the drawer, so it has no predecessor "
-            "to measure a queue against; lining progress lives on /dashboard/lining."
+        "lining_measured_against_lining_required": (
+            "LINING_CUTTING (kind=PARALLEL) has no predecessor, so its `total` "
+            "is the pieces whose breakdown says needs_lining, NOT the order "
+            "quantity — read its pct against that. Excluded from bottleneck / "
+            "blocked_stage: a lining backlog surfaces one node later as drawers "
+            "holding leather in the store. Detail: /dashboard/lining."
+        ),
+        "pipeline_sequence_is_display_order": (
+            "`sequence` is the display index, not Operation.sequence — STORE "
+            "has no Operation row. Order is preserved."
         ),
     }
+
+    # ── THE SHARED DM PIPELINE (chain + lining + store) ──────────────────
+    # ONE builder behind /direct-manager, /direct-manager/orders/{id} and
+    # /direct-manager/styles/{id}, for the same reason the DM screen composes the
+    # other dashboards' aggregates: three copies of this arithmetic would drift,
+    # and the DM's is the number people act on.
+    #
+    # It walks repo._DM_DISPLAY_PIPELINE, which is the pipeline as the factory
+    # actually runs it:
+    #
+    #   LEATHER_CUTTING → FUSING → PASTING ─┐
+    #                                        ├─► STORE ─► LINE_STITCHING → …
+    #   LINING_CUTTING ──────────────────────┘
+    #
+    # Both previously-missing nodes are here, each priced on its own terms:
+    #
+    #   LINING_CUTTING (PARALLEL) — has no predecessor to subtract from, so it is
+    #       measured against the pieces that actually NEED a lining. Against the
+    #       order quantity a half-leather-only run would look permanently ~50%
+    #       behind on lining, which is why it was left out of the funnel before
+    #       rather than shown wrong.
+    #   STORE — has no production events at all; it is the piece's DRAWER state
+    #       (core/store_display.py). `completed` = released by the DM (drawer
+    #       SENDED) plus pieces already exported, whose drawers have recycled and
+    #       so no longer read SENDED. `pending` = still in the store: parts
+    #       arriving, or complete and waiting on the DM to receive/send.
+    #
+    # CHAIN nodes keep exactly the arithmetic they had — pending is the queue
+    # against the previous CHAIN node, so no existing number moves. STORE sits
+    # between PASTING and LINE_STITCHING for display without becoming a link in
+    # that subtraction.
+    _STORE_LABEL = "Store"
+
+    async def _dm_pipeline_nodes(
+        self, *, total: int, today: date, client_scope: uuid.UUID | None,
+        order_id: uuid.UUID | None = None, style_id: uuid.UUID | None = None,
+    ) -> list[dict]:
+        """[{stage, label, sequence, kind, completed, pending, total}] in
+        pipeline order. 4 grouped round trips, shared by all three DM views."""
+        funnel = await self.repo.stage_funnel(
+            ops=self.repo._DM_FUNNEL_OPS, today=today, client_scope=client_scope,
+            order_id=order_id, style_id=style_id)
+        opmeta = await self.repo.operation_meta()
+        lining_total = await self.repo.lining_required_total(
+            client_scope=client_scope, order_id=order_id, style_id=style_id)
+        store = await self.repo.store_pipeline_counts(
+            client_scope=client_scope, order_id=order_id, style_id=style_id)
+
+        # Exported pieces have handed their drawer back to the WAITING pool, so
+        # they are absent from `released` — add them, and only them, so a piece
+        # is never counted on both sides of the store.
+        exported = funnel.get(_TERMINAL, {}).get("overall", 0)
+        store_in = store["waiting"] + store["received"]
+        store_out = store["released"] + exported
+
+        nodes: list[dict] = []
+        prev_completed = total          # the CHAIN predecessor, STORE excluded
+        # `sequence` is the DISPLAY INDEX, not Operation.sequence: STORE has no
+        # Operation row, so there is no integer between PASTING (4) and
+        # LINE_STITCHING (5) to give it. Indexing the rendered list keeps the
+        # array sortable and self-consistent; the ORDER is identical to the
+        # seeded sequences with the store slotted into its real position.
+        for idx, (code, kind) in enumerate(
+                self.repo._DM_DISPLAY_PIPELINE, start=1):
+            if kind == self.repo._K_STORE:
+                completed, node_total = store_out, store_out + store_in
+                pending = store_in
+                label = self._STORE_LABEL
+            else:
+                completed = funnel.get(code, {}).get("overall", 0)
+                label = opmeta.get(code, (code.replace("_", " ").title(), idx))[0]
+                if kind == self.repo._K_PARALLEL:
+                    node_total = lining_total
+                    pending = max(node_total - completed, 0)
+                else:
+                    node_total = total
+                    pending = max(prev_completed - completed, 0)
+                    prev_completed = completed
+            nodes.append({
+                "stage": code, "label": label, "sequence": idx, "kind": kind,
+                "completed": completed, "pending": pending, "total": node_total,
+            })
+        return nodes
 
     async def direct_manager_overview(
         self, *, client_scope: uuid.UUID | None = None, today: date | None = None,
@@ -922,9 +1016,6 @@ class DashboardService:
         prod = await self.repo.production_kpis(today=today, client_scope=client_scope)
         dept_rows = await self.repo.department_performance(
             today=today, client_scope=client_scope)
-        funnel = await self.repo.stage_funnel(
-            ops=self.repo._DM_PIPELINE, today=today, client_scope=client_scope)
-        opmeta = await self.repo.operation_meta()
         emp = await self.repo.active_employee_stats(
             today=today, client_scope=client_scope)
         hours = await self.repo.shift_hours()
@@ -973,24 +1064,36 @@ class DashboardService:
                 produced_today=td,
                 achievement_pct=round(pr / target * 100, 1) if target else 0.0))
 
-        # The pipeline + the bottleneck. `pending` at each node is the WIP the
-        # upstream stage has finished and this one has not — a queue depth. The
-        # bottleneck is the DEEPEST such queue, i.e. the actual constraint on
-        # throughput, not simply the earliest stage with unfinished work.
-        pipeline: list[StagePipelineNode] = []
-        prev_completed = target
+        # The pipeline + the bottleneck. `pending` at each node is the work
+        # queued in front of it — for a CHAIN stage the WIP the upstream stage
+        # finished and this one has not; for LINING_CUTTING the lining-required
+        # pieces not yet cut; for STORE the pieces still sitting in a drawer.
+        # The bottleneck is the DEEPEST such queue, i.e. the actual constraint
+        # on throughput, not simply the earliest stage with unfinished work.
+        #
+        # STORE joins the bottleneck race; LINING deliberately does not.
+        #   STORE is a genuine hard block on throughput — line-stitching cannot
+        #     start until the DM has received and SENDED the drawer — and it was
+        #     invisible on this screen before, which is the whole point of
+        #     adding it.
+        #   LINING_CUTTING is excluded because its queue is counted against a
+        #     DIFFERENT denominator (lining-required pieces), so putting it in
+        #     the same max() compares two unlike numbers and would name the
+        #     lining cut the constraint at the start of essentially every order.
+        #     Nothing is lost by excluding it: an unmet lining backlog shows up
+        #     in chain terms one node later, as drawers sitting in the store
+        #     holding leather and waiting for their lining.
+        nodes = await self._dm_pipeline_nodes(
+            total=target, today=today, client_scope=client_scope)
+        pipeline = [StagePipelineNode(**n) for n in nodes]
         bottleneck = Bottleneck(stage=None, label=None, pending=0, queue=0)
-        for idx, code in enumerate(self.repo._DM_PIPELINE):
-            completed = funnel.get(code, {}).get("overall", 0)
-            label, seq = opmeta.get(code, (code.replace("_", " ").title(), idx))
-            pending = max(prev_completed - completed, 0)
-            pipeline.append(StagePipelineNode(
-                stage=code, label=label, sequence=seq,
-                completed=completed, pending=pending))
-            if pending > bottleneck.pending:
-                bottleneck = Bottleneck(stage=code, label=label,
-                                        pending=pending, queue=pending)
-            prev_completed = completed
+        for n in nodes:
+            if n["kind"] == self.repo._K_PARALLEL:
+                continue
+            if n["pending"] > bottleneck.pending:
+                bottleneck = Bottleneck(
+                    stage=n["stage"], label=n["label"],
+                    pending=n["pending"], queue=n["pending"])
 
         rate = DMProductionRate(
             pieces_per_day=round(sum(d.completed for d in daily) / len(daily), 1)
@@ -1000,9 +1103,13 @@ class DashboardService:
             if emp["active_employees"] else 0.0,
             pieces_per_hour_today=round(produced_today / hours, 1) if hours else None)
 
+        # `inspected` is read off the pipeline nodes rather than re-running the
+        # funnel: same query, same answer, and it cannot drift from what the
+        # FINAL_INSPECTION node on this very response says.
         quality = DMQuality(
             produced=produced,
-            inspected=funnel.get(_INSPECTION, {}).get("overall", 0),
+            inspected=next((n["completed"] for n in nodes
+                            if n["stage"] == _INSPECTION), 0),
             rework_pieces=prod["rework_pieces"])
 
         attendance = DMAttendance(**emp)
@@ -1031,20 +1138,20 @@ class DashboardService:
         if head is None:
             return None
         order_number, total = head[0], int(head[1] or 0)
-        funnel = await self.repo.stage_funnel(
-            ops=self.repo._DM_PIPELINE, today=today, client_scope=client_scope,
-            order_id=order_id)
-        opmeta = await self.repo.operation_meta()
+        # Every stage the factory has, INCLUDING the lining cut and the store —
+        # both were missing from this response, which made a lining-heavy or
+        # store-bound order look like it had simply stalled after pasting with
+        # nothing on the screen to say why.
+        nodes = await self._dm_pipeline_nodes(
+            total=total, today=today, client_scope=client_scope, order_id=order_id)
 
         stages: list[OrderStageRow] = []
-        prev = total
         blocked: str | None = None
         blocked_pending = 0
-        for idx, code in enumerate(self.repo._DM_PIPELINE):
-            completed = funnel.get(code, {}).get("overall", 0)
-            label, seq = opmeta.get(code, (code.replace("_", " ").title(), idx))
-            pct = round(completed / total * 100, 1) if total else 0.0
-            if total and completed >= total:
+        for n in nodes:
+            completed, node_total = n["completed"], n["total"]
+            pct = round(completed / node_total * 100, 1) if node_total else 0.0
+            if node_total and completed >= node_total:
                 status = "DONE"
             elif completed == 0:
                 status = "PENDING"
@@ -1052,17 +1159,23 @@ class DashboardService:
                 status = "IN_PROGRESS"
             # The blocked stage is the one holding the largest backlog — the
             # actual constraint. "First stage with any WIP" would always name the
-            # earliest stage and be useless on a healthy order.
-            pending = max(prev - completed, 0)
-            if pending > blocked_pending and completed < total:
-                blocked_pending = pending
-                blocked = code
+            # earliest stage and be useless on a healthy order. The parallel
+            # lining node is excluded for the same reason as in the DM
+            # bottleneck: its queue is measured against a different denominator.
+            if (n["kind"] != self.repo._K_PARALLEL
+                    and n["pending"] > blocked_pending and completed < node_total):
+                blocked_pending = n["pending"]
+                blocked = n["stage"]
             stages.append(OrderStageRow(
-                stage=code, label=label, sequence=seq, completed=completed,
-                pct=pct, status=status))
-            prev = completed
+                stage=n["stage"], label=n["label"], sequence=n["sequence"],
+                kind=n["kind"], completed=completed, pending=n["pending"],
+                total=node_total, pct=pct, status=status))
 
-        terminal = funnel.get(_TERMINAL, {}).get("overall", 0)
+        # Overall completion stays the TERMINAL stage against the order quantity:
+        # an order is done when its garments have shipped, not when its store is
+        # empty. `stages` is where the store and lining detail lives.
+        terminal = next(
+            (n["completed"] for n in nodes if n["stage"] == _TERMINAL), 0)
         return OrderTracking(
             order_id=order_id, order_number=order_number, total_quantity=total,
             completion_pct=round(terminal / total * 100, 1) if total else 0.0,
@@ -1078,17 +1191,15 @@ class DashboardService:
         if head is None:
             return None
         style_name, order_number, total = head[0], head[1], int(head[2] or 0)
-        funnel = await self.repo.stage_funnel(
-            ops=self.repo._DM_PIPELINE, today=today, client_scope=client_scope,
-            style_id=style_id)
-        opmeta = await self.repo.operation_meta()
+        # Same full pipeline as order tracking — lining and store included, so
+        # the two drill-downs cannot disagree about which stages exist.
+        nodes = await self._dm_pipeline_nodes(
+            total=total, today=today, client_scope=client_scope, style_id=style_id)
         stages = [
             StyleStageRow(
-                stage=code,
-                label=opmeta.get(code, (code.replace("_", " ").title(), idx))[0],
-                sequence=opmeta.get(code, (code, idx))[1],
-                completed=funnel.get(code, {}).get("overall", 0))
-            for idx, code in enumerate(self.repo._DM_PIPELINE)
+                stage=n["stage"], label=n["label"], sequence=n["sequence"],
+                kind=n["kind"], completed=n["completed"], total=n["total"])
+            for n in nodes
         ]
         return StyleTracking(
             style_id=style_id, style=style_name, order_number=order_number,

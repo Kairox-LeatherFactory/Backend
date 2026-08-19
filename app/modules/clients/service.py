@@ -44,8 +44,75 @@ class ClientService:
                   color_code: str | None, size: str | None) -> str:
         return sku_label(style_name, color_name, color_code, size)
 
-    async def list_clients(self) -> list[Client]:
-        return await self.repo.list_clients()
+    async def list_clients(self, *, include_inactive: bool = False) -> list[Client]:
+        return await self.repo.list_clients(include_inactive=include_inactive)
+
+    async def get_client(self, client_id: uuid.UUID) -> Client:
+        client = await self.repo.get_client(client_id)
+        if client is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
+        return client
+
+    async def update_client(self, client_id: uuid.UUID, data: dict) -> Client:
+        """Partial update of a client. Only the keys the caller SENT are applied
+        (the router passes `exclude_unset=True`), so omitting a field leaves it
+        alone and sending it as null clears it — the two are different requests.
+
+        `code` is unique across clients, so a collision is a 409 and not a 500.
+        The friendly pre-check races, exactly as it does on order_number, so the
+        IntegrityError backstop is the real guarantee.
+        """
+        client = await self.get_client(client_id)
+        if not data:
+            return client
+        new_code = (data.get("code") or "").strip() or None
+        if "code" in data:
+            data["code"] = new_code
+        if new_code and new_code != client.code:
+            clash = await self.repo.get_client_by_code(new_code)
+            if clash and clash.id != client_id:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    f"Client code '{new_code}' is already used by another client.")
+        if "name" in data and data["name"] is not None:
+            data["name"] = data["name"].strip()
+            if not data["name"]:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                    "name cannot be blank")
+        try:
+            return await self.repo.update_client(client, data)
+        except IntegrityError:
+            await self.db.rollback()
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Client code '{new_code}' is already used by another client.")
+
+    async def delete_client(self, client_id: uuid.UUID) -> None:
+        """Hard-delete a client — ONLY while it has no orders.
+
+        WHY THE GUARD. `Client.client_orders` cascades `all, delete-orphan`, so
+        deleting a client that has traded would take its orders, styles and SKUs
+        with it — and every Piece, production event and wage line hangs off those
+        SKUs. That is the same history the barcode module refuses to destroy when
+        a worker leaves (CLAUDE.md §6: "you delete the scannable code, never the
+        person or their record"); a client is no different. The database would
+        stop it anyway (Piece.sku_id is a plain FK), but as a constraint error
+        mid-cascade rather than something a user can act on.
+
+        A client that HAS traded is deactivated instead:
+        `PATCH /clients/{id} {"is_active": false}` — they drop off the default
+        list and every row they own stays intact.
+        """
+        client = await self.get_client(client_id)
+        orders = await self.repo.count_orders_for_client(client_id)
+        if orders:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"'{client.name}' has {orders} order(s) and cannot be deleted — "
+                f"deleting it would destroy their styles, pieces and production "
+                f"history. Deactivate instead: "
+                f'PATCH /clients/{client_id} {{"is_active": false}}.')
+        await self.repo.delete_client(client)
 
     async def add_order(self, *, client_id: uuid.UUID, order_number: str,
                         order_date=None, delivery_deadline=None,
