@@ -5,13 +5,15 @@ modules/attendance/models.py — Attendance domain tables
 
 PURPOSE
     Tables that make the requirement spec real:
-      ShiftConfig       Factory-wide shift policy + geofence center & radius.
-                        ONE row (singleton). Stored in DB so HR can change it
-                        without redeploying — start time, length, grace minutes,
-                        factory_lat/lon, radius_m.
+      ShiftConfig       Factory-wide shift policy. ONE row (singleton). Stored
+                        in DB so HR can change it without redeploying — start
+                        time, length, grace minutes, timezone. The geofence
+                        columns are still here but the FEATURE IS REMOVED; see
+                        the note on them below.
       AttendanceLog     One row per (employee, work_date). check_in_at,
                         check_out_at, source (SELF / PROXY), is_late, is_short,
-                        is_overtime, distance_m (at check-in), recorded_by_user
+                        is_overtime, distance_m (now always NULL — location
+                        tracking removed), recorded_by_user
                         (the supervisor for proxy entries — accountability).
 
 WHY DATES NOT JUST TIMESTAMPS
@@ -59,10 +61,15 @@ class ShiftConfig(Base, UUIDMixin, TimestampMixin):
     # only applied at the business-logic + display boundaries.
     timezone: Mapped[str] = mapped_column(String(64), default="Asia/Kolkata")
 
-    # Geofence (100-meter rule from the spec)
-    factory_lat: Mapped[float] = mapped_column(Numeric(10, 7), default=0.0)
-    factory_lon: Mapped[float] = mapped_column(Numeric(10, 7), default=0.0)
-    radius_m: Mapped[int] = mapped_column(default=100)
+    # ── Geofence (the 100-metre rule) — FEATURE REMOVED, COLUMNS RETAINED ──
+    # Nothing reads or writes these any more: attendance no longer knows where
+    # the factory is and never asks a device where it is. They stay MAPPED on
+    # purpose — they are NOT NULL in Postgres with no server default, so
+    # commenting the mapping out would make the next ShiftConfig insert fail.
+    # Removing them for real is a migration, not a comment-out.
+    factory_lat: Mapped[float] = mapped_column(Numeric(10, 7), default=0.0)   # unused
+    factory_lon: Mapped[float] = mapped_column(Numeric(10, 7), default=0.0)   # unused
+    radius_m: Mapped[int] = mapped_column(default=100)                        # unused
 
 
 class AttendanceLog(Base, UUIDMixin, TimestampMixin):
@@ -88,4 +95,7 @@ class AttendanceLog(Base, UUIDMixin, TimestampMixin):
     is_late: Mapped[bool] = mapped_column(Boolean, default=False)
     is_short: Mapped[bool] = mapped_column(Boolean, default=False)
     is_overtime: Mapped[bool] = mapped_column(Boolean, default=False)
-    distance_m: Mapped[float | None] = mapped_column(Numeric(8, 2))   # at check-in
+    # Distance from the factory at check-in. FEATURE REMOVED — always NULL on
+    # rows written from now on. Nullable already, and historical rows keep the
+    # value they were recorded with, so the column simply goes quiet.
+    distance_m: Mapped[float | None] = mapped_column(Numeric(8, 2))   # unused

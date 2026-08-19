@@ -74,6 +74,37 @@ class ClientRead(BaseModel):
     code: str | None = None
     currency: str | None = None
     default_size_system: str | None = None
+    brand: str | None = None
+    label: str | None = None
+    contact_email: str | None = None
+    contact_phone: str | None = None
+    address: str | None = None
+    # Deactivating is the answer for a client that has traded: their orders,
+    # styles and pieces must survive, so they are hidden from the default list
+    # rather than deleted. See ClientUpdate and DELETE /clients/{id}.
+    is_active: bool = True
+
+
+class ClientUpdate(BaseModel):
+    """PATCH /clients/{id} — every field optional, only what is sent is written.
+
+    `name` is constrained non-empty because it is the client's whole identity on
+    every screen; blanking it by accident would leave an unnameable row. The
+    order fields are NOT here: an order is edited through its own endpoints, and
+    `order_number` is globally unique, so it must never ride along on a client
+    edit.
+    """
+    name: str | None = Field(None, min_length=1)
+    country: str | None = None
+    code: str | None = None                    # unique across clients
+    currency: str | None = Field(None, max_length=3)
+    default_size_system: str | None = Field(None, max_length=10)
+    brand: str | None = None
+    label: str | None = None
+    contact_email: str | None = None
+    contact_phone: str | None = None
+    address: str | None = None
+    is_active: bool | None = None              # False = deactivate (soft delete)
     
 # add after ClientRead:
 class CreatedClientRead(ClientRead):

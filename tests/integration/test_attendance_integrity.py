@@ -6,8 +6,10 @@ gates ALL production logging (production/service.py:176-182), and days-present c
 scale monthly pay (wages/service.py:490-495). A fabricated or missing attendance
 row moves both output records and money.
 
-Covers: work_date uniqueness, idempotent re-tap, geofence enforcement, the
-GPS-optional bypass, and the proxy wage-type restriction.
+Covers: work_date uniqueness, idempotent re-tap, the proxy wage-type
+restriction, and — since LOCATION TRACKING WAS REMOVED — that a punch needs
+no factory position and no device position to succeed. The geofence tests it
+used to carry are commented out in place, next to what replaced them.
 """
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -22,9 +24,12 @@ from app.modules.attendance.models import AttendanceLog, AttendanceSource, Shift
 from app.modules.attendance.service import AttendanceService
 from app.modules.employees.models import Employee
 
+# LOCATION REMOVED — kept only because the tests below still pass coordinates
+# on the wire to prove they are ACCEPTED AND IGNORED, which is the compatibility
+# promise made to a frontend that has not been redeployed yet.
 FACTORY_LAT, FACTORY_LON = 12.9716, 77.5946      # Bengaluru
 NEAR = (12.97165, 77.59465)                       # ~7 m away
-FAR = (12.9900, 77.6200)                          # ~3 km away
+FAR = (12.9900, 77.6200)                          # ~3 km — no longer refused
 
 
 @pytest.fixture
@@ -50,16 +55,18 @@ def supervisor():
 
 
 async def _configured(db):
-    """A ShiftConfig with REAL factory coordinates.
+    """Materialise the ShiftConfig singleton.
 
-    Without this the geofence sits at 0N 0E (attendance/models.py:63-64) and every
-    genuine check-in is refused — see the Null Island finding in pass-12 and the
-    arithmetic proof in tests/unit/test_gates_pure.py.
+    It used to seed REAL factory coordinates, because without them the fence sat
+    at 0N 0E and refused every genuine check-in (the Null Island finding in
+    pass-12). LOCATION REMOVED — no coordinates are set, and that is precisely
+    the point: check-in works with the config untouched.
+
+        cfg.factory_lat = FACTORY_LAT
+        cfg.factory_lon = FACTORY_LON
+        cfg.radius_m = 100
     """
     cfg = await AttendanceService(db)._config()
-    cfg.factory_lat = FACTORY_LAT
-    cfg.factory_lon = FACTORY_LON
-    cfg.radius_m = 100
     await db.commit()
     return cfg
 
@@ -138,110 +145,204 @@ async def test_re_tapping_the_card_is_a_no_op(db, worker_user):
     assert n == 1
 
 
-# ══════════════════════════════════════════════════════════════ geofence
+# ════════════════════════════════════════════ LOCATION REMOVED (was: geofence)
 @pytest.mark.asyncio
-async def test_a_worker_at_the_factory_may_check_in(db, worker_user):
+async def test_a_worker_checks_in_with_no_location_at_all(db, worker_user):
+    """The headline of this change: an empty body is a valid check-in.
+
+    No factory coordinate is configured (see `_configured`) and none is sent, and
+    the punch still lands — identity comes from the token, the timestamp from the
+    server. `distance_m` stays NULL because nothing measures a distance now."""
+    await _configured(db)
+    emp = await _employee(db)
+    worker_user.employee_id = emp.id
+
+    log = await AttendanceService(db).self_check_in(worker_user)
+
+    assert log.employee_id == emp.id
+    assert log.source == AttendanceSource.SELF
+    assert log.distance_m is None
+
+
+@pytest.mark.asyncio
+async def test_coordinates_are_accepted_and_ignored(db, worker_user):
+    """The compatibility promise: a frontend that still posts its GPS is not
+    broken by the removal — and coordinates 3 km off site no longer refuse the
+    punch, because nothing looks at them."""
     await _configured(db)
     emp = await _employee(db)
     worker_user.employee_id = emp.id
 
     log = await AttendanceService(db).self_check_in(
-        worker_user, schemas.CheckInRequest(lat=NEAR[0], lon=NEAR[1]))
+        worker_user, schemas.CheckInRequest(lat=FAR[0], lon=FAR[1]))
 
     assert log.employee_id == emp.id
-    assert log.source == AttendanceSource.SELF
-    assert log.distance_m is not None
-
-
-@pytest.mark.asyncio
-async def test_a_worker_off_site_is_refused(db, worker_user):
-    await _configured(db)
-    emp = await _employee(db)
-    worker_user.employee_id = emp.id
-
-    with pytest.raises(HTTPException) as exc:
-        await AttendanceService(db).self_check_in(
-            worker_user, schemas.CheckInRequest(lat=FAR[0], lon=FAR[1]))
-    assert exc.value.status_code == 403
-    assert "meters" in str(exc.value.detail)
-
-    n = await db.scalar(select(func.count(AttendanceLog.id)))
-    assert n == 0, "a refused check-in must not leave a row"
+    assert log.distance_m is None, "a sent coordinate must not be recorded"
 
 
 @pytest.mark.asyncio
 async def test_a_login_with_no_employee_record_cannot_check_itself_in(db, worker_user):
+    """The one check that survives on the SELF door: you must BE somebody."""
     await _configured(db)
     worker_user.employee_id = None
     with pytest.raises(HTTPException) as exc:
-        await AttendanceService(db).self_check_in(
-            worker_user, schemas.CheckInRequest(lat=NEAR[0], lon=NEAR[1]))
+        await AttendanceService(db).self_check_in(worker_user)
     assert exc.value.status_code == 400
 
 
 @pytest.mark.asyncio
-async def test_self_check_in_always_carries_gps(db):
-    """`CheckInRequest` extends `GpsPoint` (schemas.py:24-36), so lat/lon are
-    mandatory on the SELF door and the fence can never be skipped there. The
-    barcode door is the one that makes them optional — see below."""
-    with pytest.raises(Exception):
-        schemas.CheckInRequest()
+async def test_self_check_in_needs_no_gps():
+    """Inversion of `test_self_check_in_always_carries_gps`.
+
+    `CheckInRequest` used to extend a `GpsPoint` whose lat/lon were REQUIRED, so
+    constructing one without coordinates raised. Now it must construct cleanly —
+    that is what lets the router accept an absent body."""
+    body = schemas.CheckInRequest()
+    assert body.lat is None and body.lon is None
 
 
-# ═══════════════════════════════════ the GPS-optional bypass (AUDIT finding)
 @pytest.mark.asyncio
-async def test_a_gps_less_barcode_scan_skips_the_fence_entirely(db, supervisor):
-    """AUDIT (pass-03-security.md, top-10 #7): omit lat/lon on the barcode door and
-    `_enforce_geofence` never runs (attendance/service.py:195-207). The only cost is
-    a free-text `reason` that nothing validates — and the resulting row still
-    satisfies `is_present_today`, which gates production logging.
-
-    This test pins the CURRENT behaviour deliberately. When the finding is fixed it
-    will fail, and that failure is the signal the fix landed. Do not delete it —
-    invert it.
-    """
+async def test_a_barcode_scan_carries_no_position(db, supervisor):
+    """The barcode door — THE primary attendance surface — with no coordinates
+    and no `reason`. This used to be the audited bypass (pass-03 top-10 #7),
+    tolerated only with a free-text excuse. It is now simply how scanning works:
+    the operator's login and the card are the whole authorisation."""
     await _configured(db)
     emp = await _employee(db)
 
     log = await AttendanceService(db).barcode_scan(
         employee_id=emp.id, actor=supervisor, direction="in", proxy=False,
-        lat=None, lon=None, reason="indoor, no fix")
+        lat=None, lon=None, reason=None)
 
-    assert log["location_unverified"] is True, "no distance was ever measured"
     assert log["present_today"] is True
-
     row = await db.scalar(select(AttendanceLog)
                           .where(AttendanceLog.employee_id == emp.id))
-    assert row.distance_m is None, "the row records no position at all"
-    assert await AttendanceService(db).is_present_today(emp.id) is True, (
-        "an unverified row still counts as present — this is the finding")
+    assert row.distance_m is None
+    assert await AttendanceService(db).is_present_today(emp.id) is True
 
 
 @pytest.mark.asyncio
-async def test_a_gps_less_scan_at_least_demands_a_reason(db, supervisor):
-    """The one control that does exist on that path (service.py:203-206)."""
+async def test_a_proxy_scan_needs_no_position_either(db, supervisor):
+    """A proxy scan used to be the one path that could NOT skip GPS (a supervisor
+    on the floor was assumed to have a fix). It no longer needs one."""
     await _configured(db)
     emp = await _employee(db)
 
-    with pytest.raises(HTTPException) as exc:
-        await AttendanceService(db).barcode_scan(
-            employee_id=emp.id, actor=supervisor, direction="in", proxy=False,
-            lat=None, lon=None, reason="")
-    assert exc.value.status_code == 422
+    log = await AttendanceService(db).barcode_scan(
+        employee_id=emp.id, actor=supervisor, direction="in",
+        lat=None, lon=None, proxy=True, reason=None)
+
+    assert log["present_today"] is True
 
 
-@pytest.mark.asyncio
-async def test_a_proxy_scan_must_carry_the_supervisors_gps(db, supervisor):
-    """A supervisor standing on the floor has a device with a fix; the reason
-    escape hatch is not available to them (service.py:199-202)."""
-    await _configured(db)
-    emp = await _employee(db)
-
-    with pytest.raises(HTTPException) as exc:
-        await AttendanceService(db).barcode_scan(
-            employee_id=emp.id, actor=supervisor, direction="in",
-            lat=None, lon=None, proxy=True, reason="no fix")
-    assert exc.value.status_code == 422
+# ── the geofence tests these replaced ───────────────────────────────────────
+# Commented out, not deleted: they are the coverage that comes back with
+# app/modules/attendance/geofence.py if the 100-metre rule is ever restored.
+#
+# # ══════════════════════════════════════════════════════════════ geofence
+# @pytest.mark.asyncio
+# async def test_a_worker_at_the_factory_may_check_in(db, worker_user):
+#     await _configured(db)
+#     emp = await _employee(db)
+#     worker_user.employee_id = emp.id
+#
+#     log = await AttendanceService(db).self_check_in(
+#         worker_user, schemas.CheckInRequest(lat=NEAR[0], lon=NEAR[1]))
+#
+#     assert log.employee_id == emp.id
+#     assert log.source == AttendanceSource.SELF
+#     assert log.distance_m is not None
+#
+#
+# @pytest.mark.asyncio
+# async def test_a_worker_off_site_is_refused(db, worker_user):
+#     await _configured(db)
+#     emp = await _employee(db)
+#     worker_user.employee_id = emp.id
+#
+#     with pytest.raises(HTTPException) as exc:
+#         await AttendanceService(db).self_check_in(
+#             worker_user, schemas.CheckInRequest(lat=FAR[0], lon=FAR[1]))
+#     assert exc.value.status_code == 403
+#     assert "meters" in str(exc.value.detail)
+#
+#     n = await db.scalar(select(func.count(AttendanceLog.id)))
+#     assert n == 0, "a refused check-in must not leave a row"
+#
+#
+# @pytest.mark.asyncio
+# async def test_a_login_with_no_employee_record_cannot_check_itself_in(db, worker_user):
+#     await _configured(db)
+#     worker_user.employee_id = None
+#     with pytest.raises(HTTPException) as exc:
+#         await AttendanceService(db).self_check_in(
+#             worker_user, schemas.CheckInRequest(lat=NEAR[0], lon=NEAR[1]))
+#     assert exc.value.status_code == 400
+#
+#
+# @pytest.mark.asyncio
+# async def test_self_check_in_always_carries_gps(db):
+#     """`CheckInRequest` extends `GpsPoint` (schemas.py:24-36), so lat/lon are
+#     mandatory on the SELF door and the fence can never be skipped there. The
+#     barcode door is the one that makes them optional — see below."""
+#     with pytest.raises(Exception):
+#         schemas.CheckInRequest()
+#
+#
+# # ═══════════════════════════════════ the GPS-optional bypass (AUDIT finding)
+# @pytest.mark.asyncio
+# async def test_a_gps_less_barcode_scan_skips_the_fence_entirely(db, supervisor):
+#     """AUDIT (pass-03-security.md, top-10 #7): omit lat/lon on the barcode door and
+#     `_enforce_geofence` never runs (attendance/service.py:195-207). The only cost is
+#     a free-text `reason` that nothing validates — and the resulting row still
+#     satisfies `is_present_today`, which gates production logging.
+#
+#     This test pins the CURRENT behaviour deliberately. When the finding is fixed it
+#     will fail, and that failure is the signal the fix landed. Do not delete it —
+#     invert it.
+#     """
+#     await _configured(db)
+#     emp = await _employee(db)
+#
+#     log = await AttendanceService(db).barcode_scan(
+#         employee_id=emp.id, actor=supervisor, direction="in", proxy=False,
+#         lat=None, lon=None, reason="indoor, no fix")
+#
+#     assert log["location_unverified"] is True, "no distance was ever measured"
+#     assert log["present_today"] is True
+#
+#     row = await db.scalar(select(AttendanceLog)
+#                           .where(AttendanceLog.employee_id == emp.id))
+#     assert row.distance_m is None, "the row records no position at all"
+#     assert await AttendanceService(db).is_present_today(emp.id) is True, (
+#         "an unverified row still counts as present — this is the finding")
+#
+#
+# @pytest.mark.asyncio
+# async def test_a_gps_less_scan_at_least_demands_a_reason(db, supervisor):
+#     """The one control that does exist on that path (service.py:203-206)."""
+#     await _configured(db)
+#     emp = await _employee(db)
+#
+#     with pytest.raises(HTTPException) as exc:
+#         await AttendanceService(db).barcode_scan(
+#             employee_id=emp.id, actor=supervisor, direction="in", proxy=False,
+#             lat=None, lon=None, reason="")
+#     assert exc.value.status_code == 422
+#
+#
+# @pytest.mark.asyncio
+# async def test_a_proxy_scan_must_carry_the_supervisors_gps(db, supervisor):
+#     """A supervisor standing on the floor has a device with a fix; the reason
+#     escape hatch is not available to them (service.py:199-202)."""
+#     await _configured(db)
+#     emp = await _employee(db)
+#
+#     with pytest.raises(HTTPException) as exc:
+#         await AttendanceService(db).barcode_scan(
+#             employee_id=emp.id, actor=supervisor, direction="in",
+#             lat=None, lon=None, proxy=True, reason="no fix")
+#     assert exc.value.status_code == 422
 
 
 # ═══════════════════════════════════════════════════════ proxy restrictions
@@ -274,16 +375,33 @@ async def test_proxy_marking_a_piece_rate_worker_succeeds(db, supervisor):
     assert out[0].recorded_by_user_id == supervisor.id
 
 
-@pytest.mark.asyncio
-async def test_a_supervisor_off_site_cannot_mark_anyone_present(db, supervisor):
-    await _configured(db)
-    emp = await _employee(db)
+# LOCATION REMOVED — the operator's own position is no longer a precondition
+# for marking anyone present, so an "off-site supervisor" is not a thing the
+# system can detect or refuse.
+#
+# @pytest.mark.asyncio
+# async def test_a_supervisor_off_site_cannot_mark_anyone_present(db, supervisor):
+#     await _configured(db)
+#     emp = await _employee(db)
+#
+#     with pytest.raises(HTTPException) as exc:
+#         await AttendanceService(db).proxy_mark_present(
+#             supervisor, schemas.ProxyMarkRequest(
+#                 employee_ids=[emp.id], lat=FAR[0], lon=FAR[1]))
+#     assert exc.value.status_code == 403
 
-    with pytest.raises(HTTPException) as exc:
-        await AttendanceService(db).proxy_mark_present(
-            supervisor, schemas.ProxyMarkRequest(
-                employee_ids=[emp.id], lat=FAR[0], lon=FAR[1]))
-    assert exc.value.status_code == 403
+
+@pytest.mark.asyncio
+async def test_proxy_marking_needs_only_the_employee_ids(db, supervisor):
+    """Replacement for the off-site test: `ProxyMarkRequest` is valid with no
+    coordinates, which is what the manual door now posts."""
+    await _configured(db)
+    emp = await _employee(db, name="MANUAL")
+
+    out = await AttendanceService(db).proxy_mark_present(
+        supervisor, schemas.ProxyMarkRequest(employee_ids=[emp.id]))
+
+    assert len(out) == 1 and out[0].distance_m is None
 
 
 # ═══════════════════════════════════════════ the bridge into production/wages

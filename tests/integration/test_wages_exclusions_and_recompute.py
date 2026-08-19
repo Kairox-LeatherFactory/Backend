@@ -47,7 +47,7 @@ async def _world(db):
     po = cm.ClientOrder(client_id=client.id, order_number="EXC-PO")
     db.add(po)
     await db.flush()
-    style = cm.Style(client_order_id=po.id, name="ASHFORD", code="ASHFORD")
+    style = cm.Style(client_order_id=po.id, name="ASHFORD", code="ASHFORD", production_status="RELEASED")
     db.add(style)
     await db.flush()
     sku = cm.SKU(style_id=style.id, color_code="12", size="L", qty_ordered=50,

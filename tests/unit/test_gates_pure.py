@@ -1,5 +1,5 @@
 """
-UNIT · the gate predicates that are genuinely pure, plus the geofence.
+UNIT · the gate predicates that are genuinely pure.
 
 Gate 2 (SKILL) is a `@staticmethod` taking plain values, so it is testable with
 no session at all. Gates 1, 3 and 4 are not — they reach `self.repo`/`self.db`
@@ -7,14 +7,17 @@ and are covered in tests/integration. That asymmetry is itself an audit finding
 (pass-08-service-layer.md): the four most safety-critical rules in the system
 should all be as testable as this one.
 
-Also covers `app/modules/attendance/geofence.py`, the other pure rule in scope.
+The geofence used to be covered here too. LOCATION TRACKING IS REMOVED — its
+implementation is commented out in `app/modules/attendance/geofence.py`, so its
+tests are commented out with it at the bottom of this file.
 """
 import pytest
 from app.core.enums import UserRole, ScreenContext, screen_for_role
 from app.core.enums_barcode import (
     MULTI_STAGE_DESIGNATIONS, STAGE_DESIGNATIONS, STAGE_ROLE_ACCESS, ProductionStage,
 )
-from app.modules.attendance.geofence import haversine_m, within_geofence
+# LOCATION REMOVED — geofence.py no longer exports these.
+# from app.modules.attendance.geofence import haversine_m, within_geofence
 from app.modules.production.service import ProductionService
 
 skill_ok = ProductionService._skill_ok
@@ -160,54 +163,60 @@ def test_only_the_cut_stages_require_consumption():
         assert stage.requires_consumption is expected
 
 
-# ── geofence ─────────────────────────────────────────────────────────────────
-FACTORY = (12.9716, 77.5946)     # Bengaluru
+# ── geofence · LOCATION REMOVED ─────────────────────────────────────────────
+# The whole block below tested app/modules/attendance/geofence.py, whose
+# implementation is now commented out. Uncomment both together to restore the
+# 100-metre rule and its coverage.
+# # ── geofence ─────────────────────────────────────────────────────────────────
+# FACTORY = (12.9716, 77.5946)     # Bengaluru
+#
+#
+# def test_haversine_zero_distance():
+#     assert haversine_m(*FACTORY, *FACTORY) == pytest.approx(0.0, abs=0.01)
+#
+#
+# def test_haversine_is_symmetric():
+#     a, b = FACTORY, (12.9750, 77.5990)
+#     assert haversine_m(*a, *b) == pytest.approx(haversine_m(*b, *a), abs=0.01)
+#
+#
+# def test_haversine_known_separation():
+#     """~1 degree of latitude is ~111 km anywhere on the globe."""
+#     d = haversine_m(0.0, 0.0, 1.0, 0.0)
+#     assert 110_000 < d < 112_000
+#
+#
+# def test_inside_the_fence_is_allowed():
+#     ok, dist = within_geofence(FACTORY[0], FACTORY[1], *FACTORY, 100)
+#     assert ok is True and dist == pytest.approx(0.0, abs=0.01)
+#
+#
+# def test_outside_the_fence_is_refused():
+#     ok, dist = within_geofence(12.9900, 77.6200, *FACTORY, 100)
+#     assert ok is False and dist > 100
+#
+#
+# def test_the_boundary_itself_is_inside():
+#     """Spec rule is `distance <= radius` (geofence.py:28) — a worker standing
+#     exactly on the line is at work."""
+#     ok, dist = within_geofence(*FACTORY, *FACTORY, 0)
+#     assert ok is True and dist == 0.0
+#
+#
+# def test_null_island_default_rejects_a_real_worker():
+#     """AUDIT (pass-12, top-10 #10): ShiftConfig.factory_lat/lon default to 0.0
+#     (attendance/models.py:63-64) and the row auto-creates on first read. Until a
+#     DM sets real coordinates, every genuine check-in is measured against 0N 0E
+#     and refused — which blocks production logging factory-wide on a fresh deploy.
+#
+#     This test documents the arithmetic behind that finding.
+#     """
+#     ok, dist = within_geofence(FACTORY[0], FACTORY[1], 0.0, 0.0, 100)
+#     assert ok is False
+#     assert dist > 1_000_000        # ~1,900 km away
+#
 
 
-def test_haversine_zero_distance():
-    assert haversine_m(*FACTORY, *FACTORY) == pytest.approx(0.0, abs=0.01)
-
-
-def test_haversine_is_symmetric():
-    a, b = FACTORY, (12.9750, 77.5990)
-    assert haversine_m(*a, *b) == pytest.approx(haversine_m(*b, *a), abs=0.01)
-
-
-def test_haversine_known_separation():
-    """~1 degree of latitude is ~111 km anywhere on the globe."""
-    d = haversine_m(0.0, 0.0, 1.0, 0.0)
-    assert 110_000 < d < 112_000
-
-
-def test_inside_the_fence_is_allowed():
-    ok, dist = within_geofence(FACTORY[0], FACTORY[1], *FACTORY, 100)
-    assert ok is True and dist == pytest.approx(0.0, abs=0.01)
-
-
-def test_outside_the_fence_is_refused():
-    ok, dist = within_geofence(12.9900, 77.6200, *FACTORY, 100)
-    assert ok is False and dist > 100
-
-
-def test_the_boundary_itself_is_inside():
-    """Spec rule is `distance <= radius` (geofence.py:28) — a worker standing
-    exactly on the line is at work."""
-    ok, dist = within_geofence(*FACTORY, *FACTORY, 0)
-    assert ok is True and dist == 0.0
-
-
-def test_null_island_default_rejects_a_real_worker():
-    """AUDIT (pass-12, top-10 #10): ShiftConfig.factory_lat/lon default to 0.0
-    (attendance/models.py:63-64) and the row auto-creates on first read. Until a
-    DM sets real coordinates, every genuine check-in is measured against 0N 0E
-    and refused — which blocks production logging factory-wide on a fresh deploy.
-
-    This test documents the arithmetic behind that finding.
-    """
-    ok, dist = within_geofence(FACTORY[0], FACTORY[1], 0.0, 0.0, 100)
-    assert ok is False
-    assert dist > 1_000_000        # ~1,900 km away
-    
 def test_cutting_manager_pinned_to_leather():
     assert screen_for_role(UserRole.CUTTING_MANAGER) is ScreenContext.LEATHER_CUT
  

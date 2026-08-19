@@ -62,7 +62,7 @@ def _order(db: Session, *, order_number: str, qty: int) -> ClientOrder:
     order = ClientOrder(client_id=client.id, order_number=order_number)
     db.add(order); db.flush()
     style = Style(client_order_id=order.id, name="CLERMONT", article="CL1",
-                  code=f"{order_number}-CLERMONT")
+                  code=f"{order_number}-CLERMONT", production_status="RELEASED")
     db.add(style); db.flush()
     db.add(SKU(style_id=style.id, color_code="PINE", color_name="PINE GREEN",
                size="M", qty_ordered=qty, code=f"{order_number}-CLERMONT-PINE-M"))
@@ -144,8 +144,8 @@ def test_style_ids_scopes_the_mint_to_the_released_styles(fk_db):
     fk_db.add(client); fk_db.flush()
     order = ClientOrder(client_id=client.id, order_number="SCOPE-1")
     fk_db.add(order); fk_db.flush()
-    keep = Style(client_order_id=order.id, name="CLERMONT", code="SC-CLERMONT")
-    skip = Style(client_order_id=order.id, name="CARNABY", code="SC-CARNABY")
+    keep = Style(client_order_id=order.id, name="CLERMONT", code="SC-CLERMONT", production_status="RELEASED")
+    skip = Style(client_order_id=order.id, name="CARNABY", code="SC-CARNABY", production_status="RELEASED")
     fk_db.add_all([keep, skip]); fk_db.flush()
     fk_db.add(SKU(style_id=keep.id, color_code="P", color_name="PINE", size="M",
                   qty_ordered=3, code="SC-CLERMONT-P-M"))

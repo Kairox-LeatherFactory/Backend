@@ -628,17 +628,39 @@ class DeptPerformanceRow(BaseModel):
 
 
 class StagePipelineNode(BaseModel):
-    """One node of the factory production chain.
+    """One node of the factory production pipeline, as the DM sees it:
+
+        LEATHER_CUTTING → FUSING → PASTING ─┐
+                                             ├─► STORE ─► LINE_STITCHING → …
+        LINING_CUTTING ──────────────────────┘
 
     `pending` is the WIP sitting in front of this stage — how many pieces the
     upstream stage finished that this one has not. It is a queue depth, not a
     remaining-work figure against the order.
+
+    `kind` says how to READ that number, because two of the nodes are not
+    ordinary chain links and are not measured like one:
+
+      CHAIN     an event-backed stage on the linear leather chain.
+                pending = upstream completed − this stage's completed.
+      PARALLEL  LINING_CUTTING. It has no predecessor (it is a second entry
+                point that rejoins at the drawer), so it is measured against
+                `total`, the count of pieces that actually NEED a lining.
+      STORE     not a production event at all — the state of the piece's drawer
+                (core/store_display.py). completed = released by the DM;
+                pending = still sitting in the store waiting for parts or for
+                the DM to receive/send.
+
+    A frontend that ignores `kind` still renders correct numbers; it just draws
+    the parallel branch and the store as if they were inline stages.
     """
-    stage: str
+    stage: str                        # op code, or "STORE" for the store node
     label: str
     sequence: int
+    kind: str = "CHAIN"               # CHAIN | PARALLEL | STORE
     completed: int
     pending: int                      # upstream_completed − completed
+    total: int = 0                    # this node's own denominator
 
 
 class Bottleneck(BaseModel):
@@ -697,10 +719,16 @@ class DirectManagerDashboard(BaseModel):
 
 
 class OrderStageRow(BaseModel):
-    stage: str
+    """One stage of one order's journey. Same node vocabulary as
+    StagePipelineNode — see `kind` there for why LINING_CUTTING and STORE are
+    priced against their own denominators rather than the order quantity."""
+    stage: str                        # op code, or "STORE" for the store node
     label: str
     sequence: int
+    kind: str = "CHAIN"               # CHAIN | PARALLEL | STORE
     completed: int
+    pending: int = 0                  # total − completed, on this node's total
+    total: int = 0                    # this node's own denominator
     pct: float
     status: str                       # DONE | IN_PROGRESS | PENDING
 
@@ -715,10 +743,13 @@ class OrderTracking(BaseModel):
 
 
 class StyleStageRow(BaseModel):
-    stage: str
+    """One stage of one style's journey. `kind`/`total` as per StagePipelineNode."""
+    stage: str                        # op code, or "STORE" for the store node
     label: str
     sequence: int
+    kind: str = "CHAIN"               # CHAIN | PARALLEL | STORE
     completed: int
+    total: int = 0                    # this node's own denominator
 
 
 class StyleTracking(BaseModel):

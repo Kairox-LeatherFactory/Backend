@@ -50,7 +50,7 @@ def test_uat1_breakdown_upload_mints_pieces_and_barcodes():
     with Session(eng) as s:
         client = Client(name="John Peter", country="IT"); s.add(client); s.flush()
         order = ClientOrder(client_id=client.id, order_number="JP-PO"); s.add(order); s.flush()
-        style = Style(client_order_id=order.id, name="CLERMONT", article="CL1"); s.add(style); s.flush()
+        style = Style(client_order_id=order.id, name="CLERMONT", article="CL1", production_status="RELEASED"); s.add(style); s.flush()
         s.add(SKU(style_id=style.id, color_code="PINE", color_name="PINE GREEN",
                   size="M", qty_ordered=21, code="JP-CLERMONT-PINE-M"))
         s.commit()

@@ -59,8 +59,22 @@ async def test_the_overview_returns_every_block(
     assert d.overall.total_target == 5
     assert d.overall.total_pending == d.overall.total_target - d.overall.total_produced
     assert len(d.departments) == 6
-    assert [n.stage for n in d.pipeline] == list(
-        DashboardService(db).repo._DM_PIPELINE)
+    # The pipeline is the FULL factory view, not just the linear leather chain:
+    # the parallel lining cut and the (event-less, drawer-derived) store node are
+    # in it too, each in its real position.
+    repo = DashboardService(db).repo
+    assert [n.stage for n in d.pipeline] == [
+        code for code, _ in repo._DM_DISPLAY_PIPELINE]
+    assert [n.kind for n in d.pipeline] == [
+        kind for _, kind in repo._DM_DISPLAY_PIPELINE]
+    assert [n.sequence for n in d.pipeline] == list(range(1, len(d.pipeline) + 1))
+    by_stage = {n.stage: n for n in d.pipeline}
+    assert by_stage["LINING_CUTTING"].kind == "PARALLEL"
+    assert by_stage["STORE"].kind == "STORE"
+    # Every CHAIN node is measured against the order quantity; the two special
+    # nodes are not — that is exactly why they carry their own `total`.
+    assert all(n.total == d.overall.total_target
+               for n in d.pipeline if n.kind == "CHAIN")
     assert d.attendance.employees_assigned >= 1
     assert d.meta.scope == "all_clients"
 
@@ -88,12 +102,19 @@ async def test_the_pipeline_is_a_funnel_and_the_bottleneck_is_its_deepest_queue(
     # 3 cut, 1 fused    → a queue of 2 in front of fusing.
     assert by_stage["LEATHER_CUTTING"].pending == 2
     assert by_stage["FUSING"].pending == 2
-    # Each node's completed count never exceeds its predecessor's — it is a funnel.
-    counts = [n.completed for n in d.pipeline]
+    # Each CHAIN node's completed count never exceeds its predecessor's — the
+    # linear chain is a funnel. LINING_CUTTING and STORE are excluded: the
+    # lining cut is a PARALLEL entry with no predecessor in this list, and the
+    # store is drawer state rather than an event count, so neither is bound by
+    # the monotonicity the chain has.
+    counts = [n.completed for n in d.pipeline if n.kind == "CHAIN"]
     assert counts == sorted(counts, reverse=True)
 
     assert d.bottleneck.stage in ("LEATHER_CUTTING", "FUSING")
-    assert d.bottleneck.queue == max(n.pending for n in d.pipeline)
+    # The bottleneck skips the PARALLEL node (unlike denominator), so the max it
+    # reports is the max over the nodes that actually compete for it.
+    assert d.bottleneck.queue == max(
+        n.pending for n in d.pipeline if n.kind != "PARALLEL")
 
 
 @pytest.mark.asyncio
@@ -195,6 +216,86 @@ async def test_order_tracking_walks_the_whole_chain(
     assert by_stage["LEATHER_CUTTING"].status == "IN_PROGRESS"
     assert by_stage["PACKAGE_EXPORT"].status == "PENDING"
     assert t.blocked_stage == "LEATHER_CUTTING"   # the deepest queue: 5 → 1
+
+
+@pytest.mark.asyncio
+async def test_order_tracking_reports_the_lining_cut_and_the_store(
+    db, operations, pieces, order_tree, cutter, tailor, cutting_mgr, dm, leather_lot
+):
+    """REGRESSION: both were missing from this endpoint.
+
+    `stages` used to be the linear leather chain only, so an order held up in
+    the store, or waiting on lining, showed as "stalled after pasting" with
+    nothing on screen to say why. Both nodes must be present, in their real
+    pipeline positions, each carrying its own denominator.
+    """
+    await _walk(db, pieces[0][0], cutter=cutter, tailor=tailor,
+                cutting_mgr=cutting_mgr, dm=dm, leather_lot=leather_lot, stages=2)
+
+    t = await DashboardService(db).dm_order_tracking(
+        order_id=order_tree["order"].id)
+    by_stage = {r.stage: r for r in t.stages}
+
+    assert "LINING_CUTTING" in by_stage, "the parallel cut path must be reported"
+    assert "STORE" in by_stage, "the store must be reported"
+
+    # Real pipeline order: the lining cut sits beside the leather cut, and the
+    # store sits between pasting and line-stitching.
+    order = [r.stage for r in t.stages]
+    assert order.index("LEATHER_CUTTING") < order.index("LINING_CUTTING")
+    assert order.index("PASTING") < order.index("STORE") < order.index("LINE_STITCHING")
+
+    # Each is priced on its own terms, not on the order quantity.
+    assert by_stage["LINING_CUTTING"].kind == "PARALLEL"
+    assert by_stage["LINING_CUTTING"].total == 5      # all 5 pieces need lining
+    assert by_stage["STORE"].kind == "STORE"
+    assert by_stage["LEATHER_CUTTING"].kind == "CHAIN"
+    assert by_stage["LEATHER_CUTTING"].total == t.total_quantity
+
+    # pct is computed against the node's OWN total, so it can never exceed 100
+    # on a node whose denominator is smaller than the order.
+    assert all(0.0 <= r.pct <= 100.0 for r in t.stages)
+
+
+@pytest.mark.asyncio
+async def test_style_tracking_reports_the_lining_cut_and_the_store(
+    db, operations, pieces, order_tree, cutter, tailor, cutting_mgr, dm, leather_lot
+):
+    """The style drill-down shares the order drill-down's builder, so the two
+    can never disagree about which stages exist."""
+    s = await DashboardService(db).dm_style_tracking(
+        style_id=order_tree["style"].id)
+    stages = [r.stage for r in s.stages]
+    assert "LINING_CUTTING" in stages and "STORE" in stages
+    assert stages == [
+        r.stage for r in (await DashboardService(db).dm_order_tracking(
+            order_id=order_tree["order"].id)).stages]
+
+
+@pytest.mark.asyncio
+async def test_a_piece_held_in_the_store_is_counted_as_pending_there(
+    db, operations, pieces, order_tree, cutter, cutting_mgr, dm, leather_lot
+):
+    """The number the DM actually wants: garments sitting in a drawer.
+
+    A piece whose leather has been stored is IN the store — not released — so it
+    must land on the store node's `pending`, which is precisely the signal that
+    used to be absent from this screen."""
+    from app.core.enums import DrawerPart
+    from app.modules.drawers.service import DrawerService
+
+    piece, sku = pieces[0]
+    await _walk(db, piece, cutter=cutter, tailor=None, cutting_mgr=cutting_mgr,
+                dm=dm, leather_lot=leather_lot, stages=1)
+    await DrawerService(db).store_scan(
+        drawer_id=piece.drawer_id, piece_id=piece.id,
+        part=DrawerPart.LEATHER, actor_id=dm.id)
+
+    t = await DashboardService(db).dm_order_tracking(
+        order_id=order_tree["order"].id)
+    store = next(r for r in t.stages if r.stage == "STORE")
+    assert store.pending >= 1, "a stored piece is waiting in the store"
+    assert store.completed == 0, "nothing has been released by the DM yet"
 
 
 @pytest.mark.asyncio

@@ -8,9 +8,14 @@ WHO MAY WRITE ATTENDANCE
   all any more, so there is no such thing as a worker checking themselves in:
   an operator scans the worker's card (or types them in when the card fails).
 
+LOCATION TRACKING IS REMOVED
+  No route on this router asks for, validates or stores a position. Check-in and
+  check-out succeed on identity alone. `lat`/`lon` are still accepted on the
+  bodies that used to require them, and ignored — see attendance/schemas.py.
+
 Endpoints (all mounted under /api/v1):
   POST   /attendance/scan-check-in       Barcode door: operator scans a card, in|out
-  POST   /attendance/check-in            Operator's OWN check-in (GPS required)
+  POST   /attendance/check-in            Operator's OWN check-in (no body needed)
   POST   /attendance/check-out           Operator's OWN check-out
   POST   /attendance/proxy/check-in      Manual door: operator types employees in
   POST   /attendance/proxy/check-out     Manual door: operator closes them
@@ -18,7 +23,7 @@ Endpoints (all mounted under /api/v1):
   GET    /attendance/me                  Own attendance history (calendar view)
   GET    /attendance/me/status           Live shift status (server-anchored countdown)
   GET    /attendance/today               Today's roster (manager/HR view)
-  GET    /attendance/config              Read shift + geofence policy
+  GET    /attendance/config              Read shift policy
   PATCH  /attendance/config              Manager/HR updates policy
 ================================================================================
 """
@@ -59,6 +64,8 @@ async def scan_check_in(
 ):
     """Check in/out by scanning an employee barcode (direction = "in" | "out").
 
+    No position is requested or stored — `lat`/`lon` are accepted and ignored.
+
     THE primary attendance door. Every employee has a card and no employee has a
     login, so the operator standing at the gate — SECURITY / HR / MD / DM — scans
     every card, monthly or daily, including their own colleagues'.
@@ -70,19 +77,22 @@ async def scan_check_in(
 
 
 @router.post("/check-in", response_model=schemas.AttendanceRead, status_code=201)
-async def check_in(body: schemas.CheckInRequest,
+async def check_in(body: schemas.CheckInRequest | None = None,
             db: AsyncSession = Depends(get_db),
             user: User = Depends(require_operator)):
     """An OPERATOR records their own arrival (their login is linked to an
-    employee row). Workers never reach this — they have no login."""
+    employee row). Workers never reach this — they have no login.
+
+    The body is OPTIONAL: with the geofence removed there is nothing to send.
+    `{}`, `{"lat": .., "lon": ..}` (ignored) and no body at all all work."""
     return await AttendanceService(db).self_check_in(user, body)
 
 
 @router.post("/check-out", response_model=schemas.AttendanceRead)
-async def check_out(body: schemas.CheckOutRequest,
+async def check_out(body: schemas.CheckOutRequest | None = None,
                     db: AsyncSession = Depends(get_db),
                     user: User = Depends(require_operator)):
-    """An OPERATOR records their own departure. See check_in."""
+    """An OPERATOR records their own departure. Body optional — see check_in."""
     return await AttendanceService(db).self_check_out(user, body)
 
 
@@ -97,7 +107,8 @@ async def proxy_check_in(
     user: User = Depends(require_operator),
 ):
     """Manual check-in fallback for one or more employees (card failed / forgotten).
-    SECURITY / HR / MD / DM. Works for ANY wage type."""
+    SECURITY / HR / MD / DM. Works for ANY wage type. Only `employee_ids` is
+    required — the operator's position is no longer asked for."""
     return await AttendanceService(db).proxy_mark_present(user, body)
 
 
@@ -151,10 +162,11 @@ async def get_config(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """F44: the geofence geometry (factory_lat/lon/radius) is returned ONLY to
-    HR/managers/superusers. Everyone else gets shift times without the fence, so
-    a client/employee login cannot read the coordinates needed to forge an
-    in-fence check-in."""
+    """Shift policy — start time, length, grace, timezone.
+
+    The privileged/public split (F44) existed to keep the fence coordinates away
+    from non-managers. LOCATION IS REMOVED, so both shapes now return the same
+    fields; the branch is kept so the split returns intact if the fence does."""
     cfg = await AttendanceService(db).get_config()
     if user.role in _ATTENDANCE_READERS:
         return schemas.ShiftConfigRead.model_validate(cfg)

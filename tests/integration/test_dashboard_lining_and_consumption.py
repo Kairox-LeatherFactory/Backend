@@ -64,7 +64,7 @@ async def test_an_order_with_no_pieces_is_reported_not_hidden(db, pieces, order_
     ghost = ClientOrder(client_id=client.id, order_number="NOT-MINTED")
     db.add(ghost); await db.flush()
     style = Style(client_order_id=ghost.id, name="TOWER", article="T1",
-                  code="NM-TOWER")
+                  code="NM-TOWER", production_status="RELEASED")
     db.add(style); await db.flush()
     db.add(SKU(style_id=style.id, color_code="B", color_name="BLACK", size="L",
                qty_ordered=100, code="NM-TOWER-B-L"))

@@ -77,7 +77,9 @@ def _get_or_create_style(db: Session, order: ClientOrder, name: str,
         Style.client_order_id == order.id, Style.name == name))
     if not st:
         st = Style(client_order_id=order.id, name=name, article=article,
-                   code=make_style_code(order.order_number, name))
+                   # The article is part of the code now: the sticker, the
+                   # traveler and the style code all name the same leather.
+                   code=make_style_code(order.order_number, name, article))
         db.add(st); db.flush()
     return st
 
@@ -98,7 +100,10 @@ def _upsert_sku(db, order, style, color, size, qty):
     sku = SKU(
         style_id=style.id, color_code=color_code, color_name=color,
         size=size, qty_ordered=qty,
-        code=make_sku_code(order.order_number, style.name, color or color_code, size),
+        # style.article, not a local — a re-imported style keeps whatever
+        # article it was created with, and its SKUs must agree with its code.
+        code=make_sku_code(order.order_number, style.name, color or color_code,
+                           size, style.article),
     )
     db.add(sku)
     db.flush()          # visible to the next lookup, and gives sku.id for lines

@@ -67,7 +67,7 @@ def _order_with_skus(db: Session, *, order_number: str, qty_per_sku: int,
     order = ClientOrder(client_id=client.id, order_number=order_number)
     db.add(order); db.flush()
     style = Style(client_order_id=order.id, name="ADELE KNIT", article="GOAT SUEDE",
-                  code=f"{order_number}-ADELE")
+                  code=f"{order_number}-ADELE", production_status="RELEASED")
     db.add(style); db.flush()
     for i in range(n_skus):
         db.add(SKU(style_id=style.id, color_code="PINE", color_name="PINE GREEN",
