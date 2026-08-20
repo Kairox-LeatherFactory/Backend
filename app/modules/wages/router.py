@@ -286,7 +286,8 @@ async def reopen_run(
     run_id: uuid.UUID,
     body: schemas.ReopenRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(_PAYROLL_READERS),
+    user: User = Depends(require_roles(
+        UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR)),
 ):
     """COMMAND. UNFREEZE a CLOSED run so it can be recomputed. DM/MD only.
 
