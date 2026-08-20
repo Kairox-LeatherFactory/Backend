@@ -21,6 +21,7 @@
 # ── Web framework ──────────────────────────────────────────────────────────
 fastapi==0.136.3
 uvicorn[standard]==0.48.0
+gunicorn==23.0.0
 python-multipart==0.0.29
 
 # ── ORM + database drivers ─────────────────────────────────────────────────

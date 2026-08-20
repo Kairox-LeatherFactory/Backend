@@ -1,43 +1,24 @@
-# Python caches / local virtualenv (the image installs its own deps)
-__pycache__/
-*.pyc
-*.pyo
-.venv/
-venv/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# Secrets — provided at runtime via env_file / environment, never baked in.
-# Broad glob so .env.bak / .env.local / .env.prod never leak into a layer.
+var/procurement-documents/
+# Keep secrets, git history, caches, and the big sample spreadsheets OUT of the image.
+.git
+.gitignore
 .env
 .env.*
-*.bak
+!.env.*.example
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+node_modules/
 
-# VCS / tooling — not needed inside the image
-.git/
-.github/
-.claude/
-.gitattributes
-.gitignore
-.importlinter
+# Big Excel/PDF sample files are not needed at runtime — exclude them.
+*.xlsx
+*.xls
+*.pdf
 
-# Docs (Markdown) + scratch notes — not used at runtime
-*.md
-_specs/
-Issues & risks.txt
-file_structure.txt
-
-# Dev artifacts / large dumps that bloat the build context
-full_project_dump.txt
-app/all_code.txt
-*_dump.txt
-openapi.json
-*.log
-
-# Runtime-generated local storage (uploaded/quarantined docs). The container
-# recreates LOCAL_STORAGE_DIR on demand — never bake host uploads into the image.
-var/
-
-# NOTE: keep app/, alembic/, scripts/, config/, data/, tests/, requirements.txt,
-# entrypoint.sh, alembic.ini — all required for migrate + seed + run + pytest.
+# NOTE: we do NOT exclude *.csv, because the seed loader needs
+# data/clean_leather_lots_finalZZ.csv inside the image. If you have other large
+# throwaway CSVs, exclude them individually instead of a blanket *.csv rule, e.g.:
+# some_big_export.csv

@@ -5,4 +5,8 @@ __pycache__/
 openapi.json
 Frontend/
 .pytest_cache/
-.env.example
+.env.prod.example
+.env.staging.example
+.env.prod
+.env.staging
+!.env.example

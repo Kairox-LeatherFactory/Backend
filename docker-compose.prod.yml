@@ -1,0 +1,10 @@
+# PRODUCTION overlay — server, port 8000, migrations ON, seed OFF (NEVER seed prod).
+#   docker compose -p kairox-prod -f docker-compose.yml -f docker-compose.prod.yml \
+#     --env-file .env.prod up -d --build
+services:
+  api:
+    environment:
+      RUN_MIGRATIONS: "true"
+      RUN_SEED: "false"         # real data — never auto-seed
+    ports:
+      - "8000:8000"

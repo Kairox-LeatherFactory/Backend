@@ -1,174 +1,96 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────
-# Leather Factory backend — container entrypoint
+# KairoX backend — container entrypoint (api-only build)
 # ──────────────────────────────────────────────────────────────
-# Dispatches based on the CMD passed by docker-compose / docker run:
+# Reads ONE word:
+#   api      → wait for DB → [migrate] → [seed] → GUNICORN(uvicorn workers)
+#   migrate  → alembic upgrade head, then exit          (one-off)
+#   seed     → run the THREE seed scripts, then exit     (MANUAL only)
+#   shell    → bash                                      (debugging)
 #
-#   api       → wait for DB → migrate → seed → uvicorn        (default)
-#   worker    → wait for DB + Redis → celery worker           (BOM extraction jobs)
-#   beat      → wait for Redis → celery beat                   (scheduled jobs)
-#   migrate   → run Alembic migrations and exit                (useful in CI)
-#   seed      → force-run the seed script and exit
-#   shell     → drop into bash (for debugging)
+# This container runs GUNICORN itself — it REPLACES the systemd gunicorn.service
+# you use in World A. In Docker you do NOT write a .service file.
 #
-# Environment knobs (set in docker-compose.yml):
-#   RUN_MIGRATIONS=true   → run `alembic upgrade head` before starting (api only)
-#   RUN_SEED=true         → run scripts.seed on boot (api only; seed is idempotent)
-#   UVICORN_RELOAD=true   → start uvicorn with --reload (dev hot-reload)
-#   DB_WAIT_MAX_ATTEMPTS  → how many seconds to wait for Postgres (default 60)
-#   REDIS_WAIT_MAX_ATTEMPTS → how many seconds to wait for Redis (default 30)
-#   CELERY_CONCURRENCY    → worker process count (default 4)
-#   CELERY_LOGLEVEL       → worker/beat log level (default info)
-#
-# MIGRATIONS OWNERSHIP: only `api` migrates + seeds. `worker`/`beat` never do —
-# they wait for `api` to be HEALTHY in compose (which means migrate+seed finished),
-# so the schema exists before the worker touches it. This avoids two processes
-# racing `alembic upgrade head`.
+# SEED POLICY: OFF by default. A deploy must never auto-load data. Seed is a
+# deliberate one-off:  ... run --rm api seed
 # ──────────────────────────────────────────────────────────────
-
 set -euo pipefail
-
 CMD="${1:-api}"
 
-CELERY_APP="app.core.celery.celery_app"
-
-# ─── Helpers ──────────────────────────────────────────────────
+# Path to the leather-lots CSV INSIDE the image. Override with LEATHER_LOTS_CSV
+# if your filename differs. Must exist in the repo (copied in by `COPY . .`).
+LEATHER_LOTS_CSV="${LEATHER_LOTS_CSV:-data/clean_leather_lots_finalZZ.csv}"
 
 log() { echo "[entrypoint] $*"; }
 err() { echo "[entrypoint] ERROR: $*" >&2; }
 
-# Wait for Postgres to accept real connections. We use psycopg2 (already on
-# PATH via requirements) with the SAME DATABASE_URL the app/Alembic use, so a
-# success here means migrations and the app can connect too. This is more
-# reliable than pg_isready, which isn't installed in this image.
 wait_for_postgres() {
-    log "Waiting for Postgres to accept connections..."
-    local max_attempts="${DB_WAIT_MAX_ATTEMPTS:-60}"
-    local attempt=0
+    log "Waiting for Postgres..."
+    local max="${DB_WAIT_MAX_ATTEMPTS:-60}" n=0
     until python -c "
-import os, sys
+import os,sys
 try:
     import psycopg2
-    url = os.environ.get('DATABASE_URL', '')
-    # psycopg2 wants a raw DSN — strip the SQLAlchemy driver prefix.
-    url = url.replace('postgresql+psycopg2://', 'postgresql://')
-    psycopg2.connect(url, connect_timeout=2).close()
-    sys.exit(0)
-except Exception:
-    sys.exit(1)
+    u=os.environ.get('DATABASE_URL','').replace('postgresql+psycopg2://','postgresql://')
+    psycopg2.connect(u, connect_timeout=2).close(); sys.exit(0)
+except Exception: sys.exit(1)
 " 2>/dev/null; do
-        attempt=$((attempt + 1))
-        if [ "$attempt" -ge "$max_attempts" ]; then
-            err "Postgres not reachable after ${max_attempts}s. Giving up."
-            exit 1
-        fi
+        n=$((n+1)); [ "$n" -ge "$max" ] && { err "Postgres unreachable after ${max}s"; exit 1; }
         sleep 1
     done
-    log "Postgres is ready (${attempt}s)."
+    log "Postgres ready (${n}s)."
 }
 
-# Wait for Redis (the Celery broker) to answer PING. Uses redis-py (on PATH via
-# requirements) with the SAME CELERY_BROKER_URL the app uses, so success here means
-# the worker/beat can reach the broker. from_url handles rediss:// (Upstash) too.
-wait_for_redis() {
-    log "Waiting for Redis (Celery broker)..."
-    local max_attempts="${REDIS_WAIT_MAX_ATTEMPTS:-30}"
-    local attempt=0
-    until python -c "
-import os, sys
-try:
-    import redis
-    url = os.environ.get('CELERY_BROKER_URL', 'redis://redis:6379/0')
-    redis.Redis.from_url(url, socket_connect_timeout=2).ping()
-    sys.exit(0)
-except Exception:
-    sys.exit(1)
-" 2>/dev/null; do
-        attempt=$((attempt + 1))
-        if [ "$attempt" -ge "$max_attempts" ]; then
-            err "Redis not reachable after ${max_attempts}s. Giving up."
-            exit 1
-        fi
-        sleep 1
-    done
-    log "Redis is ready (${attempt}s)."
-}
-
-# Run Alembic migrations. A failure here is fatal — a half-migrated schema
-# should not start serving traffic.
 run_migrations() {
-    log "Running Alembic migrations..."
-    if ! alembic upgrade head; then
-        err "Migrations failed. Aborting."
-        exit 1
-    fi
+    log "alembic upgrade head"
+    alembic upgrade head || { err "Migrations failed."; exit 1; }
     log "Migrations complete."
 }
 
-# Run the seed script. It is idempotent (existing rows are reused, not
-# duplicated), so it's safe to run on every boot. A seed failure should NOT
-# block the API — devs see the error and can reset the volume if needed.
+# ── The THREE seed scripts, in the REQUIRED order ────────────────────────────
+# 1) employees  — needs migrations done first (enum values must exist)
+# 2) leather lots — needs an explicit --csv (Windows default path won't resolve here)
+# 3) drawer barcodes
+# All three are idempotent, so a re-run is safe, but we still only run this
+# MANUALLY via the `seed` command — never automatically on api boot in prod.
 run_seed() {
-    log "Seeding database (idempotent)..."
-    if ! python -m scripts.seed; then
-        err "Seed failed. Continuing anyway — DB may be partially populated."
-    fi
-}
+    log "── Seed 1/3: employees + cards + logins ──"
+    python -m scripts.seed_employees || { err "seed_employees failed."; exit 1; }
 
-# ─── Dispatch ─────────────────────────────────────────────────
+    log "── Seed 2/3: leather lots (csv=${LEATHER_LOTS_CSV}) ──"
+    if [ ! -f "${LEATHER_LOTS_CSV}" ]; then
+        err "Leather-lots CSV not found at ${LEATHER_LOTS_CSV}."
+        err "Set LEATHER_LOTS_CSV to the correct path, or ensure the file is in the image."
+        exit 1
+    fi
+    python -m scripts.load_leather_lots --csv "${LEATHER_LOTS_CSV}" \
+        || { err "load_leather_lots failed."; exit 1; }
+
+    log "── Seed 3/3: 200 drawer barcodes ──"
+    python -m scripts.gen_drawer_barcodes || { err "gen_drawer_barcodes failed."; exit 1; }
+
+    log "All three seed scripts complete."
+}
 
 case "$CMD" in
     api)
         wait_for_postgres
-        if [ "${RUN_MIGRATIONS:-true}" = "true" ]; then run_migrations; fi
-        if [ "${RUN_SEED:-true}" = "true" ]; then run_seed; fi
-        log "Starting uvicorn..."
-        exec uvicorn app.main:app \
-            --host 0.0.0.0 \
-            --port 8000 \
-            --proxy-headers \
-            ${UVICORN_RELOAD:+--reload}
+        [ "${RUN_MIGRATIONS:-true}" = "true" ] && run_migrations
+        # RUN_SEED stays OFF in staging/prod. Only turn it on in dev if you want
+        # auto-seed on boot. Otherwise seed manually with the `seed` command.
+        [ "${RUN_SEED:-false}" = "true" ] && run_seed
+        log "Starting Gunicorn (uvicorn workers)..."
+        exec gunicorn app.main:app \
+            -k uvicorn.workers.UvicornWorker \
+            -w "${WEB_CONCURRENCY:-2}" \
+            -b 0.0.0.0:8000 \
+            --timeout "${GUNICORN_TIMEOUT:-120}" \
+            --graceful-timeout 30 \
+            --access-logfile - \
+            --error-logfile -
         ;;
-
-    worker)
-        # No migrate/seed here (api owns schema; compose makes us wait for it healthy).
-        # The worker hits BOTH Postgres (build_bom_for_submission) and Redis (broker).
-        wait_for_postgres
-        wait_for_redis
-        log "Starting Celery worker (concurrency=${CELERY_CONCURRENCY:-4})..."
-        exec celery -A "$CELERY_APP" worker \
-            --loglevel="${CELERY_LOGLEVEL:-info}" \
-            --concurrency="${CELERY_CONCURRENCY:-4}"
-        ;;
-
-    beat)
-        # Beat only publishes schedule ticks to the broker — Redis is enough.
-        wait_for_redis
-        log "Starting Celery beat (scheduler)..."
-        exec celery -A "$CELERY_APP" beat \
-            --loglevel="${CELERY_LOGLEVEL:-info}"
-        ;;
-
-    migrate)
-        wait_for_postgres
-        run_migrations
-        log "Migrations done. Exiting."
-        ;;
-
-    seed)
-        wait_for_postgres
-        run_seed
-        log "Seed done. Exiting."
-        ;;
-
-    shell)
-        log "Dropping into bash shell..."
-        exec /bin/bash
-        ;;
-
-    *)
-        # Unknown directive → treat the whole argv as a raw command.
-        log "Unknown directive '$CMD' → running as raw command."
-        exec "$@"
-        ;;
+    migrate) wait_for_postgres; run_migrations; log "Done."; ;;
+    seed)    wait_for_postgres; run_seed;       log "Done."; ;;
+    shell)   exec /bin/bash ;;
+    *)       log "Unknown '$CMD' → raw"; exec "$@" ;;
 esac
