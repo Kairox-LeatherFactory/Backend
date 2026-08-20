@@ -17,7 +17,7 @@ WHAT CHANGED vs your version (read these — they are real fixes):
      It is now defined in users/deps.py (see PASTE_block_employees_into_users_deps.py).
 
   4. ADDED the barcode feature: model imports + router registration for
-     barcode / materials / drawers / attendance-scan.
+     barcode / materials / drawers / attendance-scan..
 
 ROUTER LOCKING (employees may reach ONLY their own attendance):
   Every write router already 403s an employee via its own require_roles, so the
@@ -201,6 +201,7 @@ app.add_middleware(
         "http://localhost:19006",
         "http://localhost:3000",
         "https://frontend-rust-pi-23.vercel.app",
+        "https://stagingpte.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
