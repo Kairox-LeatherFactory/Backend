@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .env
+.env.bak*
 .venv/
 openapi.json
 Frontend/
@@ -33,3 +34,4 @@ data/supplier-po-form
 _wf.txt
 docs/
 var/
+.env.bak.20260820153626

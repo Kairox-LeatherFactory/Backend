@@ -47,9 +47,6 @@ from app.modules.wages.service import WageService
 router = APIRouter(prefix="/wages", tags=["Wages"])
 
 # Who may look at labour costs at all.
-_RATE_READERS = require_roles(
-    UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.HR
-)
 # Who may look at payroll.
 _PAYROLL_READERS = require_roles(UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.HR)
 
@@ -60,7 +57,7 @@ async def list_orders(
     on: date | None = Query(None, description="Coverage as of this date. Default today."),
     unpriced_only: bool = Query(False, description="Only orders with unpriced styles."),
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(_RATE_READERS),
+    _: User = Depends(_PAYROLL_READERS),
 ):
     """ORDER CARDS — the payroll landing screen (change-list item 3).
 
@@ -83,7 +80,7 @@ async def list_styles(
     ),
     on: date | None = Query(None, description="Coverage as of this date. Default today."),
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(_RATE_READERS),
+    _: User = Depends(_PAYROLL_READERS),
 ):
     """The wages landing screen. Call this first — it is what the manager clicks.
 
@@ -105,7 +102,7 @@ async def rate_sheet(
     style_code: str = Query(..., description="e.g. JP-CLERMONT_VEST"),
     on: date | None = Query(None, description="Rates in force on this date. Default today."),
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(_RATE_READERS),
+    _: User = Depends(_PAYROLL_READERS),
 ):
     """Every operation of a style with its current rate. The rate-setting screen."""
     return await WageService(db).rate_sheet(style_code, on or date.today())
@@ -116,7 +113,7 @@ async def rate_history(
     style_code: str = Query(..., description="e.g. JP-CLERMONT_VEST"),
     operation_code: str = Query(..., description="e.g. CUTTING"),
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(_RATE_READERS),
+    _: User = Depends(_PAYROLL_READERS),
 ):
     """Every rate ever set for one style x operation, newest first."""
     return await WageService(db).rate_history(style_code, operation_code)
@@ -126,7 +123,7 @@ async def rate_history(
 async def set_rate(
     body: schemas.RateSet,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+    _: User = Depends(_PAYROLL_READERS),
 ):
     """Single-cell save. Prefer /rates/bulk when saving a whole sheet."""
     return await WageService(db).set_rate(body)
@@ -136,7 +133,7 @@ async def set_rate(
 async def set_rates_bulk(
     body: schemas.RateBulkSet,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+    _: User = Depends(_PAYROLL_READERS),
 ):
     """Save an edited rate sheet in one transaction. All codes resolved first."""
     return await WageService(db).set_rates_bulk(body)
@@ -190,7 +187,7 @@ async def list_runs(
 async def compute_run(
     body: schemas.RunRequest,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+    _: User = Depends(_PAYROLL_READERS),
 ):
     """COMMAND. Computes ONE payroll for the window the manager typed.
 
@@ -232,8 +229,7 @@ async def delete_run(
     run_id: uuid.UUID,
     body: schemas.DeleteRunRequest | None = None,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.DIRECT_MANAGER,
-                                       UserRole.MANAGING_DIRECTOR)),
+    user: User = Depends(_PAYROLL_READERS),
 ):
     """COMMAND. Delete a run and its lines outright.
 
@@ -263,7 +259,7 @@ async def recompute_run(
     run_id: uuid.UUID,
     body: schemas.RecomputeRequest | None = None,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR)),
+    user: User = Depends(_PAYROLL_READERS),
 ):
     """COMMAND. Discards a run's lines and rebuilds them from current production
     events and rates, for the SAME window and the SAME scope.
@@ -290,8 +286,7 @@ async def reopen_run(
     run_id: uuid.UUID,
     body: schemas.ReopenRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles(
-        UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR)),
+    user: User = Depends(_PAYROLL_READERS),
 ):
     """COMMAND. UNFREEZE a CLOSED run so it can be recomputed. DM/MD only.
 
