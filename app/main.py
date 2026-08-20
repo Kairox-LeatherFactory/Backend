@@ -201,6 +201,7 @@ app.add_middleware(
         "http://localhost:19006",
         "http://localhost:3000",
         "https://frontend-rust-pi-23.vercel.app",
+        "https://stagingpte.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
