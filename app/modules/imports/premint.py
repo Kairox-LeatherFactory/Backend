@@ -50,6 +50,7 @@ IDEMPOTENCY
 ================================================================================
 """
 from __future__ import annotations
+from datetime import datetime, timezone
 
 import uuid
 
@@ -386,6 +387,14 @@ def premint_order(db: Session, order, *, style_ids=None,
                 # A fresh merge starts with neither part in.
                 drawer.leather_in = False
                 drawer.lining_in = False
+                # THE MERGE IS AN ACT ON THE DRAWER, and until now the only one
+                # that left no trace of when it happened: received_at/sended_at
+                # are being cleared on the line below, and created_at belongs to
+                # the drawer's manufacture, not to this garment. Without this
+                # stamp a drawer merged five seconds ago sorts below one nothing
+                # has touched in a month.
+                drawer.last_activity_at = datetime.now(timezone.utc)
+                drawer.last_activity_kind = "merged"
                 drawer.received_at = None
                 drawer.sended_at = None
                 if hasattr(piece, "drawer_id"):
@@ -488,6 +497,8 @@ def allocate_waiting_pieces(db: Session, *, limit: int | None = None) -> dict:
         drawer.state = DrawerState.MERGED.value
         drawer.leather_in = False
         drawer.lining_in = False
+        drawer.last_activity_at = datetime.now(timezone.utc)
+        drawer.last_activity_kind = "merged"
         drawer.received_at = None
         drawer.sended_at = None
         drawer.current_piece_id = piece.id

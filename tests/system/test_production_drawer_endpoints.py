@@ -199,10 +199,10 @@ def _emp_code(emp) -> str:
 
 
 async def test_store_scan_through_the_barcode_door(
-    api_client, as_role, pieces, cutter
+    api_client, as_role, cut_pieces, cutter
 ):
     """Scan the employee, then the drawer, then the piece — codes, not ids."""
-    piece, drawer = pieces[0]
+    piece, drawer = cut_pieces[0]
     as_role(UserRole.CUTTING_MANAGER)
 
     r = await api_client.post(f"{API}/drawers/store-scan", json={
@@ -248,22 +248,30 @@ async def test_store_scan_requires_the_employee_barcode_first(
     assert "employee" in r.text.lower()
 
 
-async def test_store_scan_infers_the_hold_bucket(api_client, as_role, pieces, cutter):
+async def test_store_scan_infers_the_hold_bucket(api_client, as_role, pieces, cutter,
+                                                ready_for_store):
     """BUG #18 — no Hold Leather / Hold Lining button. `part` is omitted and the
-    server decides, reporting which bucket it chose."""
+    server decides, reporting which bucket it chose.
+
+    Each side is finished just before its own scan, which is both the real floor
+    order and the only setup that pins the answer: once BOTH cuts are done the
+    empty drawer is genuinely ambiguous and the server answers LINING (it reads
+    the lining cut first)."""
     piece, drawer = pieces[0]
     as_role(UserRole.CUTTING_MANAGER)
 
+    await ready_for_store(piece, lining=False)          # leather side finished
     r = await api_client.post(f"{API}/drawers/store-scan", json={
         "employee_barcode": _emp_code(cutter[0]),
         "drawer_barcode": drawer.code, "piece_barcode": piece.code})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["part_inferred"] is True
-    assert body["part"] == "LEATHER"        # empty drawer → fill the leather side
+    assert body["part"] == "LEATHER"        # only the leather is ready to store
     assert body["holding"] == "HOLDING LEATHER"
 
     # Second scan fills the other side without being told either.
+    await ready_for_store(piece, leather=False)         # …now the lining is cut
     r = await api_client.post(f"{API}/drawers/store-scan", json={
         "employee_barcode": _emp_code(cutter[0]),
         "drawer_barcode": drawer.code, "piece_barcode": piece.code})
@@ -310,11 +318,11 @@ async def test_store_scan_409s_a_piece_in_the_wrong_drawer(
 
 
 async def test_batch_send_releases_many_drawers_at_once(
-    api_client, as_role, pieces, cutter
+    api_client, as_role, cut_pieces, cutter
 ):
     """BUGS #13/#14/#15 — completeness auto-receives; SEND is the manual step,
     it takes many drawers, and it partially accepts."""
-    ready, not_ready = pieces[0], pieces[1]
+    ready, not_ready = cut_pieces[0], cut_pieces[1]
 
     as_role(UserRole.CUTTING_MANAGER)
     for part in ("LEATHER", "LINING"):
@@ -355,10 +363,10 @@ async def test_batch_send_releases_many_drawers_at_once(
 
 
 async def test_drawer_detail_opens_a_row_from_the_list(
-    api_client, as_role, pieces, cutter
+    api_client, as_role, cut_pieces, cutter
 ):
     """BUG #13 — the Drawers List row must open into real detail."""
-    piece, drawer = pieces[0]
+    piece, drawer = cut_pieces[0]
     as_role(UserRole.CUTTING_MANAGER)
     await api_client.post(f"{API}/drawers/store-scan", json={
         "employee_barcode": _emp_code(cutter[0]),
@@ -379,10 +387,10 @@ async def test_drawer_detail_opens_a_row_from_the_list(
 
 
 async def test_receive_is_dm_md_only_and_enforces_the_order(
-    api_client, as_role, pieces, cutter
+    api_client, as_role, cut_pieces, cutter
 ):
     """The DEPRECATED single-drawer route still behaves, for one release."""
-    piece, drawer = pieces[0]
+    piece, drawer = cut_pieces[0]
 
     as_role(UserRole.CUTTING_MANAGER)
     r = await api_client.post(f"{API}/drawers/{drawer.id}/receive",

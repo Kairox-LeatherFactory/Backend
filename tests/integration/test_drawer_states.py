@@ -51,9 +51,9 @@ async def _scan(db, drawer, piece, part):
 
 # ══════════════════════════════════════════════ the two arrival orders
 @pytest.mark.asyncio
-async def test_leather_first_then_lining(db, pieces):
+async def test_leather_first_then_lining(db, cut_pieces):
     """LEATHER in → HOLDING_LEATHER, still awaiting lining, not receivable."""
-    piece, drawer = pieces[0]
+    piece, drawer = cut_pieces[0]
 
     out = await _scan(db, drawer, piece, DrawerPart.LEATHER)
     assert out["state"] == DrawerState.HOLDING_LEATHER.value
@@ -75,10 +75,10 @@ async def test_leather_first_then_lining(db, pieces):
 
 
 @pytest.mark.asyncio
-async def test_lining_first_then_leather(db, pieces):
+async def test_lining_first_then_leather(db, cut_pieces):
     """The mirror image: LINING in → HOLDING_LINING (NOT holding_leather),
     still awaiting leather. Then leather completes it."""
-    piece, drawer = pieces[1]
+    piece, drawer = cut_pieces[1]
 
     out = await _scan(db, drawer, piece, DrawerPart.LINING)
     assert out["state"] == DrawerState.HOLDING_LINING.value
@@ -93,7 +93,7 @@ async def test_lining_first_then_leather(db, pieces):
 
 
 @pytest.mark.asyncio
-async def test_leather_only_piece_holds_leather_and_is_ready(db, pieces):
+async def test_leather_only_piece_holds_leather_and_is_ready(db, pieces, ready_for_store):
     """needs_lining=False: complete on leather alone, but the drawer holds
     LEATHER — never HOLDING BOTH, because no lining exists for this piece.
 
@@ -106,6 +106,11 @@ async def test_leather_only_piece_holds_leather_and_is_ready(db, pieces):
     piece, drawer = pieces[2]
     piece.needs_lining = False
     await db.commit()
+    # LEATHER SIDE ONLY. A logged LINING_CUTTING event would make this piece
+    # lined whatever the flag says (core/lining_rules: a cut lining is a physical
+    # fact that outranks the paperwork), so a leather-only test must never have
+    # one.
+    await ready_for_store(piece, lining=False)
 
     out = await _scan(db, drawer, piece, DrawerPart.LEATHER)
     assert out["holding"] == "HOLDING LEATHER"
@@ -120,13 +125,14 @@ async def test_leather_only_piece_holds_leather_and_is_ready(db, pieces):
 
 
 @pytest.mark.asyncio
-async def test_a_leather_only_drawer_is_still_receivable_by_hand(db, pieces):
+async def test_a_leather_only_drawer_is_still_receivable_by_hand(db, pieces, ready_for_store):
     """The other half of the rule above: nothing is stranded. A human confirms
     it, and the manual route still validates completeness, so it accepts exactly
     this case and nothing weaker."""
     piece, drawer = pieces[2]
     piece.needs_lining = False
     await db.commit()
+    await ready_for_store(piece, lining=False)   # leather side only — see above
     await _scan(db, drawer, piece, DrawerPart.LEATHER)
 
     svc = DrawerService(db)
@@ -138,11 +144,11 @@ async def test_a_leather_only_drawer_is_still_receivable_by_hand(db, pieces):
 
 
 @pytest.mark.asyncio
-async def test_only_both_parts_trigger_the_automatic_receive(db, pieces):
+async def test_only_both_parts_trigger_the_automatic_receive(db, cut_pieces):
     """The rule, stated directly: one part never auto-receives, whatever the
     needs_lining flag says; two parts always do."""
-    lined_piece, lined_drawer = pieces[0]
-    only_piece, only_drawer = pieces[1]
+    lined_piece, lined_drawer = cut_pieces[0]
+    only_piece, only_drawer = cut_pieces[1]
     only_piece.needs_lining = False
     await db.commit()
 
@@ -161,8 +167,8 @@ async def test_only_both_parts_trigger_the_automatic_receive(db, pieces):
 
 
 @pytest.mark.asyncio
-async def test_rescanning_the_same_part_is_idempotent(db, pieces):
-    piece, drawer = pieces[3]
+async def test_rescanning_the_same_part_is_idempotent(db, cut_pieces):
+    piece, drawer = cut_pieces[3]
     first = await _scan(db, drawer, piece, DrawerPart.LEATHER)
     again = await _scan(db, drawer, piece, DrawerPart.LEATHER)
     assert again["state"] == first["state"] == DrawerState.HOLDING_LEATHER.value
@@ -171,9 +177,9 @@ async def test_rescanning_the_same_part_is_idempotent(db, pieces):
 
 # ══════════════════════════════════════════════ the merge map is the authority
 @pytest.mark.asyncio
-async def test_a_piece_scanned_into_the_wrong_drawer_is_409(db, pieces):
-    piece, _ = pieces[0]
-    _, other_drawer = pieces[1]
+async def test_a_piece_scanned_into_the_wrong_drawer_is_409(db, cut_pieces):
+    piece, _ = cut_pieces[0]
+    _, other_drawer = cut_pieces[1]
     with pytest.raises(HTTPException) as exc:
         await _scan(db, other_drawer, piece, DrawerPart.LEATHER)
     assert exc.value.status_code == 409
@@ -182,8 +188,8 @@ async def test_a_piece_scanned_into_the_wrong_drawer_is_409(db, pieces):
 
 # ══════════════════════════════════════════════ RECEIVED / SENDED
 @pytest.mark.asyncio
-async def test_received_requires_completeness(db, pieces):
-    piece, drawer = pieces[0]
+async def test_received_requires_completeness(db, cut_pieces):
+    piece, drawer = cut_pieces[0]
     await _scan(db, drawer, piece, DrawerPart.LEATHER)      # lining still missing
 
     with pytest.raises(HTTPException) as exc:
@@ -197,8 +203,8 @@ async def test_received_requires_completeness(db, pieces):
 
 
 @pytest.mark.asyncio
-async def test_sended_requires_received_and_cannot_go_backwards(db, pieces):
-    piece, drawer = pieces[0]
+async def test_sended_requires_received_and_cannot_go_backwards(db, cut_pieces):
+    piece, drawer = cut_pieces[0]
     svc = DrawerService(db)
 
     with pytest.raises(HTTPException) as exc:
@@ -222,8 +228,8 @@ async def test_sended_requires_received_and_cannot_go_backwards(db, pieces):
 
 
 @pytest.mark.asyncio
-async def test_an_unknown_transition_is_422(db, pieces):
-    _, drawer = pieces[0]
+async def test_an_unknown_transition_is_422(db, cut_pieces):
+    _, drawer = cut_pieces[0]
     with pytest.raises(HTTPException) as exc:
         await DrawerService(db).transition(drawer.id, "SHIPPED", actor_id=None)
     assert exc.value.status_code == 422
@@ -231,8 +237,8 @@ async def test_an_unknown_transition_is_422(db, pieces):
 
 # ══════════════════════════════════════════════ the gate + the recycle
 @pytest.mark.asyncio
-async def test_is_sended_is_the_merge_gate_answer(db, pieces):
-    piece, drawer = pieces[0]
+async def test_is_sended_is_the_merge_gate_answer(db, cut_pieces):
+    piece, drawer = cut_pieces[0]
     svc = DrawerService(db)
     assert await svc.is_sended(piece.id) is False
 
@@ -246,8 +252,8 @@ async def test_is_sended_is_the_merge_gate_answer(db, pieces):
 
 
 @pytest.mark.asyncio
-async def test_release_recycles_the_drawer_and_clears_both_sides(db, pieces):
-    piece, drawer = pieces[0]
+async def test_release_recycles_the_drawer_and_clears_both_sides(db, cut_pieces):
+    piece, drawer = cut_pieces[0]
     svc = DrawerService(db)
     await _scan(db, drawer, piece, DrawerPart.LEATHER)
     await _scan(db, drawer, piece, DrawerPart.LINING)
@@ -268,7 +274,7 @@ async def test_release_recycles_the_drawer_and_clears_both_sides(db, pieces):
 
 
 @pytest.mark.asyncio
-async def test_the_label_sheet_lists_drawers_with_their_barcodes(db, pieces):
+async def test_the_label_sheet_lists_drawers_with_their_barcodes(db, cut_pieces):
     out = await DrawerService(db).list_labels()
     assert out["total"] == 5 and out["count"] == 5
     first = out["items"][0]
@@ -282,14 +288,14 @@ async def test_the_label_sheet_lists_drawers_with_their_barcodes(db, pieces):
 
 
 @pytest.mark.asyncio
-async def test_the_label_sheet_reports_what_each_drawer_holds(db, pieces):
+async def test_the_label_sheet_reports_what_each_drawer_holds(db, cut_pieces):
     """`holding` names the CONTENTS; `state` names the LIFECYCLE position.
 
     The two answer different questions and stop agreeing at RECEIVED — which is
     exactly why contents get their own field instead of being read off `state`.
     """
     svc = DrawerService(db)
-    piece, drawer = pieces[0]
+    piece, drawer = cut_pieces[0]
 
     async def holding_of(code: str) -> str:
         out = await svc.list_labels()
@@ -317,7 +323,7 @@ async def test_the_label_sheet_reports_what_each_drawer_holds(db, pieces):
     assert row["holding"] == "HOLDING BOTH"
 
     # A lining-first scan must read HOLDING LINING, not HOLDING LEATHER.
-    other_piece, other = pieces[1]
+    other_piece, other = cut_pieces[1]
     await svc.store_scan(drawer_id=other.id, piece_id=other_piece.id,
                          part=DrawerPart.LINING)
     assert await holding_of(other.code) == "HOLDING LINING"

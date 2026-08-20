@@ -137,8 +137,8 @@ async def test_uat4_piece_cannot_skip_ahead(
 # ── UAT-5: Merge gate ────────────────────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_uat5_lined_jacket_blocks_line_stitch_until_complete(
-        db, operations, pieces, cutter, paster, tailor, cutting_mgr,
-        stitching_mgr, dm, leather_lot):
+        db, operations, pieces, cutter, lining_cutter, paster, tailor, cutting_mgr,
+        lining_mgr, stitching_mgr, dm, leather_lot):
     """AS a DM, WHEN a jacket needs a lining, THEN it cannot go to line-stitching
     until both leather and lining are in its drawer and I mark it SENDED."""
     today = datetime.date.today()
@@ -156,6 +156,11 @@ async def test_uat5_lined_jacket_blocks_line_stitch_until_complete(
     await prod.log_batch(user=stitching_mgr, employee_id=paster[0].id,
                          piece_ids=[piece.id], work_date=today,
                          screen=ScreenContext.PIPELINE)   # pasting
+    # The lining is cut on its own parallel path — and it has to be, because the
+    # lining half of the drawer will not accept a piece whose lining was never cut.
+    await prod.log_batch(user=lining_mgr, employee_id=lining_cutter[0].id,
+                         piece_ids=[piece.id], work_date=today,
+                         screen=ScreenContext.LINING_CUT)
 
     # BEFORE storage: line-stitch is blocked
     blocked = await prod.log_batch(user=stitching_mgr, employee_id=tailor[0].id,

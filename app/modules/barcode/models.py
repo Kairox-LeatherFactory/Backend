@@ -167,6 +167,25 @@ class Drawer(Base, UUIDMixin, TimestampMixin):
     lining_in: Mapped[bool] = mapped_column(Boolean, default=False)
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # ── THE STORE SCREEN'S "LATEST" CLOCK ────────────────────────────────────
+    # Stamped by EVERY act on this drawer: merge at release, store-scan, receive,
+    # send, and release-back-to-the-pool. Nothing else in the row can answer
+    # "which drawers is the floor working on right now":
+    #   created_at  — a bootstrapped pool shares one timestamp across 200 rows,
+    #                 so it ranks them arbitrarily and forever.
+    #   received_at / sended_at — both are NULLED by release_nocommit when the
+    #                 garment ships, so the drawer that JUST shipped sinks to the
+    #                 bottom of a "recent" list. They also say nothing about the
+    #                 two events the store cares most about: the merge and the
+    #                 part scan, neither of which writes a timestamp at all.
+    # This column is monotonic within a drawer's cycle and is never cleared, so
+    # `ORDER BY last_activity_at DESC` is the store screen's default ordering.
+    last_activity_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True)
+    # WHY the last act was recorded — "merged" | "scanned" | "received" | "sent"
+    # | "released". The list shows it beside the timestamp so a drawer at the top
+    # says why it is there rather than just when.
+    last_activity_kind: Mapped[str | None] = mapped_column(String(20))
     # NO `sent_to`. A drawer briefly carried one, on the assumption that a send
     # chose between a lining floor and a stitching floor. It does not: lining is
     # UPSTREAM of the store — the lining part is cut and then scanned INTO this

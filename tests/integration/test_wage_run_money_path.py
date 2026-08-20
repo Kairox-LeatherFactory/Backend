@@ -65,6 +65,22 @@ async def _world(db, *, salary=30000):
     return dict(style=style, sku=sku, op=op, cutter=cutter, monthly=monthly)
 
 
+# ── THE PIECE / MONTHLY FORK ────────────────────────────────────────────────
+# compute_run no longer computes "the payroll" — it computes ONE of two, and a
+# PIECE run must name the work it pays for (a window with no style behind it
+# pays every garment in those dates). Every call below goes through one of these
+# two helpers so the contract is stated once.
+async def _piece_run(db, w=None, **kw):
+    """A piece-rate run, scoped to the world's one style."""
+    kw.setdefault("style_code", "CARNABY")
+    return await WageService(db).compute_run(run_kind="piece", **kw)
+
+
+async def _monthly_run(db, **kw):
+    """A salaries run. Takes no paying scope; an order/style here is a label."""
+    return await WageService(db).compute_run(run_kind="monthly", **kw)
+
+
 def _line_for(payload, name):
     """Find a worker's line by NAME.
 
@@ -150,41 +166,61 @@ async def test_a_piece_worker_is_never_paid_a_salary(db):
     await _rate(db, w, value=12.5, effective_from=START)
     await _log(db, w, qty=40, on=WORK_DAY)
 
-    payload = await WageService(db).compute_run(START, END)
+    payload = await _piece_run(db, period_start=START, period_end=END)
     line = _line_for(payload, "PIECEWORKER")
 
     assert line["wage_type"] == WageType.PIECE_RATE.value
     assert line["amount"] == pytest.approx(40 * 12.5)
+    # A piece run carries NO salaried lines at all — the fork is the population.
+    assert payload["monthly_only"] is False
+    assert payload["piece_rate_only"] is True
+    assert all(l["wage_type"] == WageType.PIECE_RATE.value
+               for l in payload["lines"])
 
 
 @F139
 @pytest.mark.asyncio
 async def test_a_monthly_worker_is_never_paid_per_piece(db):
-    """Even with production logged against them, a MONTHLY worker is prorated —
-    the two branches skip on `is not` tests over the same wage_type
-    (service.py:433-435, :467-468), so nobody satisfies both."""
+    """Even with production logged against them, a MONTHLY worker is prorated.
+
+    Now doubly guaranteed: the monthly RUN never queries production at all, and
+    the monthly BRANCH still skips anyone whose wage_type is not MONTHLY."""
     w = await _world(db)
     await _rate(db, w, value=12.5, effective_from=START)
     await _log(db, w, qty=40, on=WORK_DAY, employee=w["monthly"])
 
-    payload = await WageService(db).compute_run(START, END)
+    payload = await _monthly_run(db, period_start=START, period_end=END)
     line = _line_for(payload, "SALARIED")
 
     assert line["wage_type"] == WageType.MONTHLY.value
     assert line["amount"] != pytest.approx(40 * 12.5)
+    assert payload["monthly_only"] is True
+    assert payload["total_pieces"] == 0
 
 
 @F139
 @pytest.mark.asyncio
 async def test_every_employee_gets_at_most_one_line(db):
+    """One line per person — and, since the fork, across the PAIR of runs.
+
+    A fortnight is now paid by a PIECE run plus a MONTHLY run. That is only safe
+    if the two populations are genuinely disjoint: if anyone appeared on both,
+    the pair would pay them twice and no single-run assertion would catch it."""
     w = await _world(db)
     await _rate(db, w, value=10, effective_from=START)
     await _log(db, w, qty=5, on=WORK_DAY)
     await _log(db, w, qty=7, on=WORK_DAY + timedelta(days=1))
 
-    payload = await WageService(db).compute_run(START, END)
-    ids = [str(l["employee_id"]) for l in payload["lines"]]
-    assert len(ids) == len(set(ids))
+    piece = await _piece_run(db, period_start=START, period_end=END)
+    monthly = await _monthly_run(db, period_start=START, period_end=END)
+
+    for payload in (piece, monthly):
+        ids = [str(l["employee_id"]) for l in payload["lines"]]
+        assert len(ids) == len(set(ids))
+
+    both = ({str(l["employee_id"]) for l in piece["lines"]}
+            & {str(l["employee_id"]) for l in monthly["lines"]})
+    assert not both, f"paid on BOTH runs for the same window: {both}"
 
 
 # ═══════════════════════════════════════════════════ date-effective rate rule
@@ -202,7 +238,7 @@ async def test_a_midperiod_rate_change_prices_each_day_at_its_own_rate(db):
     await _log(db, w, qty=10, on=day_a)      # 10 x 10.00 = 100
     await _log(db, w, qty=10, on=day_b)      # 10 x 15.00 = 150
 
-    payload = await WageService(db).compute_run(START, END)
+    payload = await _piece_run(db, period_start=START, period_end=END)
     line = _line_for(payload, "PIECEWORKER")
     assert line["amount"] == pytest.approx(250.0)
 
@@ -246,9 +282,12 @@ async def test_a_closed_run_keeps_its_amounts_after_a_refused_recompute(db):
 @pytest.mark.asyncio
 async def test_an_inverted_window_is_refused(db):
     await _world(db)
+    # Scoped on purpose: an unscoped piece run is now ALSO a 422, and this test
+    # must fail on the window rather than pass for the wrong reason.
     with pytest.raises(HTTPException) as exc:
-        await WageService(db).compute_run(END, START)
+        await _piece_run(db, period_start=END, period_end=START)
     assert exc.value.status_code == 422
+    assert "period_end" in str(exc.value.detail)
 
 
 @pytest.mark.asyncio
@@ -257,8 +296,9 @@ async def test_a_future_window_is_refused(db):
     await _world(db)
     tomorrow = date.today() + timedelta(days=1)
     with pytest.raises(HTTPException) as exc:
-        await WageService(db).compute_run(date.today(), tomorrow)
+        await _piece_run(db, period_start=date.today(), period_end=tomorrow)
     assert exc.value.status_code == 422
+    assert "future" in str(exc.value.detail).lower()
 
 
 @pytest.mark.asyncio
@@ -268,8 +308,12 @@ async def test_an_overlapping_closed_run_is_refused(db):
     db.add(WageRun(period_start=START, period_end=END, status=RunStatus.CLOSED))
     await db.commit()
 
+    # The pre-existing run carries run_kind='combined' (the model default), which
+    # is what a run computed before the piece/monthly split really was: it paid
+    # both populations for the whole factory. It therefore collides with anything.
     with pytest.raises(HTTPException) as exc:
-        await WageService(db).compute_run(START + timedelta(days=3), END)
+        await _piece_run(db, period_start=START + timedelta(days=3),
+                         period_end=END)
     assert exc.value.status_code == 409
 
 
@@ -283,7 +327,7 @@ async def test_an_abandoned_open_run_still_blocks_the_window(db):
     await db.commit()
 
     with pytest.raises(HTTPException) as exc:
-        await WageService(db).compute_run(START, END)
+        await _piece_run(db, period_start=START, period_end=END)
     assert exc.value.status_code == 409
     assert "open" in str(exc.value.detail).lower()
 
@@ -297,5 +341,5 @@ async def test_a_non_overlapping_earlier_window_is_allowed(db):
                    period_end=START - timedelta(days=17), status=RunStatus.CLOSED))
     await db.commit()
 
-    payload = await WageService(db).compute_run(START, END)
+    payload = await _piece_run(db, period_start=START, period_end=END)
     assert payload["period_start"] == START or str(START) in str(payload)

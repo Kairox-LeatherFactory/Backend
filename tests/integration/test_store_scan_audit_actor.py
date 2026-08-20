@@ -49,7 +49,7 @@ from app.modules.barcode.models import BarcodeRegistry, Drawer
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
 from app.modules.drawers.service import DrawerService
 from app.modules.employees.models import Employee
-from app.modules.production.models import Piece
+from app.modules.production.models import Operation, Piece, ProductionEvent
 from app.modules.users.models import User
 
 pytestmark = pytest.mark.integrity
@@ -114,6 +114,20 @@ async def scene(fk_db):
     fk_db.add(BarcodeRegistry(code="EMP-FKA001", type=BarcodeType.EMPLOYEE.value,
                               status=BarcodeStatus.ACTIVE.value,
                               employee_id=emp.id, caption="LINA"))
+
+    # BOTH CUT PATHS FINISHED. The store only accepts a part whose side is done —
+    # leather after PASTING, lining after LINING_CUTTING — so a piece straight off
+    # the upload cannot be scanned in at all, and this fixture is about what the
+    # scan AUDITS, not about the entry gate. The events are written directly
+    # because this module runs its own session and has no production fixtures.
+    for seq, code in enumerate(
+            ("LEATHER_CUTTING", "LINING_CUTTING", "FUSING", "PASTING"), start=1):
+        op = Operation(code=code, label=code.title(), sequence=seq, is_active=True)
+        fk_db.add(op)
+        await fk_db.flush()
+        fk_db.add(ProductionEvent(
+            sku_id=sku.id, operation_id=op.id, employee_id=emp.id,
+            work_date=date.today(), qty=1, piece_id=piece.id, entered_by="test"))
     await fk_db.commit()
     return {"user": user, "employee": emp, "piece": piece, "drawer": drawer}
 
