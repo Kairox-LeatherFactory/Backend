@@ -14,13 +14,15 @@ lots (they do it when material arrives) and check stock.
 """
 import uuid
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.enums import UserRole
 from app.modules.materials import schemas
+from app.modules.materials import style_spec_schemas as spec_schemas
 from app.modules.materials.service import MaterialService
+from app.modules.materials.style_spec_service import StyleSpecService
 from app.modules.users.deps import require_roles
 from app.modules.users.models import User
 
@@ -33,6 +35,11 @@ _STOCK_READERS = require_roles(
     UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.HR,
     UserRole.CUTTING_MANAGER, UserRole.STITCHING_MANAGER, UserRole.LINING_MANAGER, UserRole.SECURITY, UserRole.STORE_MANAGER)
 _DM = require_roles(UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR)
+# The off-spec correction is made BY the store, at the drawer, so the store
+# manager needs it — waiting for a DM to record a swapped button is how the
+# correction stops being made at all.
+_ISSUERS = require_roles(
+    UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.STORE_MANAGER)
 
 
 @router.post("/lots", response_model=schemas.LotCreateResult, status_code=201)
@@ -243,3 +250,175 @@ async def edit_order_spec(
     order = await MaterialService(db).repo.get_order(order_id)
     return {"order_id": order.id, "status": order.status,
             "arrived_at": order.arrived_at.isoformat() if order.arrived_at else None}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# THE PER-PIECE MATERIAL SPEC  —  /styles/{style_id}/material-spec
+# ══════════════════════════════════════════════════════════════════════════════
+# A THIRD ROUTER IN THIS MODULE, not a new module, following the router +
+# sup_router precedent already registered side by side in main.py. The recipe is
+# a materials concept that happens to hang off a style: it resolves to lots
+# through the same six columns, it is validated by the same resolve_spec table,
+# and it is spent by the same decrement. Splitting it into its own module would
+# put those two halves behind a cross-module call for no gain.
+#
+# PREFIX /styles, which was unclaimed by every other router.
+spec_router = APIRouter(prefix="/styles", tags=["Style material spec"])
+
+
+@spec_router.get("/{style_id}/material-spec")
+async def get_material_spec(
+    style_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_STOCK_READERS),
+):
+    """The recipe grid: every line, how it resolves to stock, what blocks release.
+
+    READABLE BY THE WHOLE FLOOR (_STOCK_READERS), because the cutting manager
+    needs the dcm and the store manager needs the accessory list. Writing is
+    DM/MD only.
+    """
+    return await StyleSpecService(db).get_spec(style_id)
+
+
+@spec_router.put("/{style_id}/material-spec")
+async def replace_material_spec(
+    style_id: uuid.UUID,
+    body: spec_schemas.SpecReplace,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_DM),
+):
+    """Save the whole grid in one call. Idempotent — posting it twice is a no-op.
+
+    409 once the style is RELEASED: its pieces carry printed barcodes and the
+    recipe is already being spent against them. Correct a released style on the
+    floor with POST /materials/issues instead.
+    """
+    return await StyleSpecService(db).replace_spec(
+        style_id, [line.model_dump() for line in body.lines],
+        actor_name=user.name, actor_id=user.id)
+
+
+@spec_router.post("/{style_id}/material-spec/lines", status_code=201)
+async def add_material_spec_line(
+    style_id: uuid.UUID,
+    body: spec_schemas.SpecLineIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_DM),
+):
+    """Add one line. 409 if this style already has that material."""
+    return await StyleSpecService(db).add_line(
+        style_id, body.model_dump(), actor_name=user.name, actor_id=user.id)
+
+
+@spec_router.patch("/{style_id}/material-spec/lines/{line_id}")
+async def patch_material_spec_line(
+    style_id: uuid.UUID,
+    line_id: uuid.UUID,
+    body: spec_schemas.SpecLinePatch,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_DM),
+):
+    """Edit one line. Omitted fields keep their current value."""
+    return await StyleSpecService(db).patch_line(
+        style_id, line_id, body.model_dump(exclude_unset=True),
+        actor_name=user.name, actor_id=user.id)
+
+
+@spec_router.delete("/{style_id}/material-spec/lines/{line_id}")
+async def delete_material_spec_line(
+    style_id: uuid.UUID,
+    line_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_DM),
+):
+    """Remove a line. SOFT — the ledger still points at it, so it deactivates."""
+    return await StyleSpecService(db).deactivate_line(
+        style_id, line_id, actor_name=user.name, actor_id=user.id)
+
+
+@spec_router.post("/{style_id}/material-spec/confirm")
+async def confirm_material_spec(
+    style_id: uuid.UUID,
+    body: spec_schemas.SpecConfirm,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_DM),
+):
+    """Sign the recipe off. THIS IS WHAT UNLOCKS RELEASE.
+
+    Separate from the release call on purpose: the DM can finish the recipe days
+    earlier, and the release screen can render `release_blockers` BEFORE the
+    button is pressed rather than explaining a rejection afterwards.
+    """
+    return await StyleSpecService(db).confirm(
+        style_id, no_accessories=body.no_accessories,
+        actor_name=user.name, actor_id=user.id)
+
+
+@spec_router.post("/{style_id}/material-spec/copy-from", status_code=201)
+async def copy_material_spec(
+    style_id: uuid.UUID,
+    body: spec_schemas.SpecCopyFrom,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_DM),
+):
+    """Seed this recipe from another style's. Does NOT confirm it."""
+    return await StyleSpecService(db).copy_from(
+        style_id, body.source_style_id,
+        include_sku_overrides=body.include_sku_overrides,
+        actor_name=user.name, actor_id=user.id)
+
+
+@spec_router.get("/{style_id}/material-spec/requirement")
+async def material_spec_requirement(
+    style_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_STOCK_READERS),
+):
+    """qty_ordered x per-piece vs what is on the shelf, per line.
+
+    THE SCREEN THAT SHOULD STOP AN ORDER, and the moment to read it is BEFORE
+    release — afterwards the garments exist and a shortfall is a stoppage rather
+    than a purchase order. `short_by` and `suggested_supplier` feed straight into
+    POST /suppliers/orders.
+    """
+    return await StyleSpecService(db).requirement(style_id)
+
+
+@router.post("/issues", status_code=201)
+async def record_manual_issue(
+    body: spec_schemas.ManualIssue,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_ISSUERS),
+):
+    """Record a material issued to one garment OUTSIDE its spec. Spends stock.
+
+    THE ESCAPE HATCH THAT MAKES THE FROZEN RECIPE ACCEPTABLE. A released style's
+    spec cannot be edited — its garments are already being issued against it — so
+    a wrong article is corrected by recording what was ACTUALLY handed over, not
+    by rewriting the recipe underneath live pieces.
+
+    Repeatable on purpose: three corrections on one garment are three real
+    events, and none of them makes the kit checklist think a spec line was
+    satisfied.
+    """
+    from app.modules.barcode.service import BarcodeService
+    barcodes = BarcodeService(db)
+    piece_id = body.piece_id or (
+        await barcodes.resolve_piece_id(body.piece_barcode)
+        if body.piece_barcode else None)
+    if piece_id is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "Provide piece_barcode or piece_id.")
+    lot_id = body.material_lot_id or (
+        await barcodes.resolve_lot_id(body.lot_barcode)
+        if body.lot_barcode else None)
+    if lot_id is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "Provide lot_barcode or material_lot_id.")
+    employee_id = body.employee_id
+    if employee_id is None and body.employee_barcode:
+        employee_id = await barcodes.resolve_actor(
+            employee_barcode=body.employee_barcode)
+    return await StyleSpecService(db).issue_manual(
+        piece_id=piece_id, material_lot_id=lot_id, qty=body.qty, note=body.note,
+        employee_id=employee_id, entered_by=user.name, actor_id=user.id)

@@ -252,6 +252,8 @@ from app.core.enums_barcode import (  # noqa: E402
     SupplierOrderStatus,
     DrawerState,
     DrawerPart,
+    MaterialIssueSource,
+    KitStatus,
     BarcodeAuditAction,
     LINING_MANAGER,
     MERGE_GATE_ENTRY,

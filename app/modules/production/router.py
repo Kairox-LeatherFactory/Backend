@@ -32,7 +32,8 @@ from app.modules.users.models import User
 from app.modules.production.schemas import (
     Consumption, LogRequest, LogResult, PieceState,
 )
-from app.core.enums import ProductionStage, ScreenContext, screen_for_role
+from app.core.enums import (ProductionStage, ScreenContext, SCREEN_TO_STAGE,
+                            screen_for_role)
 
 router = APIRouter(prefix="/production", tags=["Production"])
 
@@ -186,6 +187,38 @@ async def piece_state(
         piece_id, user=user, employee_id=employee_id)
 
 
+async def _spec_dcm(db: AsyncSession, piece_ids: list, screen: ScreenContext):
+    """The per-piece dcm from the style recipe, when every piece agrees on it.
+
+    A BATCH THAT DISAGREES IS A 422, NOT A GUESS. Pieces from two SKUs whose
+    overrides set different dcm values have no single number, and silently
+    picking one would write the wrong consumption against half the garments —
+    the exact class of quiet ledger error this whole feature exists to remove.
+    Naming both values lets the operator split the batch or type the number.
+    """
+    from app.modules.materials.style_spec_service import StyleSpecService
+
+    category = ("LINING" if screen is ScreenContext.LINING_CUT else "LEATHER")
+    svc = StyleSpecService(db)
+    values = {}
+    for pid in piece_ids:
+        block = await svc.material_requirement_block(pid)
+        line = block.get("lining" if category == "LINING" else "leather")
+        if line and line.get("qty_per_piece"):
+            values.setdefault(float(line["qty_per_piece"]), []).append(pid)
+    if not values:
+        return None, None
+    if len(values) > 1:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"The pieces in this batch have different {category.lower()} "
+            f"consumption in their style specs "
+            f"({', '.join(str(v) for v in sorted(values))}), so there is no one "
+            f"quantity to record. Send `consumption.dcm` explicitly, or scan the "
+            f"pieces in separate batches.")
+    return next(iter(values)), "style_spec"
+
+
 async def _resolve_cut_lot(
     db: AsyncSession, cons: Consumption, screen: ScreenContext,
 ) -> tuple[uuid.UUID | None, uuid.UUID | None]:
@@ -305,11 +338,26 @@ async def log_batch(
     # thickness instead of by lot id. Resolved to ids HERE so the service still
     # sees ids only, exactly as barcodes are.
     leather_lot_id, lining_lot_id = await _resolve_cut_lot(db, cons, screen)
+
+    # ── THE DCM, AND WHERE IT CAME FROM ─────────────────────────────────────
+    # Resolved HERE, beside the lot, for the same reason: the service must keep
+    # seeing one number and one lot id, whatever door supplied them.
+    #
+    # OPT-IN ONLY. A client that sends neither `dcm` nor `use_style_spec` still
+    # gets today's 422 from the service — the branch that guards the leather
+    # ledger and the costing is untouched. The recipe is normally reached the
+    # other way round: /production/piece-state returns `suggested_dcm_per_piece`
+    # and the screen prefills the field, so the operator still confirms the
+    # number that reaches the ledger.
+    dcm, source = cons.dcm, ("typed" if cons.dcm is not None else None)
+    if dcm is None and cons.use_style_spec and screen in SCREEN_TO_STAGE:
+        dcm, source = await _spec_dcm(db, piece_ids, screen)
+
     return await svc.log_batch(
         user=user, employee_id=employee_id, piece_ids=piece_ids,
         work_date=body.work_date, screen=screen,
         leather_lot_id=leather_lot_id, lining_lot_id=lining_lot_id,
-        consumption_qty=cons.dcm, preview=body.preview)
+        consumption_qty=dcm, consumption_source=source, preview=body.preview)
 
 
 

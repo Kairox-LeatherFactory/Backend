@@ -326,6 +326,15 @@ async def store_scan(
     piece's own cut history and what the drawer is still missing. Send it only to
     override that.
 
+    `part=ACCESSORY` ISSUES THE GARMENT'S ACCESSORY KIT and SPENDS STOCK. It is
+    never inferred — the server only ever guesses between the two cut parts,
+    because a wrongly guessed kit would decrement lots nobody asked to spend. The
+    scan is idempotent: a second tap issues nothing and returns the same 200.
+
+    EVERY scan comes back with the `kit` block, cut parts included, so the person
+    at the drawer can see what accessories the garment still needs without
+    leaving the screen.
+
     H2: floor staff only. This write feeds the merge gate that releases a piece
     into line-stitching — CLIENT and VIEWER tokens must not reach it."""
     barcodes = BarcodeService(db)
@@ -372,7 +381,10 @@ async def store_scan(
         # scanned. Passing the worker as the actor is what wrote an employee id
         # into audit_log.actor_user_id and broke this endpoint — see store_scan.
         actor_id=user.id,
-        employee_id=employee_id)
+        employee_id=employee_id,
+        # ACCESSORY only: a partial or substituted kit issue. Ignored otherwise.
+        lines=body.lines,
+        entered_by=user.name)
 
 
 @router.post("/{drawer_id}/receive", response_model=schemas.DrawerTransitionResult,

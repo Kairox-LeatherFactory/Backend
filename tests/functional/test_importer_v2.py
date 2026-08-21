@@ -6,7 +6,10 @@ import pytest
 from app.modules.imports.import_engine import build_preview
 
 _FILENAME = "GARMENT_ORDERPRODUCTION_DETAILS.xlsx"
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# THREE dirnames: tests/functional/<file> -> tests/ -> backend/. The two-dirname
+# version resolved to tests/, so every fixture "did not exist" and this whole
+# file skipped silently for however long it has been in the tree.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Resolve the real workbook from (1) an explicit env override, (2) the project's
 # ./data folder, (3) the legacy container mount — first one that exists wins.
 _CANDIDATES = [

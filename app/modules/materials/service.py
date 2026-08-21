@@ -62,6 +62,13 @@ class MaterialService:
         # it already holds. Always defined, so reading it before a decrement is
         # None rather than an AttributeError.
         self.last_decrement_warning: dict | None = None
+        # THE KIT SPENDS SEVERAL LOTS IN ONE SCAN, so a single "last"
+        # warning cannot describe it: four accessory lines can each be
+        # short, and the operator needs all four. last_decrement_warning
+        # is kept exactly as it was (production/service.py reads it after
+        # its single cut decrement); this accumulates EVERY warning raised
+        # on this instance, in order.
+        self.decrement_warnings: list[dict] = []
 
     # ── create lot (+ child barcode + stock) ─────────────────────────────────
     async def create_lot(self, body) -> dict:
@@ -612,7 +619,7 @@ class MaterialService:
             "mismatch_fields": mismatch or None,
         }
 
-    # ── consumption hook (called by the cutting log) ─────────────────────────
+    # ── consumption hooks (the cutting log and the store kit) ────────────────
     async def decrement_for_cut_nocommit(self, lot_id: uuid.UUID,
                                          qty: float) -> float:
         """Drop a lot's on_hand by qty (dcm/mtrs) at cutting. NO commit — the
@@ -622,14 +629,45 @@ class MaterialService:
         Idempotency is the CALLER's responsibility: production writes one event
         per piece per operation, so a piece cut once decrements once. A re-posted
         identical scan is caught upstream by the per-piece 'already logged' check.
+
+        UNCHANGED SIGNATURE, RETURN TYPE AND MESSAGES. The body moved into
+        _decrement_nocommit so the accessory kit can reuse the exact same
+        warn-never-block arithmetic; every existing caller sees no difference.
         """
+        return await self._decrement_nocommit(
+            lot_id, qty, verb="Cut", context="at cutting",
+            recorded="The cut WAS recorded", not_found="Consumption lot not found.")
+
+    async def decrement_for_issue_nocommit(self, lot_id: uuid.UUID,
+                                           qty: float) -> float:
+        """Drop a lot's on_hand by qty when the store ISSUES it to a garment.
+
+        Same engine, same warn-never-block rule, different vocabulary: nothing
+        was cut here, a kit was issued. NO commit — DrawerService.store_scan owns
+        the transaction so the ledger row, the stock move and the drawer flags
+        land together or not at all.
+
+        THE CALLER MUST HAVE RESOLVED THE LOT ALREADY. This still 404s on a
+        missing lot, and a 404 mid-kit would abort a scan that had legitimately
+        issued three other lines. StyleSpecService.issue_kit_nocommit therefore
+        resolves every line FIRST and only calls this for lines that resolved —
+        unresolvable ones come back as data in `unresolved`, not as an exception.
+        """
+        return await self._decrement_nocommit(
+            lot_id, qty, verb="Issued", context="on this kit",
+            recorded="The issue WAS recorded", not_found="Issue lot not found.")
+
+    async def _decrement_nocommit(self, lot_id: uuid.UUID, qty: float, *,
+                                  verb: str, context: str, recorded: str,
+                                  not_found: str) -> float:
+        """The one place stock comes off a lot. See the two wrappers above."""
         lot = await self.repo.get_lot(lot_id)
         if not lot:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Consumption lot not found.")
+            raise HTTPException(status.HTTP_404_NOT_FOUND, not_found)
         d = Decimal(str(qty))
         if d <= 0:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
-                                "Consumption must be > 0 at cutting.")
+                                f"Consumption must be > 0 {context}.")
 
         # ── STOCK VALIDATION: warn, never block ──────────────────────────────
         # Cutting more than the ledger says is on hand is a REAL and legitimate
@@ -651,6 +689,9 @@ class MaterialService:
 
         self.last_decrement_warning = None
         if shortfall > 0:
+            # `verb` is the only thing that differs between a cut and an issue:
+            # "Cut 12.5 dcm of NAPPA" vs "Issued 4 pcs of BTN-4H". Both were
+            # RECORDED, which is the sentence that matters to whoever reads this.
             self.last_decrement_warning = {
                 "lot_id": str(lot_id),
                 "article": lot.article,
@@ -661,13 +702,16 @@ class MaterialService:
                 "short_by": float(shortfall),
                 "on_hand_after": float(lot.on_hand),
                 "note": (
-                    f"Cut {float(d)} {lot.uom} of {lot.article}"
+                    f"{verb} {float(d)} {lot.uom} of {lot.article}"
                     f"{' · ' + lot.colour if lot.colour else ''} but only "
                     f"{float(available_before)} {lot.uom} was available — short by "
-                    f"{float(shortfall)}. The cut WAS recorded; stock now reads "
+                    f"{float(shortfall)}. {recorded}; stock now reads "
                     f"{float(lot.on_hand)} {lot.uom}. Check the physical count or "
                     f"whether the wrong lot was selected."),
             }
+            # A kit decrements several lots on one service instance, so the
+            # single "last" warning would report only the final line. Accumulate.
+            self.decrement_warnings.append(self.last_decrement_warning)
         return float(lot.on_hand - reserved)
 
     # ── supplier orders ──────────────────────────────────────────────────────
@@ -786,9 +830,3 @@ class MaterialService:
         return {"order_id": order.id, "status": order.status,
                 "arrived_at": order.arrived_at.isoformat() if order.arrived_at else None}
 
-    async def _audit(self, actor_id, action, entity_id, after: dict) -> None:
-        from datetime import datetime, timezone
-        from app.core.models import AuditLog
-        self.db.add(AuditLog(
-            actor_user_id=actor_id, action=action, entity_type="material_lot",
-            entity_id=entity_id, after=after, at=datetime.now(timezone.utc)))

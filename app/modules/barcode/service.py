@@ -311,6 +311,18 @@ class BarcodeService:
             "leather_consumption_dcm": (
                 float(r.consumption_qty) if r.consumption_qty is not None else None),
             "needs_lining": bool(r.needs_lining),
+            # ── WHAT THIS GARMENT NEEDS, AND WHAT IT HAS BEEN GIVEN ──────────
+            # The answer to "how does the operator know which accessories go in
+            # the drawer?". It hangs off the PIECE code because that is one of
+            # the two things a person at the store physically has in their hand
+            # (the other is the drawer code, which carries the same block).
+            #
+            # ADDITIVE: one new key on a payload the schema already types as
+            # `dict | None`, so nothing a current client reads changes. For a
+            # style with no accessory spec it comes back NOT_REQUIRED with an
+            # empty list, which tells the screen to hide the panel rather than
+            # render an empty checklist.
+            "material_requirement": await self._material_requirement(r.id),
             # The sticker text, pre-joined so every screen prints it identically.
             "label_line": " · ".join(str(v) for v in [
                 r.order_number, r.style_name, r.article,
@@ -338,9 +350,21 @@ class BarcodeService:
             "state": r.state,
             "current_piece_id": str(r.current_piece_id) if r.current_piece_id else None,
             "leather_in": r.leather_in, "lining_in": r.lining_in,
+            # The third bucket, and the drawer-side answer to the same question
+            # the piece payload answers. Resolved for whatever piece the drawer
+            # currently holds; an empty drawer gets the NOT_REQUIRED shape rather
+            # than a null, so the screen always has something to render.
+            "accessories_in": bool(getattr(r, "accessories_in", False)),
             "holding": holding_label(leather_in=r.leather_in,
                                      lining_in=r.lining_in),
+            "material_requirement": await self._material_requirement(
+                r.current_piece_id),
         }
+
+    async def _material_requirement(self, piece_id) -> dict:
+        """The kit checklist for a piece. Lazy import keeps the graph acyclic."""
+        from app.modules.materials.style_spec_service import StyleSpecService
+        return await StyleSpecService(self.db).material_requirement_block(piece_id)
 
     async def _lot_payload(self, lot_id: uuid.UUID) -> dict:
         r = await self.repo.lot_card(lot_id)

@@ -110,6 +110,64 @@ def _upsert_sku(db, order, style, color, size, qty):
     return sku, "created"
 
 
+def _apply_style_commercials(style, line, order, cp) -> None:
+    """Fold a line's printed PRICE and DELIVERY DATE up onto its Style.
+
+    THE SHEET PRINTS THESE ONCE PER STYLE ROW, but a style usually has SEVERAL
+    rows — one per colourway. So the same fact arrives many times and the rows
+    can disagree, which is where a silent import quietly picks whichever row
+    happened to be last. Neither field is ever guessed:
+
+      PRICE     first non-empty value wins, and any LATER row that disagrees
+                raises a preview warning naming the style and BOTH numbers.
+                First-wins rather than max or last because the top row of a
+                style block is the one a human wrote deliberately; the rest are
+                copies, and a copy that drifted is exactly what the warning is
+                for.
+
+      DELIVERY  the EARLIEST date wins, and a disagreement is warned about with
+                every date listed. Earliest rather than first because delivery is
+                a COMMITMENT: if two rows of one style claim different ship dates
+                the factory is bound by the sooner one, and planning to the later
+                one would miss it.
+
+    CURRENCY falls back down a chain — the symbol in the cell, then the order,
+    then the client — because a bare "83" is a real price whose currency is
+    stated once at the top of the paperwork rather than in every cell. When
+    nothing in the chain answers, the currency is left NULL and the preview says
+    so; inventing one would put a number in the costing with no unit.
+    """
+    if line.unit_price is not None:
+        if style.unit_price is None:
+            style.unit_price = line.unit_price
+        elif style.unit_price != line.unit_price:
+            cp.warnings.append(
+                f"{style.name}: row {line.source_row} prices this style at "
+                f"{line.unit_price} but an earlier row said {style.unit_price}. "
+                f"Kept {style.unit_price} — correct the sheet if that is wrong.")
+        if not style.currency:
+            style.currency = (line.currency or getattr(order, "currency", None)
+                              or getattr(getattr(order, "client", None),
+                                         "currency", None))
+            if not style.currency:
+                cp.warnings.append(
+                    f"{style.name}: priced at {line.unit_price} but no currency "
+                    f"is stated on the cell, the order or the client. Left NULL "
+                    f"rather than assumed.")
+
+    if line.delivery_date is not None:
+        if style.delivery_date is None:
+            style.delivery_date = line.delivery_date
+        elif style.delivery_date != line.delivery_date:
+            earliest = min(style.delivery_date, line.delivery_date)
+            cp.warnings.append(
+                f"{style.name}: rows disagree on the delivery date "
+                f"({style.delivery_date} vs {line.delivery_date}). Kept the "
+                f"earliest, {earliest} — a delivery date is a commitment, and "
+                f"planning to the later one would miss it.")
+            style.delivery_date = earliest
+
+
 def _get_or_create_operation(db: Session, code: str, seq: int) -> Operation:
     op = db.scalar(select(Operation).where(Operation.code == code))
     if not op:
@@ -307,6 +365,7 @@ def load_preview_into_order(db, preview, *, order_number: str,
             style = _get_or_create_style(db, order, line.style, line.article)
             if style.id not in styles_seen:
                 styles_seen.add(style.id); stats["styles"] += 1
+            _apply_style_commercials(style, line, order, cp)
             for size, qty in line.sizes.items():
                 sku, res = _upsert_sku(db, order, style, line.color, size, qty)
                 if res == "created": stats["skus_created"] += 1
