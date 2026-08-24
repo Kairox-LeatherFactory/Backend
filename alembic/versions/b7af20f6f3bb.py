@@ -7,7 +7,7 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-from app.core.models import GUID
+from sqlalchemy.dialects.postgresql import UUID as GUID
 
 revision = 'b7af20f6f3bb'
 down_revision = '20260822_style_spec_optional_article'
