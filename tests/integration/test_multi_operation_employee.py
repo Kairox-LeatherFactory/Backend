@@ -56,7 +56,9 @@ async def test_one_employee_multiple_operations(db):
     await ws.set_rate(RateSet(style_code="CARNABY", operation_code="PASTING",
                               rate=40, effective_from=date(2026, 3, 1)))
 
-    run = await ws.compute_run(date(2026, 3, 1), date(2026, 3, 31))
+    # A piece run names the work it pays for; this employee is piece-rate.
+    run = await ws.compute_run(date(2026, 3, 1), date(2026, 3, 31),
+                               run_kind="piece", style_code="CARNABY")
     detail = await ws.get_run_detail(run["id"])
     line = next((l for l in detail["lines"] if l["employee_name"] == "MD Afzal"), None)
     assert line is not None

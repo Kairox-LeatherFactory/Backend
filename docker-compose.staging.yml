@@ -1,0 +1,27 @@
+# STAGING overlay — server, port 8001, migrations ON, seed OFF (seed manually once).
+#   docker compose -p kairox-staging -f docker-compose.yml -f docker-compose.staging.yml \
+#     --env-file .env.staging up -d --build
+services:
+  api:
+    environment:
+      RUN_MIGRATIONS: "true"
+      RUN_SEED: "false"         # seed manually with `run --rm api seed`
+    ports:
+      - "8001:8000"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1200M
+  worker:
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1200M
+  beat:
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M

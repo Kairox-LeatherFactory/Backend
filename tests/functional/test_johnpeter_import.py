@@ -29,7 +29,10 @@ from app.modules.imports.import_engine import build_preview
 from app.modules.imports.parse_orders import parse_order_sheet
 from app.modules.imports.service import preview_workbook
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# THREE dirnames: tests/functional/<file> -> tests/ -> backend/. The two-dirname
+# version resolved to tests/, so every fixture "did not exist" and this whole
+# file skipped silently for however long it has been in the tree.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 JP_FILE = os.environ.get("JOHNPETER_TEST_FILE") or os.path.join(
     _PROJECT_ROOT, "data", "johnpeter.xlsx")
 HAVE_FILE = os.path.exists(JP_FILE)

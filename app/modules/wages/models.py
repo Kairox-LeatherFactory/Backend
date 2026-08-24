@@ -16,12 +16,13 @@ from datetime import date, datetime
 from sqlalchemy import DateTime
 
 from sqlalchemy import (
-    Date, Enum, ForeignKey, Integer, Numeric, String, UniqueConstraint,
+    JSON, Boolean, Date, Enum, ForeignKey, Integer, Numeric, String,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
-from app.core.enums import RunStatus
+from app.core.enums import RunStatus, WageRunKind
 from app.core.models import GUID, TimestampMixin, UUIDMixin
 
 
@@ -67,6 +68,37 @@ class WageRun(Base, UUIDMixin, TimestampMixin):
     # to the whole factory would pay everyone twice for the window.
     scope_order_number: Mapped[str | None] = mapped_column(String(50), index=True)
     scope_style_code: Mapped[str | None] = mapped_column(String(200), index=True)
+    # ── WHICH PAYROLL THIS RUN IS (WageRunKind) ────────────────────────────
+    # STORED AS A PLAIN STRING, deliberately, and not as Enum(..., name=...).
+    # A native PG enum type would need its labels ALTER TYPE-d in before any
+    # INSERT could name them, and this project has been bitten three times by
+    # exactly that (see CLAUDE.md §13 — lining_manager, security, merchandiser
+    # all shipped with a label the ORM never emitted). A VARCHAR needs no type
+    # surgery, degrades identically on SQLite, and the values are validated by
+    # WageRunKind at the schema boundary where a bad one becomes a 422 instead
+    # of a mid-transaction DataError.
+    #
+    # DEFAULTS TO "combined" for the rows that pre-date the fork: those runs
+    # genuinely paid both populations, and calling them PIECE or MONTHLY would
+    # under-report what they already paid to the overlap guard.
+    run_kind: Mapped[str] = mapped_column(
+        String(20), default=WageRunKind.COMBINED.value,
+        server_default=WageRunKind.COMBINED.value, index=True)
+    # TRUE when scope_order_number / scope_style_code are DECORATION, not a
+    # filter — i.e. on a MONTHLY run. The distinction has to be stored, not
+    # re-derived from run_kind at read time, because it is what the overlap
+    # guard consults: two monthly runs over the same fortnight pay the same
+    # salaries twice no matter which style each one is labelled with, so a label
+    # must never be allowed to look like a narrowing.
+    scope_is_label: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False)
+    # ── THE UNPAID-WORK WARNING, FROZEN WITH THE RUN ───────────────────────
+    # compute returned `unrated_operations` once and then lost it: every later
+    # read (GET /runs/{id}, GET /runs) hardcoded []. A manager reopening the
+    # payslip screen therefore saw an empty warning list and no way to tell it
+    # apart from "everything was rated". Snapshotted here so the warning is a
+    # property of the run, not of the one HTTP response that computed it.
+    unrated_snapshot: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # ── recompute / reopen audit ───────────────────────────────────────────
     # A closed run is still a snapshot; these make it a VERSIONED one. A payslip
     # printed at recompute_count=0 and one printed at 2 are different documents

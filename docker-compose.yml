@@ -1,91 +1,83 @@
 # ──────────────────────────────────────────────────────────────
-# Leather Factory backend — docker-compose.yml
+# Leather Factory backend — docker-compose.yml  (BASE / shared)
 # ──────────────────────────────────────────────────────────────
-# ZERO-SETUP DEV ONBOARDING. A fresh clone needs nothing but Docker:
+# ONE base file, combined with a small per-environment overlay.
 #
-#   docker compose up --build   → Postgres + Redis + API + Worker + Beat
-#                                 (api entrypoint: wait-for-db → migrate → seed → uvicorn)
-#   docker compose down         → stop, KEEP data (volumes persist)
-#   docker compose down -v      → stop AND wipe DB + Redis (next `up` re-migrates + reseeds)
+#   DEV (laptop — bundled Postgres + Redis + hot-reload):
+#     docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+#       --profile dev up --build
 #
-# No `.env` is required — every setting has a safe dev default baked in below and in
-# app/core/config.py. If a `.env` exists (e.g. with real GEMINI/GROQ keys, or an Upstash
-# CELERY_BROKER_URL) it is loaded and overrides these; if absent, the stack still boots.
-# compose `environment:` wins over `env_file:`, so the DB/Redis URLs below always point
-# at the bundled `db` / `redis` services in dev.
+#   STAGING (server — Supabase-staging + Upstash-staging):
+#     docker compose -p kairox-staging \
+#       -f docker-compose.yml -f docker-compose.staging.yml \
+#       --env-file .env.staging up -d --build
 #
-# BOM extraction now runs as a background Celery job: POST /generate-bom returns 202 +
-# job_id, the `worker` builds the BOM, and the UI flips via Realtime. `worker` + `beat`
-# + `redis` are default-on so that flow works on the first `up`. In prod, point
-# CELERY_BROKER_URL / CELERY_RESULT_BACKEND at Upstash (rediss://…) and you can drop the
-# local `redis` service.
+#   PRODUCTION (server — later — Supabase-prod + Upstash-prod):
+#     docker compose -p kairox-prod \
+#       -f docker-compose.yml -f docker-compose.prod.yml \
+#       --env-file .env.prod up -d --build
 #
-# OPTIONAL virus scanning (Stage-1 upload gate) is OFF by default so the first `up` is
-# fast and never fails-closed. To turn it on:
-#   docker compose --profile scan up        # starts the clamav sidecar
-#   …and set VIRUS_SCAN_ENABLED=true (in .env or your shell env).
+# `-p <name>` labels every container/volume so two stacks never collide on one EC2.
+# Bundled db/redis are behind the `dev` profile => they only start on the laptop,
+# never on the server (server uses Supabase + Upstash).
+#
+# Each service runs GUNICORN internally (api) / celery (worker,beat) via
+# entrypoint.sh — so you do NOT write a systemd gunicorn.service in Docker.
+# Docker keeps them alive via `restart: unless-stopped`. Nginx is still the
+# public front door.
 # ──────────────────────────────────────────────────────────────
 
-# ── shared building blocks (DRY across api / worker / beat) ───────────────────
+# ── shared log-rotation, applied to every app container ──────────────────────
+# Caps each container's logs so they never fill the disk over weeks
+# (max 3 files × 10MB = 30MB per container). Referenced by api/worker/beat below.
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 x-app-base: &app-base
   build:
     context: .
     dockerfile: Dockerfile
   restart: unless-stopped
-  # Load .env if present (real API keys, custom knobs), but DON'T require it.
+  logging: *default-logging
   env_file:
     - path: .env
       required: false
   volumes:
-    # Bind-mount the source for hot-reload during dev (*.sh are pinned to LF in
-    # .gitattributes so the bind-mounted entrypoint runs on Windows too).
-    # COMMENT THIS OUT to test the baked image exactly as it ships.
-    - ./:/app
-    # Shared document store so LOCAL storage works ACROSS api + worker (the worker
-    # must read bytes the api wrote). A named volume survives even if the bind-mount
-    # above is removed. In prod with STORAGE_BACKEND=supabase this is unused.
     - procurement_docs:/app/var/procurement-documents
 
 x-app-env: &app-env
-  # Sync URL (Alembic + seed) and async URL (live API), both at the `db` host.
-  DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-factory}:${POSTGRES_PASSWORD:-factory}@db:5432/${POSTGRES_DB:-factory}
-  ASYNC_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-factory}:${POSTGRES_PASSWORD:-factory}@db:5432/${POSTGRES_DB:-factory}
-  # Alembic owns the schema (a single verified baseline). DEBUG stays false so the
-  # app never builds tables behind Alembic's back (CLAUDE.md §7).
-  DEBUG: "false"
-  # Auth: a dev-only signing key so a fresh clone has working JWTs out of the box.
-  # OVERRIDE with a long random SECRET_KEY in .env / real deployments.
+  DATABASE_URL: "${DATABASE_URL:-postgresql+psycopg2://factory:factory@db:5432/factory}"
+  ASYNC_DATABASE_URL: "${ASYNC_DATABASE_URL:-postgresql+asyncpg://factory:factory@db:5432/factory}"
+  DEBUG: "${DEBUG:-false}"
   SECRET_KEY: "${SECRET_KEY:-dev-only-insecure-change-me-in-prod}"
-  # Celery / Redis. Broker on db 0, results on db 1. Override with Upstash rediss://
-  # in prod. (config.py must expose celery_broker_url / celery_result_backend.)
   CELERY_BROKER_URL: "${CELERY_BROKER_URL:-redis://redis:6379/0}"
   CELERY_RESULT_BACKEND: "${CELERY_RESULT_BACKEND:-redis://redis:6379/1}"
-  # Stage-1 upload gate. OFF by default (uploads record scan_status=skipped) so the
-  # stack boots without the clamav sidecar. Turn on with `--profile scan` + true.
+  CELERY_DEFAULT_QUEUE: "${CELERY_DEFAULT_QUEUE:-default}"
+  WEB_CONCURRENCY: "${WEB_CONCURRENCY:-4}"
+  GUNICORN_TIMEOUT: "${GUNICORN_TIMEOUT:-120}"
   VIRUS_SCAN_ENABLED: "${VIRUS_SCAN_ENABLED:-false}"
-  CLAMD_HOST: clamav
+  CLAMD_HOST: "${CLAMD_HOST:-clamav}"
   CLAMD_PORT: "3310"
-  # Storage stays on the local driver inside the container by default; set
-  # STORAGE_BACKEND=supabase + the SUPABASE_* vars in prod (see .env.example).
-  STORAGE_BACKEND: "${STORAGE_BACKEND:-local}"
+  # On the server you use Supabase storage; default reflects that. Dev overrides
+  # to `local` via .env / the dev overlay when needed.
+  STORAGE_BACKEND: "${STORAGE_BACKEND:-supabase}"
   LOCAL_STORAGE_DIR: "/app/var/procurement-documents"
   MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-25}"
 
 services:
-  # ────────────────────────────────────────────────────────────
-  # Postgres 16 — primary data store
-  # ────────────────────────────────────────────────────────────
+  # ── LOCAL-DEV ONLY: bundled Postgres (profile: dev) ─────────────────────────
   db:
     image: postgres:16
-    container_name: factory_postgres
+    profiles: ["dev"]
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-factory}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-factory}
       POSTGRES_DB: ${POSTGRES_DB:-factory}
     ports:
-      # Exposed on the host so devs can connect with psql/DBeaver.
-      # Drop this in production — Docker-internal access only.
       - "${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -96,18 +88,13 @@ services:
       retries: 10
       start_period: 10s
 
-  # ────────────────────────────────────────────────────────────
-  # Redis 7 — Celery broker (db 0) + result backend (db 1)
-  # Lightweight + fast to pull, so it's default-on (the 202 BOM flow needs the worker,
-  # which needs the broker). appendonly persistence keeps queued jobs across restarts.
-  # ────────────────────────────────────────────────────────────
+  # ── LOCAL-DEV ONLY: bundled Redis (profile: dev) ────────────────────────────
   redis:
     image: redis:7-alpine
-    container_name: factory_redis
+    profiles: ["dev"]
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      # Exposed for local debugging (redis-cli). Drop in production.
       - "${REDIS_HOST_PORT:-6379}:6379"
     volumes:
       - redisdata:/data
@@ -118,19 +105,12 @@ services:
       retries: 10
       start_period: 5s
 
-  # ────────────────────────────────────────────────────────────
-  # ClamAV — virus scanner sidecar (Stage-1 upload gate, §7) — OPT-IN.
-  # Behind the `scan` profile so the default `docker compose up` does NOT start it
-  # (its first boot downloads virus definitions, ~1-2 min). Enable with
-  # `docker compose --profile scan up` + VIRUS_SCAN_ENABLED=true. When ON in
-  # staging/prod a malware hit is rejected (422) and the API fails CLOSED (503) if
-  # clamd is unreachable — an unscanned file is never stored.
-  # ────────────────────────────────────────────────────────────
+  # ── ClamAV virus scanner — OPT-IN (profile: scan) ───────────────────────────
   clamav:
     image: clamav/clamav:latest
-    container_name: factory_clamav
     profiles: ["scan"]
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "${CLAMD_HOST_PORT:-3310}:3310"
     healthcheck:
@@ -138,44 +118,28 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 120s   # first boot downloads virus definitions (freshclam)
+      start_period: 120s
 
-  # ────────────────────────────────────────────────────────────
-  # Backend API — FastAPI / uvicorn
-  # entrypoint.sh runs: wait-for-db → migrate → seed → uvicorn
-  # (api OWNS migrations + seed; worker/beat wait for it to be healthy)
-  # ────────────────────────────────────────────────────────────
+  # ── Backend API — Gunicorn managing uvicorn workers ─────────────────────────
   api:
     <<: *app-base
-    container_name: factory_api
     command: ["api"]
     environment:
       <<: *app-env
-      RUN_MIGRATIONS: "true"      # alembic upgrade head before serving
-      RUN_SEED: "true"            # idempotent seed from the bundled spreadsheets
-      UVICORN_RELOAD: "true"      # hot-reload in dev; remove for a production-like run
+      RUN_MIGRATIONS: "${RUN_MIGRATIONS:-true}"
+      RUN_SEED: "${RUN_SEED:-false}"     # OFF by default — seed is manual
     ports:
       - "${BACKEND_HOST_PORT:-8000}:8000"
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 90s   # first boot runs migrations + seed (≈ 870 inventory rows)
+      start_period: 90s
 
-  # ────────────────────────────────────────────────────────────
-  # Celery worker — background BOM extraction/generation jobs.
-  # Same image; entrypoint role "worker". Waits for db + redis, and for `api` to be
-  # HEALTHY (so migrate+seed are done) before processing. Never migrates/seeds itself.
-  # ────────────────────────────────────────────────────────────
+  # ── Celery worker ───────────────────────────────────────────────────────────
   worker:
     <<: *app-base
-    container_name: factory_worker
     command: ["worker"]
     environment:
       <<: *app-env
@@ -184,21 +148,12 @@ services:
       CELERY_CONCURRENCY: "${CELERY_CONCURRENCY:-4}"
       CELERY_LOGLEVEL: "${CELERY_LOGLEVEL:-info}"
     depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
       api:
-        condition: service_healthy   # api owns schema; wait until migrate+seed finished
-    # no ports — not web-facing
+        condition: service_healthy
 
-  # ────────────────────────────────────────────────────────────
-  # Celery beat — scheduler for periodic jobs (freight-risk scan, review escalation).
-  # Only talks to the broker; task bodies execute in `worker`.
-  # ────────────────────────────────────────────────────────────
+  # ── Celery beat ─────────────────────────────────────────────────────────────
   beat:
     <<: *app-base
-    container_name: factory_beat
     command: ["beat"]
     environment:
       <<: *app-env
@@ -206,15 +161,13 @@ services:
       RUN_SEED: "false"
       CELERY_LOGLEVEL: "${CELERY_LOGLEVEL:-info}"
     depends_on:
-      redis:
-        condition: service_healthy
       api:
         condition: service_healthy
 
 volumes:
   pgdata:
-    name: factory_pgdata
+    name: ${COMPOSE_PROJECT_NAME:-factory}_pgdata
   redisdata:
-    name: factory_redis_data
+    name: ${COMPOSE_PROJECT_NAME:-factory}_redis_data
   procurement_docs:
-    name: factory_procurement_docs
+    name: ${COMPOSE_PROJECT_NAME:-factory}_procurement_docs

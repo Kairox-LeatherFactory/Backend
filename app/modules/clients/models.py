@@ -135,6 +135,21 @@ class Style(Base, UUIDMixin, TimestampMixin):
     )
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     released_by: Mapped[str | None] = mapped_column(String(120))
+    # ── WHEN THIS STYLE SHIPS ────────────────────────────────────────────────
+    # Read from the DELIVERY column of the breakdown sheet, which prints it once
+    # per style row.
+    #
+    # PER STYLE, NOT PER ORDER, and that is the whole reason this column exists
+    # rather than reusing ClientOrder.delivery_deadline. One order sheet routinely
+    # carries a main-season style and an outlet style with different ship dates;
+    # collapsing them onto the order would make the earlier one invisible and the
+    # later one a lie. `delivery_deadline` stays exactly as it is — the order's
+    # own commercial deadline — and the two answer different questions.
+    #
+    # NULLABLE because plenty of sheets simply do not print a delivery column
+    # (the John Peter consolidated sheets do not). That is not an error and must
+    # not be treated as one.
+    delivery_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     # ── THE LINING DECLARATION (asked at release) ───────────────────────────
     # "Does this style take a lining?", answered by the DM at the moment they
     # release the style into production, and authoritative from then on — see
@@ -148,6 +163,33 @@ class Style(Base, UUIDMixin, TimestampMixin):
     # the floor. A three-state answer needs three states; a NOT NULL default of
     # False would silently declare 1,400 live pieces leather-only.
     needs_lining: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    # ── THE MATERIAL SPEC HEADER (the per-piece recipe, asked before release) ─
+    # The LINES live in style_material_spec; these three columns are the header:
+    # who signed the recipe off, when, and the one answer the lines themselves
+    # cannot express.
+    #
+    # WHY THREE COLUMNS AND NOT A HEADER TABLE. A header table earns its keep
+    # only if the spec is VERSIONED, and nobody has asked for that. Style already
+    # carries exactly this shape of question — needs_lining above, beside
+    # released_at / released_by — so the recipe declaration is modelled the same
+    # way as the lining declaration it sits next to.
+    #
+    # PREFIXED `material_spec_` DELIBERATELY: a bare `spec_` reads as SpecSheet,
+    # which is the BOM module's (different, Phase-2) thing.
+    material_spec_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    material_spec_confirmed_by: Mapped[str | None] = mapped_column(String(120))
+    # THREE-STATE, and the NULL is load-bearing exactly as it is for
+    # needs_lining: NULL means nobody has been asked. A recipe with no accessory
+    # lines is ambiguous on its own — it could be a jacket that genuinely takes
+    # none, or one whose buttons nobody entered yet — and releasing the second
+    # kind silently is how the whole order reaches the store with no kit. True is
+    # the DM saying "this style takes no accessories"; that is the only thing
+    # that lets an accessory-free style through the release gate.
+    material_spec_no_accessories: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True)
+
     client_order: Mapped["ClientOrder"] = relationship(back_populates="styles")
     skus: Mapped[list["SKU"]] = relationship(
         back_populates="style", cascade="all, delete-orphan"
@@ -194,6 +236,29 @@ def style_in_production():
 def is_in_production(style) -> bool:
     return (getattr(style, "production_status", None)
             == ProductionReleaseStatus.RELEASED.value)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAY THE MATERIAL SPEC STILL BE EDITED?
+# ══════════════════════════════════════════════════════════════════════════════
+# The recipe is frozen by the same event that freezes the breakdown behind it:
+# release. Once a style is RELEASED its pieces carry printed barcodes and its
+# spec is being SPENT — every kit scan decrements stock against these lines — so
+# editing a line underneath live garments would make the ledger disagree with
+# what was physically issued.
+#
+# CANCELLED is editable on purpose. It never minted anything, and a style pulled
+# and later re-uploaded should not have to fight a frozen recipe.
+#
+# THIS IS NOT A DEAD END FOR A WRONG SPEC. A typo'd button article on a released
+# style is corrected on the floor through POST /materials/issues, which records
+# what was ACTUALLY issued (source=MANUAL) without unfreezing the recipe. That
+# escape hatch is what makes freezing acceptable.
+def spec_editable(style) -> bool:
+    """True when this style's material spec may still be written to."""
+    status = (getattr(style, "production_status", None)
+              or ProductionReleaseStatus.DRAFT.value)
+    return status != ProductionReleaseStatus.RELEASED.value
 
 
 class StyleComponent(Base, UUIDMixin, TimestampMixin):

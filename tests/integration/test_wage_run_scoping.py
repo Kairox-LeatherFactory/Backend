@@ -31,11 +31,11 @@ from datetime import date, timedelta
 import pytest
 from fastapi import HTTPException
 
-from app.core.enums import WageType
+from app.core.enums import RunStatus, WageType
 from app.modules.clients import models as cm
 from app.modules.employees import models as em
 from app.modules.production import models as pm
-from app.modules.wages.models import Rate
+from app.modules.wages.models import Rate, WageRun
 from app.modules.wages.service import WageService
 
 END = date.today() - timedelta(days=1)
@@ -135,13 +135,33 @@ async def test_the_same_order_twice_is_still_a_double_payment(db):
 
 
 @pytest.mark.asyncio
-async def test_an_unscoped_run_still_covers_every_style_in_its_window(db):
-    """An unscoped run already paid everything in those dates, so a scoped
-    re-run over the same days would pay those same garments a second time."""
+async def test_a_legacy_combined_run_still_covers_every_style_in_its_window(db):
+    """A pre-fork run already paid everything in those dates, so a scoped re-run
+    over the same days would pay those same garments a second time.
+
+    The API can no longer CREATE an unscoped run — a piece run must name its
+    work — but rows written before the split carry run_kind='combined' and
+    really did pay the whole factory. The guard has to keep believing them."""
     await _two_orders(db)
     svc = WageService(db)
-    await svc.compute_run(START, END)
+    db.add(WageRun(period_start=START, period_end=END, status=RunStatus.OPEN))
+    await db.commit()
     with pytest.raises(HTTPException) as e:
         await svc.compute_run(START, END, order_number="ORD-AAA")
     assert e.value.status_code == 409
     assert "paid twice" in e.value.detail
+
+
+@pytest.mark.asyncio
+async def test_a_monthly_run_never_collides_with_a_scoped_piece_run(db):
+    """Disjoint POPULATIONS, not disjoint styles — so the dates may be identical.
+
+    This is the property that makes the mandatory scope workable: salaried staff
+    are paid by their own run over the same fortnight, and no arrangement of
+    style scopes has to be invented to let that happen."""
+    await _two_orders(db)
+    svc = WageService(db)
+    piece = await svc.compute_run(START, END, order_number="ORD-AAA")
+    salaries = await svc.compute_run(START, END, run_kind="monthly")
+    assert piece["id"] != salaries["id"]
+    assert salaries["monthly_only"] is True

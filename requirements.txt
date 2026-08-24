@@ -18,9 +18,13 @@
 #   `langchain-community==0.4.2` resolves it without downgrading anything else.
 # ──────────────────────────────────────────────────────────────────────────────
 
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.6.0+cpu
+
 # ── Web framework ──────────────────────────────────────────────────────────
 fastapi==0.136.3
 uvicorn[standard]==0.48.0
+gunicorn==23.0.0
 python-multipart==0.0.29
 
 # ── ORM + database drivers ─────────────────────────────────────────────────

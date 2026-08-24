@@ -433,7 +433,15 @@ async def test_receive_is_dm_md_only_and_enforces_the_order(
 
 async def test_the_drawer_label_sheet(api_client, as_role, pieces):
     as_role(UserRole.DIRECT_MANAGER)
-    r = await api_client.get(f"{API}/drawers", params={"seq_from": 1, "seq_to": 3})
+    # sort=seq EXPLICITLY. The default is "recent", which orders by
+    # coalesce(last_activity_at, updated_at, created_at) DESC and only falls back
+    # to seq on a TIE. SQLite's CURRENT_TIMESTAMP has one-second resolution, so
+    # the five drawers this fixture creates tie — until the loop happens to
+    # straddle a second boundary, at which point they come back newest-first and
+    # this assertion fails for reasons that have nothing to do with the endpoint.
+    # The label SHEET is a seq-ordered question, so ask for seq order.
+    r = await api_client.get(f"{API}/drawers",
+                             params={"seq_from": 1, "seq_to": 3, "sort": "seq"})
     assert r.status_code == 200
     body = r.json()
     assert body["total"] == 3 and body["count"] == 3

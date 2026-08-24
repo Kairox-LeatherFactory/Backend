@@ -123,6 +123,39 @@ class RunStatus(str, enum.Enum):
     CLOSED = "closed"
 
 
+class WageRunKind(str, enum.Enum):
+    """WHICH PAYROLL a run computes. The fork is on the EMPLOYEE POPULATION, and
+    it exists because the two populations are priced by incompatible facts.
+
+    PIECE     Pays PIECE_RATE workers only, and MUST name an order or a style.
+              A piece-rate wage is earned on a specific garment, so scoping the
+              run to that garment's style is not a filter — it is the definition
+              of what is being paid. Requiring the scope is what stops a manager
+              from typing two dates, pressing compute, and paying the whole
+              factory's piece work under a window they meant to narrow.
+
+    MONTHLY   Pays MONTHLY salaried staff only, and takes NO paying scope. A
+              salary is a fact about a PERSON for a PERIOD; there is no honest
+              way to say what share of a fitter's month belongs to CLERMONT
+              rather than CARNABY, so a monthly run is priced by the calendar
+              alone (see wages/proration.py).
+
+              It MAY still carry an order_number / style_code — but purely as a
+              LABEL for the payroll screen ("the month we ran CLERMONT"), never
+              as a filter on who is paid or how much. See
+              WageRun.scope_is_label and WageService._populate_run.
+
+    COMBINED  LEGACY ONLY, never created by the API any more. Runs computed
+              before the fork paid both populations from one unscoped window.
+              They stay readable, recomputable and — crucially — they still
+              collide with everything in the overlap guard, because they really
+              did pay everybody.
+    """
+    PIECE = "piece"
+    MONTHLY = "monthly"
+    COMBINED = "combined"
+
+
 class ProductionReleaseStatus(str, enum.Enum):
     """Whether a breakdown-sheet style has been RELEASED into production.
 
@@ -219,6 +252,8 @@ from app.core.enums_barcode import (  # noqa: E402
     SupplierOrderStatus,
     DrawerState,
     DrawerPart,
+    MaterialIssueSource,
+    KitStatus,
     BarcodeAuditAction,
     LINING_MANAGER,
     MERGE_GATE_ENTRY,

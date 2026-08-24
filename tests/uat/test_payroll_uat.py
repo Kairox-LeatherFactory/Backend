@@ -174,11 +174,32 @@ async def test_uat05_step6_the_dm_computes_the_fortnight(db, fortnight):
     ])
     await db.commit()
 
-    payload = await WageService(db).compute_run(PERIOD_START, PERIOD_END)
+    piece = await _piece_run(db)
+    salaries = await _monthly_run(db)
 
-    assert payload["status"] == RunStatus.CLOSED
-    assert payload["employee_count"] == 2
-    assert len(payload["lines"]) == 2
+    # Two runs, one line each — RAMESH on the piece run, TARA on the monthly one.
+    # The pair is the fortnight; the split is the point.
+    for payload in (piece, salaries):
+        assert payload["status"] == RunStatus.CLOSED
+        assert payload["employee_count"] == 1
+        assert len(payload["lines"]) == 1
+    assert _line(piece, "RAMESH") is not None
+    assert _line(salaries, "TARA") is not None
+
+
+# ── THE FORTNIGHT IS TWO RUNS ───────────────────────────────────────────────
+# A piece run must name the work it pays for (RAMESH's money is earned on
+# CLERMONT garments); a monthly run is priced from the calendar and takes no
+# paying scope (TARA's salary is not a fact about any style). Together they are
+# the whole fortnight, and neither can pay the other's people.
+async def _piece_run(db, **kw):
+    return await WageService(db).compute_run(
+        PERIOD_START, PERIOD_END, run_kind="piece", style_code="CLERMONT", **kw)
+
+
+async def _monthly_run(db, **kw):
+    return await WageService(db).compute_run(
+        PERIOD_START, PERIOD_END, run_kind="monthly", **kw)
 
 
 @pytest.mark.asyncio
@@ -189,9 +210,18 @@ async def test_uat05_step7_every_worker_gets_exactly_one_line(db, fortnight):
                 rate=12.50, effective_from=PERIOD_START))
     await db.commit()
 
-    payload = await WageService(db).compute_run(PERIOD_START, PERIOD_END)
-    ids = [str(l["employee_id"]) for l in payload["lines"]]
-    assert len(ids) == len(set(ids)), "an employee appeared on two lines"
+    piece = await _piece_run(db)
+    salaries = await _monthly_run(db)
+
+    for payload in (piece, salaries):
+        ids = [str(l["employee_id"]) for l in payload["lines"]]
+        assert len(ids) == len(set(ids)), "an employee appeared on two lines"
+
+    # The stronger claim the fork has to earn: nobody is on BOTH runs, or the
+    # fortnight pays them twice and no single-run check would notice.
+    overlap = ({str(l["employee_id"]) for l in piece["lines"]}
+               & {str(l["employee_id"]) for l in salaries["lines"]})
+    assert not overlap, "a worker was paid on both runs for the same fortnight"
 
 
 @pytest.mark.asyncio
@@ -208,7 +238,7 @@ async def test_uat05_step8_the_piece_worker_is_priced_per_piece_at_each_days_rat
     ])
     await db.commit()
 
-    payload = await WageService(db).compute_run(PERIOD_START, PERIOD_END)
+    payload = await _piece_run(db)
     line = _line(payload, "RAMESH")
 
     assert line["wage_type"] == WageType.PIECE_RATE.value
@@ -227,7 +257,7 @@ async def test_uat05_step9_the_monthly_worker_is_prorated_not_paid_per_piece(
                 rate=12.50, effective_from=PERIOD_START))
     await db.commit()
 
-    payload = await WageService(db).compute_run(PERIOD_START, PERIOD_END)
+    payload = await _monthly_run(db)
     line = _line(payload, "TARA")
 
     assert line["wage_type"] == WageType.MONTHLY.value
@@ -245,13 +275,20 @@ async def test_uat05_step10_the_same_fortnight_cannot_be_paid_twice(db, fortnigh
     db.add(Rate(style_id=fortnight["style"].id, operation_id=fortnight["op"].id,
                 rate=12.50, effective_from=PERIOD_START))
     await db.commit()
-    await WageService(db).compute_run(PERIOD_START, PERIOD_END)
+    await _piece_run(db)
 
     with pytest.raises(HTTPException) as exc:
         await WageService(db).compute_run(
-            PERIOD_START + datetime.timedelta(days=3), PERIOD_END)
+            PERIOD_START + datetime.timedelta(days=3), PERIOD_END,
+            run_kind="piece", style_code="CLERMONT")
     assert exc.value.status_code == 409
     assert "twice" in str(exc.value.detail).lower()
+
+    # ...and the SALARIES run over those very same dates is still allowed,
+    # because it pays a different set of people. That is what makes a mandatory
+    # style scope liveable instead of a trap.
+    salaries = await _monthly_run(db)
+    assert salaries["monthly_only"] is True
 
 
 @pytest.mark.asyncio
@@ -262,14 +299,25 @@ async def test_uat05_step11_hr_reads_the_payslip_but_cannot_run_payroll(
     db.add(Rate(style_id=fortnight["style"].id, operation_id=fortnight["op"].id,
                 rate=12.50, effective_from=PERIOD_START))
     await db.commit()
-    run = await WageService(db).compute_run(PERIOD_START, PERIOD_END)
+    run = await _piece_run(db)
 
     as_role(UserRole.HR)
     r = await api_client.get(f"{API}/wages/runs/{run['id']}")
     assert r.status_code == 200, r.text
-    assert len(r.json()["lines"]) == 2
+    assert len(r.json()["lines"]) == 1
+
+    # The run list is HR-readable too, and it is the route back to a run_id:
+    # every row carries the style it paid for, so a manager can find last
+    # fortnight's CLERMONT run without opening runs one at a time.
+    r = await api_client.get(f"{API}/wages/runs", params={"style_code": "CLERMONT"})
+    assert r.status_code == 200, r.text
+    rows = r.json()
+    assert rows and rows[0]["scope_style_code"] == "CLERMONT"
+    assert rows[0]["run_kind"] == "piece"
+    assert rows[0]["scope_is_label"] is False
 
     r = await api_client.post(f"{API}/wages/runs", json={
+        "run_kind": "piece", "style_code": "CLERMONT",
         "period_start": (PERIOD_START - datetime.timedelta(days=30)).isoformat(),
         "period_end": (PERIOD_START - datetime.timedelta(days=17)).isoformat()})
     assert r.status_code == 403, "HR started a payroll run"
@@ -308,7 +356,7 @@ async def test_uat05_step13_the_payslip_reconciles_for_the_worker_holding_it(
     ])
     await db.commit()
 
-    payload = await WageService(db).compute_run(PERIOD_START, PERIOD_END)
+    payload = await _piece_run(db)
     line = _line(payload, "RAMESH")
 
     assert line["breakdown"], "the payslip carries no explanation of the total"
@@ -330,7 +378,7 @@ async def test_uat05_step14_unpriced_work_is_named_before_anyone_is_paid(
 
     The checklist's instruction is "check unrated_operations before paying
     anyone"; this asserts there is something worth checking."""
-    payload = await WageService(db).compute_run(PERIOD_START, PERIOD_END)
+    payload = await _piece_run(db)
 
     unrated = [u for u in payload["unrated_operations"]
                if u.get("kind") == "unrated_operation"]
@@ -338,3 +386,10 @@ async def test_uat05_step14_unpriced_work_is_named_before_anyone_is_paid(
     assert unrated[0]["style_code"] == "CLERMONT"
     assert unrated[0]["unpaid_pieces"] == 200
     assert _line(payload, "RAMESH") is None, "unpriced work became a zero-rupee line"
+
+    # The checklist says "check unrated_operations before paying anyone" — so the
+    # warning has to still be there when the DM reopens the screen tomorrow. It
+    # used to live only in this response; every later read returned [].
+    reread = await WageService(db).get_run_detail(payload["id"])
+    assert [u for u in reread["unrated_operations"]
+            if u.get("kind") == "unrated_operation"] == unrated

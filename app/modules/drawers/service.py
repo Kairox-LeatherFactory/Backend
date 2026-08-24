@@ -41,11 +41,12 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import kit_rules
 from app.core.enums import (BarcodeAuditAction, BarcodeType, DrawerPart,
-                            DrawerState, ProductionStage)
+                            DrawerState, MaterialCategory, ProductionStage)
 from app.core.lining_rules import (LINING_COLOUR_FIELDS, lining_required,
                                    lining_required_sql, why_lining_required)
 from app.core.store_display import STORE_ENTRY_STAGE, holding_label
@@ -53,6 +54,23 @@ from app.modules.barcode.models import BarcodeRegistry, Drawer
 from app.modules.clients.models import SKU, Style
 from app.modules.production.models import Piece
 
+
+
+# ── THE STORE SCREEN'S ACTIVITY CLOCK ────────────────────────────────────────
+# Every act on a drawer stamps `last_activity_at` through this one function, so
+# there is exactly one place that decides what "recently used" means. Inlining
+# `drawer.last_activity_at = now` at the five mutation sites is how the previous
+# ordering (`coalesce(sended_at, received_at, created_at)`) drifted: two of those
+# three columns are CLEARED on release, and neither the merge nor the part scan
+# wrote any timestamp at all.
+#
+# It is deliberately NOT reset by release_nocommit. A drawer that has just
+# shipped its garment is the single most recently worked-on drawer in the
+# building, and the old ordering buried it.
+def _touch(drawer, kind: str, *, now=None) -> None:
+    """Record that something just happened to this drawer, and what."""
+    drawer.last_activity_at = now or datetime.now(timezone.utc)
+    drawer.last_activity_kind = kind
 
 
 class DrawerService:
@@ -108,6 +126,50 @@ class DrawerService:
         from app.modules.production.repository import ProductionRepository
         done = await ProductionRepository(self.db).completed_stage_codes(piece_id)
         return ProductionStage.LINING_CUTTING.value in done
+
+    async def _kit_required(self, piece: Piece | None) -> bool:
+        """Does this garment's style declare any accessories at all?
+
+        THE PYTHON HALF of the same two-shape pattern the lining question uses —
+        StyleSpecRepository.kit_required_sql is the SQL half, and the two sit
+        beside each other so they cannot answer differently.
+
+        FALSE FOR EVERY STYLE THAT PREDATES THE MATERIAL SPEC, which is what
+        makes the completeness predicate collapse to exactly its pre-existing
+        form for every drawer already on the floor. That is the whole
+        back-compatibility argument, and it lives in this one line.
+        """
+        if piece is None:
+            return False
+        from app.modules.materials.style_spec_service import StyleSpecService
+        return await StyleSpecService(self.db).kit_required_for_piece(piece.id)
+
+    async def _kit_required_map(self, piece_ids: list[uuid.UUID]) -> dict:
+        """Batch form — {piece_id: bool}. Three queries, not N+1.
+
+        list_labels renders up to 2000 drawers and must apply exactly the
+        predicate send_batch enforces, so it resolves the whole page at once.
+        """
+        ids = [p for p in dict.fromkeys(piece_ids) if p is not None]
+        if not ids:
+            return {}
+        from app.modules.materials.style_spec_repository import StyleSpecRepository
+        from app.modules.materials.style_spec_service import StyleSpecService
+
+        rows = (await self.db.execute(
+            select(Piece.id, Piece.sku_id, SKU.style_id)
+            .join(SKU, SKU.id == Piece.sku_id)
+            .where(Piece.id.in_(ids)))).all()
+        style_ids = list({r[2] for r in rows})
+        lines_by_style = await StyleSpecRepository(self.db).lines_for_styles(style_ids)
+
+        out = {pid: False for pid in ids}
+        for pid, sku_id, style_id in rows:
+            eff = StyleSpecService.merge_lines(
+                lines_by_style.get(style_id, []), sku_id)
+            out[pid] = any(l.category == MaterialCategory.ACCESSORY.value
+                           for l in eff)
+        return out
 
     async def _needs_lining_map(self, piece_ids: list[uuid.UUID]) -> dict:
         """Batch form of _needs_lining — {piece_id: bool}. Two queries, not N+1.
@@ -172,7 +234,8 @@ class DrawerService:
                           has_piece: bool | None = None,
                           sendable: bool | None = None,
                           code: str | None = None,
-                          sort: str = "seq",
+                          sort: str = "recent",
+                          pin_codes: list[str] | None = None,
                           limit: int = 500, offset: int = 0) -> dict:
         """Every drawer + its barcode + the garment inside it — the Drawers List.
 
@@ -232,9 +295,22 @@ class DrawerService:
             # holding both parts auto-receives, but a genuinely leather-only piece
             # never gets a second part and so never reaches RECEIVED, while still
             # being complete and perfectly sendable.
+            #
+            # THE ACCESSORY TERM works the same way the lining one does: a
+            # correlated EXISTS that is FALSE for every style with no accessory
+            # spec, so the clause collapses to TRUE and this filter returns
+            # exactly what it returned before the kit existed. Like the lining
+            # SQL, the Python pass below can only ever ADD a requirement, so a
+            # row this admits may still be held back per-drawer — never the
+            # reverse, which is the only direction that could offer the DM a
+            # drawer the server would then refuse to send.
+            from app.modules.materials.style_spec_repository import (
+                StyleSpecRepository)
+            kit_sql = StyleSpecRepository.kit_required_sql(Style.id)
             complete_sql = and_(
                 Drawer.leather_in.is_(True),
                 or_(Drawer.lining_in.is_(True), ~lining_sql),
+                or_(Drawer.accessories_in.is_(True), ~kit_sql),
             )
             not_gone = Drawer.state != DrawerState.SENDED.value
             if sendable is True:
@@ -255,26 +331,67 @@ class DrawerService:
         # `seq` is the PRINT order — DRW-0001…DRW-0430, which is how labels are
         # produced and how an operator finds a physical drawer in the rack.
         #
-        # `recent` is the STORE SCREEN order (change-list item 6: "show the 10
-        # latest drawers"). "Latest" means most recently ACTED ON, not most
-        # recently created: a 200-drawer pool is bootstrapped in one transaction,
-        # so created_at is effectively constant across it and would return the
-        # same arbitrary ten every time. The activity timestamp is therefore the
-        # newest of sended_at / received_at, falling back to created_at for a
-        # drawer nothing has happened to yet.
-        activity = func.coalesce(Drawer.sended_at, Drawer.received_at,
+        # `recent` is the STORE SCREEN order, and it is now the DEFAULT: a store
+        # operator opens this list many times a day to see what the floor is
+        # working on, and prints labels rarely. The print sheet asks for
+        # `sort=seq` explicitly.
+        #
+        # WHAT "LATEST" USED TO MEAN, AND WHY IT WAS WRONG.
+        #     coalesce(sended_at, received_at, created_at)
+        # got all three of the cases this screen exists for:
+        #   • A MERGED drawer has neither sended_at nor received_at, so a garment
+        #     merged into it seconds ago fell through to created_at.
+        #   • A STORE SCAN writes neither column — it moves leather_in/lining_in
+        #     and state — so the single most common act on a drawer was invisible.
+        #   • release_nocommit NULLS both columns, so the drawer that had JUST
+        #     shipped sorted to the very bottom.
+        # And created_at cannot be the fallback that saves it: a 200-drawer pool
+        # is bootstrapped in one transaction and shares one timestamp, so it
+        # returns the same arbitrary ten rows forever.
+        #
+        # `last_activity_at` is stamped by every act (see _touch and premint) and
+        # is never cleared. `updated_at` backfills it for rows written before this
+        # column existed — TimestampMixin sets onupdate=func.now(), so any drawer
+        # ever touched by the ORM already carries a true activity time.
+        activity = func.coalesce(Drawer.last_activity_at, Drawer.updated_at,
                                  Drawer.created_at)
-        if (sort or "seq").strip().lower() == "recent":
-            order_by = (activity.desc(), Drawer.seq.asc())
-        else:
+
+        # PINNED CODES — the "recently searched" band (change-list item: drawers).
+        # A search is a fact about one operator's SESSION, not about the factory,
+        # so it is not stored: the client keeps its own recent-search list and
+        # replays it here as `pin_codes`. That keeps a read endpoint a read
+        # endpoint (the alternative wrote a row to the database on every list
+        # call) and it costs one CASE expression.
+        #
+        # Pinned rows sort ABOVE everything, in the order the client sent them —
+        # the client's list is already most-recent-first, and re-sorting it here
+        # would throw that away.
+        pinned = [c.strip().upper() for c in (pin_codes or []) if c and c.strip()]
+        pin_rank = None
+        if pinned:
+            pin_rank = case(
+                {c: i for i, c in enumerate(pinned)},
+                value=func.upper(Drawer.code),
+                else_=len(pinned),
+            )
+
+        if (sort or "recent").strip().lower() == "seq":
             order_by = (Drawer.seq.asc(),)
+        else:
+            # seq is the tiebreaker, not decoration: drawers merged in one
+            # transaction share a timestamp to the microsecond, and without a
+            # stable second key they reshuffle between pages of the same list.
+            order_by = (activity.desc(), Drawer.seq.asc())
+        if pin_rank is not None:
+            order_by = (pin_rank.asc(),) + order_by
 
         rows = (await self.db.execute(
             _filtered(_joins(
                 select(Drawer, BarcodeRegistry.id, BarcodeRegistry.code,
                        BarcodeRegistry.caption, BarcodeRegistry.status,
                        Piece.code.label("piece_code"), Piece.seq.label("piece_seq"),
-                       Piece.needs_lining)
+                       Piece.needs_lining,
+                       activity.label("activity_at"))
                 .outerjoin(
                     BarcodeRegistry,
                     and_(BarcodeRegistry.drawer_id == Drawer.id,
@@ -288,13 +405,20 @@ class DrawerService:
         # the lining-cut-event term the SQL could not carry.
         lining_map = await self._needs_lining_map(
             [r[0].current_piece_id for r in rows])
+        kit_map = await self._kit_required_map(
+            [r[0].current_piece_id for r in rows])
 
+        pin_set = set(pinned)
         items = []
         for r in rows:
             drawer = r[0]
             pid = drawer.current_piece_id
             needs_lining = lining_map.get(pid, True) if pid else True
-            complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
+            kit_required = kit_map.get(pid, False) if pid else False
+            complete = kit_rules.drawer_complete(
+                leather_in=drawer.leather_in, lining_in=drawer.lining_in,
+                accessories_in=drawer.accessories_in,
+                needs_lining=needs_lining, kit_required=kit_required)
             items.append({
                 "drawer_id": drawer.id,
                 "seq": drawer.seq,
@@ -304,6 +428,8 @@ class DrawerService:
                                          lining_in=drawer.lining_in),
                 "leather_in": bool(drawer.leather_in),
                 "lining_in": bool(drawer.lining_in),
+                "accessories_in": bool(drawer.accessories_in),
+                "kit_required": bool(kit_required),
                 # EFFECTIVE, not the stored flag — see _needs_lining_map.
                 "needs_lining": bool(needs_lining),
                 "lining_reason": None,
@@ -323,6 +449,12 @@ class DrawerService:
                 "barcode": r[2],
                 "caption": r[3],
                 "barcode_status": r[4],
+                # WHEN this drawer was last worked on, and WHY it is where it is
+                # in the list. A row at the top saying "sent · 2 min ago" is
+                # self-explaining; a bare timestamp is not.
+                "last_activity_at": r.activity_at,
+                "last_activity": drawer.last_activity_kind,
+                "pinned": bool(pinned) and (drawer.code or "").upper() in pin_set,
             })
         return {"total": total, "count": len(items), "items": items}
 
@@ -352,6 +484,15 @@ class DrawerService:
         that a caller can skip by naming the bucket itself is not a gate — and
         the explicit path is the one the barcode screen uses.
         """
+        # NO STAGE GATE ON THE ACCESSORY KIT, deliberately. STORE_ENTRY_STAGE
+        # exists because there is no leather part to store until PASTING and no
+        # lining until LINING_CUTTING — a cut side has to EXIST before it can be
+        # put anywhere. Nothing produces a button: the kit is picked from stock,
+        # and an operator who reaches the accessory bin before the leather is
+        # pasted is working ahead, not out of sequence. Indexing the map here
+        # would also KeyError, since it is keyed by the two cut parts only.
+        if part is DrawerPart.ACCESSORY:
+            return
         required = STORE_ENTRY_STAGE[part.value]
         if required in done:
             return
@@ -423,7 +564,9 @@ class DrawerService:
     async def store_scan(self, *, drawer_id: uuid.UUID, piece_id: uuid.UUID,
                          part: DrawerPart | None = None,
                          actor_id: uuid.UUID | None = None,
-                         employee_id: uuid.UUID | None = None) -> dict:
+                         employee_id: uuid.UUID | None = None,
+                         lines: list | None = None,
+                         entered_by: str | None = None) -> dict:
         """Record a part arriving in its drawer.
 
         TWO IDENTITIES, TWO PARAMETERS — and they are not interchangeable.
@@ -464,11 +607,38 @@ class DrawerService:
         # A drawer already RECEIVED or SENDED must not be dragged backwards by a
         # new scan — that would silently revoke a merge gate production may have
         # already passed.
-        if drawer.state in (DrawerState.RECEIVED.value, DrawerState.SENDED.value):
+        # AN ACCESSORY KIT IS EXEMPT FROM THE `RECEIVED` HALF OF THIS RULE, and
+        # that exemption is load-bearing rather than a convenience.
+        #
+        # What F08 protects is a drawer being dragged BACKWARDS: a new cut part
+        # arriving after the drawer was released would silently revoke a merge
+        # gate production may already have passed. An accessory issue cannot do
+        # that. It is purely ADDITIVE — it spends stock and fills a bucket that
+        # was empty — so no gate that was open can close because of it.
+        #
+        # Without the exemption the feature is unusable on lined garments. Auto-
+        # RECEIVED fires on leather+lining, so the natural store order (leather,
+        # lining, then the kit) would put the third scan against an already-
+        # RECEIVED drawer and 409 it, with a message about "released for the next
+        # stage" that has nothing to do with what the operator just did. The
+        # other half of that fix is in the auto-RECEIVE branch below, which now
+        # waits for the kit; the two must ship together.
+        #
+        # SENDED still refuses everything: once the drawer has physically left
+        # the store there is nothing there to put anything into.
+        is_kit = part is DrawerPart.ACCESSORY
+        late_kit = False
+        if drawer.state == DrawerState.SENDED.value or (
+                drawer.state == DrawerState.RECEIVED.value and not is_kit):
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 f"Drawer {drawer.code} is already {drawer.state} and cannot accept "
                 "another part scan. Its pieces have been released for the next stage.")
+        if drawer.state == DrawerState.RECEIVED.value and is_kit:
+            # Reported so the screen can say so: this drawer was received before
+            # its kit was issued, which is normal only for a style whose spec
+            # arrived late.
+            late_kit = True
 
         # BUG #18: no manual Hold Leather / Hold Lining button. An explicit part
         # still wins (a screen that genuinely knows), otherwise the system reads
@@ -490,13 +660,38 @@ class DrawerService:
         # the inferred one, or naming the bucket would skip the gate.
         await self._assert_ready_for_store(piece, part, done)
 
-        if part is DrawerPart.LEATHER:
+        # ── THE KIT BRANCH ───────────────────────────────────────────────────
+        # Everything above ran unchanged: the merge map is still the first
+        # authority, the lifecycle block still refuses a SENDED drawer, and the
+        # piece history was still read exactly once. Only now does the scan
+        # become accessory-aware.
+        kit = None
+        if is_kit:
+            from app.modules.materials.style_spec_service import StyleSpecService
+            kit = await StyleSpecService(self.db).issue_kit_nocommit(
+                piece=piece, drawer=drawer, requested_lines=lines,
+                employee_id=employee_id, entered_by=entered_by)
+            # `complete` is the SERVICE's verdict, and it is False when any line
+            # failed to resolve to a lot as well as when something is still owed.
+            # A drawer whose kit is short must not become sendable, so this flag
+            # is the only thing allowed to set the boolean.
+            drawer.accessories_in = bool(kit["complete"])
+            _touch(drawer, "kit")
+        elif part is DrawerPart.LEATHER:
             drawer.leather_in = True
+            # The part scan is the event the store screen most needs to see and
+            # the only one that previously wrote NO timestamp anywhere.
+            _touch(drawer, "scanned")
         else:
             drawer.lining_in = True
+            _touch(drawer, "scanned")
 
         needs_lining, lining_reason = await self._needs_lining(piece)
-        complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
+        kit_required = await self._kit_required(piece)
+        complete = kit_rules.drawer_complete(
+            leather_in=drawer.leather_in, lining_in=drawer.lining_in,
+            accessories_in=drawer.accessories_in,
+            needs_lining=needs_lining, kit_required=kit_required)
         # THE STATE NAMES WHAT IS PHYSICALLY IN THE DRAWER — nothing else.
         #   leather only            → HOLDING_LEATHER
         #   lining only             → HOLDING_LINING   (F07: a lining-first scan
@@ -513,8 +708,15 @@ class DrawerService:
             drawer.state = DrawerState.HOLDING_LEATHER.value
         elif drawer.lining_in:
             drawer.state = DrawerState.HOLDING_LINING.value
-        else:
+        elif not is_kit:
             drawer.state = DrawerState.WAITING.value
+        # LATENT BUG, MADE REACHABLE BY THE KIT. This last arm was dead code:
+        # before accessories, every scan set one of the two booleans first, so
+        # "neither part in" could not happen here. A kit issued BEFORE either cut
+        # part arrives reaches it — and would stamp WAITING on a drawer that is
+        # merged to a piece and now physically holds its buttons. WAITING is the
+        # free-pool state every screen reads as "nothing here", so the row would
+        # be a lie. Leave the state alone instead: MERGED still describes it.
 
         # ── HOLDING BOTH AUTO-ADVANCES TO RECEIVED ───────────────────────────
         # RECEIVED used to be a button pressed on one drawer at a time, and it
@@ -545,10 +747,20 @@ class DrawerService:
         #
         # SEND REMAINS MANUAL EITHER WAY. Receiving records what is in the drawer;
         # sending releases the piece into the next stage. See send_batch.
+        # AND IT NOW WAITS FOR THE ACCESSORY KIT TOO — the other half of the
+        # RECEIVED exemption above, and the reason the two must ship together.
+        # `kit_satisfied` is True whenever the style declares no accessories, so
+        # for every style that predates the material spec this condition is still
+        # exactly `leather_in and lining_in` and nothing on the floor changes.
         auto_received = False
-        if drawer.leather_in and drawer.lining_in:
+        if kit_rules.auto_receive_ready(
+                leather_in=drawer.leather_in, lining_in=drawer.lining_in,
+                accessories_in=drawer.accessories_in,
+                kit_required=kit_required) and (
+                drawer.state != DrawerState.RECEIVED.value):
             drawer.state = DrawerState.RECEIVED.value
             drawer.received_at = datetime.now(timezone.utc)
+            _touch(drawer, "received", now=drawer.received_at)
             auto_received = True
             await self._audit(
                 actor_id, BarcodeAuditAction.DRAWER_RECEIVED.value, drawer.id,
@@ -556,7 +768,17 @@ class DrawerService:
                  # The worker who physically put the part in. Recorded as data,
                  # NOT as actor_user_id — see the docstring above.
                  "employee_id": str(employee_id) if employee_id else None,
-                 "part": part.value})
+                 "part": part.value, "kit_status": kit["status"] if kit else None})
+        if is_kit:
+            await self._audit(
+                actor_id, BarcodeAuditAction.MATERIAL_KIT_ISSUED.value, drawer.id,
+                {"piece": piece.code, "drawer": drawer.code,
+                 "status": kit["status"],
+                 "issued": [{"article": r["article"], "qty": r["qty"],
+                             "uom": r["uom"]} for r in kit["issued_now"]],
+                 "unresolved": [r["article"] for r in kit["unresolved"]],
+                 "late_kit": late_kit,
+                 "employee_id": str(employee_id) if employee_id else None})
 
         await self.repo_commit()   # F71: commit via a single seam (see below)
         await self.db.refresh(drawer)
@@ -566,6 +788,18 @@ class DrawerService:
             awaiting.append("LEATHER")
         if needs_lining and not drawer.lining_in:
             awaiting.append("LINING")
+        if kit_required and not drawer.accessories_in:
+            awaiting.append("ACCESSORIES")
+
+        # THE CHECKLIST COMES BACK ON EVERY SCAN, not only the accessory one.
+        # The person holding the leather is the person who also has to find the
+        # buttons, and answering "what else does this garment need?" on the scan
+        # they were already doing is the whole visibility ask. On a cut-part scan
+        # this is a READ (kit_view issues nothing); on a kit scan it is the
+        # receipt for what was just spent.
+        if kit is None:
+            from app.modules.materials.style_spec_service import StyleSpecService
+            kit = await StyleSpecService(self.db).kit_view(piece.id, drawer)
         return {
             "drawer_code": drawer.code, "piece_code": piece.code,
             "state": drawer.state, "needs_lining": needs_lining,
@@ -583,6 +817,10 @@ class DrawerService:
             "holding": holding_label(leather_in=drawer.leather_in,
                                      lining_in=drawer.lining_in),
             "auto_received": auto_received,
+            "kit": kit,
+            # True when the kit went into a drawer that had already been
+            # RECEIVED — normal only where the spec arrived after the garment.
+            "late_kit": late_kit,
             # ── BUG #15: THIS SCAN IS NOT COMPLETION ─────────────────────────
             # The frontend was marking an item finished as soon as it was scanned
             # in. It is not: the piece is sitting in a drawer, and it does not
@@ -596,13 +834,23 @@ class DrawerService:
             "next_action": self._next_action(
                 piece_code=piece.code, drawer_code=drawer.code,
                 auto_received=auto_received, complete=complete,
-                awaiting=awaiting),
+                awaiting=awaiting, kit=kit),
         }
 
     @staticmethod
     def _next_action(*, piece_code: str, drawer_code: str, auto_received: bool,
-                     complete: bool, awaiting: list[str]) -> str:
+                     complete: bool, awaiting: list[str], kit=None) -> str:
         """One sentence telling the operator what actually happens next."""
+        # AN UNRESOLVED KIT LINE OUTRANKS EVERY OTHER MESSAGE. It means the
+        # recipe asks for stock that does not exist under that article, so the
+        # garment is stuck on something no amount of scanning will fix — and
+        # "still awaiting ACCESSORIES" would send the operator to a bin that is
+        # not the problem.
+        if kit and kit.get("unresolved"):
+            missing = ", ".join(r["article"] for r in kit["unresolved"][:3])
+            return (f"{piece_code} cannot be kitted: no stock lot matches "
+                    f"{missing}. Receive that material, or correct the style's "
+                    f"material spec, then scan the kit again.")
         if auto_received:
             return (f"{piece_code} is in drawer {drawer_code}, which now holds "
                     f"both parts and has been received. Select it in the Drawers "
@@ -636,9 +884,20 @@ class DrawerService:
                     status.HTTP_409_CONFLICT,
                     f"Drawer {drawer.code} is already SENDED — cannot move back to "
                     "RECEIVED.")
-            complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
+            kit_required = await self._kit_required(
+                await self.db.get(Piece, drawer.current_piece_id)
+                if drawer.current_piece_id else None)
+            complete = kit_rules.drawer_complete(
+                leather_in=drawer.leather_in, lining_in=drawer.lining_in,
+                accessories_in=drawer.accessories_in,
+                needs_lining=needs_lining, kit_required=kit_required)
             if not complete:
-                missing = "lining" if needs_lining and not drawer.lining_in else "leather"
+                if kit_required and not drawer.accessories_in:
+                    missing = "accessory kit"
+                elif needs_lining and not drawer.lining_in:
+                    missing = "lining"
+                else:
+                    missing = "leather"
                 because = f" ({lining_reason})" if missing == "lining" and lining_reason else ""
                 raise HTTPException(
                     status.HTTP_409_CONFLICT,
@@ -646,6 +905,7 @@ class DrawerService:
                     f"{drawer.code}{because}.")
             drawer.state = DrawerState.RECEIVED.value
             drawer.received_at = datetime.now(timezone.utc)
+            _touch(drawer, "received", now=drawer.received_at)
             action = BarcodeAuditAction.DRAWER_RECEIVED.value
 
         elif t == "SENDED":
@@ -655,6 +915,7 @@ class DrawerService:
                     "Cannot SEND before RECEIVED. Set RECEIVED first.")
             drawer.state = DrawerState.SENDED.value
             drawer.sended_at = datetime.now(timezone.utc)
+            _touch(drawer, "sent", now=drawer.sended_at)
             action = BarcodeAuditAction.DRAWER_SENDED.value
         else:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -696,12 +957,21 @@ class DrawerService:
             piece = await self.db.get(Piece, drawer.current_piece_id)
             needs_lining, lining_reason = await self._needs_lining(piece)
 
-        complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
+        kit_required = False
+        if drawer.current_piece_id:
+            kit_required = await self._kit_required(
+                await self.db.get(Piece, drawer.current_piece_id))
+        complete = kit_rules.drawer_complete(
+            leather_in=drawer.leather_in, lining_in=drawer.lining_in,
+            accessories_in=drawer.accessories_in,
+            needs_lining=needs_lining, kit_required=kit_required)
         awaiting = []
         if not drawer.leather_in:
             awaiting.append("LEATHER")
         if needs_lining and not drawer.lining_in:
             awaiting.append("LINING")
+        if kit_required and not drawer.accessories_in:
+            awaiting.append("ACCESSORIES")
 
         return {
             "drawer_id": drawer.id, "code": drawer.code, "seq": drawer.seq,
@@ -710,6 +980,8 @@ class DrawerService:
                                      lining_in=drawer.lining_in),
             "leather_in": bool(drawer.leather_in),
             "lining_in": bool(drawer.lining_in),
+            "accessories_in": bool(drawer.accessories_in),
+            "kit_required": bool(kit_required),
             "needs_lining": needs_lining,
             "lining_reason": lining_reason,
             "awaiting": awaiting,
@@ -807,22 +1079,47 @@ class DrawerService:
             # ran to PACKAGE_EXPORT with no lining ever cut. _needs_lining()
             # resolves the requirement from every signal instead.
             needs_lining, lining_reason = await self._needs_lining(piece)
-            complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
+            # THE KIT GATES THE SEND, and this is the one place it matters most:
+            # sending is the garment physically LEAVING the store. Line-stitching
+            # is deliberately NOT gated on accessories (see
+            # ProductionService._merge_ok) because buttons are an input to
+            # finishing, not to stitching — but a drawer must not leave the store
+            # without the parts that travel with it.
+            kit_required = await self._kit_required(piece)
+            complete = kit_rules.drawer_complete(
+                leather_in=drawer.leather_in, lining_in=drawer.lining_in,
+                accessories_in=drawer.accessories_in,
+                needs_lining=needs_lining, kit_required=kit_required)
             if not complete:
-                missing = "leather" if not drawer.leather_in else "lining"
+                if kit_required and not drawer.accessories_in:
+                    missing = "accessory kit"
+                elif not drawer.leather_in:
+                    missing = "leather"
+                else:
+                    missing = "lining"
                 because = (f" This garment takes a lining because {lining_reason}."
                            if missing == "lining" and lining_reason else "")
+                # The kit is ISSUED, not scanned in like a cut part, so it needs
+                # its own instruction — telling an operator to "scan the missing
+                # part" when what is missing is four buttons is not actionable.
+                fix = ("Issue its accessory kit (store-scan with part=ACCESSORY) "
+                       "before sending."
+                       if missing == "accessory kit" else
+                       "Scan the missing part into it before sending.")
                 not_ready.append({
                     "drawer_id": str(did), "drawer_code": drawer.code,
                     "state": drawer.state,
                     "needs_lining": bool(needs_lining),
+                    "kit_required": bool(kit_required),
+                    "accessories_in": bool(drawer.accessories_in),
                     "reason": (
                         f"Drawer {drawer.code} is still awaiting its {missing}. "
-                        f"Scan the missing part into it before sending.{because}")})
+                        f"{fix}{because}")})
                 continue
 
             drawer.state = DrawerState.SENDED.value
             drawer.sended_at = now
+            _touch(drawer, "sent", now=now)
             # A complete drawer that never passed through RECEIVED (the
             # leather-only case) is received at the moment it is sent — otherwise
             # the audit trail would show a garment released with no record of it
@@ -870,8 +1167,18 @@ class DrawerService:
             drawer.current_piece_id = None
             drawer.leather_in = False
             drawer.lining_in = False
+            # The kit left the store with the garment, so the slot is
+            # empty again and the next piece merged here starts unkitted.
+            drawer.accessories_in = False
             drawer.received_at = None
             drawer.sended_at = None
+            # STAMPED, NOT CLEARED. received_at/sended_at are wiped because the
+            # drawer is being handed back to the pool empty, but the fact that
+            # something happened to it a second ago is exactly what the store
+            # screen's "latest" list is asking about — and clearing those two
+            # columns is precisely what used to bury a just-shipped drawer at the
+            # bottom of it.
+            _touch(drawer, "released")
         # F11: clear BOTH sides of the piece↔drawer link. Previously only
         # drawer.current_piece_id was nulled, so after release the piece still
         # pointed at a drawer that no longer claimed it — the barcode payload and

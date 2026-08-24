@@ -17,7 +17,7 @@ WHAT CHANGED vs your version (read these — they are real fixes):
      It is now defined in users/deps.py (see PASTE_block_employees_into_users_deps.py).
 
   4. ADDED the barcode feature: model imports + router registration for
-     barcode / materials / drawers / attendance-scan.
+     barcode / materials / drawers / attendance-scan..
 
 ROUTER LOCKING (employees may reach ONLY their own attendance):
   Every write router already 403s an employee via its own require_roles, so the
@@ -59,7 +59,7 @@ from app.modules.clients import models as _clients          # noqa: F401
 from app.modules.production import models as _production     # noqa: F401
 from app.modules.wages import models as _wages              # noqa: F401
 from app.modules.attendance import models as _attendance    # noqa: F401
-from app.modules.barcode import models as _barcode          # noqa: F401  (barcode + materials + drawer + supplier tables all live here)
+from app.modules.barcode import models as _barcode          # noqa: F401  (barcode + materials + drawer + supplier + style-spec/issue-ledger tables all live here)
 from app.core import models as _core_models                 # noqa: F401
 from app.modules.procurement import models as _procurement  # noqa: F401  Stage 1
 from app.modules.bom import models as _bom                  # noqa: F401  Stage 2/3
@@ -93,6 +93,7 @@ from app.modules.barcode.router import router as barcode_router
 from app.modules.barcode.router import emp_router as barcode_emp_router
 from app.modules.materials.router import router as materials_router
 from app.modules.materials.router import sup_router as suppliers_router
+from app.modules.materials.router import spec_router as style_spec_router
 from app.modules.drawers.router import router as drawers_router
 
 from app.modules.users.deps import block_employees
@@ -201,6 +202,7 @@ app.add_middleware(
         "http://localhost:19006",
         "http://localhost:3000",
         "https://frontend-rust-pi-23.vercel.app",
+        "https://stagingpte.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -262,6 +264,10 @@ app.include_router(chat_router,        prefix=API_PREFIX, dependencies=_LOCKED)
 app.include_router(barcode_emp_router, prefix=API_PREFIX, dependencies=_LOCKED)  # NEW: /employees/{id}/barcode
 app.include_router(materials_router,   prefix=API_PREFIX, dependencies=_LOCKED)  # NEW
 app.include_router(suppliers_router,   prefix=API_PREFIX, dependencies=_LOCKED)  # NEW
+# The per-piece material spec. Mounted at /styles (previously unclaimed) and
+# locked like every other manager surface; its own routes then split read
+# (_STOCK_READERS — the floor needs the accessory list) from write (DM/MD).
+app.include_router(style_spec_router, prefix=API_PREFIX, dependencies=_LOCKED)
 app.include_router(drawers_router,     prefix=API_PREFIX, dependencies=_LOCKED)  # NEW
 
 # Aug-20 stages (BOM/procurement/inventory/supplier_po) — locked.

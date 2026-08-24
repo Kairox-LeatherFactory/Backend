@@ -1,7 +1,7 @@
 """
 ================================================================================
 modules/imports/breakdown.py — the uploaded breakdown as an editable table,
-                               and the AUDITED release into production
+                            and the AUDITED release into production
 ================================================================================
 
 THE TWO-PHASE COMMIT (change-list item 9)
@@ -14,11 +14,11 @@ THE TWO-PHASE COMMIT (change-list item 9)
 
     NOW
         1. POST /imports/commit          writes styles + SKUs. Nothing is minted.
-                                         Every style lands DRAFT.
+                                        Every style lands DRAFT.
         2. GET/PATCH/DELETE /imports/breakdown/...   the DM corrects the table.
         3. POST /imports/breakdown/release           the DM names the styles that
-                                         go to production. ONLY THEN are pieces,
-                                         barcodes and drawer merges created.
+                                        go to production. ONLY THEN are pieces,
+                                        barcodes and drawer merges created.
 
     RELEASE IS A HARD, AUDITED TRANSITION — a `production_status` enum plus an
     audit_log row, never a boolean `is_released` (CLAUDE.md §15). It records who
@@ -53,13 +53,13 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from app.core.enums import ProductionReleaseStatus
 from app.core.lining_rules import lining_required
-from app.modules.clients.models import SKU, ClientOrder, Style
+from app.modules.clients.models import SKU, Client, ClientOrder, Style
 from app.modules.production.models import Piece
 
 # Only these transitions exist. CANCELLED is terminal for the style; RELEASED is
@@ -67,9 +67,201 @@ from app.modules.production.models import Piece
 _RELEASABLE = {ProductionReleaseStatus.DRAFT.value}
 
 
+# The rollup a manager reads off the order list. It answers "can I click this
+# row yet, and what will I find" in one word, from the styles' release states.
+_NOT_UPLOADED = "NOT_UPLOADED"       # the order exists; no breakdown sheet yet
+_DRAFT = "DRAFT"                     # sheet uploaded, nothing released
+_PARTIAL = "PARTIALLY_RELEASED"      # some styles in production, some still draft
+_RELEASED = "RELEASED"               # every live style released
+_CANCELLED = "CANCELLED"             # every style cancelled
+
+
 class BreakdownService:
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    # ── the ORDER LIST ───────────────────────────────────────────────────────
+    async def list_orders(self, *, q: str | None = None,
+                          client_id: uuid.UUID | None = None,
+                          status: str | None = None,
+                          has_breakdown: bool | None = None,
+                          limit: int = 50, offset: int = 0) -> dict:
+        """EVERY ORDER, PERMANENTLY — the index the breakdown screen is reached
+        through.
+
+        WHY THIS EXISTS. POST /imports/commit answers with the order number, and
+        that answer was the only place the number appeared: close the tab and the
+        breakdown table at GET /imports/breakdown/{order_number} was unreachable
+        unless somebody had written the number down. Nothing was actually lost —
+        `client_order` is a permanent table and commit REQUIRES the order to
+        already exist, so it never creates one — but there was no way to LIST
+        orders. `GET /clients/{client_id}/orders` needs a client id you may not
+        have, and the analytics explorer returns a nested tree, not a clickable
+        index. This is that index.
+
+        Each row carries `breakdown_status`, rolled up from its styles, so the
+        list says which orders still need work before a manager opens any of
+        them:
+
+            NOT_UPLOADED         order created, no breakdown sheet committed yet
+            DRAFT                sheet uploaded; nothing released, nothing minted
+            PARTIALLY_RELEASED   some styles in production, some still editable
+            RELEASED             every live style released and minting pieces
+            CANCELLED            every style on the order was cancelled
+
+        ORDERED BY MOST RECENTLY WORKED ON — the newest of the order's own
+        created_at and the last style written under it — so an order whose sheet
+        was uploaded this morning sits above one raised months ago and untouched.
+        Ordering by order_date would sort by a date the CLIENT chose, which has
+        nothing to do with what the factory is currently handling.
+
+        ONE aggregate query for the counts, not one per order: a factory with two
+        years of orders would otherwise issue several hundred round trips to
+        paint one list.
+        """
+        # ── the per-order rollup, computed in SQL ───────────────────────────
+        # LEFT joins throughout: an order with no styles is exactly the
+        # NOT_UPLOADED case this list has to be able to show, and an inner join
+        # would silently drop it.
+        released_v = ProductionReleaseStatus.RELEASED.value
+        cancelled_v = ProductionReleaseStatus.CANCELLED.value
+
+        agg = (
+            select(
+                Style.client_order_id.label("order_id"),
+                func.count(func.distinct(Style.id)).label("style_count"),
+                func.sum(
+                    case((Style.production_status == released_v, 1), else_=0)
+                ).label("released_count"),
+                func.sum(
+                    case((Style.production_status == cancelled_v, 1), else_=0)
+                ).label("cancelled_count"),
+                func.max(Style.created_at).label("last_style_at"),
+            )
+            .group_by(Style.client_order_id)
+            .subquery()
+        )
+        # SKU totals ride a SEPARATE subquery rather than another join on the one
+        # above. Joining style→sku and then counting styles in the same select
+        # multiplies the style count by the number of SKUs per style — the classic
+        # fan-out that makes a 3-style order report 47 styles.
+        sku_agg = (
+            select(
+                Style.client_order_id.label("order_id"),
+                func.count(SKU.id).label("sku_count"),
+                func.coalesce(func.sum(SKU.qty_ordered), 0).label("qty_ordered"),
+            )
+            .join(SKU, SKU.style_id == Style.id)
+            .group_by(Style.client_order_id)
+            .subquery()
+        )
+        piece_agg = (
+            select(
+                Style.client_order_id.label("order_id"),
+                func.count(Piece.id).label("pieces_minted"),
+            )
+            .join(SKU, SKU.style_id == Style.id)
+            .join(Piece, Piece.sku_id == SKU.id)
+            .group_by(Style.client_order_id)
+            .subquery()
+        )
+
+        style_count = func.coalesce(agg.c.style_count, 0)
+        released_count = func.coalesce(agg.c.released_count, 0)
+        cancelled_count = func.coalesce(agg.c.cancelled_count, 0)
+        # "Live" = not cancelled. A fully released order must not be dragged back
+        # to PARTIALLY_RELEASED by styles somebody cancelled on purpose.
+        live_count = style_count - cancelled_count
+
+        status_expr = case(
+            (style_count == 0, _NOT_UPLOADED),
+            (live_count == 0, _CANCELLED),
+            (released_count == 0, _DRAFT),
+            (released_count >= live_count, _RELEASED),
+            else_=_PARTIAL,
+        )
+        activity = func.coalesce(agg.c.last_style_at, ClientOrder.created_at)
+
+        stmt = (
+            select(
+                ClientOrder.id, ClientOrder.order_number, ClientOrder.order_date,
+                ClientOrder.delivery_deadline, ClientOrder.ship_mode,
+                ClientOrder.currency, ClientOrder.created_at,
+                Client.id.label("client_id"), Client.name.label("client_name"),
+                Client.code.label("client_code"),
+                style_count.label("style_count"),
+                released_count.label("released_count"),
+                cancelled_count.label("cancelled_count"),
+                func.coalesce(sku_agg.c.sku_count, 0).label("sku_count"),
+                func.coalesce(sku_agg.c.qty_ordered, 0).label("qty_ordered"),
+                func.coalesce(piece_agg.c.pieces_minted, 0).label("pieces_minted"),
+                agg.c.last_style_at,
+                status_expr.label("breakdown_status"),
+                activity.label("last_activity_at"),
+            )
+            .join(Client, Client.id == ClientOrder.client_id)
+            .outerjoin(agg, agg.c.order_id == ClientOrder.id)
+            .outerjoin(sku_agg, sku_agg.c.order_id == ClientOrder.id)
+            .outerjoin(piece_agg, piece_agg.c.order_id == ClientOrder.id)
+        )
+
+        conds = []
+        if q:
+            # CONTAINS, case-insensitive — a manager types "1579" or part of the
+            # client's name off a printed sheet, not the exact stored string.
+            needle = f"%{q.strip().upper()}%"
+            conds.append(or_(
+                func.upper(ClientOrder.order_number).like(needle),
+                func.upper(Client.name).like(needle),
+            ))
+        if client_id:
+            conds.append(ClientOrder.client_id == client_id)
+        if status:
+            conds.append(status_expr == status.strip().upper())
+        if has_breakdown is True:
+            conds.append(style_count > 0)
+        elif has_breakdown is False:
+            conds.append(style_count == 0)
+        if conds:
+            stmt = stmt.where(and_(*conds))
+
+        total = int(await self.db.scalar(
+            select(func.count()).select_from(stmt.subquery())) or 0)
+
+        rows = (await self.db.execute(
+            stmt.order_by(activity.desc(), ClientOrder.order_number.asc())
+                .limit(limit).offset(offset)
+        )).all()
+
+        items = [{
+            "order_id": r.id,
+            "order_number": r.order_number,
+            "client_id": r.client_id,
+            "client_name": r.client_name,
+            "client_code": r.client_code,
+            "order_date": r.order_date,
+            "delivery_deadline": r.delivery_deadline,
+            "ship_mode": r.ship_mode,
+            "currency": r.currency,
+            "breakdown_status": r.breakdown_status,
+            "style_count": int(r.style_count or 0),
+            "released_styles": int(r.released_count or 0),
+            "cancelled_styles": int(r.cancelled_count or 0),
+            "sku_count": int(r.sku_count or 0),
+            "qty_ordered": int(r.qty_ordered or 0),
+            "pieces_minted": int(r.pieces_minted or 0),
+            # NULL until a breakdown sheet is committed — which is precisely what
+            # distinguishes an order awaiting its sheet from one already worked on.
+            "last_uploaded_at": r.last_style_at,
+            "last_activity_at": r.last_activity_at,
+            "created_at": r.created_at,
+            # The call to make when this row is clicked. Spelled out so the
+            # frontend does not have to reconstruct the URL from the order number
+            # and get the encoding wrong on "Proposta N.2".
+            "breakdown_url": f"/api/v1/imports/breakdown/{r.order_number}",
+        } for r in rows]
+
+        return {"total": total, "count": len(items), "items": items}
 
     # ── the table ────────────────────────────────────────────────────────────
     async def get_table(self, order_number: str) -> dict:
@@ -435,6 +627,22 @@ class BreakdownService:
 
         releasable: list[uuid.UUID] = []
         rejected: list[dict] = []
+
+        # ── THE MATERIAL-SPEC GATE ───────────────────────────────────────────
+        # Release is the last moment anyone can be asked what one of these
+        # garments takes. After it the style has barcoded pieces in drawers and
+        # its recipe is frozen and being spent; before it the sheet is still a
+        # spreadsheet row. So "12.5 dcm, 4 buttons, 1 zip" is asked HERE, exactly
+        # where "does this take a lining?" already is.
+        #
+        # RESOLVED ON THE ASYNC SESSION, batched, BEFORE the loop — not inside
+        # _release_sync. The sync half runs in a threadpool and commits as a
+        # whole; putting the check there would lose the per-style partial accept
+        # this loop exists to provide, and would need a second, sync repository
+        # for the same two tables.
+        from app.modules.materials.style_spec_service import StyleSpecService
+        blockers_by_style = await StyleSpecService(self.db).blockers_for_styles(wanted)
+
         for sid in wanted:
             style = await self.db.get(Style, sid)
             if style is None or style.client_order_id != order.id:
@@ -457,6 +665,18 @@ class BreakdownService:
                     "style_id": str(sid), "style_code": style.code,
                     "reason": f"{style.name} has no ordered quantity — there is "
                               f"nothing to mint."})
+                continue
+            # Same partial-accept shape as every rejection above: one unspecced
+            # style must not lose the four the DM ticked with it. `blockers`
+            # carries the individual sentences so the screen can list them beside
+            # the row instead of only showing the joined `reason`.
+            blockers = blockers_by_style.get(sid, [])
+            if blockers:
+                rejected.append({
+                    "style_id": str(sid), "style_code": style.code,
+                    "reason": f"{style.name} cannot be released yet. "
+                              + " ".join(blockers),
+                    "blockers": blockers})
                 continue
             releasable.append(sid)
 
