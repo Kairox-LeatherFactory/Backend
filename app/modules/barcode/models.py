@@ -371,9 +371,10 @@ class StyleMaterialSpec(Base, UUIDMixin, TimestampMixin):
 
     category: Mapped[str] = mapped_column(String(20), index=True)   # MaterialCategory
     subtype: Mapped[str | None] = mapped_column(String(20))         # MaterialSubtype
-    # NOT NULL: a line that does not name WHAT to issue cannot resolve to a lot,
-    # so it could never be spent and would sit in the recipe as decoration.
-    article: Mapped[str] = mapped_column(String(120), index=True)
+    # Accessories identify the item by article; leather and lining identify the
+    # material kind by category/subtype/thickness and may leave this blank.
+    article: Mapped[str | None] = mapped_column(String(120), index=True,
+                                                  nullable=True)
     colour: Mapped[str | None] = mapped_column(String(80))
     thickness: Mapped[str | None] = mapped_column(String(40))
     size: Mapped[str | None] = mapped_column(String(40))            # zip 60cm, button 18L
