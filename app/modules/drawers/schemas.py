@@ -24,7 +24,15 @@ class StoreScanRequest(BaseModel):
     drawer_id: uuid.UUID | None = None
     piece_barcode: str | None = None
     piece_id: uuid.UUID | None = None
-    part: str | None = Field(default=None, pattern="^(LEATHER|LINING)$")
+    # WIDENED, NEVER NARROWED: a client sending LEATHER or LINING is unaffected.
+    # ACCESSORY is the store issuing the garment's accessory kit into the drawer,
+    # and it is EXPLICIT-ONLY — the server never infers it, because a mis-inferred
+    # kit would spend stock nobody asked to spend (see DrawerPart).
+    part: str | None = Field(default=None, pattern="^(LEATHER|LINING|ACCESSORY)$")
+    # Optional, ACCESSORY only. Omit to issue the full kit exactly as the style's
+    # material spec says. Send it to issue part of the kit (the operator is short
+    # of one article) or to substitute a different lot for one line.
+    lines: list["KitLineRequest"] | None = None
 
     @model_validator(mode="after")
     def _actor_required(self):
@@ -33,6 +41,53 @@ class StoreScanRequest(BaseModel):
                 "Scan the employee barcode first — provide employee_barcode or "
                 "employee_id.")
         return self
+
+
+class KitLineRequest(BaseModel):
+    """One line of a partial or substituted accessory issue."""
+    spec_id: uuid.UUID
+    qty: float | None = None            # default: everything still owed
+    material_lot_id: uuid.UUID | None = None   # default: resolve from the spec
+
+
+class KitLine(BaseModel):
+    """One accessory line, as reported back on a scan."""
+    spec_id: str
+    category: str | None = None
+    subtype: str | None = None
+    article: str
+    colour: str | None = None
+    size: str | None = None
+    qty_per_piece: float = 0
+    qty: float = 0
+    uom: str | None = None
+    issued: float | None = None
+    lot_id: str | None = None
+    available_after: float | None = None
+    # Set on `unresolved` lines only: NONE (no lot carries this article) or
+    # AMBIGUOUS (several do, so a human must pick).
+    reason: str | None = None
+    candidate_lot_ids: list[str] = Field(default_factory=list)
+    note: str | None = None
+
+
+class KitBlock(BaseModel):
+    """What this garment's accessories are, and what has happened to them.
+
+    Returned on EVERY store scan, not only the accessory one — the operator
+    holding the leather is the one who also has to find the buttons. On a cut-part
+    scan it is a read-only checklist; on an accessory scan it is the receipt.
+    """
+    status: str                     # NOT_REQUIRED | PENDING | PARTIAL | ISSUED
+    summary_line: str | None = None
+    issued_now: list[KitLine] = Field(default_factory=list)
+    already_issued: list[KitLine] = Field(default_factory=list)
+    outstanding: list[dict] = Field(default_factory=list)
+    unresolved: list[dict] = Field(default_factory=list)
+    # Verbatim decrement warnings — one per line that went short. The issue was
+    # still RECORDED; see MaterialService._decrement_nocommit.
+    stock_warnings: list[dict] = Field(default_factory=list)
+    complete: bool = False
 
 
 class StoreScanResult(BaseModel):
@@ -57,6 +112,11 @@ class StoreScanResult(BaseModel):
     # someone selects it and sends it; these say so explicitly.
     sent: bool = False
     next_action: str = ""
+    # ── the accessory kit ────────────────────────────────────────────────────
+    kit: KitBlock | None = None
+    # True when the kit was issued into a drawer that had already been RECEIVED.
+    # Normal only where the style's spec arrived after its garments did.
+    late_kit: bool = False
 
 
 
@@ -113,6 +173,10 @@ class DrawerLabel(BaseModel):
     holding: str          # HOLDING LEATHER | HOLDING LINING | HOLDING BOTH | EMPTY
     leather_in: bool = False
     lining_in: bool = False
+    # The third bucket. False on every drawer whose style declares no
+    # accessories, so a list of pre-spec drawers renders exactly as it always has.
+    accessories_in: bool = False
+    kit_required: bool = False
     # The EFFECTIVE lining requirement, resolved from every signal — not the
     # stored piece.needs_lining flag, which is written once at upload and is
     # wrong for most of a live order. See core/lining_rules.py.
@@ -167,6 +231,8 @@ class DrawerDetail(BaseModel):
     holding: str
     leather_in: bool
     lining_in: bool
+    accessories_in: bool = False
+    kit_required: bool = False
     needs_lining: bool           # EFFECTIVE requirement, not the stored flag
     lining_reason: str | None = None
     awaiting: list[str] = Field(default_factory=list)

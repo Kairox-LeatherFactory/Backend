@@ -253,6 +253,7 @@ class ProductionService:
                         leather_lot_id: uuid.UUID | None = None,
                         lining_lot_id: uuid.UUID | None = None,
                         consumption_qty: float | None = None,
+                        consumption_source: str | None = None,
                         preview: bool = False) -> dict:      # NEW param
         """Log one stage for a batch of pieces. Stage inferred, never sent.
  
@@ -577,6 +578,10 @@ class ProductionService:
             "screen_role_warning": screen_role_warning,
             "consumption_recorded": None,
             "stock_warning": None,
+            # "typed" | "style_spec" | None — where the dcm came from. The
+            # router decides; the service only reports, so the ledger branch
+            # below stays a single number however it was obtained.
+            "consumption_source": consumption_source if is_cut else None,
             "preview": bool(preview),
             "skill_warnings": skill_warnings,
             # BUG #12 — where each scanned garment lives, on the response the scan
@@ -584,6 +589,11 @@ class ProductionService:
             "drawer_by_piece": drawer_by_piece,
             # BUG #8 — filled in after the commit; see below.
             "sku_progress": None,
+            # The accessory kit, per scanned piece. Lean by design (three fields)
+            # because a 40-piece batch would otherwise carry 40 full checklists.
+            # Populated on a PREVIEW too — it is a read, and the whole point of a
+            # preview is to show the operator what they are about to face.
+            "kit_by_piece": await self._kit_by_piece(list(pieces)),
         }
 
         if preview:
@@ -811,6 +821,12 @@ class ProductionService:
             "next_stage": next_stage.value if next_stage else None,   # bug #4
             "next_stage_requires_consumption": bool(
                 next_stage and next_stage.requires_consumption),
+            # THE RECIPE, ON THE SCAN SCREEN. `suggested_dcm_per_piece` lets the
+            # cut screen prefill the consumption field instead of the cutting
+            # manager typing it from memory; `material_requirement` is the
+            # accessory checklist the store needs. Both are READS — neither
+            # changes what the ledger records unless a human confirms it.
+            **await self._spec_hints(piece_id),
             "display_stage": disp["display_stage"],
             "display_label": disp["label"],
             "in_store": disp["in_store"],
@@ -871,6 +887,30 @@ class ProductionService:
             "skill_note": (None if skill_ok or stage is None
                            else self._skill_msg(emp.name, emp.designation, stage)),
         }, blockers
+
+    async def _kit_by_piece(self, piece_ids: list) -> dict:
+        """{piece_code: {kit_required, kit_status, outstanding}} for the batch.
+
+        Four queries regardless of batch size. Lazy import, per CLAUDE.md §15.
+        """
+        if not piece_ids:
+            return {}
+        from app.modules.materials.style_spec_service import StyleSpecService
+        return await StyleSpecService(self.db).kit_by_pieces(piece_ids)
+
+    async def _spec_hints(self, piece_id) -> dict:
+        """{suggested_dcm_per_piece, material_requirement} for one piece.
+
+        Lazy import — production must not import the materials module at module
+        level (CLAUDE.md §15 keeps the graph acyclic through call-site imports).
+        """
+        from app.modules.materials.style_spec_service import StyleSpecService
+        block = await StyleSpecService(self.db).material_requirement_block(piece_id)
+        leather = block.get("leather") or {}
+        return {
+            "suggested_dcm_per_piece": leather.get("qty_per_piece"),
+            "material_requirement": block,
+        }
 
     async def _sku_progress_at_stage(self, sku_id: uuid.UUID,
                                      stage: "ProductionStage | None") -> dict:

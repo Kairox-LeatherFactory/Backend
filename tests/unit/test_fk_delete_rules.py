@@ -79,6 +79,30 @@ def _all_fks():
     return sorted(out)
 
 
+# ── THE ONE DOCUMENTED EXCEPTION ─────────────────────────────────────────────
+# The SET NULL rule rests on a premise stated in the docstring above: "a NULLABLE
+# foreign key is a column whose schema already says the link is optional". That is
+# true of every other nullable FK in this schema, where NULL means "no parent".
+#
+# It is NOT true of style_material_spec.sku_id, where NULL is a VALUE with its own
+# meaning: "this recipe line is the STYLE-WIDE default", as opposed to a non-null
+# id meaning "this line overrides that default for one colourway". SET NULL would
+# therefore not clear a link — it would silently PROMOTE a single colourway's
+# override into the default for every colourway of the style, changing what gets
+# issued to garments nobody touched. It can also collide head-on with the unique
+# constraint (a style-wide line for the same material may already exist), turning
+# an ordinary SKU delete into a 500.
+#
+# So the line is OWNED by its SKU and CASCADEs with it, and the exception is
+# recorded here rather than left as a silent divergence. Invariants 1 and 2 still
+# apply to it in full — it must declare SOME ondelete, and it does.
+#
+# ADD TO THIS SET ONLY when NULL genuinely carries meaning in the column, and say
+# what that meaning is. "SET NULL was inconvenient" is not a reason.
+_MEANINGFUL_NULL_FKS = {
+    ("style_material_spec", "sku_id", "sku"),
+}
+
 _NULLABLE = [f for f in _all_fks() if f[3]]
 _NOT_NULL = [f for f in _all_fks() if not f[3]]
 
@@ -98,6 +122,8 @@ def _load_migration():
     ids=[f"{t}.{c}" for t, c, _r, _n, _o in _NULLABLE],
 )
 def test_every_nullable_fk_declares_an_ondelete_rule(table, column, referred, ondelete):
+    # Applies to the documented exceptions too: they may choose a different rule,
+    # but they may not choose no rule at all.
     assert ondelete, (
         f"{table}.{column} → {referred}.id is nullable but declares no ondelete, "
         f"so the parent row can never be deleted while this child exists. Add "
@@ -126,7 +152,7 @@ def test_no_not_null_fk_declares_set_null(table, column, referred, ondelete):
 
 def test_the_migration_lists_exactly_the_nullable_fks_the_models_declare():
     listed = {(t, c, r) for t, c, r, _name in _load_migration()._NULLABLE_FKS}
-    declared = {(t, c, r) for t, c, r, _n, _o in _NULLABLE}
+    declared = {(t, c, r) for t, c, r, _n, _o in _NULLABLE} - _MEANINGFUL_NULL_FKS
 
     missing = declared - listed
     extra = listed - declared

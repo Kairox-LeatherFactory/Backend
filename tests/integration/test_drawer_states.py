@@ -275,7 +275,9 @@ async def test_release_recycles_the_drawer_and_clears_both_sides(db, cut_pieces)
 
 @pytest.mark.asyncio
 async def test_the_label_sheet_lists_drawers_with_their_barcodes(db, cut_pieces):
-    out = await DrawerService(db).list_labels()
+    # sort="seq": the default "recent" ordering ties on SQLite's one-second
+    # timestamps and flips whenever the fixture straddles a second boundary.
+    out = await DrawerService(db).list_labels(sort="seq")
     assert out["total"] == 5 and out["count"] == 5
     first = out["items"][0]
     assert first["seq"] == 1

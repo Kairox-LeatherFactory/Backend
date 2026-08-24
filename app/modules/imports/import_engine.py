@@ -39,6 +39,37 @@ def _sheet_type(ws) -> str:
             v = clean_str(ws.cell(r, c).value)
             if v and v.upper() in ("S.NO", "SNO", "STYLE", "DATE"):
                 return "ORDER"
+
+    # THE WORDS ARE NOT THE SHEET. A perfectly ordinary Italian order sheet
+    # headed `Modello | Materiale | Colore | 38 | 40 | …` says none of those four
+    # tokens, so it used to be classified UNKNOWN and skipped in silence — the
+    # whole order simply never arrived. A breakdown sheet is recognisable by its
+    # SHAPE instead: somewhere on it a contiguous run of quantity columns adds up
+    # to a printed total. If that shape is there, it is an order sheet, whatever
+    # language it is written in.
+    # PROVEN, NOT MERELY PLAUSIBLE. Classification demands HIGH confidence: a
+    # contiguous run of columns that reconciles against a printed total on every
+    # data row. MEDIUM — "these columns look like a band but nothing on the sheet
+    # confirms it" — is not enough to decide what a DOCUMENT is.
+    #
+    # That distinction is what keeps a costing workbook out. `SAMPLE COSTING
+    # SHEET FOR SIR.xlsx` offers plenty of two-column runs that add up somewhere,
+    # and on shape alone it came back as a 16,649,667-piece order; none of them
+    # reconciles across the sheet, so all of them are MEDIUM. Every genuine order
+    # sheet here — BOGGI, John Peter, the legacy multi-block workbook — is HIGH.
+    #
+    # A sheet whose header DOES name itself (S.NO / STYLE / DATE above) never
+    # reaches this branch, so a human-recognisable order sheet is still accepted
+    # at MEDIUM. Only the shape-only path has to meet the higher bar.
+    from app.modules.imports._size_band import find_header_row
+    header_row, band = find_header_row(ws)
+    # AND IT MUST HOLD FOR MORE THAN ONE ROW. A single row that happens to add
+    # up is a coincidence — a costing sheet reconciles 576000 = 48000 x 12 on one
+    # line and nothing else. A breakdown repeats its shape down the page, so two
+    # reconciling rows is the difference between a layout and an accident.
+    if (header_row is not None and band.confidence == "HIGH"
+            and len(band.size_cols) >= 2 and band.reconciled_rows >= 2):
+        return "ORDER"
     return "UNKNOWN"
 
 
@@ -67,10 +98,33 @@ class ImportPreview:
             # (continuation rows, multiple colours, etc.) are summed together.
             by_style: dict[str, dict] = {}
             for line in cp.order_lines:
-                entry = by_style.setdefault(line.style, {"sizes": {}, "pieces_ordered": 0})
+                entry = by_style.setdefault(line.style, {
+                    "sizes": {}, "pieces_ordered": 0,
+                    # THE COMMERCIAL FACTS, SHOWN BEFORE COMMIT. They are the two
+                    # numbers on the sheet a human can actually check at a glance
+                    # — a mis-read price or ship date is far more expensive than
+                    # a mis-read quantity, and far less obvious afterwards.
+                    "unit_price": None, "currency": None, "delivery_date": None,
+                    # MEDIUM here means the size band could not be proved against
+                    # a printed total. The reason is in `warnings`.
+                    "size_confidence": "HIGH",
+                })
                 for size, qty in line.sizes.items():
                     entry["sizes"][size] = entry["sizes"].get(size, 0) + qty
                 entry["pieces_ordered"] += line.total
+                # Same precedence the loader applies, so the preview shows what
+                # the commit will actually write: price first-wins, delivery
+                # earliest-wins.
+                if entry["unit_price"] is None and line.unit_price is not None:
+                    entry["unit_price"] = float(line.unit_price)
+                    entry["currency"] = line.currency
+                if line.delivery_date is not None:
+                    prev = entry["delivery_date"]
+                    entry["delivery_date"] = (
+                        line.delivery_date.isoformat() if prev is None
+                        else min(prev, line.delivery_date.isoformat()))
+                if line.size_confidence != "HIGH":
+                    entry["size_confidence"] = line.size_confidence
 
             warns = list(cp.warnings)
             for card in cp.production_cards:

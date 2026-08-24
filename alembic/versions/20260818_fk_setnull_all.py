@@ -219,6 +219,23 @@ _NULLABLE_FKS = [
     ("piece", "current_operation_id", "operation",
      "fk_piece_current_operation_id_operation"),
     ("piece", "drawer_id", "drawer", "fk_piece_drawer_id_drawer"),
+    # ── piece_material_issue ──────────────────────────────────
+    # The accessory-kit ledger (20260821_style_spec). Listed here because this
+    # list is the REGISTRY of nullable FKs the models declare — the test in
+    # tests/unit/test_fk_delete_rules.py reads it as such — even though these
+    # constraints are created with SET NULL inline by their own migration and so
+    # need no repointing. _repoint() no-ops on a table that is not deployed yet,
+    # which is exactly the case at this revision.
+    ("piece_material_issue", "drawer_id", "drawer",
+     "fk_piece_material_issue_drawer_id_drawer"),
+    ("piece_material_issue", "issued_by_employee_id", "employee",
+     "fk_piece_material_issue_issued_by_employee_id_employee"),
+    ("piece_material_issue", "material_lot_id", "material_lot",
+     "fk_piece_material_issue_material_lot_id_material_lot"),
+    ("piece_material_issue", "piece_id", "piece",
+     "fk_piece_material_issue_piece_id_piece"),
+    ("piece_material_issue", "spec_line_id", "style_material_spec",
+     "fk_piece_material_issue_spec_line_id_style_material_spec"),
     # ── po_item ───────────────────────────────────────────────
     ("po_item", "bom_item_id", "bom_item", "fk_po_item_bom_item_id_bom_item"),
     ("po_item", "inventory_item_id", "inventory_item",
@@ -265,6 +282,14 @@ _NULLABLE_FKS = [
     ("spec_sheet", "style_id", "style", "fk_spec_sheet_style_id_style"),
     # ── style ─────────────────────────────────────────────────
     ("style", "base_style_id", "style", "fk_style_base_style_id_style"),
+    # ── style_material_spec ───────────────────────────────────
+    # Only material_lot_id is listed. `sku_id` is nullable but CASCADEs, and is
+    # a DOCUMENTED EXCEPTION to the SET NULL rule — NULL there means "this line
+    # is the style-wide default", so SET NULL would promote one colourway's
+    # override into everyone's default instead of clearing a link. See
+    # _MEANINGFUL_NULL_FKS in tests/unit/test_fk_delete_rules.py.
+    ("style_material_spec", "material_lot_id", "material_lot",
+     "fk_style_material_spec_material_lot_id_material_lot"),
     # ── style_consumption_template ────────────────────────────
     ("style_consumption_template", "client_id", "client",
      "fk_style_consumption_template_client_id_client"),

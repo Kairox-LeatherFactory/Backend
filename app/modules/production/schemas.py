@@ -184,6 +184,13 @@ class Consumption(BaseModel):
     article: str | None = None
     colour: str | None = None
     thickness: str | None = None
+    # OPT IN to letting the server take the dcm from the style's material spec
+    # when `dcm` is omitted. OFF BY DEFAULT, deliberately: omitting both still
+    # returns today's 422, so no existing client silently changes behaviour on
+    # the one branch that guards the leather ledger and the costing. The spec
+    # value is also surfaced as `suggested_dcm_per_piece` on the read paths, so
+    # a screen can simply prefill the field and never send this flag at all.
+    use_style_spec: bool = False
 
 
 class LogRequest(BaseModel):
@@ -241,6 +248,17 @@ class LogResult(BaseModel):
     # style must stop being offered for scanning. Null on a preview or a MIXED
     # batch (there is no single stage to report against).
     sku_progress: dict | None = None
+    # ── the accessory kit, per piece ─────────────────────────────────────────
+    # {piece_code: {kit_required, kit_status, outstanding}}. DELIBERATELY LEAN:
+    # a 40-piece batch carrying the full requirement block would dwarf the rest
+    # of the response, and three fields is all the scan screen needs to show a
+    # "kit still owed" chip and link through to the drawer. `kit_status` is
+    # NOT_REQUIRED for every style with no accessory spec.
+    kit_by_piece: dict[str, dict] = Field(default_factory=dict)
+    # Where the cut quantity came from: "typed" (the operator entered it) or
+    # "style_spec" (taken from the recipe because consumption.use_style_spec was
+    # set and no dcm was sent). Null when nothing was consumed.
+    consumption_source: str | None = None
 
 
 # ── the scan-time state read (bugs #4, #6, #8, #12) ─────────────────────────
@@ -278,6 +296,14 @@ class PieceState(BaseModel):
     current_stage_label: str | None = None
     next_stage: str | None = None    # bug #4 — inferred, never chosen by the user
     next_stage_requires_consumption: bool = False
+    # The dcm the style's recipe says one of these takes, so the cut screen can
+    # PREFILL the field instead of the cutting manager typing it from memory.
+    # A suggestion, never a substitution — the operator still confirms or
+    # overrides the number that reaches the ledger.
+    suggested_dcm_per_piece: float | None = None
+    # The full kit checklist for this piece: what it needs, what it has been
+    # given, what is still owed. NOT_REQUIRED for a style with no accessory spec.
+    material_requirement: dict | None = None
     display_stage: str | None = None  # may be the virtual STORE
     display_label: str | None = None
     in_store: bool = False

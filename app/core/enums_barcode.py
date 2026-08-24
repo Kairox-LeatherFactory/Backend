@@ -504,8 +504,49 @@ class DrawerState(str, enum.Enum):
 
 
 class DrawerPart(str, enum.Enum):
+    """What is being scanned into a drawer.
+
+    ACCESSORY IS NEVER INFERRED, AND THAT IS A SAFETY RULE, NOT A CONVENIENCE ONE.
+        `DrawerService.infer_part` reads a piece's history to decide whether a
+        scan is the leather or the lining arriving. The worst a wrong guess can
+        do there is set the wrong boolean, which a human can undo. An inferred
+        ACCESSORY would *spend stock* — it decrements every accessory lot on the
+        style's spec — so a mis-inference would move money that nothing on the
+        floor asked to move. The kit is therefore explicit-only: `infer_part`
+        still returns LEATHER or LINING and nothing else, and `part_inferred`
+        stays honest.
+    """
     LEATHER = "LEATHER"
     LINING = "LINING"
+    ACCESSORY = "ACCESSORY"     # NEVER inferred — see above
+
+
+class MaterialIssueSource(str, enum.Enum):
+    """How a `piece_material_issue` row came to exist.
+
+    CUT is RESERVED, not used. Leather and lining consumption lives on
+    ProductionEvent (`leather_lot_id` / `lining_lot_id` / `consumption_qty`) —
+    the lot link belongs to the ACT OF CUTTING, never to the piece (CLAUDE.md
+    §8). The member exists so a future decision to unify the two ledgers has a
+    name already minted rather than a migration to add one.
+    """
+    STORE_KIT = "STORE_KIT"     # the drawer kit scan — the normal path
+    CUT = "CUT"                 # reserved; see above
+    MANUAL = "MANUAL"           # off-spec correction, POST /materials/issues
+
+
+class KitStatus(str, enum.Enum):
+    """Where a piece stands against its accessory spec.
+
+    NOT_REQUIRED is load-bearing: it is what every style that predates the spec
+    feature reports, and it tells the screen to HIDE the checklist rather than
+    render an empty one. "No accessories declared" and "accessories declared but
+    none issued" are different facts and must not collapse into one.
+    """
+    NOT_REQUIRED = "NOT_REQUIRED"   # the style declares no accessories
+    PENDING = "PENDING"             # declared, nothing issued
+    PARTIAL = "PARTIAL"             # some issued, or some line unresolved
+    ISSUED = "ISSUED"               # every line issued in full
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -517,6 +558,14 @@ class BarcodeAuditAction(str, enum.Enum):
     EMPLOYEE_BARCODE_REISSUE = "EMPLOYEE_BARCODE_REISSUE"
     EMPLOYEE_BARCODE_DEACTIVATE = "EMPLOYEE_BARCODE_DEACTIVATE"
     MATERIAL_RECEIVED = "MATERIAL_RECEIVED"
+    # The kit scan spends stock, so it is a hard transition like the two drawer
+    # ones above and gets the same audit row.
+    MATERIAL_KIT_ISSUED = "MATERIAL_KIT_ISSUED"
+    MATERIAL_ISSUED_MANUAL = "MATERIAL_ISSUED_MANUAL"
+    # Confirming a spec is what unlocks release, so who confirmed it and what
+    # they confirmed has to be recoverable months later.
+    STYLE_MATERIAL_SPEC_CONFIRMED = "STYLE_MATERIAL_SPEC_CONFIRMED"
+    STYLE_MATERIAL_SPEC_AMENDED = "STYLE_MATERIAL_SPEC_AMENDED"
 
 
 # ══════════════════════════════════════════════════════════════════════════

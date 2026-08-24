@@ -1,7 +1,7 @@
 """
 ================================================================================
 modules/imports/breakdown.py — the uploaded breakdown as an editable table,
-                               and the AUDITED release into production
+                            and the AUDITED release into production
 ================================================================================
 
 THE TWO-PHASE COMMIT (change-list item 9)
@@ -14,11 +14,11 @@ THE TWO-PHASE COMMIT (change-list item 9)
 
     NOW
         1. POST /imports/commit          writes styles + SKUs. Nothing is minted.
-                                         Every style lands DRAFT.
+                                        Every style lands DRAFT.
         2. GET/PATCH/DELETE /imports/breakdown/...   the DM corrects the table.
         3. POST /imports/breakdown/release           the DM names the styles that
-                                         go to production. ONLY THEN are pieces,
-                                         barcodes and drawer merges created.
+                                        go to production. ONLY THEN are pieces,
+                                        barcodes and drawer merges created.
 
     RELEASE IS A HARD, AUDITED TRANSITION — a `production_status` enum plus an
     audit_log row, never a boolean `is_released` (CLAUDE.md §15). It records who
@@ -627,6 +627,22 @@ class BreakdownService:
 
         releasable: list[uuid.UUID] = []
         rejected: list[dict] = []
+
+        # ── THE MATERIAL-SPEC GATE ───────────────────────────────────────────
+        # Release is the last moment anyone can be asked what one of these
+        # garments takes. After it the style has barcoded pieces in drawers and
+        # its recipe is frozen and being spent; before it the sheet is still a
+        # spreadsheet row. So "12.5 dcm, 4 buttons, 1 zip" is asked HERE, exactly
+        # where "does this take a lining?" already is.
+        #
+        # RESOLVED ON THE ASYNC SESSION, batched, BEFORE the loop — not inside
+        # _release_sync. The sync half runs in a threadpool and commits as a
+        # whole; putting the check there would lose the per-style partial accept
+        # this loop exists to provide, and would need a second, sync repository
+        # for the same two tables.
+        from app.modules.materials.style_spec_service import StyleSpecService
+        blockers_by_style = await StyleSpecService(self.db).blockers_for_styles(wanted)
+
         for sid in wanted:
             style = await self.db.get(Style, sid)
             if style is None or style.client_order_id != order.id:
@@ -649,6 +665,18 @@ class BreakdownService:
                     "style_id": str(sid), "style_code": style.code,
                     "reason": f"{style.name} has no ordered quantity — there is "
                               f"nothing to mint."})
+                continue
+            # Same partial-accept shape as every rejection above: one unspecced
+            # style must not lose the four the DM ticked with it. `blockers`
+            # carries the individual sentences so the screen can list them beside
+            # the row instead of only showing the joined `reason`.
+            blockers = blockers_by_style.get(sid, [])
+            if blockers:
+                rejected.append({
+                    "style_id": str(sid), "style_code": style.code,
+                    "reason": f"{style.name} cannot be released yet. "
+                              + " ".join(blockers),
+                    "blockers": blockers})
                 continue
             releasable.append(sid)
 

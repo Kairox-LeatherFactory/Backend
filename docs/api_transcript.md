@@ -10,14 +10,14 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
 ```json
 {
   "meta": {
-    "generated_for": "2026-08-19",
+    "generated_for": "2026-08-21",
     "scope": "all_clients",
     "unsupported": {
       "quality_rejection": "No quality/rejection table exists. produced / inspected / event-based rework are real; accepted / rejected / defective_pct are null until a PieceInspection (pass/reject/rework) model + migration lands.",
       "department_target_routing": "Department target uses the order quantity as a uniform denominator. Per-stage routing (which pieces a style actually sends to each stage) can be refined via the StyleOperation table when precise per-department targets are required.",
       "rate_shift_costing": "pieces_per_hour uses the ShiftConfig shift length. pieces_per_shift assumes a single shift; per_piece_rate (rs/piece) is a wages/costing concern owned by the wages module \u2014 both null here.",
       "store_is_drawer_state": "The STORE node (kind=STORE) is drawer state, not a production event: completed = released by the DM plus pieces already exported, whose drawers have recycled; pending = still in a drawer.",
-      "lining_measured_against_lining_required": "LINING_CUTTING (kind=PARALLEL) has no predecessor, so its `total` is the pieces whose breakdown says needs_lining, NOT the order quantity \u2014 read its pct against that. Excluded from bottleneck / blocked_stage: a lining backlog surfaces one node later as drawers holding leather in the store. Detail: /dashboard/lining.",
+      "lining_measured_against_lining_required": "LINING_CUTTING (kind=PARALLEL) has no predecessor, so its `total` is the pieces that actually take a lining per core/lining_rules (the DM's release declaration, else the stored flag / SKU lining colour / style-name marker, plus any piece already lining-cut), NOT the order quantity \u2014 read its pct against that. Excluded from bottleneck / blocked_stage: a lining backlog surfaces one node later as drawers holding leather in the store. Detail: /dashboard/lining.",
       "pipeline_sequence_is_display_order": "`sequence` is the display index, not Operation.sequence \u2014 STORE has no Operation row. Order is preserved."
     }
   },
@@ -59,14 +59,7 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
         "PASTING"
       ],
       "target": 8,
-      "produced": 0,
-      "produced_today": 0,
-      "achievement_pct": 0.0
-    },
-    {
-      "department": "Stitching",
-      "stages": [
-        "LI
+      "p
 … (truncated)
 ```
 
@@ -76,8 +69,8 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
 
 ```json
 {
-  "period_start": "2026-08-05",
-  "period_end": "2026-08-18",
+  "period_start": "2026-08-07",
+  "period_end": "2026-08-20",
   "order_number": "KJ2451"
 }
 ```
@@ -85,21 +78,24 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
 
 ```json
 {
-  "id": "ffff2682-a746-4430-8f0f-5bb4ecff971e",
-  "period_start": "2026-08-05",
-  "period_end": "2026-08-18",
+  "id": "90974741-6def-4a7a-b329-4ca6ce1a8090",
+  "period_start": "2026-08-07",
+  "period_end": "2026-08-20",
   "status": "closed",
+  "run_kind": "piece",
   "scope_order_number": "KJ2451",
   "scope_style_code": null,
+  "scope_is_label": false,
   "piece_rate_only": true,
+  "monthly_only": false,
   "total_amount": 50.0,
   "total_pieces": 4,
   "employee_count": 1,
   "unrated_operations": [],
   "lines": [
     {
-      "id": "de191990-4a48-43e7-849f-fd4ed9731bd5",
-      "employee_id": "d1404045-f974-412a-92a9-e3d2354011d1",
+      "id": "cb798724-d6b5-4b97-8739-96bb0d4293f9",
+      "employee_id": "3c898362-bba0-4ee5-a899-9641c8e40af4",
       "employee_name": "RAGAVAN L",
       "designation": "CUTTER",
       "wage_type": "piece_rate",
@@ -124,7 +120,9 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
   ],
   "gap_days": 0,
   "recomputed": false,
-  "recompute_count": 0
+  "recompute_count": 0,
+  "reopen_count": 0,
+  "computed_at": null
 }
 ```
 
@@ -134,8 +132,8 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
 
 ```json
 {
-  "period_start": "2026-08-05",
-  "period_end": "2026-08-18",
+  "period_start": "2026-08-07",
+  "period_end": "2026-08-20",
   "order_number": "KJ2452"
 }
 ```
@@ -143,21 +141,24 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
 
 ```json
 {
-  "id": "abbbe8cf-72a1-4b55-b906-571c4d81cb94",
-  "period_start": "2026-08-05",
-  "period_end": "2026-08-18",
+  "id": "b8761389-5b06-414d-b356-fdef286043f5",
+  "period_start": "2026-08-07",
+  "period_end": "2026-08-20",
   "status": "closed",
+  "run_kind": "piece",
   "scope_order_number": "KJ2452",
   "scope_style_code": null,
+  "scope_is_label": false,
   "piece_rate_only": true,
+  "monthly_only": false,
   "total_amount": 50.0,
   "total_pieces": 4,
   "employee_count": 1,
   "unrated_operations": [],
   "lines": [
     {
-      "id": "fcc0ef9e-5c85-4fb4-886b-3718f816a1e1",
-      "employee_id": "d1404045-f974-412a-92a9-e3d2354011d1",
+      "id": "e9fcac71-d3fa-4160-a8c3-1b69babaa88a",
+      "employee_id": "3c898362-bba0-4ee5-a899-9641c8e40af4",
       "employee_name": "RAGAVAN L",
       "designation": "CUTTER",
       "wage_type": "piece_rate",
@@ -182,7 +183,9 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
   ],
   "gap_days": 0,
   "recomputed": false,
-  "recompute_count": 0
+  "recompute_count": 0,
+  "reopen_count": 0,
+  "computed_at": null
 }
 ```
 
@@ -192,8 +195,8 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
 
 ```json
 {
-  "period_start": "2026-08-05",
-  "period_end": "2026-08-18",
+  "period_start": "2026-08-07",
+  "period_end": "2026-08-20",
   "style_code": "KJ2451-CLERMONT-GOAT_SUEDE"
 }
 ```
@@ -201,23 +204,23 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
 
 ```json
 {
-  "detail": "This run (KJ2451-CLERMONT-GOAT_SUEDE) would pay work already covered by closed run ffff2682-a746-4430-8f0f-5bb4ecff971e (2026-08-05..2026-08-18, scope: KJ2451) \u2014 1 shared style(s) in common over the same dates, so those garments would be paid twice. Runs for DIFFERENT orders or styles over the same dates are allowed; narrow this run, move the window, or delete that run if it is wreckage from a failed compute."
+  "detail": "This PIECE run (KJ2451-CLERMONT-GOAT_SUEDE) would pay work already covered by closed PIECE run 90974741-6def-4a7a-b329-4ca6ce1a8090 (2026-08-07..2026-08-20, scope: KJ2451) \u2014 1 shared style(s) in common over the same dates, so those garments would be paid twice. Runs for DIFFERENT orders or styles over the same dates are allowed, and a PIECE run never collides with a MONTHLY one. Narrow this run, move the window, recompute run 90974741-6def-4a7a-b329-4ca6ce1a8090 (POST /wages/runs/90974741-6def-4a7a-b329-4ca6ce1a8090/recompute), or delete it (DELETE /wages/runs/90974741-6def-4a7a-b329-4ca6ce1a8090) if it is wreckage from a failed compute."
 }
 ```
 
-### 5. GET `/api/v1/wages/runs/ffff2682-a746-4430-8f0f-5bb4ecff971e/breakdown`
+### 5. GET `/api/v1/wages/runs/90974741-6def-4a7a-b329-4ca6ce1a8090/breakdown`
 > Where the money went: by style, by stage, by employee.
 **Response — `200`**
 
 ```json
 {
-  "run_id": "ffff2682-a746-4430-8f0f-5bb4ecff971e",
-  "period_start": "2026-08-05",
-  "period_end": "2026-08-18",
+  "run_id": "90974741-6def-4a7a-b329-4ca6ce1a8090",
+  "period_start": "2026-08-07",
+  "period_end": "2026-08-20",
   "status": "closed",
   "scope_order_number": "KJ2451",
   "scope_style_code": null,
-  "computed_at": "2026-08-18T20:15:40",
+  "computed_at": "2026-08-21T13:44:16",
   "recompute_count": 0,
   "reopen_count": 0,
   "total_amount": 50.0,
@@ -240,7 +243,7 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
       ],
       "employees": [
         {
-          "employee_id": "d1404045-f974-412a-92a9-e3d2354011d1",
+          "employee_id": "3c898362-bba0-4ee5-a899-9641c8e40af4",
           "employee_name": "RAGAVAN L",
           "designation": "CUTTER",
           "pieces": 4,
@@ -262,7 +265,7 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
   ],
   "by_employee": [
     {
-      "employee_id": "d1404045-f974-412a-92a9-e3d2354011d1",
+      "employee_id": "3c898362-bba0-4ee5-a899-9641c8e40af4",
       "employee_name": "RAGAVAN L",
       "designation": "CUTTER",
       "pieces": 4,

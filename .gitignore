@@ -32,6 +32,5 @@ config/
 data/Full-data-spec-order
 data/supplier-po-form
 _wf.txt
-docs/
 var/
 .env.bak.20260820153626
