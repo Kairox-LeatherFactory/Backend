@@ -118,14 +118,46 @@ async def test_an_unknown_material_kind_is_refused_like_the_lot_form_refuses_it(
 
 
 @pytest.mark.asyncio
-async def test_a_line_with_no_article_is_refused(db, draft_style):
+async def test_a_leather_line_needs_thickness_but_not_article_or_colour(
+        db, draft_style):
+    from fastapi import HTTPException
+    line = await StyleSpecService(db).add_line(
+        draft_style.id,
+        {"category": "LEATHER", "thickness": "1.2", "qty_per_piece": 1.25},
+        actor_name="DM")
+    assert line["article"] is None
+    assert line["colour"] is None
+
+    with pytest.raises(HTTPException) as exc:
+        await StyleSpecService(db).add_line(
+            draft_style.id, {"category": "LEATHER", "qty_per_piece": 5},
+            actor_name="DM")
+    assert exc.value.status_code == 422
+    assert "thickness" in str(exc.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_a_lining_line_accepts_only_its_kind_thickness_and_quantity(
+        db, draft_style):
+    line = await StyleSpecService(db).add_line(
+        draft_style.id,
+        {"category": "LINING", "subtype": "KNIT", "thickness": "1.2",
+         "qty_per_piece": 1.5}, actor_name="DM")
+    assert line["article"] is None
+    assert line["colour"] is None
+    assert line["subtype"] == "KNIT"
+
+
+@pytest.mark.asyncio
+async def test_an_accessory_line_still_requires_article(db, draft_style):
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as exc:
         await StyleSpecService(db).add_line(
-            draft_style.id, {"category": "LEATHER", "article": "  ",
-                             "qty_per_piece": 5}, actor_name="DM")
+            draft_style.id,
+            {"category": "ACCESSORY", "subtype": "THREAD",
+             "qty_per_piece": 5}, actor_name="DM")
     assert exc.value.status_code == 422
-    assert "must name an article" in str(exc.value.detail)
+    assert "accessory" in str(exc.value.detail)
 
 
 @pytest.mark.asyncio

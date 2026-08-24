@@ -24,7 +24,7 @@ class SpecLineIn(BaseModel):
     sku_id: uuid.UUID | None = None     # None = the style-wide default
     category: str
     subtype: str | None = None
-    article: str
+    article: str | None = None
     colour: str | None = None
     thickness: str | None = None
     size: str | None = None

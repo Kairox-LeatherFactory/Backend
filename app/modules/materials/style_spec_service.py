@@ -112,13 +112,17 @@ class StyleSpecService:
                 f"KNIT) or ACCESSORY (BUTTON / ZIP / THREAD / OTHER) — the same "
                 f"list GET /materials/spec returns.")
 
-        article = (body.get("article") or "").strip()
-        if not article:
+        article = (body.get("article") or "").strip() or None
+        if category == "ACCESSORY" and not article:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
-                "Every recipe line must name an article — a line that does not "
-                "say WHAT to issue can never resolve to a lot, so it could never "
-                "be spent.")
+                "Every accessory recipe line must name an article.")
+
+        thickness = (body.get("thickness") or "").strip() or None
+        if category in {"LEATHER", "LINING"} and not thickness:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"{category} recipe lines must include thickness.")
 
         sku_id = body.get("sku_id")
         if sku_id is not None:
@@ -154,7 +158,7 @@ class StyleSpecService:
             "subtype": subtype,
             "article": article,
             "colour": (body.get("colour") or "").strip() or None,
-            "thickness": (body.get("thickness") or "").strip() or None,
+            "thickness": thickness,
             "size": (body.get("size") or "").strip() or None,
             "qty_per_piece": qty,
             # DERIVED, AND A SENT VALUE IS DISCARDED. uom is a property of the
