@@ -9,7 +9,7 @@ Revises: 20260822_style_delivery
 from alembic import op
 
 
-revision = "20260822_style_spec_optional_article"
+revision = "20260822_style_article"
 down_revision = "20260822_style_delivery"
 branch_labels = None
 depends_on = None
