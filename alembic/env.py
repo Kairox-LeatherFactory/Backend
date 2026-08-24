@@ -24,6 +24,7 @@ from app.modules.procurement import models as _pr  # noqa
 from app.modules.bom import models as _bom  # noqa
 from app.modules.inventory import models as _inv  # noqa
 from app.modules.supplier_po import models as _spo  # noqa
+from app.modules.barcode import models as _bc  # noqa
 
 config = context.config
 db_url = get_settings().database_url
