@@ -87,6 +87,7 @@ async def test_uat2_cutting_logs_consumption_and_drops_stock(
         work_date=datetime.date.today(), screen=ScreenContext.LEATHER_CUT,
         leather_lot_id=leather_lot.id, consumption_qty=15.0)
     assert res["count_logged"] == 1
+    assert res["consumption_recorded"]["onused"] == 15.0
     await db.refresh(leather_lot)
     assert float(leather_lot.on_hand) == before - 15.0
 

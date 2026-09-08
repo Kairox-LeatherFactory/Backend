@@ -54,6 +54,8 @@ async def test_cutting_one_piece_decrements_the_lot_once(db, operations, pieces,
     assert await _on_hand(db, leather_lot.id) == pytest.approx(before - 10.0)
     assert res["consumption_recorded"]["dcm"] == pytest.approx(10.0)
     assert res["consumption_recorded"]["pieces_consuming"] == 1
+    assert res["consumption_recorded"]["reserved_per_piece"] == pytest.approx(10.0)
+    assert res["consumption_recorded"]["available_before"] == pytest.approx(before)
 
 
 @pytest.mark.asyncio

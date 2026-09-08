@@ -522,8 +522,13 @@ class ProductionService:
             consumption_recorded = {
                 "lot_id": str(lot_id),
                 "pieces_consuming": fresh_cut_count,
+                "dcm_per_piece": float(consumption_value),
+                "reserved_per_piece": float(consumption_value),
                 "qty": float(total_consumption),
                 "dcm": float(total_consumption),
+                "onused": materials.last_used_after,
+                "reserved": materials.last_used_after,
+                "available_before": materials.last_available_before,
                 "available_after": avail,
                 # True when the ledger went short. The cut is still recorded —
                 # see decrement_for_cut_nocommit for why this warns, not blocks.

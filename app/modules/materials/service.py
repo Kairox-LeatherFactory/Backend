@@ -37,6 +37,7 @@ _LOT_BARCODE_TYPE = {
     "ACCESSORY": BarcodeType.ACCESSORY_LOT,
 }
 
+
 # The fields that go into a lot's printed barcode caption, per category/subtype.
 # Order matters — this is what the label reads left-to-right.
 _CAPTION_FIELDS = {
@@ -68,7 +69,19 @@ class MaterialService:
         # is kept exactly as it was (production/service.py reads it after
         # its single cut decrement); this accumulates EVERY warning raised
         # on this instance, in order.
+        self.last_used_after: float | None = None
+        self.last_available_before: float | None = None
         self.decrement_warnings: list[dict] = []
+
+    @staticmethod
+    def _display_stock(on_hand, used, active_reserved):
+        """Present received, consumed/reserved, and remaining stock together."""
+        current = Decimal(str(on_hand or 0))
+        consumed = Decimal(str(used or 0))
+        committed = Decimal(str(active_reserved or 0))
+        received = current + consumed
+        reserved = consumed + committed
+        return received, reserved, received - reserved
 
     # ── create lot (+ child barcode + stock) ─────────────────────────────────
     async def create_lot(self, body) -> dict:
@@ -100,12 +113,24 @@ class MaterialService:
         if not body.colour or not str(body.colour).strip():
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 "colour is required.")
-
+        # removing empty values
         attrs = {k: v for k, v in dict(body.attributes or {}).items()
                  if v is not None and str(v).strip() != ""}
 
         # STRICT: every required attribute key must be present and non-empty.
         missing = spec["required"] - set(attrs)
+        
+        # ", ".join(["colour", "dcm", "thickness"])
+
+        # joins those strings using:
+
+        # , 
+
+        # (comma + space)
+
+        # Result:
+
+        # "colour, dcm, thickness"
         if missing:
             pretty = ", ".join(sorted(missing))
             raise HTTPException(
@@ -142,6 +167,18 @@ class MaterialService:
             colour=body.colour, thickness=attrs.get("thickness"),
             size=attrs.get("size"))
         if dup is not None:
+            # GOAT
+            # BLACK
+            # 0.8MM
+            # M
+
+            # And:
+
+            # " · ".join(...)
+
+            # combines them:
+
+            # GOAT · BLACK · 0.8MM · M
             spec_desc = " · ".join(str(v) for v in
                                    [body.article, body.colour,
                                     attrs.get("thickness"), attrs.get("size")] if v)
@@ -161,6 +198,7 @@ class MaterialService:
         await self.db.flush()   # need lot.id for the barcode
 
         # per-category caption: exactly the fields the spec lists for the label.
+        #removing the unwanted fields from the body
         caption = self._caption(cat, subtype, body, attrs, qty, uom)
         bc = await self.barcodes.mint_lot_code_nocommit(
             lot.id, _LOT_BARCODE_TYPE[cat], caption)
@@ -171,10 +209,10 @@ class MaterialService:
             "lot_id": lot.id, "lot_barcode": bc.code,
             "category": lot.category, "subtype": lot.subtype,
             "article": lot.article, "colour": lot.colour,
-            "on_hand": float(lot.on_hand), "reserved": 0.0,
+            "on_hand": float(lot.on_hand), "used": 0.0, "reserved": 0.0,
             "available": float(lot.on_hand), "uom": lot.uom,
         }
-
+ 
     @staticmethod
     def _caption(cat, subtype, body, attrs, qty, uom) -> str:
         key = (cat, None) if cat == "LEATHER" else (cat, subtype or "PLAIN_LINING")
@@ -185,7 +223,7 @@ class MaterialService:
             "description": attrs.get("description"), "qty": f"{qty} {uom}",
         }
         return " · ".join(str(values[f]) for f in fields if values.get(f))
-
+ 
     # ══════════════════════════════════════════════════════════════════════
     # LOT CRUD (change-list item 7) — the stock-management screen
     # ══════════════════════════════════════════════════════════════════════
@@ -217,9 +255,13 @@ class MaterialService:
             "category": lot.category, "subtype": lot.subtype,
             "article": lot.article, "colour": lot.colour,
             "thickness": lot.thickness, "size": lot.size, "uom": lot.uom,
-            "on_hand": float(lot.on_hand or 0),
-            "reserved": float(reserved),
-            "available": float((lot.on_hand or Decimal(0)) - reserved),
+            "on_hand": float(self._display_stock(
+                lot.on_hand, lot.used, reserved)[0]),
+            "used": float(lot.used or 0),
+            "reserved": float(self._display_stock(
+                lot.on_hand, lot.used, reserved)[1]),
+            "available": float(self._display_stock(
+                lot.on_hand, lot.used, reserved)[2]),
             "attributes": dict(lot.attributes or {}),
             "supplier_id": lot.supplier_id,
             "is_active": bool(lot.is_active),
@@ -230,7 +272,7 @@ class MaterialService:
                 - {"article", "colour"}),
             "required_attributes": sorted(spec.get("required", [])),
         }
-
+ 
     async def update_lot(self, lot_id: uuid.UUID, patch: dict) -> dict:
         """Correct a lot's IDENTITY — article, colour, thickness, size, supplier.
 
@@ -242,7 +284,8 @@ class MaterialService:
         lot = await self.repo.get_lot(lot_id)
         if not lot:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Material lot not found.")
-
+        
+        #loop run four times for each blocked field and raise error if any of them is present in the patch
         for blocked in ("category", "subtype", "on_hand", "uom"):
             if patch.get(blocked) is not None:
                 raise HTTPException(
@@ -258,7 +301,13 @@ class MaterialService:
         if not fields:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 "Nothing to update.")
-
+        # here we are make a update
+        # {
+        #     "article": "GOAT",       # existing
+        #     "colour": "BLACK",       # new
+        #     "thickness": 0.8,        # existing
+        #     "size": "M"              # existing
+        # }
         candidate = {
             "article": fields.get("article", lot.article),
             "colour": fields.get("colour", lot.colour),
@@ -456,9 +505,13 @@ class MaterialService:
                 "article": lot.article, "colour": lot.colour,
                 "thickness": lot.thickness, "size": lot.size,
                 "uom": lot.uom,
-                "on_hand": float(lot.on_hand or 0),
-                "reserved": float(reserved),
-                "available": float(available),
+                "on_hand": float(self._display_stock(
+                    lot.on_hand, lot.used, reserved)[0]),
+                "used": float(lot.used or 0),
+                "reserved": float(self._display_stock(
+                    lot.on_hand, lot.used, reserved)[1]),
+                "available": float(self._display_stock(
+                    lot.on_hand, lot.used, reserved)[2]),
                 # Pre-select this one in the UI, but SHOW it — never silently.
                 "last_used_for_sku": lot.id == last_used_id,
                 # None when the caller did not say how much it needs.
@@ -469,6 +522,7 @@ class MaterialService:
         # the suggested lot at the top so the common case is the first row.
         items.sort(key=lambda i: (not i["last_used_for_sku"],))
 
+        # IT TAKE A PARTICULAR FIELD LIKE EG COLOR IT ONLY LOOP THROUGH THE COLOR
         def _distinct(field: str) -> list:
             return sorted({i[field] for i in items if i[field] is not None})
 
@@ -494,11 +548,14 @@ class MaterialService:
             category=category, subtype=subtype, article=article,
             colour=colour, thickness=thickness, size=size)
         on_hand = Decimal(0)
-        reserved = Decimal(0)
+        used = Decimal(0)
+        active_reserved = Decimal(0)
         for lot in lots:
             on_hand += lot.on_hand
-            reserved += await self.repo.active_reserved(lot.id)
-        available = on_hand - reserved
+            used += lot.used or Decimal(0)
+            active_reserved += await self.repo.active_reserved(lot.id)
+        received, reserved, available = self._display_stock(
+            on_hand, used, active_reserved)
         uom = lots[0].uom if lots else uom_for(category or "", subtype)
 
         out = {
@@ -506,7 +563,8 @@ class MaterialService:
             "subtype": (subtype or None),
             "article": article, "colour": colour, "thickness": thickness,
             "size": size, "uom": uom,
-            "on_hand": float(on_hand), "reserved": float(reserved),
+            "on_hand": float(received), "used": float(used),
+            "reserved": float(reserved),
             "available": float(available),
             "lot_count": len(lots),
         }
@@ -610,9 +668,14 @@ class MaterialService:
  
         reserved = await self.repo.active_reserved(target_lot.id)
         return {
-            "lot_id": target_lot.id, "on_hand": float(target_lot.on_hand),
-            "reserved": float(reserved),
-            "available": float(target_lot.on_hand - reserved),
+            "lot_id": target_lot.id,
+            "on_hand": float(self._display_stock(
+                target_lot.on_hand, target_lot.used, reserved)[0]),
+            "used": float(target_lot.used or 0),
+            "reserved": float(self._display_stock(
+                target_lot.on_hand, target_lot.used, reserved)[1]),
+            "available": float(self._display_stock(
+                target_lot.on_hand, target_lot.used, reserved)[2]),
             "rejected_logged": float(rejected),
             "supplier_order_status": order_status,
             "substituted": substituted,
@@ -686,7 +749,9 @@ class MaterialService:
         shortfall = d - available_before
 
         lot.on_hand = before - d
-
+        lot.used = (lot.used or Decimal(0)) + d
+        self.last_available_before = float(available_before)
+        self.last_used_after = float(lot.used)
         self.last_decrement_warning = None
         if shortfall > 0:
             # `verb` is the only thing that differs between a cut and an issue:
