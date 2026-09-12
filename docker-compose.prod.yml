@@ -1,6 +1,15 @@
 # PRODUCTION overlay — server, port 8000, migrations ON, seed OFF (NEVER seed prod).
 #   docker compose -p kairox-prod -f docker-compose.yml -f docker-compose.prod.yml \
 #     --env-file .env.prod up -d --build
+#
+# Redis is NOT bundled here — .env.prod must set CELERY_BROKER_URL and
+# CELERY_RESULT_BACKEND at your Upstash / Redis Cloud instance (rediss:// for TLS),
+# configured with maxmemory-policy=noeviction.
+#
+# SCALING NOTE: `docker compose up -d --scale worker=N` is safe — the breakdown
+# claim is an atomic COMPLETE->CONSUMED compare-and-set, so two workers can never
+# process the same submission. NEVER scale `beat`: each replica is its own
+# scheduler, so every periodic job would fire once per replica.
 services:
   api:
     environment:
@@ -8,3 +17,21 @@ services:
       RUN_SEED: "false"         # real data — never auto-seed
     ports:
       - "8000:8000"
+  worker:
+    environment:
+      CELERY_AUTORELOAD: "false"
+      CELERY_CONCURRENCY: "${CELERY_CONCURRENCY:-4}"
+      CELERY_LOGLEVEL: "${CELERY_LOGLEVEL:-info}"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2400M
+  beat:
+    environment:
+      CELERY_AUTORELOAD: "false"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M

@@ -43,6 +43,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 
@@ -113,6 +114,38 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             yield session
         finally:
             await session.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# CELERY ASYNC engine + session  (background workers ONLY — see note)
+#
+# UPDATED 2026-09-11 (Hamthan): Celery tasks (modules/bom/tasks.py) drive their
+# async work via asyncio.run() on a FRESH event loop per task, but they used to
+# import the FastAPI AsyncSessionLocal above, whose engine is a POOLED engine
+# built for one long-lived event loop. asyncpg connections are bound to the
+# loop that opened them, so a connection returned to that pool by task N would
+# get handed to task N+1 on a DIFFERENT (new) loop; pool_pre_ping's own ping
+# then failed with "RuntimeError: Event loop is closed" instead of
+# transparently reconnecting (seen in worker logs: task 1 succeeded on a cold
+# pool, task 2 crashed on checkout of the stale connection 13 min later).
+# NullPool opens a brand-new connection on every checkout and closes it on
+# checkin, so no connection ever outlives the event loop that created it —
+# this sidesteps the cross-loop reuse entirely. Only Celery tasks should use
+# this engine; the FastAPI app keeps using the pooled async_engine above.
+# ──────────────────────────────────────────────────────────────────────────
+celery_async_engine = create_async_engine(
+    settings.effective_async_url,
+    echo=False,
+    future=True,
+    poolclass=NullPool,
+)
+
+CeleryAsyncSessionLocal = async_sessionmaker(
+    bind=celery_async_engine,
+    class_=AsyncSession,
+    autoflush=False,
+    expire_on_commit=False,
+)
 
 # ──────────────────────────────────────────────────────────────────────────
 # SYNC engine + session  (Alembic migrations + scripts/seed.py)

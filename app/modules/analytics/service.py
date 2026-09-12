@@ -1044,7 +1044,7 @@ class AnalyticsService(BarcodeAnalyticsMixin):
                 "lines": lines,
             })
         employees.sort(key=lambda e: -e["total_amount"])
-
+ 
         return {
             "start": start,
             "end": end,

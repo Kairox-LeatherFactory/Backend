@@ -128,15 +128,46 @@ async def open_notification(notification_id: uuid.UUID, db: AsyncSession = Depen
 
 @router.post("/patterns", status_code=202)
 async def upload_pattern(file: UploadFile = File(...), style_signature: str | None = None,
+                         client_id: uuid.UUID | None = None,
                          db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     data = await file.read()
     key = f"patterns/incoming/{uuid.uuid4()}.dxf"
     get_storage().put(key, data)                       # store, then hand the KEY to the task
+    # UPDATED 2026-09-11 (Hamthan): this always used getattr(user,"client_id",None)
+    # — the UPLOADING user's own client_id, which is None for every staff
+    # (DM/MD) upload, since staff accounts aren't scoped to one client. The
+    # resulting PatternExtraction.client_id could then never match a real
+    # order's client_id, so repo.get_current_pattern's (style_signature,
+    # client_id) auto-match always missed and the pattern had to be attached
+    # via the manual confirm-override path every time. A DM/MD may now name
+    # the client explicitly; a CLIENT-role caller stays pinned to their own
+    # (mirrors clients/router.py's existing CLIENT-role pinning pattern).
+    if user.role == UserRole.CLIENT:
+        resolved_client_id = user.client_id
+    else:
+        resolved_client_id = client_id or getattr(user, "client_id", None)
     from app.modules.bom.tasks import parse_pattern_dxf
     job = parse_pattern_dxf.delay(user_id=str(user.id), style_signature=style_signature,
-                                  client_id=str(getattr(user,"client_id",None) or "") or None,
+                                  client_id=str(resolved_client_id) if resolved_client_id else None,
                                   storage_key=key)
     return {"job_id": job.id, "channel": f"pattern:{style_signature}"}
+
+
+# UPDATED 2026-09-12 (Hamthan): POST /patterns is async (Celery) and only ever
+# returns a job_id — there was no way to find the resulting PatternExtraction.id
+# (the pattern_reference_id needed for POST /order-styles/{id}/attachments)
+# without reading worker logs or querying the DB directly. Poll this after
+# POST /patterns until the row you just uploaded shows up.
+@router.get("/patterns")
+async def list_patterns(style_signature: str | None = None, client_id: uuid.UUID | None = None,
+                        db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
+    rows = await BomService(db).repo.list_patterns(style_signature=style_signature, client_id=client_id)
+    return [{"id": str(r.id), "style_signature": r.style_signature,
+             "client_id": str(r.client_id) if r.client_id else None,
+             "is_current": r.is_current, "n_pieces": r.n_pieces,
+             "sha256": r.sha256, "created_at": r.created_at.isoformat()}
+            for r in rows]
+
 
 @router.put("/admin/dxf-yields/{species}")
 async def put_dxf_yield(species: str, body: DxfYieldIn,
@@ -173,9 +204,14 @@ async def put_checks(client_code: str, body: ClientChecksPut,
 @router.get("/admin/pom-dictionary")
 async def list_pom_dictionary(db: AsyncSession = Depends(get_db), user: User = Depends(_DMMD)):
     rows = await BomService(db).repo.list_pom_mappings()
+    # UPDATED 2026-09-11 (Hamthan): surface the new status/confidence fields
+    # (models.PomDictionary) so an admin can actually see which mappings are
+    # LLM-suggested and still need review vs already confirmed.
     return [{"source_term": r.source_term, "pom_code": r.pom_code, "language": r.language,
              "garment_type_id": str(r.garment_type_id) if r.garment_type_id else None,
-             "weight": r.weight} for r in rows]
+             "weight": r.weight, "status": r.status,
+             "confidence": float(r.confidence) if r.confidence is not None else None}
+            for r in rows]
 
 @router.post("/admin/pom-dictionary")
 async def add_pom_mapping(body: PomMappingIn, db: AsyncSession = Depends(get_db),
@@ -204,6 +240,20 @@ async def create_order_breakdown(
     if state == "processing":
         return BreakdownAccepted(submission_id=submission_id,
                                  status="already_processing")
+
+    # UPDATED 2026-09-11 (Hamthan): a submission with no client_id used to sail
+    # through here, get claimed, get enqueued, and only fail deep inside the
+    # Celery worker (tasks.py's build_order_breakdown_for_submission returning
+    # {"status":"failed","reason":"submission_missing_client_id"}) — a failure
+    # this POST's 202 response never surfaces, visible only in worker logs or
+    # by polling GET .../order-breakdown afterward. Checking it here, before
+    # claiming/enqueueing, turns an invisible async failure into an immediate,
+    # actionable 422 for the caller.
+    if await svc.procurement.get_submission_client_id(submission_id) is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "submission has no client_id — open it with POST /submissions "
+            "{\"client_id\": ...} before running the breakdown")
 
     # Gate + claim (reuses the procurement claim; new gate: ORDER slot accepted —
     # the spec is per-style now, so it is NOT required to start the breakdown).
@@ -287,3 +337,31 @@ async def generate_style_bom(
                                              str(getattr(user, "id", "")))
     return StyleBomAccepted(order_style_id=order_style_id, status="queued",
                             task_id=task.id)
+
+
+# UPDATED 2026-09-11 (Hamthan): POST .../generate-bom only queues the Celery
+# task (generation takes ~30-50s — a real Gemini extraction call, same reason
+# every other heavy task in this module is async, see tasks.py's module
+# docstring) and returns bom_id=null immediately. There was no way to find out
+# when the BOM became ready other than the Realtime "bom_generated" push,
+# which isn't wired up in this dev setup. This mirrors the existing
+# GET /submissions/{id}/order-breakdown poll pattern: not_started while
+# order_style.bom_id is still null, ready with the full BOM once generation
+# links it.
+@router.get("/order-styles/{order_style_id}/bom")
+async def get_style_bom(
+    order_style_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Poll target for POST .../generate-bom. status: not_started (nothing
+    yet) | ready (bom present)."""
+    svc = BomService(db)
+    row = await svc.repo.get_order_style(order_style_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "order style not found")
+    if row.bom_id is None:
+        return {"order_style_id": order_style_id, "status": "not_started", "bom": None}
+    return {"order_style_id": order_style_id, "status": "ready",
+            "bom": await svc.get_bom(row.bom_id)}
+    
