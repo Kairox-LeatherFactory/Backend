@@ -22,6 +22,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+
 from app.core.config import settings
 from app.core.enums import DrawerState, ProductionStage, ShipMode
 from app.core.store_display import display_stage, holding_label
@@ -1043,7 +1044,7 @@ class AnalyticsService(BarcodeAnalyticsMixin):
                 "lines": lines,
             })
         employees.sort(key=lambda e: -e["total_amount"])
-
+ 
         return {
             "start": start,
             "end": end,

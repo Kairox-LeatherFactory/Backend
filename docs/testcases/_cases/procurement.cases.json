@@ -1,0 +1,1069 @@
+{
+  "service": "Procurement",
+  "slug": "procurement",
+  "doc_only": true,
+  "module": "app/modules/procurement",
+  "stage": "Stage 1 — upload intake and validation",
+  "prefix": "/api/v1/procurement",
+  "intro": "Request-level test cases for the Stage-1 intake API. Every row is a literal HTTP request (method, path, headers, body) with the exact status code and response fields to check. Ready-made requests: procurement.postman_collection.json.",
+  "notes": [
+    "Every endpoint requires `Authorization: Bearer <token>` for a Direct Manager or Managing Director — there is no anonymous access anywhere in this module.",
+    "**Known build note:** the byte-identical re-upload shortcut (instant replay / 409 `duplicate_content`) is disabled in this build — the service marks it \"TESTING PHASE\". Until it is re-enabled, re-POSTing the same bytes re-runs full validation instead of short-circuiting. OS-B1 / OS-B2 depend on this; confirm current behaviour before filing either as a bug.",
+    "Every 4xx/5xx upload response carries a `reason_code`: unsupported_mime (415), file_too_large (413), empty_or_corrupt (422), virus_detected (422), scanner_unavailable (503), not_an_order_sheet / not_a_spec_sheet / wrong_slot / needs_manual_review (422), submission_locked (409), duplicate_content (409).",
+    "`force=true` only ever overrides `needs_manual_review`. It is ignored for every hard reject.",
+    "The ORDER slot is the only slot that locks, and the only slot that gates Stage-2 readiness. The SPEC slot never locks and never gates on its own."
+  ],
+  "sections": [
+    {
+      "code": "A",
+      "title": "Open a submission",
+      "sub": "POST /submissions",
+      "gate": "DM / MD",
+      "cases": [
+        {
+          "id": "A-P1",
+          "cat": "POS",
+          "prio": "High",
+          "status": "201",
+          "title": "Open with no client",
+          "role": "",
+          "steps": [
+            "POST /submissions",
+            "Authorization: Bearer {{dm_token}}",
+            "Body: {}  (or omitted entirely)"
+          ],
+          "expected": "201; body {\"submission_id\":\"<uuid>\",\"status\":\"open\"}"
+        },
+        {
+          "id": "A-P2",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "201",
+          "title": "Open with a client_id",
+          "role": "",
+          "steps": [
+            "POST /submissions",
+            "Authorization: Bearer {{dm_token}}",
+            "Body: {\"client_id\": \"<known-client-uuid>\"}"
+          ],
+          "expected": "201; same shape as A‑P1 — the client link isn't echoed here, verify via GET status later."
+        },
+        {
+          "id": "A-P3",
+          "cat": "POS",
+          "prio": "Low",
+          "status": "201",
+          "title": "MD opens a submission",
+          "role": "",
+          "steps": [
+            "POST /submissions",
+            "Authorization: Bearer {{md_token}}",
+            "Body: {}"
+          ],
+          "expected": "201, identical shape."
+        },
+        {
+          "id": "A-N1",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "403",
+          "title": "Wrong role",
+          "role": "",
+          "steps": [
+            "POST /submissions",
+            "Authorization: Bearer {{other_token}}",
+            "Body: {}"
+          ],
+          "expected": "403 Forbidden."
+        },
+        {
+          "id": "A-N2",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "401",
+          "title": "No/invalid token",
+          "role": "",
+          "steps": [
+            "POST /submissions",
+            "(no Authorization header, or an expired/garbage token)",
+            "Body: {}"
+          ],
+          "expected": "401 Unauthorized."
+        },
+        {
+          "id": "A-N3",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "422",
+          "title": "Malformed client_id",
+          "role": "",
+          "steps": [
+            "POST /submissions",
+            "Authorization: Bearer {{dm_token}}",
+            "Body: {\"client_id\": \"not-a-uuid\"}"
+          ],
+          "expected": "422 — Pydantic UUID coercion failure."
+        },
+        {
+          "id": "A-B1",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "n/a",
+          "title": "Many opens in a row",
+          "role": "",
+          "steps": [
+            "POST /submissions ×5",
+            "Authorization: Bearer {{dm_token}}",
+            "Body: {}  (fire 5 times back to back)"
+          ],
+          "expected": "Each call returns a distinct submission_id; no error, no rate limit observed at this volume."
+        },
+        {
+          "id": "A-L1",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "n/a",
+          "title": "A client-less submission still accepts uploads",
+          "role": "",
+          "steps": [
+            "POST /submissions → {}",
+            "then",
+            "POST /submissions/{id}/order-sheet",
+            "(valid order-sheet file, no client on the submission)"
+          ],
+          "expected": "Upload proceeds and validates normally — client_id only narrows which client_template profile is checked first, it's never a precondition."
+        }
+      ]
+    },
+    {
+      "code": "FG",
+      "title": "Shared intake gates (order + spec)",
+      "sub": "POST /submissions/{id}/order-sheet · POST /submissions/{id}/spec-sheet",
+      "gate": "DM / MD",
+      "cases": [
+        {
+          "id": "FG-P1",
+          "cat": "POS",
+          "prio": "High",
+          "status": "201",
+          "title": "Valid PDF, onboarded client",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "Authorization: Bearer {{dm_token}}",
+            "Content-Type: multipart/form-data",
+            "file=@order_sheet_valid.pdf"
+          ],
+          "expected": "201; document.validation.status:\"accepted\", method:\"heuristic\", slot filled in the returned submission summary."
+        },
+        {
+          "id": "FG-P2",
+          "cat": "POS",
+          "prio": "High",
+          "status": "201",
+          "title": "Valid XLSX",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@order_sheet_valid.xlsx"
+          ],
+          "expected": "201, accepted."
+        },
+        {
+          "id": "FG-P3",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "201",
+          "title": "Valid CSV",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@order_sheet_valid.csv"
+          ],
+          "expected": "201, accepted."
+        },
+        {
+          "id": "FG-P4",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "201",
+          "title": "Valid legacy .xls",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@order_sheet_valid.xls  (old BIFF format)"
+          ],
+          "expected": "201, accepted — read via the xlrd fallback path."
+        },
+        {
+          "id": "FG-P5",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "201",
+          "title": "Scanned PDF, genuinely valid",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@order_sheet_scanned_valid.pdf  (image-only, no text layer)"
+          ],
+          "expected": "201 or 422 depending on OCR/LLM outcome — method:\"llm\" if it escalated and passed; check validation_signals shows OCR text was used, not an instant reject just because there's no text layer."
+        },
+        {
+          "id": "FG-P6",
+          "cat": "POS",
+          "prio": "Low",
+          "status": "n/a",
+          "title": "Mid-confidence genuine document",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@order_sheet_sparse_but_real.pdf"
+          ],
+          "expected": "Resolves to a real verdict (accepted, rejected, or needs_manual_review) with method:\"llm\" — not stuck, not a timeout."
+        },
+        {
+          "id": "FG-N1",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "415",
+          "title": "Unsupported file type",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@random.docx"
+          ],
+          "expected": "415; reason_code:\"unsupported_mime\"."
+        },
+        {
+          "id": "FG-N2",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "415",
+          "title": "Disguised file (extension lies)",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@renamed_zip_as.pdf  (a .zip's bytes, .pdf filename)"
+          ],
+          "expected": "415; reason_code:\"unsupported_mime\" — sniffed content wins over the extension."
+        },
+        {
+          "id": "FG-N3",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "413",
+          "title": "Oversized file",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@big_file_30mb.pdf"
+          ],
+          "expected": "413; reason_code:\"file_too_large\" — returned while streaming, before the pipeline runs."
+        },
+        {
+          "id": "FG-N4",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "422",
+          "title": "Zero-byte upload",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@empty.pdf  (0 bytes)"
+          ],
+          "expected": "422; reason_code:\"empty_or_corrupt\"."
+        },
+        {
+          "id": "FG-N5",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "422",
+          "title": "Corrupted file",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@truncated_corrupt.xlsx"
+          ],
+          "expected": "422; reason_code:\"empty_or_corrupt\", no 500."
+        },
+        {
+          "id": "FG-N6",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "422",
+          "title": "EICAR virus test string",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@eicar.txt  (the standard EICAR test signature, renamed .pdf/.csv)",
+            "[requires VIRUS_SCAN_ENABLED=true in this environment]"
+          ],
+          "expected": "422; reason_code:\"virus_detected\", payload.scan_signature present. Cross-check an AuditLog row with action:\"VIRUS_DETECTED\" was written (ask backend/DB access if you can't query directly)."
+        },
+        {
+          "id": "FG-N7",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "503",
+          "title": "Scanner unreachable",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@order_sheet_valid.pdf",
+            "[with VIRUS_SCAN_ENABLED=true and clamd stopped]"
+          ],
+          "expected": "503; reason_code:\"scanner_unavailable\" — confirm no document/storage row was created (fail closed, nothing stored unscanned)."
+        },
+        {
+          "id": "FG-N8",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "422",
+          "title": "Narrative document quoting real client refs",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@process_workflow_writeup.pdf  (prose PDF, section headings, mentions real order numbers)"
+          ],
+          "expected": "422; reason_code:\"not_an_order_sheet\", method:\"heuristic\", signals_found mentions \"flowing narrative text\" / section headings."
+        },
+        {
+          "id": "FG-N9",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "422",
+          "title": "Right document, wrong slot",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@spec_sheet_valid.pdf  (a real SPEC sheet, posted to the ORDER slot)"
+          ],
+          "expected": "422; reason_code:\"wrong_slot\", suggested_fix names the correct slot."
+        },
+        {
+          "id": "FG-N10",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "422",
+          "title": "Unrelated document",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@random_unrelated_spreadsheet.xlsx"
+          ],
+          "expected": "422; reason_code:\"not_an_order_sheet\"."
+        },
+        {
+          "id": "FG-B1",
+          "cat": "BND",
+          "prio": "Medium",
+          "status": "n/a",
+          "title": "Exactly at the size limit",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@exactly_25mb.pdf"
+          ],
+          "expected": "Not rejected for size — processes normally (only strictly > the cap 413s)."
+        },
+        {
+          "id": "FG-B2",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "413",
+          "title": "A few KB over the limit",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@25mb_plus_1kb.pdf"
+          ],
+          "expected": "413; reason_code:\"file_too_large\"."
+        },
+        {
+          "id": "FG-B3",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "n/a",
+          "title": "PDF with a sliver of text (near the 40-char text-layer bar)",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@pdf_stamp_only_text.pdf  (a watermark/stamp, <40 extractable chars)"
+          ],
+          "expected": "Treated as scanned (is_scanned_pdf:true in signals) and escalated via OCR, not scored as if it had a real text layer."
+        },
+        {
+          "id": "FG-B4",
+          "cat": "BND",
+          "prio": "Medium",
+          "status": "n/a",
+          "title": "Right on the heuristic accept/reject boundary",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@order_sheet_borderline.pdf  (weakly matches the client's fingerprint terms)"
+          ],
+          "expected": "method:\"llm\" in the response — escalated instead of guessed at the heuristic layer."
+        },
+        {
+          "id": "FG-B5",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "n/a",
+          "title": "No file extension",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@order  (valid PDF bytes, filename has no extension)"
+          ],
+          "expected": "Classified purely on sniffed content — extension-agreement check is skipped when there's no extension."
+        },
+        {
+          "id": "FG-B6",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "n/a",
+          "title": "Mixed/uppercase extension",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@ORDER.PDF"
+          ],
+          "expected": "Recognized the same as lowercase — no unsupported_mime from casing alone."
+        },
+        {
+          "id": "FG-L1",
+          "cat": "LGC",
+          "prio": "High",
+          "status": "422",
+          "title": "\"Needs review\" is a distinct outcome",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@order_sheet_ambiguous.pdf"
+          ],
+          "expected": "422; validation.status:\"needs_manual_review\", validation.can_override:true, override_hint text present — never silently 201'd or silently a hard reject."
+        },
+        {
+          "id": "FG-L2",
+          "cat": "LGC",
+          "prio": "Low",
+          "status": "n/a",
+          "title": "Client-vocabulary vs. generic-English diagnostics",
+          "role": "",
+          "steps": [
+            "Compare two runs of POST /submissions/{id}/order-sheet:",
+            "1) file rejected for an onboarded non-English client",
+            "2) same bad file, submission with NO client onboarded"
+          ],
+          "expected": "validation.signals_expected differs between the two — (1) lists that client's own anchor terms, (2) falls back to the generic English list."
+        },
+        {
+          "id": "FG-L3",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "422",
+          "title": "Graceful degrade with no classifier configured",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@order_sheet_borderline.pdf",
+            "[environment with no LLM/classifier key configured]"
+          ],
+          "expected": "422; validation.status:\"needs_manual_review\", method:\"heuristic\" — not a 500, not a hang."
+        },
+        {
+          "id": "FG-L4",
+          "cat": "LGC",
+          "prio": "Low",
+          "status": "422",
+          "title": "Illegible scan degrades safely",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@scanned_illegible.pdf  (poor-quality scan, OCR finds nothing)"
+          ],
+          "expected": "422; validation.status:\"needs_manual_review\" — not force-guessed accept or reject."
+        }
+      ]
+    },
+    {
+      "code": "OS",
+      "title": "Order-sheet slot",
+      "sub": "POST /submissions/{id}/order-sheet · POST /upload/order-sheet",
+      "gate": "DM / MD",
+      "cases": [
+        {
+          "id": "OS-P1",
+          "cat": "POS",
+          "prio": "High",
+          "status": "201",
+          "title": "Accept into a fresh submission",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@order_sheet_valid.pdf"
+          ],
+          "expected": "201; submission summary shows order_sheet.present:true, ready_for_stage_2:true (order alone is enough — OS‑L1)."
+        },
+        {
+          "id": "OS-P2",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "201",
+          "title": "Correct with a re-upload before consumption",
+          "role": "",
+          "steps": [
+            "1) POST /submissions/{id}/order-sheet → accepted (doc A)",
+            "2) POST /submissions/{id}/order-sheet",
+            "file=@order_sheet_corrected.pdf  (different bytes)"
+          ],
+          "expected": "201 on step 2; GET .../documents/{doc A} now shows validation.status:\"superseded\"."
+        },
+        {
+          "id": "OS-P3",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "201",
+          "title": "Direct upload, no submission yet",
+          "role": "",
+          "steps": [
+            "POST /upload/order-sheet",
+            "Authorization: Bearer {{dm_token}}",
+            "file=@order_sheet_valid.pdf"
+          ],
+          "expected": "201; response's submission_id is a NEW id — capture it for the paired spec-sheet upload."
+        },
+        {
+          "id": "OS-P4",
+          "cat": "POS",
+          "prio": "High",
+          "status": "201",
+          "title": "Force-accept a needs_manual_review order sheet",
+          "role": "",
+          "steps": [
+            "1) POST /submissions/{id}/order-sheet",
+            "file=@order_sheet_ambiguous.pdf → 422 needs_manual_review",
+            "2) POST /submissions/{id}/order-sheet?force=true",
+            "file=@order_sheet_ambiguous.pdf  (SAME file)"
+          ],
+          "expected": "Step 2 → 201; document.validation.status:\"accepted\", validation_signals.manual_override:true."
+        },
+        {
+          "id": "OS-N1",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "409",
+          "title": "Change the order sheet after consumption",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "file=@order_sheet_v2.pdf",
+            "[submission.status already \"consumed\" — order was claimed by the style breakdown]"
+          ],
+          "expected": "409; reason_code:\"submission_locked\"."
+        },
+        {
+          "id": "OS-N2",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "415",
+          "title": "force=true on a hard reject",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet?force=true",
+            "file=@random.docx  (hard reject: unsupported_mime)"
+          ],
+          "expected": "Still 415; reason_code:\"unsupported_mime\" — force is ignored for anything that isn't needs_manual_review."
+        },
+        {
+          "id": "OS-N3",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "403",
+          "title": "Wrong role",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/order-sheet",
+            "Authorization: Bearer {{other_token}}",
+            "file=@order_sheet_valid.pdf"
+          ],
+          "expected": "403."
+        },
+        {
+          "id": "OS-N4",
+          "cat": "NEG",
+          "prio": "Low",
+          "status": "404",
+          "title": "Unknown submission id",
+          "role": "",
+          "steps": [
+            "POST /submissions/00000000-0000-0000-0000-000000000000/order-sheet",
+            "file=@order_sheet_valid.pdf"
+          ],
+          "expected": "404 \"Submission not found.\""
+        },
+        {
+          "id": "OS-B1",
+          "cat": "BND",
+          "prio": "Medium",
+          "status": "201",
+          "title": "Re-POST the identical file twice",
+          "role": "",
+          "steps": [
+            "1) POST /submissions/{id}/order-sheet",
+            "file=@order_sheet_valid.pdf → 201",
+            "2) POST /submissions/{id}/order-sheet",
+            "file=@order_sheet_valid.pdf  (byte-identical)"
+          ],
+          "expected": "Per the build note: currently re-runs full validation again (still 201) rather than an instant replay. Confirm this is the intended current state — the designed behaviour (dedupe enabled) is a short-circuit replay of the cached verdict."
+        },
+        {
+          "id": "OS-B2",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "409",
+          "title": "Same bytes already accepted in the OTHER slot",
+          "role": "",
+          "steps": [
+            "1) POST /submissions/{id}/spec-sheet",
+            "file=@shared_bytes.pdf → 201 accepted into SPEC slot",
+            "2) POST /submissions/{id}/order-sheet",
+            "file=@shared_bytes.pdf  (identical bytes)"
+          ],
+          "expected": "Designed behaviour (dedupe enabled): 409, error:\"duplicate_content\". Currently may instead re-validate per the build note — record whichever you observe."
+        },
+        {
+          "id": "OS-L1",
+          "cat": "LGC",
+          "prio": "High",
+          "status": "n/a",
+          "title": "Readiness needs ONLY the order slot",
+          "role": "",
+          "steps": [
+            "1) POST /submissions/{id}/order-sheet → 201 (spec slot left empty)",
+            "2) GET /submissions/{id}"
+          ],
+          "expected": "Step 2 → status:\"complete\", ready_for_stage_2:true, spec_sheet.present:false — a spec sheet is not required here."
+        },
+        {
+          "id": "OS-L2",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "n/a",
+          "title": "A spec uploaded first still lands, doesn't gate",
+          "role": "",
+          "steps": [
+            "1) POST /submissions/{id}/spec-sheet → 201 (order slot still empty)",
+            "2) GET /submissions/{id}"
+          ],
+          "expected": "Step 2 → spec_sheet.present:true but status:\"open\", ready_for_stage_2:false — the order slot is the only gate."
+        }
+      ]
+    },
+    {
+      "code": "SS",
+      "title": "Spec-sheet slot",
+      "sub": "POST /submissions/{id}/spec-sheet · POST /upload/spec-sheet",
+      "gate": "DM / MD",
+      "cases": [
+        {
+          "id": "SS-P1",
+          "cat": "POS",
+          "prio": "High",
+          "status": "201",
+          "title": "Accept at any time",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/spec-sheet",
+            "file=@spec_sheet_valid.pdf   (try both before AND after the order slot is filled)"
+          ],
+          "expected": "201 either way; spec_sheet.present:true."
+        },
+        {
+          "id": "SS-P2",
+          "cat": "POS",
+          "prio": "Low",
+          "status": "201",
+          "title": "Direct upload, no submission yet",
+          "role": "",
+          "steps": [
+            "POST /upload/spec-sheet",
+            "file=@spec_sheet_valid.pdf"
+          ],
+          "expected": "201; new submission_id returned."
+        },
+        {
+          "id": "SS-P3",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "201",
+          "title": "Force-accept needs_manual_review",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/spec-sheet?force=true",
+            "file=@spec_sheet_ambiguous.pdf"
+          ],
+          "expected": "201; validation_signals.manual_override:true."
+        },
+        {
+          "id": "SS-N1",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "403",
+          "title": "Wrong role",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/spec-sheet",
+            "Authorization: Bearer {{other_token}}",
+            "file=@spec_sheet_valid.pdf"
+          ],
+          "expected": "403."
+        },
+        {
+          "id": "SS-N2",
+          "cat": "NEG",
+          "prio": "Low",
+          "status": "404",
+          "title": "Unknown submission id",
+          "role": "",
+          "steps": [
+            "POST /submissions/00000000-0000-0000-0000-000000000000/spec-sheet",
+            "file=@spec_sheet_valid.pdf"
+          ],
+          "expected": "404."
+        },
+        {
+          "id": "SS-N3",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "422",
+          "title": "force=true on a hard reject",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/spec-sheet?force=true",
+            "file=@virus_eicar.pdf"
+          ],
+          "expected": "Still 422 virus_detected — override never applies to a hard reject."
+        },
+        {
+          "id": "SS-B1",
+          "cat": "BND",
+          "prio": "High",
+          "status": "201",
+          "title": "Upload after the order is already locked",
+          "role": "",
+          "steps": [
+            "POST /submissions/{id}/spec-sheet",
+            "file=@spec_sheet_valid.pdf",
+            "[submission.status already \"consumed\"]"
+          ],
+          "expected": "201 — spec slot is deliberately never locked, unlike the order slot."
+        },
+        {
+          "id": "SS-L1",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "n/a",
+          "title": "Spec-only submission stays \"open\"",
+          "role": "",
+          "steps": [
+            "1) POST /submissions/{id}/spec-sheet → 201 (no order upload at all)",
+            "2) GET /submissions/{id}"
+          ],
+          "expected": "Step 2 → status:\"open\", ready_for_stage_2:false, blocking lists \"order_sheet missing\"."
+        },
+        {
+          "id": "SS-L2",
+          "cat": "LGC",
+          "prio": "Low",
+          "status": "n/a",
+          "title": "spec_type correctly told apart",
+          "role": "",
+          "steps": [
+            "1) POST /submissions/{id}/spec-sheet",
+            "file=@spec_measurement_grid.xlsx",
+            "2) separately: POST /submissions/{id2}/spec-sheet",
+            "file=@spec_narrative_techpack.pdf"
+          ],
+          "expected": "Each document's validation.spec_type reflects its own kind (measurement grid vs. narrative tech pack) — check via GET .../documents/{id}."
+        }
+      ]
+    },
+    {
+      "code": "ST",
+      "title": "Submission status / readiness",
+      "sub": "GET /submissions/{submission_id}",
+      "gate": "DM / MD",
+      "cases": [
+        {
+          "id": "ST-P1",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Fresh, empty submission",
+          "role": "",
+          "steps": [
+            "GET /submissions/{id}",
+            "(immediately after opening, nothing uploaded)"
+          ],
+          "expected": "200; order_sheet.present:false, spec_sheet.present:false, ready_for_stage_2:false, blocking:[\"order_sheet missing\",\"spec_sheet missing\"]."
+        },
+        {
+          "id": "ST-P2",
+          "cat": "POS",
+          "prio": "High",
+          "status": "200",
+          "title": "After order accepted",
+          "role": "",
+          "steps": [
+            "GET /submissions/{id}",
+            "(order sheet accepted, spec not uploaded)"
+          ],
+          "expected": "200; status:\"complete\", ready_for_stage_2:true, order_sheet.present:true."
+        },
+        {
+          "id": "ST-P3",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "After both slots accepted",
+          "role": "",
+          "steps": [
+            "GET /submissions/{id}",
+            "(both order + spec accepted)"
+          ],
+          "expected": "200; both slots present:true, still ready."
+        },
+        {
+          "id": "ST-N1",
+          "cat": "NEG",
+          "prio": "Low",
+          "status": "404",
+          "title": "Unknown submission id",
+          "role": "",
+          "steps": [
+            "GET /submissions/00000000-0000-0000-0000-000000000000"
+          ],
+          "expected": "404."
+        },
+        {
+          "id": "ST-N2",
+          "cat": "NEG",
+          "prio": "Low",
+          "status": "403",
+          "title": "Wrong role",
+          "role": "",
+          "steps": [
+            "GET /submissions/{id}",
+            "Authorization: Bearer {{other_token}}"
+          ],
+          "expected": "403."
+        },
+        {
+          "id": "ST-B1",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "n/a",
+          "title": "Status right after a supersede",
+          "role": "",
+          "steps": [
+            "1) accept order doc A",
+            "2) re-upload → doc B accepted, A superseded",
+            "3) GET /submissions/{id}"
+          ],
+          "expected": "Reflects doc B only — superseded doc A doesn't affect the slot state either way."
+        },
+        {
+          "id": "ST-B2",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "n/a",
+          "title": "Accepted but scan status not clean",
+          "role": "",
+          "steps": [
+            "GET /submissions/{id}",
+            "[a slot's doc has validation_status=accepted but scan_status outside clean/skipped — needs a DB/test-fixture setup, ask backend for a seeded case]"
+          ],
+          "expected": "blocking includes an entry like \"order_sheet scan_status=...\", called out separately from the validation status."
+        },
+        {
+          "id": "ST-L1",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "n/a",
+          "title": "blocking[] is always human-readable",
+          "role": "",
+          "steps": [
+            "GET /submissions/{id}",
+            "(run against several submissions in different incomplete states)"
+          ],
+          "expected": "Every non-ready case includes specific plain-text reasons in blocking — never just a bare boolean with no explanation."
+        }
+      ]
+    },
+    {
+      "code": "DR",
+      "title": "Document report",
+      "sub": "GET /submissions/{submission_id}/documents/{document_id}",
+      "gate": "DM / MD",
+      "cases": [
+        {
+          "id": "DR-P1",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Report for an accepted doc",
+          "role": "",
+          "steps": [
+            "GET /submissions/{id}/documents/{doc_id}",
+            "(doc_id of an accepted upload)"
+          ],
+          "expected": "200; document.validation.status:\"accepted\", confidence, method, classified_as populated."
+        },
+        {
+          "id": "DR-P2",
+          "cat": "POS",
+          "prio": "High",
+          "status": "200",
+          "title": "Report for a rejected doc",
+          "role": "",
+          "steps": [
+            "GET /submissions/{id}/documents/{doc_id}",
+            "(doc_id of a rejected upload)"
+          ],
+          "expected": "200; validation.status:\"rejected\", reason_code, signals_expected vs signals_found, suggested_fix text."
+        },
+        {
+          "id": "DR-N1",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "404",
+          "title": "Document belongs to a different submission",
+          "role": "",
+          "steps": [
+            "GET /submissions/{submission_B_id}/documents/{doc_from_submission_A}"
+          ],
+          "expected": "404 \"Document not found in this submission.\" — must NOT leak the document via the wrong submission."
+        },
+        {
+          "id": "DR-N2",
+          "cat": "NEG",
+          "prio": "Low",
+          "status": "404",
+          "title": "Unknown document id",
+          "role": "",
+          "steps": [
+            "GET /submissions/{id}/documents/00000000-0000-0000-0000-000000000000"
+          ],
+          "expected": "404."
+        },
+        {
+          "id": "DR-N3",
+          "cat": "NEG",
+          "prio": "Low",
+          "status": "403",
+          "title": "Wrong role",
+          "role": "",
+          "steps": [
+            "GET /submissions/{id}/documents/{doc_id}",
+            "Authorization: Bearer {{other_token}}"
+          ],
+          "expected": "403."
+        },
+        {
+          "id": "DR-L1",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "n/a",
+          "title": "Superseded doc keeps its own original verdict",
+          "role": "",
+          "steps": [
+            "1) doc A accepted, then superseded by doc B",
+            "2) GET /submissions/{id}/documents/{doc A id}"
+          ],
+          "expected": "Still shows doc A's ORIGINAL verdict/signals as recorded at the time — not overwritten to match doc B."
+        }
+      ]
+    },
+    {
+      "code": "G",
+      "title": "End-to-end sequences",
+      "sub": "chained calls across the endpoints above",
+      "gate": "DM / MD",
+      "cases": [
+        {
+          "id": "G-1",
+          "cat": "LGC",
+          "prio": "High",
+          "status": "201",
+          "title": "Straight-through happy path",
+          "role": "",
+          "steps": [
+            "1) POST /submissions → {}",
+            "2) POST /submissions/{id}/order-sheet, file=@order_sheet_valid.pdf",
+            "3) GET /submissions/{id}"
+          ],
+          "expected": "201 → 201 → 200 ready, no manual step needed anywhere."
+        },
+        {
+          "id": "G-2",
+          "cat": "LGC",
+          "prio": "High",
+          "status": "n/a",
+          "title": "Reject → correct → re-upload → accept",
+          "role": "",
+          "steps": [
+            "1) POST /submissions → {}",
+            "2) POST /submissions/{id}/order-sheet, file=@bad.docx → 415",
+            "3) POST /submissions/{id}/order-sheet, file=@order_sheet_valid.pdf → 201",
+            "4) GET /submissions/{id} → ready"
+          ],
+          "expected": "A rejected slot is fully recoverable within the SAME submission by re-POSTing the fixed file."
+        },
+        {
+          "id": "G-3",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "n/a",
+          "title": "Pair two direct uploads",
+          "role": "",
+          "steps": [
+            "1) POST /upload/order-sheet, file=@order_sheet_valid.pdf → capture submission_id",
+            "2) POST /upload/spec-sheet?...  (NOTE: /upload/spec-sheet does NOT take a submission_id param — instead POST POST /submissions/{captured_id}/spec-sheet, file=@spec_sheet_valid.pdf)"
+          ],
+          "expected": "Both documents land on the SAME submission — verify via GET /submissions/{captured_id} showing both slots present."
+        },
+        {
+          "id": "G-4",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "n/a",
+          "title": "Manual-review override end to end",
+          "role": "",
+          "steps": [
+            "1) POST /submissions/{id}/order-sheet, file=@ambiguous.pdf → 422 needs_manual_review",
+            "2) GET /submissions/{id}/documents/{doc_id} → review signals",
+            "3) POST /submissions/{id}/order-sheet?force=true, file=@ambiguous.pdf → 201"
+          ],
+          "expected": "Same submission recovers from \"needs review\" straight into \"accepted\" without starting over."
+        },
+        {
+          "id": "G-5",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "409",
+          "title": "Locked order forces a fresh submission",
+          "role": "",
+          "steps": [
+            "1) [given: submission.status=\"consumed\"]",
+            "2) POST /submissions/{id}/order-sheet, file=@order_sheet_v2.pdf → 409 submission_locked",
+            "3) POST /submissions → {} → new id",
+            "4) POST /submissions/{new_id}/order-sheet, file=@order_sheet_v2.pdf → 201"
+          ],
+          "expected": "The 409 has a clear, actionable path forward — a new submission, not a dead end."
+        }
+      ]
+    }
+  ]
+}

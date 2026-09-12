@@ -272,15 +272,19 @@ class StyleSpecService:
         if lot is not None:
             reserved = await self.materials.active_reserved(lot.id)
             on_hand = Decimal(str(lot.on_hand or 0))
+            used = Decimal(str(lot.used or 0))
+            received, displayed_reserved, available = (
+                self.materials._display_stock(on_hand, used, reserved))
             out["lot"] = {
                 "lot_id": str(lot.id), "article": lot.article,
                 "colour": lot.colour, "uom": lot.uom,
-                "on_hand": float(on_hand),
+                "on_hand": float(received),
+                "used": float(used),
                 # RESERVED IS SHOWN, NOT SILENTLY SUBTRACTED. Nothing in this
                 # codebase can release a reservation, so a stuck one would
                 # otherwise present as a phantom shortfall with no visible cause.
-                "reserved": float(reserved),
-                "available": float(on_hand - reserved),
+                "reserved": float(displayed_reserved),
+                "available": float(available),
             }
         return out
 
@@ -422,6 +426,7 @@ class StyleSpecService:
         merged.update({k: v for k, v in patch.items() if v is not None})
         d = await self._clean_line(style, merged)
         for field, value in d.items():
+            # Don't change line.style_id.
             if field != "style_id":
                 setattr(line, field, value)
         await self.db.commit()
@@ -674,7 +679,7 @@ class StyleSpecService:
             return {}
         rows = (await self.db.execute(
             select(Style).where(Style.id.in_(style_ids)))).scalars().all()
-        by_style = await self.repo.lines_for_styles([s.id for s in rows])
+        by_style = await self.repo.lines_for_styles([s.id for s in rows]) # LINE STYLE ONLY
         out: dict = {}
         for style in rows:
             lines = by_style.get(style.id, [])
@@ -908,6 +913,7 @@ class StyleSpecService:
         # An explicit line list means a partial or substituted issue: the operator
         # is short of one article and is issuing the rest, or swapping a lot.
         overrides = {}
+        # If row is already a dictionary, keep it as it is. Otherwise, convert the object's attributes into a dictionary.
         for row in (requested_lines or []):
             row = row if isinstance(row, dict) else dict(vars(row))
             if row.get("spec_id") is not None:
@@ -920,9 +926,9 @@ class StyleSpecService:
 
         issued_now, already_issued, outstanding, unresolved = [], [], [], []
         for line in accessories:
-            want = Decimal(str(line.qty_per_piece or 0))
-            have = Decimal(str(issued_already.get(line.id, 0)))
-            owed = want - have
+            want = Decimal(str(line.qty_per_piece or 0)) # 4 from material spec
+            have = Decimal(str(issued_already.get(line.id, 0))) # 4 we have a fixed one
+            owed = want - have # 0 if we already issued the full amount
 
             if selective and str(line.id) not in overrides:
                 # Not named in a selective issue: still report what it owes, so

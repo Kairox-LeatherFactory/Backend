@@ -235,6 +235,7 @@ class MaterialLot(Base, UUIDMixin, TimestampMixin):
     size: Mapped[str | None] = mapped_column(String(40), index=True)
     uom: Mapped[str] = mapped_column(String(20))
     on_hand: Mapped[Decimal] = mapped_column(Numeric(14, 3), default=0)
+    used: Mapped[Decimal] = mapped_column(Numeric, nullable=False, default=Decimal(0), server_default="0")
     supplier_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("material_supplier.id", ondelete="SET NULL"), nullable=True, index=True)
     attributes: Mapped[dict | None] = mapped_column(JSON_VARIANT)

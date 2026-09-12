@@ -37,6 +37,7 @@ class LotRead(BaseModel):
     size: str | None
     uom: str
     on_hand: float
+    used: float = 0.0
     reserved: float
     available: float             # on_hand − reserved
     last_used_for_sku: bool = False   # pre-select this one, but SHOW that you did
@@ -86,6 +87,7 @@ class LotDetail(BaseModel):
     size: str | None = None
     uom: str
     on_hand: float
+    used: float = 0.0
     reserved: float
     available: float          # DERIVED, never stored — on_hand − reserved
     attributes: dict = Field(default_factory=dict)
@@ -136,6 +138,7 @@ class StockRead(BaseModel):
     size: str | None
     uom: str
     on_hand: float
+    used: float = 0.0
     reserved: float
     available: float
     lot_count: int
@@ -156,6 +159,7 @@ class ReceiveRequest(BaseModel):
 class ReceiveResult(BaseModel):
     lot_id: uuid.UUID
     on_hand: float
+    used: float = 0.0
     reserved: float
     available: float
     rejected_logged: float

@@ -1,6 +1,14 @@
 # LOCAL DEV overlay — restores the zero-setup laptop workflow.
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile dev up --build
 # Bundled db/redis start (via --profile dev), source is bind-mounted, seed ON.
+#
+# CELERY IN DEV — the one thing that trips everyone up:
+# the worker holds your task AND pydantic schema code in memory. Editing e.g.
+# app/modules/bom/extraction_schemas.py changes NOTHING until that process
+# restarts — the fix looks like it did not work. CELERY_AUTORELOAD=true below
+# runs the worker under watchdog watchmedo so a saved .py restarts it for you
+# (requires `watchdog` in requirements.txt). Otherwise, after every edit:
+#   docker compose restart worker
 services:
   api:
     environment:
@@ -15,9 +23,17 @@ services:
       redis:
         condition: service_healthy
   worker:
+    environment:
+      CELERY_AUTORELOAD: "${CELERY_AUTORELOAD:-true}"
+      CELERY_LOGLEVEL: "${CELERY_LOGLEVEL:-info}"
+      # One laptop core is plenty; a DXF parse will happily eat four.
+      CELERY_CONCURRENCY: "${CELERY_CONCURRENCY:-2}"
     volumes:
       - ./:/app
       - procurement_docs:/app/var/procurement-documents
+    # Bind-mounted source means a restart is cheap — do not wait 5 minutes for an
+    # in-flight task on `docker compose down` the way staging/prod do.
+    stop_grace_period: 30s
     depends_on:
       db: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -26,6 +42,13 @@ services:
     volumes:
       - ./:/app
       - procurement_docs:/app/var/procurement-documents
+      - celerybeat:/app/var/celerybeat
     depends_on:
       redis: { condition: service_healthy }
       api: { condition: service_healthy }
+  flower:
+    volumes:
+      - ./:/app
+      - procurement_docs:/app/var/procurement-documents
+    depends_on:
+      redis: { condition: service_healthy }

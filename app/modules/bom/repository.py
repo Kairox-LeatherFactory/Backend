@@ -315,6 +315,22 @@ class BomRepository:
         return await self.db.get(OrderExtraction, oe_id)
     
     
+    # UPDATED 2026-09-11 (Hamthan): generate_bom only ever auto-matched a
+    # pattern by (style_signature, client_id) via get_current_pattern below —
+    # it never looked up the pattern a human had explicitly confirmed via
+    # POST /order-styles/{id}/attachments (OrderStyle.pattern_reference_id).
+    # That auto-match silently misses whenever the uploaded DXF's own
+    # style_signature differs from the order style's (e.g. a shared base
+    # pattern uploaded under a different code) or its client_id doesn't match
+    # (POST /patterns stores the uploading STAFF user's client_id, which is
+    # normally None, so it can never equal a real order's client_id) — both
+    # true in the case that sent every leather/lining BOM line to
+    # dcm_source="provisional" despite a pattern having been confirmed. A
+    # confirmed attachment is a direct id lookup, not a fuzzy re-match, so it
+    # needs its own accessor.
+    async def get_pattern_by_id(self, pattern_id) -> PatternExtraction | None:
+        return await self.db.get(PatternExtraction, pattern_id)
+
     # ── load: row -> PatternData for the resolver ──────────────────────────────
     async def get_current_pattern(self, style_signature: str,
                                   client_id=None) -> PatternExtraction | None:
@@ -326,6 +342,24 @@ class BomRepository:
             q = q.where(PatternExtraction.client_id == client_id)
         return await self.db.scalar(q.order_by(PatternExtraction.created_at.desc()).limit(1))
     
+    # UPDATED 2026-09-11 (Hamthan): persist_dxf's own docstring documents
+    # (style_signature, sha256) as its idempotency key and says a duplicate
+    # should be "caught upstream as a 409/no-op" — but nothing upstream ever
+    # looked the existing row up, so a byte-identical re-upload just hit the
+    # uq_pattern_extraction_file unique constraint as an unhandled
+    # IntegrityError (Celery's parse_pattern_dxf then burned 2 retries against
+    # the same guaranteed collision before failing permanently). This lets the
+    # service catch that IntegrityError and return the row that's already there.
+    async def get_pattern_by_signature_and_sha(
+        self, style_signature: str, sha256: str
+    ) -> PatternExtraction | None:
+        return await self.db.scalar(
+            select(PatternExtraction).where(
+                PatternExtraction.style_signature == style_signature,
+                PatternExtraction.sha256 == sha256,
+            )
+        )
+
     async def supersede_patterns(self, style_signature: str, client_id=None) -> None:
         q = select(PatternExtraction).where(
             PatternExtraction.style_signature == style_signature,
@@ -468,8 +502,14 @@ class BomRepository:
                     range_lo=rng[0], range_hi=rng[1], params=r.get("params"), sort_order=i))
             await self.db.commit()
             
+    # UPDATED 2026-09-11 (Hamthan): added status/confidence so the LLM-suggested
+    # POM mapping path (service.py._resolve_and_persist_poms) can persist without
+    # crashing (see the matching comment on PomDictionary in models.py). Default
+    # status="confirmed" preserves the existing meaning for every caller that
+    # doesn't pass it (add_pom_mapping = admin-authored, trusted).
     async def upsert_pom_mapping(self, *, language, source_term, pom_code,
-                                    garment_type_id=None, weight=1):
+                                    garment_type_id=None, weight=1,
+                                    status="confirmed", confidence=None):
         from app.modules.bom.models import PomDictionary
         row = await self.db.scalar(select(PomDictionary).where(
             PomDictionary.language == language,
@@ -477,9 +517,11 @@ class BomRepository:
             PomDictionary.garment_type_id == garment_type_id))
         if row:
             row.pom_code, row.weight = pom_code, weight
+            row.status, row.confidence = status, confidence
         else:
             row = PomDictionary(language=language, source_term=source_term,
-                                pom_code=pom_code, garment_type_id=garment_type_id, weight=weight)
+                                pom_code=pom_code, garment_type_id=garment_type_id, weight=weight,
+                                status=status, confidence=confidence)
             self.db.add(row)
         await self.db.commit()
         return row
@@ -510,15 +552,37 @@ class BomRepository:
             .options(selectinload(OrderStyle.colors)))
         return res.scalar_one_or_none()
 
-    async def patterns_for_client(self, client_id) -> list["PatternReference"]:
-        from sqlalchemy import select
-        from app.modules.bom.models import PatternReference
-        stmt = select(PatternReference)
+    # UPDATED 2026-09-11 (Hamthan): this fed build_order_breakdown's DXF
+    # auto-suggestion (service.py's `pat = self._suggest_by_name(..., candidates_dxf,
+    # key=lambda p: p.style_signature or p.source_name)`), but PatternReference
+    # has neither `style_signature` nor `source_name` — that lambda would
+    # AttributeError the instant this returned any row at all. It was querying
+    # the wrong table anyway: the DXF pattern data the suggestion is meant to
+    # match against is PatternExtraction (see the OrderStyle.pattern_reference_id
+    # comment in models.py for the same mix-up). Switched to PatternExtraction,
+    # restricted to is_current (a superseded re-upload shouldn't be suggested).
+    async def patterns_for_client(self, client_id):
+        stmt = select(PatternExtraction).where(PatternExtraction.is_current.is_(True))
         if client_id is not None:
-            stmt = stmt.where(PatternReference.client_id == client_id)
-        res = await self.db.execute(stmt.order_by(PatternReference.created_at.desc()))
+            stmt = stmt.where(PatternExtraction.client_id == client_id)
+        res = await self.db.execute(stmt.order_by(PatternExtraction.created_at.desc()))
         return list(res.scalars().all())
-    
+
+    # UPDATED 2026-09-12 (Hamthan): POST /patterns (DXF upload) is async and only
+    # ever returns a Celery job_id — there was no way to look up the resulting
+    # PatternExtraction.id (needed as `pattern_reference_id` on
+    # POST /order-styles/{id}/attachments) without reading worker logs or
+    # querying the DB by hand. Backs the new GET /patterns lookup endpoint.
+    async def list_patterns(self, *, style_signature=None, client_id=None, limit=20):
+        stmt = select(PatternExtraction)
+        if style_signature is not None:
+            stmt = stmt.where(PatternExtraction.style_signature == style_signature)
+        if client_id is not None:
+            stmt = stmt.where(PatternExtraction.client_id == client_id)
+        stmt = stmt.order_by(PatternExtraction.created_at.desc()).limit(limit)
+        res = await self.db.execute(stmt)
+        return list(res.scalars().all())
+
     @staticmethod
     def _rate_key(name: str) -> str:
         return " ".join((name or "").strip().casefold().split())

@@ -34,6 +34,8 @@ class MaterialRepository:
         ("SUEDE-A32,NAP-11"). Case-insensitive substring on a token match."""
         if supplier is None or not (supplier.articles or "").strip():
             return False
+        
+        # "SUEDE-A32,NAP-11"
         tokens = {t.strip().upper() for t in supplier.articles.split(",") if t.strip()}
         a = (article or "").strip().upper()
         return a in tokens or any(a in t or t in a for t in tokens)
@@ -111,6 +113,7 @@ class MaterialRepository:
         )
         return {lot_id: code for lot_id, code in rows.all() if lot_id is not None}
 
+    # we are finding the recent style was cut in factory
     async def last_lot_for_sku(self, sku_id: uuid.UUID, *,
                                lining: bool = False) -> uuid.UUID | None:
         """The lot this SKU was most recently CUT from — derived, never stored.
@@ -167,6 +170,28 @@ class MaterialRepository:
                                 reason=reason)
         self.db.add(r)
         return r
+
+    async def consume_reservations_nocommit(self, lot_id: uuid.UUID,
+                                            qty: Decimal) -> Decimal:
+        """Consume active reservations oldest first as stock is used."""
+        remaining = qty
+        rows = await self.db.execute(
+            select(MaterialReservation)
+            .where(MaterialReservation.material_lot_id == lot_id,
+                   MaterialReservation.status == "active")
+            .order_by(MaterialReservation.created_at,
+                      MaterialReservation.id)
+        )
+        for reservation in rows.scalars():
+            if remaining <= 0:
+                break
+            consumed = min(remaining, reservation.qty)
+            reservation.qty -= consumed
+            remaining -= consumed
+            if reservation.qty == 0:
+                reservation.status = "consumed"
+                reservation.released_at = datetime.now(timezone.utc)
+        return await self.active_reserved(lot_id)
 
     # ── receipts ─────────────────────────────────────────────────────────────
     def add_receipt_nocommit(self, **kw) -> MaterialReceipt:
