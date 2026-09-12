@@ -63,22 +63,26 @@ class OrderLine:
 
 
 def _find_columns(ws, header_row: int, data_rows: list | None = None):
-    """(col_map, size_cols, band) for one block.
+    """(col_map, size_cols, band, warnings) for one block.
 
     THE SIZE BAND IS SOLVED, NOT NAMED. detect_size_band reconciles a contiguous
     run of quantity columns against the total the sheet prints, so the labels can
     be anything the client uses and a decoy integer column cannot join in. See
     imports/_size_band.py.
 
-    THE DESCRIPTOR COLUMNS still go by header, with a POSITIONAL FALLBACK: on a
-    sheet whose descriptors are in a language nobody catalogued, everything left
-    of the band is descriptor text, so the first populated text column is the
-    style and the next is the colour. That keeps an unknown sheet importable
-    instead of rejecting it for want of a word.
+    THE DESCRIPTOR COLUMNS ARE POSITIONAL BY DEFAULT, BY NAME WHEN NAMED. About
+    95% of sheets print STYLE, then COLOUR, then ARTICLE, left to right, so that
+    is the assumed reading and it needs no vocabulary at all. A recognised header
+    always OVERRIDES it, because the other 5% is real: John Peter prints
+    `Modello | Materiale | Colore` — STYLE, ARTICLE, COLOUR — and that client is
+    not going to change their sheet. When the two readings disagree the header
+    wins and a single warning says so, so an unusual sheet still imports
+    correctly while a genuinely wrong one is visible in the preview.
     """
     if data_rows is None:
         data_rows = list(range(header_row + 1, ws.max_row + 1))
     band = detect_size_band(ws, header_row, data_rows)
+    warnings: list[str] = list(band.warnings)
 
     col_map = {}
     for c in range(1, ws.max_column + 1):
@@ -94,15 +98,13 @@ def _find_columns(ws, header_row: int, data_rows: list | None = None):
                 and not is_delivery_header(h)):
             col_map["date"] = c
 
-    # Positional fallback for whatever the headers did not name. Only columns
-    # LEFT of the band are considered — the tail is price/total/delivery and
-    # never a descriptor.
+    # The descriptor zone is every text column LEFT of the band — the tail is
+    # total/price/delivery and is never a descriptor.
+    text_cols = []
     first = band.first_col
     if first:
-        taken = set(col_map.values())
-        text_cols = []
         for c in range(1, first):
-            if c in taken:
+            if c == col_map.get("date"):
                 continue
             populated = [clean_str(ws.cell(r, c).value) for r in data_rows]
             populated = [v for v in populated if v]
@@ -113,18 +115,47 @@ def _find_columns(ws, header_row: int, data_rows: list | None = None):
             texty = sum(1 for v in populated if to_int(v) is None)
             if texty >= max(1, len(populated) // 2):
                 text_cols.append(c)
-        for key in ("style", "color", "article"):
-            if key not in col_map and text_cols:
-                col_map[key] = text_cols.pop(0)
+
+    # The 95% reading, computed whether or not the headers named anything — it is
+    # both the fallback AND the cross-check.
+    positional, free = {}, list(text_cols)
+    for key in ("style", "color", "article"):
+        if free:
+            positional[key] = free.pop(0)
+
+    for key in ("style", "color", "article"):
+        if key not in col_map and positional.get(key) is not None \
+                and positional[key] not in col_map.values():
+            col_map[key] = positional[key]
+
+    # ONE warning per block, not one per column: John Peter deviates on two
+    # columns of every sheet they have ever sent, and three lines of noise per
+    # import is how people learn to stop reading warnings.
+    if any(col_map.get(k) and positional.get(k) and col_map[k] != positional[k]
+           for k in ("style", "color", "article")):
+        reading = ", ".join(
+            f"{k.upper()}=col {col_map[k]}"
+            for k in ("style", "color", "article") if col_map.get(k))
+        warnings.append(
+            "Descriptor columns are not in the usual STYLE, COLOUR, ARTICLE "
+            f"order. Read from the headers as {reading}.")
 
     if band.price_col:
         col_map["price"] = band.price_col
     if band.delivery_col:
         col_map["delivery"] = band.delivery_col
-    return col_map, dict(band.size_cols), band
+    return col_map, dict(band.size_cols), band, warnings
 
 
-# _is_header_row — substring match on DATE
+# _is_header_row — substring match on DATE.
+#
+# THIS IS A BLOCK SPLITTER, NOT A CLASSIFIER. It is deliberately loose because
+# its job is to find where a new block starts INSIDE a sheet already known to be
+# an order sheet, and the stacked sheets head their blocks with things like
+# "ORDER DATE" or "DATE RECEIVED". Do not use it to decide what a DOCUMENT is:
+# `GGZ-PRODUCTION` heads a column "Cutting started DATE", which matches here, and
+# treating that as an order header parses its CUTTING/FUSING/PASTING columns as
+# sizes and reports 90,097 pieces. `_sheet_names_itself` below is the strict test.
 def _is_header_row(ws, r) -> bool:
     a = clean_str(ws.cell(r, 1).value)
     b = clean_str(ws.cell(r, 2).value)
@@ -135,15 +166,50 @@ def _is_header_row(ws, r) -> bool:
     return False
 
 
-def parse_order_sheet(ws) -> tuple[list[OrderLine], list[str]]:
+def _sheet_names_itself(ws) -> bool:
+    """Does this sheet ANNOUNCE itself as an order sheet, in so many words?
+
+    An EXACT match on one of the four tokens, in the first few columns near the
+    top — not a substring. That precision is the whole point: "DATE" is an order
+    header, "Cutting started DATE" is a production sheet's first column, and the
+    difference between them is the difference between a 146-piece order and a
+    90,097-piece fiction.
+
+    A sheet that passes here is accepted at MEDIUM confidence, because a human
+    reading it would call it an order sheet and the arithmetic is only a check.
+    A sheet that fails here has to prove itself on shape alone — see the verdict
+    in parse_order_sheet.
+    """
+    for r in range(1, min(ws.max_row, 20) + 1):
+        for c in range(1, 5):
+            v = clean_str(ws.cell(r, c).value)
+            if v and v.upper() in ("S.NO", "SNO", "STYLE", "DATE"):
+                return True
+    return False
+
+
+def parse_order_sheet(ws) -> tuple[list[OrderLine], list[str], str]:
     """Parse a full order sheet (possibly many stacked blocks).
 
-    Returns (order_lines, sheet_warnings).
+    Returns (order_lines, sheet_warnings, verdict) where verdict is "ORDER" or
+    "UNKNOWN".
+
+    PARSING *IS* THE CLASSIFICATION — one pass, one verdict. This used to be two
+    passes with two different sets of thresholds: `_sheet_type` solved the whole
+    sheet to decide "is this an order sheet?", then this function solved it all
+    over again to extract from it. They could disagree, and they did — a weekly
+    production sheet was classified ORDER and then parsed to zero lines, so an
+    entire sheet vanished from the import without a single warning. A sheet can
+    no longer be called an ORDER unless the parse actually produced order lines.
     """
     lines: list[OrderLine] = []
     warnings: list[str] = []
     col_map, size_cols = {}, {}
     band = None
+    # Did any block prove its band arithmetically (HIGH, >=2 size columns, >=2
+    # reconciled rows)? That is the bar a sheet must clear when its header names
+    # nothing recognisable — see the verdict at the end.
+    proven = False
     last_style = None
     last_article = None
     declared_block_total = None        # the subtotal printed under a block
@@ -176,15 +242,15 @@ def parse_order_sheet(ws) -> tuple[list[OrderLine], list[str]]:
         stop = later[0] if later else ws.max_row + 1
         return list(range(header_row + 1, stop))
 
+
     solved_header = None
     if not header_rows:
         solved_header, solved_band = find_header_row(ws)
         if solved_header is None:
             warnings.append(
-                "No size columns could be reconciled on this sheet — no header "
-                "row was recognised and no run of columns adds up to a printed "
-                "total.")
-            return lines, warnings
+                "Not an order sheet: no header row was recognised and no run of "
+                "columns adds up to a printed total.")
+            return lines, warnings, "UNKNOWN"
         if solved_band.confidence == "MEDIUM":
             warnings.append(
                 f"MEDIUM confidence: this sheet prints no total to check the "
@@ -200,7 +266,12 @@ def parse_order_sheet(ws) -> tuple[list[OrderLine], list[str]]:
         # New header? Re-detect columns for this block.
         if _is_header_row(ws, r) or r == solved_header:
             close_block()
-            col_map, size_cols, band = _find_columns(ws, r, _block_rows(r))
+            col_map, size_cols, band, block_warnings = _find_columns(
+                ws, r, _block_rows(r))
+            warnings.extend(block_warnings)
+            if (band.confidence == "HIGH" and len(band.size_cols) >= 2
+                    and band.reconciled_rows >= 2):
+                proven = True
             if not size_cols:
                 warnings.append(f"Header at row {r} had no recognizable size columns")
             continue
@@ -297,4 +368,27 @@ def parse_order_sheet(ws) -> tuple[list[OrderLine], list[str]]:
     elif grand is not None:
         warnings.append(f"OK: grand total {grand} matches parsed rows")
 
-    return lines, warnings
+    # ── THE VERDICT ─────────────────────────────────────────────────────────
+    # Two ways a sheet earns the name ORDER, and both require that the parse
+    # actually produced lines:
+    #
+    #   · IT NAMES ITSELF. The header says S.NO / STYLE / DATE, so a human would
+    #     read it as an order sheet. MEDIUM confidence is acceptable here — the
+    #     words are the evidence and the arithmetic is only a check.
+    #   · IT PROVES ITSELF. No recognisable words, so the shape has to carry the
+    #     whole argument: HIGH confidence, >=2 size columns, >=2 reconciled rows.
+    #     This is the bar that keeps `SAMPLE COSTING SHEET FOR SIR.xlsx` out —
+    #     its columns reconcile in places, but never across a sheet.
+    #
+    # Requiring lines is what closes the old silent hole: a sheet that classified
+    # ORDER and parsed to nothing used to be reported as a successful empty
+    # order. Now it is UNKNOWN and says why.
+    named_itself = _sheet_names_itself(ws)
+    if lines and (named_itself or proven):
+        return lines, warnings, "ORDER"
+
+    if named_itself or proven:
+        warnings.append(
+            "Not imported as an order sheet: a header and size columns were "
+            "found, but no row on the sheet carried a style with quantities.")
+    return lines, warnings, "UNKNOWN"

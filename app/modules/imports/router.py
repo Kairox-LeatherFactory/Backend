@@ -22,7 +22,6 @@ ASYNC NOTE
 from __future__ import annotations
 
 import os
-import tempfile
 import uuid
 import zipfile
 
@@ -49,44 +48,45 @@ router = APIRouter(prefix="/imports", tags=["Imports"])
 # SUPERUSER_ROLES inside require_roles.
 _DM = require_roles(UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR)
 
+def _validated_upload(file: UploadFile):
+    """Return the upload as a seekable stream, after all three guards pass.
 
-def _save_upload(file: UploadFile) -> str:
+    NO TEMP FILE. Starlette has already spooled the body into a
+    SpooledTemporaryFile, which is seekable, and openpyxl reads a file-like
+    object as happily as a path — so copying those bytes to a second file on
+    disk bought nothing but I/O and a cleanup path to get wrong.
+
+    THE THREE GUARDS STAY. They are not incidental to the temp file, and every
+    one of them still runs here:
+      · the extension check (400)
+      · the settings.max_upload_mb size cap (413)
+      · the zip-container check (400) — an .xlsx IS a zip, so anything merely
+        renamed to .xlsx is rejected before openpyxl ever parses it. This is the
+        decompression-bomb / mislabelled-file guard.
+    """
     # F118: filename is optional in the multipart spec — guard before .lower().
     fname = (file.filename or "").lower()
     if not fname.endswith((".xlsx", ".xlsm")):
         raise HTTPException(400, "Please upload an .xlsx file")
 
-    # F38: stream the body with a hard cap instead of an unbounded .read() that
-    # pulls the whole upload into memory. The cap comes from settings.
+    # F38: enforce the cap against the spooled body rather than an unbounded
+    # .read(). Seek to the end to measure without pulling it into memory.
+    stream = file.file
     max_bytes = settings.max_upload_mb * 1024 * 1024
-    fd, path = tempfile.mkstemp(suffix=".xlsx")
-    written = 0
-    with os.fdopen(fd, "wb") as f:
-        while True:
-            chunk = file.file.read(1024 * 1024)
-            if not chunk:
-                break
-            written += len(chunk)
-            if written > max_bytes:
-                f.close()
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-                raise HTTPException(
-                    413, f"File exceeds the {settings.max_upload_mb} MB limit.")
-            f.write(chunk)
+    stream.seek(0, os.SEEK_END)
+    size = stream.tell()
+    stream.seek(0)
+    if size > max_bytes:
+        raise HTTPException(
+            413, f"File exceeds the {settings.max_upload_mb} MB limit.")
 
-    # F45: validate the CONTAINER, not just the extension. An .xlsx is a zip;
-    # anything renamed to .xlsx that is not a valid zip is rejected before it
-    # reaches openpyxl (guards against a decompression bomb / mislabelled file).
-    if not zipfile.is_zipfile(path):
-        try:
-            os.remove(path)
-        except OSError:
-            pass
+    # F45: validate the CONTAINER, not just the extension.
+    if not zipfile.is_zipfile(stream):
         raise HTTPException(400, "File is not a valid .xlsx workbook.")
-    return path
+
+    # is_zipfile leaves the cursor wherever it finished; openpyxl needs the top.
+    stream.seek(0)
+    return stream
 
 async def _require_order(db: AsyncSession, order_number: str):
     """Reject early if the entered number doesn't match a client's order."""
@@ -96,8 +96,8 @@ async def _require_order(db: AsyncSession, order_number: str):
             404, "Order number not found. Please verify with the client record.")
     return order
 
-def _do_commit_into_order(path: str, order_number: str) -> dict:
-    preview = build_preview(path)
+def _do_commit_into_order(source, order_number: str) -> dict:
+    preview = build_preview(source)
     summary = preview.summary()
     db = SessionLocal()
     try:
@@ -106,8 +106,8 @@ def _do_commit_into_order(path: str, order_number: str) -> dict:
         db.close()
     return {"summary": summary, "written": stats}
 
-def _do_preview(path: str) -> dict:
-    return build_preview(path).summary()
+def _do_preview(source) -> dict:
+    return build_preview(source).summary()
 
 
 @router.post("/preview")
@@ -119,11 +119,7 @@ async def preview_import(
 ):
     """Dry-run. Validates the order number first, then parses (no writes)."""
     await _require_order(db, order_number)
-    path = _save_upload(file)
-    try:
-        return await run_in_threadpool(_do_preview, path)
-    finally:
-        os.remove(path)
+    return await run_in_threadpool(_do_preview, _validated_upload(file))
 
 
 @router.post("/commit")
@@ -149,11 +145,8 @@ async def commit_import(
     that index.
     """
     await _require_order(db, order_number)
-    path = _save_upload(file)
-    try:
-        return await run_in_threadpool(_do_commit_into_order, path, order_number)
-    finally:
-        os.remove(path)
+    return await run_in_threadpool(
+        _do_commit_into_order, _validated_upload(file), order_number)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

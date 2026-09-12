@@ -125,6 +125,132 @@ def test_the_header_row_is_found_under_a_title_row():
     assert list(band.size_cols.values()) == ["S", "M"]
 
 
+def test_an_all_zero_run_never_reconciles():
+    """0 + 0 + 0 == 0 is true and proves nothing.
+
+    A weekly production sheet whose stage columns are all zero offers a run that
+    reconciles against an all-zero total on every row — arithmetically perfect,
+    and HIGH confidence for a band carrying no order at all. `NIPAL-NEW
+    PRODUCTION` is this sheet: it was classified ORDER, parsed to zero lines, and
+    vanished from the import without a warning.
+    """
+    ws = _sheet([
+        ["WEEK", "CUTTING", "FUSING", "PASTING", "TOTAL"],
+        ["w1", 0, 0, 0, 0],
+        ["w2", 0, 0, 0, 0],
+        ["w3", 0, 0, 0, 0],
+    ])
+    band = detect_size_band(ws, 1, [2, 3, 4])
+    assert band.confidence != "HIGH"
+
+    header, solved = find_header_row(ws)
+    assert not (header is not None and solved.confidence == "HIGH"
+                and len(solved.size_cols) >= 2 and solved.reconciled_rows >= 2)
+
+
+def test_a_footer_caption_inside_the_band_does_not_drop_its_column():
+    """The GGZ case, in miniature.
+
+    A 'GRAND TOTAL' caption printed in the size-50 column makes that column look
+    like text. If footer rows are profiled alongside data rows the column is
+    dropped, the contiguous run splits, and a 146-piece order reports 65. Footers
+    are excluded from the PROFILE only — see `profile_rows` in _size_band.py.
+    """
+    ws = _sheet([
+        ["S.NO", "STYLE", "COLOUR", "44", "46", "48", "50", "52", "54", "TOTAL"],
+        [1, "BOMBER A", "MORO", 2, 23, 40, 43, 28, 10, 146],
+        [None, None, None, None, None, None, None, None, None, 146],
+        [None, None, None, None, None, None, "GRAND TOTAL", None, None, 146],
+    ])
+    band = detect_size_band(ws, 1, [2, 3, 4])
+    assert band.confidence == "HIGH"
+    assert list(band.size_cols.values()) == ["44", "46", "48", "50", "52", "54"]
+
+
+# ═══════════════════════════════════════════════════ the tail: price/delivery
+def test_price_after_the_total_is_read__the_95_percent_layout():
+    """TOTAL | PRICE | DELIVERY — what the KairoX template ships."""
+    ws = _sheet([
+        ["STYLE", "COLOUR", "S", "M", "L", "TOTAL", "PRICE", "DELIVERY"],
+        ["BO-1", "TAUPE", 10, 20, 30, 60, 83, "15/09/2026"],
+        ["BO-2", "BEIGE", 5, 5, 5, 15, 93, "15/09/2026"],
+    ])
+    band = detect_size_band(ws, 1, [2, 3])
+    assert band.total_col == 6
+    assert band.price_col == 7
+    assert band.delivery_col == 8
+    assert band.warnings == []          # the usual layout is not worth a warning
+
+
+def test_price_before_the_total_is_read_and_flagged__john_peter():
+    """... | 62 | Prezzo (€) | Totale Capi — a real client, not a broken sheet.
+
+    It must parse correctly, and it must say so, because a tail printed the
+    unusual way round is exactly where a silent misread would cost money.
+    """
+    ws = _sheet([
+        ["Modello", "Colore", "38", "40", "42", "Prezzo", "Totale Capi"],
+        ["CLERMONT", "WHISKY", 2, 3, 2, 66, 7],
+        ["FLAVIO", "FOREST", 5, 5, 5, 74, 15],
+    ])
+    band = detect_size_band(ws, 1, [2, 3])
+    assert band.total_col == 7
+    assert band.price_col == 6
+    assert any("LEFT of TOTAL" in w for w in band.warnings)
+
+
+def test_an_uncatalogued_price_header_is_read_by_shape():
+    """'Precio Unitario' is on no list here. Its CELLS are money, so it is price.
+
+    This is the whole reason the tail is read by shape: a maintained header list
+    is a promise to edit code every time a client writes a new word.
+    """
+    ws = _sheet([
+        ["STYLE", "COLOUR", "S", "M", "TOTAL", "Precio Unitario"],
+        ["BO-1", "TAUPE", 10, 20, 30, "80,00"],
+        ["BO-2", "BEIGE", 5, 5, 10, "75,50"],
+    ])
+    band = detect_size_band(ws, 1, [2, 3])
+    assert band.total_col == 5
+    assert band.price_col == 6
+
+
+# ═══════════════════════════════════════════════════════ descriptor columns
+def test_the_95_percent_descriptor_order_is_the_default():
+    """STYLE, then COLOUR, then ARTICLE — assumed with no header vocabulary."""
+    from app.modules.imports.parse_orders import parse_order_sheet
+    ws = _sheet([
+        ["Modelo", "Tono", "Tejido", "S", "M", "Suma"],
+        ["BO-1", "TAUPE", "SUEDE", 10, 20, 30],
+        ["BO-2", "BEIGE", "SUEDE", 5, 5, 10],
+    ])
+    lines, _warnings, verdict = parse_order_sheet(ws)
+    assert verdict == "ORDER"
+    assert [(l.style, l.color, l.article) for l in lines] == [
+        ("BO-1", "TAUPE", "SUEDE"), ("BO-2", "BEIGE", "SUEDE")]
+
+
+def test_a_recognised_header_beats_the_positional_default():
+    """John Peter prints `Modello | Materiale | Colore` — STYLE, ARTICLE, COLOUR.
+
+    Position alone would read MATERIALE as the colour and COLORE as the article,
+    swapping two fields on every row of a real client's every sheet. The header
+    wins, and the deviation is reported once.
+    """
+    from app.modules.imports.parse_orders import parse_order_sheet
+    ws = _sheet([
+        ["Modello", "Materiale", "Colore", "38", "40", "Totale"],
+        ["CLERMONT", "BURNED SUEDE", "WHISKY", 2, 3, 5],
+        ["FLAVIO", "WINTER SUEDE", "FOREST", 5, 5, 10],
+    ])
+    lines, warnings, verdict = parse_order_sheet(ws)
+    assert verdict == "ORDER"
+    assert [(l.style, l.color, l.article) for l in lines] == [
+        ("CLERMONT", "WHISKY", "BURNED SUEDE"),
+        ("FLAVIO", "FOREST", "WINTER SUEDE")]
+    assert sum("usual STYLE, COLOUR, ARTICLE order" in w for w in warnings) == 1
+
+
 # ══════════════════════════════════════════════════════════════════ to_money
 @pytest.mark.parametrize("raw,expected,currency", [
     ("83", Decimal("83.00"), None),

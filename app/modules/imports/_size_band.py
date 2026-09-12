@@ -46,7 +46,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from app.modules.imports.excel_reader import clean_str, to_int
+from app.modules.imports.excel_reader import clean_str, to_date, to_int, to_money
 
 # ── THE ONLY ALIAS LIST IN THIS FILE, and it is not about sizes ──────────────
 # These name the TAIL columns — the ones to the right of the band that must never
@@ -116,6 +116,9 @@ class SizeBand:
     confidence: str = "NONE"                        # HIGH | MEDIUM | NONE
     reconciled_rows: int = 0
     mismatched_rows: list = field(default_factory=list)   # [(row, printed, summed)]
+    # Things the human should see in the preview: a tail column whose header and
+    # whose cells disagree, or a tail printed in an unusual order.
+    warnings: list = field(default_factory=list)
 
     @property
     def first_col(self) -> int | None:
@@ -126,9 +129,11 @@ def _qty(ws, r: int, c: int):
     """The cell as a quantity, or None. Blank and non-integer both read None."""
     return to_int(ws.cell(r, c).value)
 
-
-def _is_quantity_column(ws, rows: list, c: int) -> bool:
+def _is_quantity_column(ws, profile_rows: list, c: int) -> bool:
     """True when this column holds quantities rather than words.
+
+    `profile_rows` is the SAMPLE the column is judged over, not the rows that
+    will be parsed — see the note where it is built in detect_size_band.
 
     A size column may be entirely EMPTY — a sheet prints size 62 and orders none
     of it, and dropping the column would lose a label the client uses. So an
@@ -147,7 +152,7 @@ def _is_quantity_column(ws, rows: list, c: int) -> bool:
     a column of words never sums to anything.
     """
     numeric = text = 0
-    for r in rows:
+    for r in profile_rows:
         raw = ws.cell(r, c).value
         if raw is None or (isinstance(raw, str) and raw.strip() == ""):
             continue
@@ -162,6 +167,87 @@ def _is_quantity_column(ws, rows: list, c: int) -> bool:
 
 def _row_sum(ws, r: int, cols: range) -> int:
     return sum((_qty(ws, r, c) or 0) for c in cols)
+
+
+def _classify_tail(ws, profile_rows, labels, band_last, total_col, ncols):
+    """Name the TAIL columns by SHAPE, with the header name as corroboration.
+
+    THE TAIL IS STRUCTURAL: it is every labelled column right of the band, minus
+    the total. That part needs no vocabulary at all. What the columns in it MEAN
+    is then decided by what their cells actually are:
+
+        cells that parse as dates   -> DELIVERY
+        cells that parse as money   -> PRICE
+
+    WHY NOT PURE POSITION. 95% of sheets print TOTAL | PRICE | DELIVERY, and the
+    KairoX template does. But John Peter prints
+
+        ... | 60 | 62 | Prezzo (€) | Totale Capi
+
+    with the PRICE to the LEFT of the total, and that is a real client, not a
+    malformed sheet. So position is the EXPECTATION (deviating from it raises a
+    warning) and never the test.
+
+    WHY NOT PURE NAME. PRICE_HEADERS/DELIVERY_HEADERS cannot know every word a
+    client will use — 'Precio Unitario', 'Costo', 'Valor'. Shape reads those for
+    free. The name is kept as a tiebreaker for a column whose cells are ambiguous,
+    and as a cross-check: when the header says one thing and the cells say
+    another, the cells win and the human is told.
+
+    Returns (price_col, delivery_col, warnings).
+    """
+    warnings: list = []
+    tail = [c for c in range(band_last + 1, ncols + 1)
+            if c != total_col and labels.get(c)]
+
+    price_col = delivery_col = None
+    for c in tail:
+        dates = money = 0
+        for r in profile_rows:
+            raw = ws.cell(r, c).value
+            if raw is None or (isinstance(raw, str) and not raw.strip()):
+                continue
+            if to_date(raw) is not None:
+                dates += 1
+            elif to_money(raw)[0] is not None:
+                money += 1
+
+        if dates > money:
+            shape = "DELIVERY"
+        elif money:
+            shape = "PRICE"
+        else:
+            shape = None                 # empty or all text — says nothing
+
+        named = ("PRICE" if is_price_header(labels.get(c))
+                 else "DELIVERY" if is_delivery_header(labels.get(c)) else None)
+
+        if named and shape and named != shape:
+            warnings.append(
+                f"Column {c} is headed {labels[c]!r}, which reads as {named}, but "
+                f"its cells look like {shape}. Reading it as {shape} — check the "
+                f"sheet if that is wrong.")
+
+        verdict = shape or named         # cells first, header as the tiebreaker
+        if verdict == "PRICE" and price_col is None:
+            price_col = c
+        elif verdict == "DELIVERY" and delivery_col is None:
+            delivery_col = c
+
+    # THE 95% LAYOUT IS AN EXPECTATION, NOT A RULE. Everything still parses; the
+    # human is simply told the sheet is printed the unusual way round.
+    if total_col is not None and price_col is not None and price_col < total_col:
+        warnings.append(
+            f"PRICE is in column {price_col}, to the LEFT of TOTAL (column "
+            f"{total_col}). It was read correctly; the usual layout is TOTAL, "
+            f"then PRICE, then DELIVERY.")
+    if (price_col is not None and delivery_col is not None
+            and delivery_col < price_col):
+        warnings.append(
+            f"DELIVERY (column {delivery_col}) is printed before PRICE (column "
+            f"{price_col}). Both were read correctly; the usual order is PRICE "
+            f"then DELIVERY.")
+    return price_col, delivery_col, warnings
 
 
 def detect_size_band(ws, header_row: int, data_rows: list) -> SizeBand:
@@ -185,27 +271,52 @@ def detect_size_band(ws, header_row: int, data_rows: list) -> SizeBand:
     def _numeric_count(r):
         return sum(1 for c in range(1, ncols + 1) if _qty(ws, r, c) is not None)
 
-    rows = [r for r in data_rows if _numeric_count(r) >= 2]
-    if not rows:
+    # WHY >= 2 AND NOT >= 1 — the name is the trap, so read this before widening it.
+    # `profile_rows` is NOT a selection of rows to parse; every row is parsed
+    # later regardless. It is the SAMPLE the COLUMNS are profiled over, handed to
+    # _is_quantity_column below. Widening it to >= 1 admits footer rows, and a
+    # footer caption sitting inside the band disqualifies a real size column:
+    #
+    #   GGZ-GARMENT ORDER
+    #     2  S.NO|STYLE|COLOUR|44|46|48|50|52|54|TOTAL
+    #     3     1|BOMBER A|MORO| 2|23|40|43|28|10|  146    <- the only data row
+    #    11      |        |    |  |  |  |GRAND TOTAL| 146  <- caption in col 7 ("50")
+    #
+    #   >= 2 -> profile [3]      -> col 7: numeric=1 text=0 -> a quantity column
+    #   >= 1 -> profile [3,5,11] -> col 7: numeric=1 text=1 -> DROPPED
+    #
+    # Dropping col 7 splits the run 4-10 into [4,5,6] and [8,9,10], so the band
+    # becomes 44|46|48 and a 146-piece order reports 65. The same mechanism costs
+    # NIPAL 259->206 and RICANO 150->109.
+    profile_rows = [r for r in data_rows if _numeric_count(r) >= 2]
+    if not profile_rows:
         # A one-size-one-row sheet has a single number per row and nothing to
         # spare. Fall back to any populated row rather than refusing to look.
-        rows = [r for r in data_rows if _numeric_count(r) >= 1]
-    if not rows:
+        # This fires ONLY when the strict filter found nothing at all, which is
+        # why relaxing the strict filter is not the same as having this fallback.
+        profile_rows = [r for r in data_rows if _numeric_count(r) >= 1]
+    if not profile_rows:
         return SizeBand()
 
     labels = {c: clean_str(ws.cell(header_row, c).value) for c in range(1, ncols + 1)}
-    price_col = next((c for c in range(1, ncols + 1)
-                      if is_price_header(labels.get(c))), None)
-    delivery_col = next((c for c in range(1, ncols + 1)
-                         if is_delivery_header(labels.get(c))), None)
+
+    # A PROVISIONAL name-based exclusion, so a column that openly calls itself
+    # PRICE or DELIVERY cannot be drafted into the band. This is not the answer —
+    # the tail is named properly by _classify_tail once the band is known, which
+    # is the only point at which "the tail" even exists. Chicken and egg: the
+    # band defines the tail, so the tail cannot define the band.
+    named_price = next((c for c in range(1, ncols + 1)
+                        if is_price_header(labels.get(c))), None)
+    named_delivery = next((c for c in range(1, ncols + 1)
+                           if is_delivery_header(labels.get(c))), None)
 
     # A column may hold sizes only if it is labelled, holds whole numbers, and is
     # not one of the tail columns we can name outright.
     eligible = {
         c for c in range(1, ncols + 1)
-        if labels.get(c) and c not in (price_col, delivery_col)
+        if labels.get(c) and c not in (named_price, named_delivery)
         and _looks_like_a_size_label(labels.get(c))
-        and _is_quantity_column(ws, rows, c)
+        and _is_quantity_column(ws, profile_rows, c)
     }
 
     best = None
@@ -214,10 +325,10 @@ def detect_size_band(ws, header_row: int, data_rows: list) -> SizeBand:
     # finds it before any accidental left-hand match.
     for total_col in sorted(
             (c for c in range(2, ncols + 1)
-             if c not in (price_col, delivery_col) and labels.get(c)
-             and any(_qty(ws, r, c) is not None for r in rows)),
+             if c not in (named_price, named_delivery) and labels.get(c)
+             and any(_qty(ws, r, c) is not None for r in profile_rows)),
             reverse=True):
-        if not any(_qty(ws, r, total_col) is not None for r in rows):
+        if not any(_qty(ws, r, total_col) is not None for r in profile_rows):
             continue
         for start in range(1, total_col):
             if start not in eligible:
@@ -234,13 +345,22 @@ def detect_size_band(ws, header_row: int, data_rows: list) -> SizeBand:
                 # reconcile too means no total column can ever be confirmed, and
                 # the whole sheet silently degrades to a guessed band. They are
                 # not counter-examples, they are footers.
-                checkable = [r for r in rows
+                checkable = [r for r in profile_rows
                              if any(_qty(ws, r, c) is not None for c in run)]
                 if not checkable:
                     continue
                 matched = [r for r in checkable
                            if _row_sum(ws, r, run) == _qty(ws, r, total_col)]
                 if len(matched) != len(checkable):
+                    continue
+                # ZERO PROVES NOTHING. A run of all-zero columns reconciles
+                # trivially against an all-zero total — 0+0+0 == 0 on every row —
+                # and that is HIGH confidence for a band carrying no order at all.
+                # `NIPAL-NEW PRODUCTION` is exactly this shape: its stage columns
+                # are zero for seven rows, so a DATA row's literal values were
+                # read as column labels and a weekly progress sheet came back
+                # classified ORDER, parsing to 0 pieces with no warning at all.
+                if not any(_row_sum(ws, r, run) > 0 for r in matched):
                     continue
                 # Every row reconciles. Prefer the widest such run: a narrower
                 # one only wins by dropping columns that happened to be empty,
@@ -254,17 +374,18 @@ def detect_size_band(ws, header_row: int, data_rows: list) -> SizeBand:
 
     if best is not None:
         _score, start, end, total_col, matched = best
+        # The band is proven, so the tail now EXISTS and can be named by shape.
+        price_col, delivery_col, tail_warnings = _classify_tail(
+            ws, profile_rows, labels, end, total_col, ncols)
         return SizeBand(
             size_cols={c: _norm(labels[c]) for c in range(start, end + 1)},
             total_col=total_col, price_col=price_col, delivery_col=delivery_col,
-            confidence="HIGH", reconciled_rows=matched)
+            confidence="HIGH", reconciled_rows=matched, warnings=tail_warnings)
 
-    return _fallback_band(ws, rows, labels, eligible, price_col, delivery_col,
-                          ncols)
+    return _fallback_band(ws, profile_rows, labels, eligible, ncols)
 
 
-def _fallback_band(ws, rows, labels, eligible, price_col, delivery_col,
-                   ncols) -> SizeBand:
+def _fallback_band(ws, profile_rows, labels, eligible, ncols) -> SizeBand:
     """No column reconciles. Take the widest labelled quantity run — at MEDIUM.
 
     TWO DIFFERENT SHEETS LAND HERE and they must not be reported the same way:
@@ -289,7 +410,8 @@ def _fallback_band(ws, rows, labels, eligible, price_col, delivery_col,
     if current:
         runs.append(current)
     if not runs:
-        return SizeBand(price_col=price_col, delivery_col=delivery_col)
+        # No band at all, so there is no tail to speak of either.
+        return SizeBand()
 
     run = max(runs, key=len)
 
@@ -303,7 +425,7 @@ def _fallback_band(ws, rows, labels, eligible, price_col, delivery_col,
     split_total = None
     if len(run) >= 2:
         body, last = run[:-1], run[-1]
-        printed = [(r, _qty(ws, r, last)) for r in rows]
+        printed = [(r, _qty(ws, r, last)) for r in profile_rows]
         printed = [(r, v) for r, v in printed if v is not None]
         matches = [(r, v) for r, v in printed
                    if _row_sum(ws, r, range(min(body), max(body) + 1)) == v]
@@ -311,13 +433,17 @@ def _fallback_band(ws, rows, labels, eligible, price_col, delivery_col,
             split_total = last
             run = body
 
+    price_col, delivery_col, tail_warnings = _classify_tail(
+        ws, profile_rows, labels, max(run), split_total, ncols)
+
     band = SizeBand(
         size_cols={c: _norm(labels[c]) for c in run},
         total_col=split_total,
-        price_col=price_col, delivery_col=delivery_col, confidence="MEDIUM")
+        price_col=price_col, delivery_col=delivery_col, confidence="MEDIUM",
+        warnings=tail_warnings)
 
     if split_total is not None:
-        printed = [(r, _qty(ws, r, split_total)) for r in rows]
+        printed = [(r, _qty(ws, r, split_total)) for r in profile_rows]
         printed = [(r, v) for r, v in printed if v is not None]
         band.mismatched_rows = [
             (r, v, _row_sum(ws, r, range(min(run), max(run) + 1)))
@@ -332,7 +458,7 @@ def _fallback_band(ws, rows, labels, eligible, price_col, delivery_col,
     tail = [c for c in range(max(run) + 1, ncols + 1)
             if c not in (price_col, delivery_col) and labels.get(c)]
     for total_col in tail:
-        printed = [(r, _qty(ws, r, total_col)) for r in rows]
+        printed = [(r, _qty(ws, r, total_col)) for r in profile_rows]
         printed = [(r, v) for r, v in printed if v is not None]
         if not printed:
             continue
@@ -384,7 +510,13 @@ def find_header_row(ws, max_scan: int = 30, min_width: int = 2) -> tuple:
             break
         labelled = sum(1 for c in range(1, ws.max_column + 1)
                        if clean_str(ws.cell(r, c).value))
-        if labelled < 3:              # a header names at least a few columns
+        # A header names at least a few columns. This stays LOW on purpose: the
+        # real order sheets here head 10-21 columns, so raising the floor to 7 or
+        # 10 never fires on real data — it only rejects narrow sheets and test
+        # fixtures. What actually keeps a non-order sheet out is band QUALITY
+        # (min_width below, plus the positive-quantity rule in detect_size_band),
+        # which is a statement about the data rather than about how wide it is.
+        if labelled < 3:
             continue
         band = detect_size_band(ws, r, data_rows)
         if len(band.size_cols) < min_width:

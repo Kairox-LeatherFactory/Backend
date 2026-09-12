@@ -67,8 +67,11 @@ def test_f39_styles_scoped_for_client():
 
 # ── F38/F45/F118: upload handler hardened (structural) ──────────────────────
 def test_f38_f45_f118_upload_hardened():
+    # _save_upload became _validated_upload when the temp-file copy was dropped:
+    # the upload's own spooled stream goes straight to openpyxl. All three guards
+    # moved with it — they were never a property of writing the file to disk.
     from app.modules.imports import router as i_router
-    src = inspect.getsource(i_router._save_upload)
+    src = inspect.getsource(i_router._validated_upload)
     assert "max_upload_mb" in src            # F38 size cap
     assert "is_zipfile" in src               # F45 container validation
     assert "file.filename or" in src         # F118 None-filename guard
