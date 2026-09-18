@@ -15,7 +15,7 @@ THE BUG, PRECISELY
         complete = leather_in and (lining_in or not needs_lining)
 
     A KNIT jacket whose stored flag said False was therefore "complete" on its
-    leather alone. It received, it sent, `_merge_ok` saw DrawerState.SENDED and
+    leather alone. It received, it sent, `_merge_ok` saw StoreState.SENDED and
     opened, and the garment walked the whole chain to PACKAGE_EXPORT having never
     had a lining cut.
 
@@ -37,14 +37,43 @@ WHY INTEGRATION AND NOT UNIT
     column. So these exercise the real DrawerService against a real session.
 ================================================================================
 """
+
 import pytest
 
-from app.core.enums import DrawerState, ProductionStage
+# ══════════════════════════════════════════════════════════════════════════════
+# RETIRED WITH THE DRAWER — the lining verdict via DrawerService.
+#
+# There were 200 physical drawers. A style releases 100+ garments, stalled
+# mid-chain, and the surplus were minted onto a "waiting for a drawer" list that
+# the merge gate then refused to line-stitch — so the DM had to re-allocate boxes
+# by hand, which in practice did not happen. Since 20260902_store_piece the store
+# is a STATE on the garment (piece.store_state), and a state has no capacity.
+#
+# THE RULES THIS FILE ASSERTED ARE NOT LOST. Every one of them — completeness,
+# auto-receive, the store-entry gate, the lining verdict (including the stale
+# needs_lining flag that let a KNIT jacket reach PACKAGE_EXPORT unlined), the
+# merge gate that opens LINE_STITCHING, partial-accept send, the PACKAGE_EXPORT
+# release and the piece lookup — is carried forward in
+# tests/integration/test_store_merge.py, against the API the floor now uses.
+#
+# What is NOT carried forward, deliberately: "a piece scanned into the wrong
+# drawer is a 409". There is no wrong drawer. That rejection policed an
+# assignment the system invented at upload, and its absence is the feature.
+#
+# The file is kept rather than deleted so the drawer's behaviour stays readable
+# while the tables are still in the database (they are retained, unwritten, for
+# audit). It goes when they do.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+import pytest
+
+from app.core.enums import StoreState, ProductionStage
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
-from app.modules.drawers.service import DrawerService
+from app.modules.store.service import StoreService
 from app.modules.production.models import Piece
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.skip(reason="Drawers are retired; see tests/integration/test_store_merge.py")]
 
 
 async def _order_with_style(db, *, style_name: str, article: str = "A1",
@@ -82,7 +111,7 @@ async def _piece_in_drawer(db, sku, *, seq: int, stored_flag: bool):
     from app.modules.barcode.models import Drawer
 
     drawer = Drawer(code=f"DRW-9{seq:03d}", seq=900 + seq,
-                    state=DrawerState.MERGED.value)
+                    state=StoreState.MERGED.value)
     db.add(drawer)
     await db.flush()
     piece = Piece(code=f"{sku.code}-{seq:03d}", seq=seq, sku_id=sku.id,
@@ -110,13 +139,13 @@ async def test_knit_style_cannot_send_on_leather_alone_despite_false_flag(db):
     _, _, sku = await _order_with_style(db, style_name="ADELE KNIT")
     piece, drawer = await _piece_in_drawer(db, sku, seq=1, stored_flag=False)
 
-    drawer.leather_in = True
-    drawer.lining_in = False
-    drawer.state = DrawerState.HOLDING_LEATHER.value
+    piece.leather_in = True
+    piece.lining_in = False
+    piece.store_state = StoreState.HOLDING_LEATHER.value
     await db.commit()
 
-    svc = DrawerService(db)
-    result = await svc.send_batch(drawer_ids=[drawer.id], actor_id=None)
+    svc = StoreService(db)
+    result = await svc.send(piece_ids=[piece.id], actor_user_id=None)
 
     assert result["count_sent"] == 0, "a KNIT garment was sent with no lining"
     assert result["not_ready"], "the drawer was neither sent nor explained"
@@ -127,7 +156,7 @@ async def test_knit_style_cannot_send_on_leather_alone_despite_false_flag(db):
     assert "KNIT" in reason, f"reason does not name the evidence: {reason}"
 
     await db.refresh(drawer)
-    assert drawer.state != DrawerState.SENDED.value
+    assert piece.store_state != StoreState.SENDED.value
 
 
 async def test_knit_style_cannot_be_received_on_leather_alone(db):
@@ -136,12 +165,12 @@ async def test_knit_style_cannot_be_received_on_leather_alone(db):
 
     _, _, sku = await _order_with_style(db, style_name="REESE WOOL")
     piece, drawer = await _piece_in_drawer(db, sku, seq=2, stored_flag=False)
-    drawer.leather_in = True
-    drawer.state = DrawerState.HOLDING_LEATHER.value
+    piece.leather_in = True
+    piece.store_state = StoreState.HOLDING_LEATHER.value
     await db.commit()
 
     with pytest.raises(HTTPException) as exc:
-        await DrawerService(db).transition(drawer.id, "RECEIVED", actor_id=None)
+        await StoreService(db).transition(drawer.id, "RECEIVED", actor_id=None)
     assert exc.value.status_code == 409
     assert "lining" in str(exc.value.detail).lower()
 
@@ -150,16 +179,16 @@ async def test_lining_scanned_in_unblocks_the_send(db):
     """The gate is a gate, not a wall: put the lining in and it opens."""
     _, _, sku = await _order_with_style(db, style_name="FRANCIS KNIT")
     piece, drawer = await _piece_in_drawer(db, sku, seq=3, stored_flag=False)
-    drawer.leather_in = True
-    drawer.lining_in = True
-    drawer.state = DrawerState.HOLDING_BOTH.value
+    piece.leather_in = True
+    piece.lining_in = True
+    piece.store_state = StoreState.HOLDING_BOTH.value
     await db.commit()
 
-    result = await DrawerService(db).send_batch(drawer_ids=[drawer.id],
+    result = await StoreService(db).send_batch(drawer_ids=[drawer.id],
                                                 actor_id=None)
     assert result["count_sent"] == 1, result
     await db.refresh(drawer)
-    assert drawer.state == DrawerState.SENDED.value
+    assert piece.store_state == StoreState.SENDED.value
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -175,12 +204,12 @@ async def test_genuinely_leather_only_garment_still_sends_on_leather_alone(db):
     """
     _, _, sku = await _order_with_style(db, style_name="CLERMONT", article="CL1")
     piece, drawer = await _piece_in_drawer(db, sku, seq=4, stored_flag=False)
-    drawer.leather_in = True
-    drawer.lining_in = False
-    drawer.state = DrawerState.HOLDING_LEATHER.value
+    piece.leather_in = True
+    piece.lining_in = False
+    piece.store_state = StoreState.HOLDING_LEATHER.value
     await db.commit()
 
-    result = await DrawerService(db).send_batch(drawer_ids=[drawer.id],
+    result = await StoreService(db).send_batch(drawer_ids=[drawer.id],
                                                 actor_id=None)
     assert result["count_sent"] == 1, (
         "a genuinely leather-only garment was stranded: " + str(result))
@@ -191,11 +220,11 @@ async def test_lining_colour_on_the_sku_also_requires_a_lining(db):
     _, _, sku = await _order_with_style(db, style_name="CLERMONT",
                                         knit_color="ECRU")
     piece, drawer = await _piece_in_drawer(db, sku, seq=5, stored_flag=False)
-    drawer.leather_in = True
-    drawer.state = DrawerState.HOLDING_LEATHER.value
+    piece.leather_in = True
+    piece.store_state = StoreState.HOLDING_LEATHER.value
     await db.commit()
 
-    result = await DrawerService(db).send_batch(drawer_ids=[drawer.id],
+    result = await StoreService(db).send_batch(drawer_ids=[drawer.id],
                                                 actor_id=None)
     assert result["count_sent"] == 0
     assert "lining colour" in result["not_ready"][0]["reason"].lower()
@@ -207,7 +236,7 @@ async def test_lining_colour_on_the_sku_also_requires_a_lining(db):
 async def test_merge_gate_stays_shut_for_the_blocked_piece(db, operations):
     """The store block is only worth having if production honours it.
 
-    `_merge_ok` reads DrawerState.SENDED. Since the blocked drawer never reaches
+    `_merge_ok` reads StoreState.SENDED. Since the blocked drawer never reaches
     SENDED, LINE_STITCHING must remain closed — and with it every stage after it
     on the chain, which is how the garment used to reach PACKAGE_EXPORT.
     """
@@ -215,8 +244,8 @@ async def test_merge_gate_stays_shut_for_the_blocked_piece(db, operations):
 
     _, _, sku = await _order_with_style(db, style_name="SHINOBI KNIT")
     piece, drawer = await _piece_in_drawer(db, sku, seq=6, stored_flag=False)
-    drawer.leather_in = True
-    drawer.state = DrawerState.HOLDING_LEATHER.value
+    piece.leather_in = True
+    piece.store_state = StoreState.HOLDING_LEATHER.value
     await db.commit()
 
     ok, why = await ProductionService(db)._merge_ok(
@@ -234,11 +263,11 @@ async def test_list_and_send_agree_about_the_same_drawer(db):
     """
     _, _, sku = await _order_with_style(db, style_name="FLAVIO KNIT")
     piece, drawer = await _piece_in_drawer(db, sku, seq=7, stored_flag=False)
-    drawer.leather_in = True
-    drawer.state = DrawerState.HOLDING_LEATHER.value
+    piece.leather_in = True
+    piece.store_state = StoreState.HOLDING_LEATHER.value
     await db.commit()
 
-    svc = DrawerService(db)
+    svc = StoreService(db)
     queue = await svc.list_labels(sendable=True, limit=500)
     assert drawer.id not in {row["drawer_id"] for row in queue["items"]}
 

@@ -72,17 +72,40 @@ class StyleSpecService:
         return style
 
     @staticmethod
-    def _assert_editable(style: Style) -> None:
-        """The recipe freezes when the style is released. See spec_editable()."""
+    def _assert_editable(style: Style, *, category: str | None = None) -> None:
+        """The recipe freezes when the style is released — ACCESSORIES EXCEPTED.
+
+        WHY IT FREEZES AT ALL. Once released, the style's pieces carry printed
+        barcodes and the recipe is already being spent against them. Editing the
+        LEATHER line underneath that would rewrite what a garment was costed at
+        after it was cut, and the cutting record and the costing would disagree
+        with nothing to say which is right.
+
+        WHY ACCESSORIES ARE DIFFERENT (backend fix #12). Reported: "After
+        release, if the DM finds an incorrect accessory assignment, there is
+        currently no option to edit it." An accessory line is not a measurement
+        of work already done — it is a list of what still has to be put in the
+        bag, and the wrong button is discovered precisely when somebody goes to
+        fetch it, which is always after release.
+
+        WHAT AN EDIT DOES NOT DO is rewrite history. `piece_material_issue` is
+        the record of what was ACTUALLY issued and is untouched: garments already
+        kitted keep exactly what they were given. The edit changes what the
+        checklist asks for from here on.
+        """
         if spec_editable(style):
+            return
+        if (category or "").upper() == MaterialCategory.ACCESSORY.value:
             return
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            f"{style.name} is {style.production_status} — its material spec is "
-            f"frozen because its pieces carry printed barcodes and the spec is "
-            f"already being spent against them. To correct what a garment was "
-            f"actually issued, record it on the floor with POST "
-            f"/materials/issues instead of editing the recipe underneath it.")
+            f"{style.name} is {style.production_status} — its {category or 'material'} "
+            f"spec is frozen because its pieces carry printed barcodes and the "
+            f"spec is already being spent against them. Accessory lines may "
+            f"still be corrected after release; leather and lining may not, "
+            f"because they are what the garments were cut and costed against. "
+            f"To correct what a garment was actually issued, record it on the "
+            f"floor with POST /materials/issues.")
 
     async def _audit(self, actor_id, action: str, entity_id, after: dict) -> None:
         from app.core.models import AuditLog
@@ -160,6 +183,18 @@ class StyleSpecService:
             "colour": (body.get("colour") or "").strip() or None,
             "thickness": thickness,
             "size": (body.get("size") or "").strip() or None,
+            # WHICH GARMENT SIZES THIS LINE IS FOR. Explicit wins; otherwise it
+            # is inferred from the material's own size, because in this factory
+            # a size-specific accessory is labelled with the GARMENT's size —
+            # a "zip L" is the zip for an L jacket. That default is what lets the
+            # DM keep entering exactly what they entered before and have the
+            # matching start working. A 60cm zip or an 18L button does not read
+            # as a garment size and stays NULL = every size.
+            "garment_size": (
+                (body.get("garment_size") or "").strip() or None
+                or ((body.get("size") or "").strip().upper()
+                    if self._looks_like_a_garment_size(body.get("size"))
+                    else None)),
             "qty_per_piece": qty,
             # DERIVED, AND A SENT VALUE IS DISCARDED. uom is a property of the
             # material kind, not a choice: buttons are pcs and thread is mtrs
@@ -204,40 +239,107 @@ class StyleSpecService:
 
     # ══════════════════════════════════════════ the style/SKU merge
     @staticmethod
-    def merge_lines(lines: list, sku_id: uuid.UUID | None) -> list:
-        """The effective recipe for ONE colourway: SKU overrides beat style defaults.
+    def _looks_like_a_garment_size(value) -> bool:
+        """Is this material `size` actually a GARMENT size in disguise?
 
-        THE OVERRIDE IS LINE-LEVEL, keyed on (category, subtype, article). The
-        real case is "the TAN colourway takes TAN buttons of the same article", so
-        a SKU line REPLACES the style line for that article and leaves the rest of
-        the recipe alone. Set-level replacement was the alternative and it would
-        force re-entering the whole recipe for every colour that differs by one
-        button.
+        In this factory an accessory that varies by garment size is labelled with
+        the garment's size — a "zip L" is the zip for an L jacket, and the DM
+        enters exactly that. So a line whose material size reads as a garment
+        size is almost certainly size-specific, and defaulting garment_size to it
+        makes the matching work without asking the DM to fill in a new field they
+        have never had to fill in before.
 
-        A SKU line naming an article the style does not have is an ADDITION.
-        A SKU line with qty_per_piece = 0 REMOVES that material for that
-        colourway — which is why the zero is dropped here rather than earlier:
-        it has to survive long enough to shadow the style line.
+        A 60cm zip or an 18L button is NOT a garment size, and must not be read
+        as one: doing so would confine a perfectly general line to a size that
+        does not exist.
+        """
+        from app.core.leather_norms import normalise_size
+        token = (str(value or "")).strip().upper()
+        if not token:
+            return False
+        # A real garment size normalises to a rung. '60CM' and '18L' do not.
+        if any(ch.isalpha() for ch in token) and not token.isalnum():
+            return False
+        if token.isdigit():
+            return 30 <= int(token) <= 70        # the EU jacket ladder
+        return normalise_size(token) is not None and len(token) <= 5
 
-        PURE and static so the unit layer can exercise every case with plain
-        objects and no database.
+    @staticmethod
+    def applies_to_size(line, garment_size: str | None) -> bool:
+        """Does this recipe line belong on a garment of this size?
+
+        NULL garment_size MEANS EVERY SIZE, and that is what makes this change
+        back-compatible: every line that predates the column has NULL, so every
+        already-released style resolves to exactly the recipe it resolved to
+        before.
+        """
+        want = getattr(line, "garment_size", None)
+        if not want:
+            return True
+        if not garment_size:
+            return True          # the piece's size is unknown — do not drop it
+        from app.core.leather_norms import normalise_size
+        a, b = str(want).strip().upper(), str(garment_size).strip().upper()
+        if a == b:
+            return True
+        # '52' and 'L' are the same garment on the Italian ladder.
+        na, nb = normalise_size(a), normalise_size(b)
+        return na is not None and na == nb
+
+    @staticmethod
+    def merge_lines(lines: list, sku_id: uuid.UUID | None,
+                    garment_size: str | None = None) -> list:
+        """The effective recipe for ONE colourway AND ONE SIZE.
+
+        THE OVERRIDE IS LINE-LEVEL, keyed on (category, subtype, article,
+        garment_size). A SKU-scoped line replaces the style-wide line with the
+        same key and is added alongside one with a different key.
+
+        `garment_size` IS WHY THIS SIGNATURE CHANGED. It used to key on three
+        fields and never look at the piece's size at all, which is how a DM
+        entering Thread S / M / L got either all three lines on every garment
+        (distinct articles → distinct keys) or silently only the last one (same
+        article, distinct sizes → one key). Both are wrong, and neither is
+        visible from outside: the store rendered three sizes of thread for one
+        jacket and the kit scan spent all three.
+
+        ALL FOUR CONSUMING SURFACES GO THROUGH HERE — kit_required_for_piece,
+        kit_by_pieces, material_requirement_block and issue_kit_nocommit — so
+        this one filter fixes the checklist, the scan payload, the production
+        log's kit block and the actual spend together. That is the reason the fix
+        belongs here and not in each caller.
         """
         style_lines = [l for l in lines if l.sku_id is None]
         sku_lines = [l for l in lines if sku_id is not None and l.sku_id == sku_id]
 
         def key(l):
             return ((l.category or "").upper(), (l.subtype or "") or None,
-                    (l.article or ""))
+                    (l.article or ""),
+                    (getattr(l, "garment_size", None) or "") or None)
 
         merged = {key(l): l for l in style_lines}
         for l in sku_lines:
             merged[key(l)] = l          # override or addition
-        return [l for l in merged.values() if (l.qty_per_piece or 0) > 0]
+
+        return [l for l in merged.values()
+                if (l.qty_per_piece or 0) > 0
+                and StyleSpecService.applies_to_size(l, garment_size)]
 
     async def effective_lines(self, style_id: uuid.UUID,
-                              sku_id: uuid.UUID | None) -> list:
-        """The recipe that actually applies to one SKU of one style."""
-        return self.merge_lines(await self.repo.lines_for_style(style_id), sku_id)
+                              sku_id: uuid.UUID | None,
+                              garment_size: str | None = None) -> list:
+        """The recipe that actually applies to one SKU of one style, AT ITS SIZE.
+
+        The size is looked up from the SKU when the caller does not supply it, so
+        every existing call site becomes size-aware without being edited — which
+        matters, because there are four of them and missing one would leave a
+        surface silently spending the wrong accessories.
+        """
+        if garment_size is None and sku_id is not None:
+            sku = await self.db.get(SKU, sku_id)
+            garment_size = getattr(sku, "size", None)
+        return self.merge_lines(await self.repo.lines_for_style(style_id),
+                                sku_id, garment_size)
 
     async def _piece_context(self, piece_id: uuid.UUID) -> tuple:
         """(piece, sku, style) for a piece id — the join every read here needs."""
@@ -258,6 +360,12 @@ class StyleSpecService:
             "category": line.category, "subtype": line.subtype,
             "article": line.article, "colour": line.colour,
             "thickness": line.thickness, "size": line.size,
+            # WHICH GARMENTS THIS LINE IS FOR. Returned because the recipe grid
+            # has to SHOW it beside `size`: the two look alike and mean different
+            # things — `size` is the material's (a 60cm zip), this is which
+            # jackets it belongs on. Stored and matched but never returned is how
+            # a DM edits a line and cannot see what they changed.
+            "garment_size": getattr(line, "garment_size", None),
             "qty_per_piece": float(line.qty_per_piece or 0),
             "uom": line.uom,
             "material_lot_id": str(line.material_lot_id) if line.material_lot_id else None,
@@ -333,8 +441,12 @@ class StyleSpecService:
         cleaned = [await self._clean_line(style, dict(row)) for row in lines]
 
         def identity(d):
+            # garment_size is part of the identity: "Thread for L" and "Thread
+            # for M" are two lines, not one line entered twice. Leaving it out is
+            # what made the second silently overwrite the first.
             return (d["sku_id"], d["category"], d["subtype"], d["article"],
-                    d["colour"], d["thickness"], d["size"])
+                    d["colour"], d["thickness"], d["size"],
+                    d.get("garment_size"))
 
         seen: dict = {}
         for d in cleaned:
@@ -351,7 +463,7 @@ class StyleSpecService:
         existing = await self.repo.lines_for_style(style_id, active_only=False)
         by_identity = {
             (l.sku_id, l.category, l.subtype, l.article, l.colour, l.thickness,
-             l.size): l for l in existing}
+             l.size, getattr(l, 'garment_size', None)): l for l in existing}
 
         kept, added = [], []
         for k, d in seen.items():
@@ -385,7 +497,7 @@ class StyleSpecService:
     async def add_line(self, style_id: uuid.UUID, body: dict, *,
                        actor_name: str, actor_id=None) -> dict:
         style = await self._style(style_id)
-        self._assert_editable(style)
+        self._assert_editable(style, category=(body or {}).get("category"))
         d = await self._clean_line(style, body)
         dup = await self.repo.find_duplicate_line(
             style_id=style.id, sku_id=d["sku_id"], category=d["category"],
@@ -406,11 +518,14 @@ class StyleSpecService:
     async def patch_line(self, style_id: uuid.UUID, line_id: uuid.UUID,
                          patch: dict, *, actor_name: str, actor_id=None) -> dict:
         style = await self._style(style_id)
-        self._assert_editable(style)
         line = await self.repo.get_line(line_id)
         if line is None or line.style_id != style.id:
             raise HTTPException(status.HTTP_404_NOT_FOUND,
                                 "No such line on this style.")
+        # The line is fetched FIRST so the freeze can be judged on what is
+        # actually being edited: accessories stay correctable after release,
+        # leather and lining do not.
+        self._assert_editable(style, category=line.category)
         merged = {
             "sku_id": line.sku_id, "category": line.category,
             "subtype": line.subtype, "article": line.article,
@@ -432,11 +547,14 @@ class StyleSpecService:
                               actor_name: str, actor_id=None) -> dict:
         """SOFT delete. The ledger points at this row and must keep resolving."""
         style = await self._style(style_id)
-        self._assert_editable(style)
         line = await self.repo.get_line(line_id)
         if line is None or line.style_id != style.id:
             raise HTTPException(status.HTTP_404_NOT_FOUND,
                                 "No such line on this style.")
+        # The line is fetched FIRST so the freeze can be judged on what is
+        # actually being edited: accessories stay correctable after release,
+        # leather and lining do not.
+        self._assert_editable(style, category=line.category)
         line.is_active = False
         await self.db.commit()
         return {"deactivated": True, "line_id": str(line_id),
@@ -608,6 +726,17 @@ class StyleSpecService:
         qty_by_sku = {sid: int(q or 0) for sid, q in rows}
         total_qty = sum(qty_by_sku.values())
 
+        # HOW MANY GARMENTS OF EACH SIZE, so a size-specific line is multiplied
+        # by the garments it actually reaches. Without this a style with three
+        # sized zip lines ordered three zips per garment instead of one — the
+        # requirement is what a purchase is raised from, so the error would have
+        # been bought.
+        size_rows = (await self.db.execute(
+            select(SKU.size, func.coalesce(func.sum(SKU.qty_ordered), 0))
+            .where(SKU.style_id == style_id).group_by(SKU.size))).all()
+        qty_by_size = {(sz or "").strip().upper(): int(q or 0)
+                       for sz, q in size_rows}
+
         # Which SKUs have their own line for a given (category, subtype, article)?
         overridden: dict = {}
         for l in lines:
@@ -618,8 +747,12 @@ class StyleSpecService:
         out_lines, short_lines = [], 0
         for line in lines:
             payload = await self._line_payload(line)
+            gsize = (getattr(line, "garment_size", None) or "").strip().upper()
             if line.sku_id is not None:
                 pieces = qty_by_sku.get(line.sku_id, 0)
+            elif gsize:
+                # A sized line reaches only garments of that size.
+                pieces = qty_by_size.get(gsize, 0)
             else:
                 key = ((line.category or "").upper(), line.subtype, line.article)
                 pieces = total_qty - sum(qty_by_sku.get(s, 0)
@@ -729,7 +862,12 @@ class StyleSpecService:
         for piece in pieces:
             sku = skus.get(piece.sku_id)
             all_lines = lines_by_style.get(sku.style_id, []) if sku else []
-            eff = self.merge_lines(all_lines, sku.id if sku else None)
+            # SIZE-AWARE, like every other consumer of the recipe. Without the
+            # third argument this batched read answered a different recipe from
+            # the one the store would actually issue — the scan screen showed
+            # three sizes of thread owed and the kit then issued one.
+            eff = self.merge_lines(all_lines, sku.id if sku else None,
+                                   getattr(sku, "size", None))
             acc = [l for l in eff if l.category == MaterialCategory.ACCESSORY.value]
             issued = issued_by_piece.get(piece.id, {})
             required_total = sum(float(l.qty_per_piece or 0) for l in acc)

@@ -3,7 +3,11 @@
 
 **Every endpoint of the production system**, with purpose, roles, request, response and errors — enough to build the entire frontend against mocks, and enough for a backend developer to use as the contract of record.
 
-**Covers:** Auth & Users · Employees · Clients · Imports · Barcode · Materials · Production · Drawers · Attendance · Wages · Analytics · Dashboard
+**Covers:** Auth & Users · Employees · Clients · Imports · Barcode · Materials · **Cutting** · Production · **Store** *(replaces Drawers)* · **Inspections** · **Job Work** · Attendance · Wages · Analytics · Dashboard
+
+> **Updated for the Cutting V2 / Store / Reject-Rework / Job-Work release.**
+> **Start at §0** — it lists everything new, everything that changed shape, and
+> the two things that will break a screen if you do nothing.
 
 **Companion document:** *KairoX Production-Event System Guide* — the business logic, module architecture and screen design behind these endpoints.
 
@@ -19,7 +23,673 @@
 
 ---
 
+# 0. WHAT CHANGED — read this first
+
+*Added in the Cutting V2 / Store / Reject-Rework / Job-Work release.*
+
+This section is written for the **frontend developer**. It lists everything that
+is new, everything that changed shape, and the two things that will break a
+screen if you do nothing. Everything else in this document is still accurate.
+
+---
+
+## 0.1 The one-paragraph summary
+
+**Drawers are gone.** There were 200 physical boxes; a style released 100+
+garments, the pool ran dry, and the DM had to re-allocate by hand. The store is
+now a *state on the garment*, so it has no capacity and nothing runs out. The
+store scan dropped from three scans to two.
+
+**Cutting got a spreadsheet.** Leather is now tracked hide by hide. The cutting
+manager opens a grid, the system allocates ~10 sheets per garment, he edits it,
+approves it — and the cutter's scan pulls all of it in without typing anything.
+
+**Three new things:** rejecting a piece and sending it back for rework;
+sending garments to an outside factory and getting them back; and accessories
+that only reach the garment size they are for.
+
+---
+
+## 0.2 BREAKING — two things to fix before you ship
+
+### 1. `/api/v1/drawers/*` is gone (404)
+
+Every drawer route is withdrawn. Replace as follows:
+
+| Old | New |
+|---|---|
+| `POST /drawers/store-scan` | `POST /store/scan` — **no `drawer_id`**, and the drawer scan step disappears from the UI |
+| `POST /drawers/send` | `POST /store/send` — takes `piece_ids`, not `drawer_ids` |
+| `GET /drawers` | `GET /store/pieces` |
+| `GET /drawers/by-code/{code}` | `GET /store/pieces/{piece_code}` |
+| `GET /drawers/{id}` | `GET /store/pieces/{piece_code}` |
+| `POST /drawers/{id}/receive` | *nothing* — the scan **is** the receipt now |
+| `GET/POST /drawers/pool`, `/drawers/allocate-waiting` | *nothing* — there is no pool |
+
+Old DRAWER barcodes still **resolve** (so a printed sticker does not 404), but
+they return `next_expected_scan: null` and their state is frozen history.
+
+### 2. `drawer` in production responses is now always `null`
+
+`GET /production/piece-state` and the piece-checklist rows still return a
+`drawer` key, but it is `null` for one release so nothing crashes. The real data
+moved to a new `store` block:
+
+```jsonc
+{
+  "store": {
+    "state": "holding_both",        // waiting|merged|holding_leather|holding_lining|holding_both|received|sended
+    "holding": "HOLDING BOTH",      // ready-to-render caption
+    "leather_in": true,
+    "lining_in": true,
+    "accessories_in": false
+  },
+  "drawer": null,                   // REMOVED NEXT RELEASE — migrate off it
+  "drawer_code": null
+}
+```
+
+> **Do this now:** search your codebase for `.drawer` and `drawer_code`. Anything
+> reading `drawer.code` will render blank rather than crash, which is worse —
+> it looks like missing data instead of a bug.
+
+---
+
+## 0.3 `POST /production/log` — three new rejection buckets
+
+The request is **unchanged**. The response gained three per-piece buckets
+alongside `sequence_blocked` / `skill_blocked` / `merge_blocked`:
+
+| Bucket | Means | What the operator should be told |
+|---|---|---|
+| `assignment_blocked` | the scanned worker is not the cutter this row was approved for | "This piece was approved for a different cutter." |
+| `rejected_blocked` | a rejection on this garment is waiting for the DM | "Rejected at PASTING — waiting for the DM." |
+| `offsite_blocked` | the garment is physically at an outside factory | "Out at ABC Tailors since 12/09." |
+
+Every one of them is **per piece**, like the existing gates: one bad garment
+never loses the tray it was scanned with.
+
+**The `blocked[]` array is what you should actually render.** It carries the
+reason sentence per piece and has done since before this release:
+
+```jsonc
+"blocked": [
+  {"piece": "PC-2234", "gate": "offsite", "stage": "LINE_STITCHING",
+   "reason": "PC-2234 is out at ABC Tailors for LINE_STITCHING since 2026-09-12. Book it back in before logging anything on it here."}
+]
+```
+
+> **Design note.** Do not build a separate UI branch per bucket. Render
+> `blocked[]` as a list of rows — piece code, a badge from `gate`, and `reason`
+> verbatim. The reasons are written to be shown to the floor as-is; they name the
+> fix, not just the problem. New gates then appear in your UI with no work.
+
+---
+
+## 0.4 NEW: Cutting grid — `/cutting/*`
+
+**Roles:** CUTTING_MANAGER, DM, MD.
+
+This replaces Kumar's Excel. One row = **one garment**.
+
+### `GET /cutting/grid?style_id={uuid}&colour={string}`
+
+```jsonc
+{
+  "style_id": "…", "style_name": "CLERMONT", "colour": "NAVY",
+  "colours": ["NAVY", "WHISKY"],          // fills the colour picker
+  "uncut_pieces": 12,                      // garments with no row yet
+  "present_cutters": [                     // ONLY people checked in today
+    {"employee_id": "…", "name": "MAJID", "designation": "CUTTER"}
+  ],
+  "warnings": [],
+  "rows": [
+    {
+      "row_id": "…", "piece_id": "…", "piece_code": "PC-2234",
+      "article": "SUEDE-A32", "colour": "NAVY", "size": "L", "rc_no": "1072",
+      "cutter_employee_id": "…", "cutter_name": "MAJID",
+      "work_date": "2026-09-18", "status": "DRAFT",
+      "target_dcm": 430.0, "target_source": "size_baseline",
+      "total_dcm": 438.0, "sheet_count": 10,
+      "sheets": [
+        {"sheet_id": "…", "code": "LS-000001", "dcm": 43.0, "status": "ALLOCATED"}
+      ],
+      "approved_at": null, "logged_at": null,
+      "warnings": []
+    }
+  ]
+}
+```
+
+**`target_source` matters for the UI.** `"style_spec"` means a human measured
+this style — show the number plainly. `"size_baseline"` means the system
+estimated it from the garment size — show it greyed or with a hint, because the
+manager is *expected* to correct it.
+
+**`present_cutters` is the whole cutter dropdown.** Do not offer anyone else:
+production refuses to log an absent worker, so a row assigned to someone who did
+not clock in collects the leather and then fails at the scan.
+
+### `POST /cutting/rows/generate`
+
+```jsonc
+// request
+{"style_id": "…", "colour": "NAVY", "cutter_employee_id": "…",
+ "material_lot_id": null,    // omit → resolved from the style's article+colour
+ "limit": null, "work_date": null, "allocate": true}
+
+// response
+{"created": 12, "rows": [ …RowRead… ],
+ "warnings": ["PC-2240: only 114 dcm of hide was left against a target of 430 — the stock ran out partway through. Add sheets before approving."]}
+```
+
+Safe to press twice — rows are only created for pieces that have none.
+
+**409** when several leather lots match the style's article+colour. Send
+`material_lot_id` to disambiguate; the system will not guess which hides to spend.
+
+### Editing a row
+
+| Call | Body | Use |
+|---|---|---|
+| `PATCH /cutting/rows/{id}` | `{cutter_employee_id?, size?, rc_no?, article?, colour?, work_date?, note?}` | edit any cell |
+| `POST /cutting/rows/{id}/sheets` | `{sheet_code}` *or* `{sheet_id}` *or* `{dcm, material_lot_id}` | the cutter needed one more |
+| `DELETE /cutting/rows/{id}/sheets/{sheet_id}` | — | he handed one back |
+| `PATCH /cutting/rows/{id}/sheets/{sheet_id}` | `{dcm}` | correct a measurement |
+
+All four return the whole updated `RowRead`, so **re-render the row from the
+response** rather than patching local state.
+
+`POST .../sheets` has three doors on purpose: `sheet_code` when he scans the
+hide, `sheet_id` when he picks it from a list, `dcm` when the delivery was never
+sheeted and the hide has to be created now.
+
+### `POST /cutting/rows/{id}/approve`
+
+```jsonc
+{"row": { …RowRead, "status": "APPROVED"… },
+ "message": "Approved: 10 sheet(s), 438 dcm. Scan the piece on the cutting screen to log it."}
+```
+
+Approving freezes the row and moves its hides to `ISSUED`. After that every edit
+returns **409** — use `POST /cutting/rows/{id}/reopen?reason=…` (audited).
+
+Re-approving is a **no-op, not an error** — a manager who is unsure whether the
+first tap landed will press it again, and they should not be punished for it.
+
+**409 before approve** if: no sheets on the row, or no cutter assigned.
+
+> **Screen design.** Build this as a real spreadsheet, not a form-per-row: one
+> table, sticky style/colour header, sheet DCMs as editable cells across the row,
+> a derived total column you never let anyone type into, and one APPROVE button
+> per row. The factory has used a spreadsheet for years — matching the shape they
+> know is worth more than a prettier layout.
+
+---
+
+## 0.5 NEW: The store — `/store/*`
+
+**Scan roles:** STORE_MANAGER, STITCHING_MANAGER, DM, MD.
+**Read roles:** all floor roles + HR.
+
+### `POST /store/scan` — two scans, not three
+
+```jsonc
+// request — the worker and the garment. No drawer.
+{"employee_barcode": "EMP-4F2A11", "piece_barcode": "PC-2234",
+ "part": null,          // null → inferred. "ACCESSORY" must always be explicit.
+ "lines": null}         // optional: a partial/substituted kit issue
+
+// response
+{
+  "piece_code": "PC-2234",
+  "store_state": "holding_both",
+  "holding": "HOLDING BOTH",
+  "leather_in": true, "lining_in": true, "accessories_in": false,
+  "part_stored": "LINING", "part_inferred": true,
+  "complete": false,
+  "awaiting": ["ACCESSORIES"],        // what is still owed — render as chips
+  "auto_received": false,
+  "ready_for_received": false,
+  "sent": false,
+  "needs_lining": true,
+  "lining_reason": "its style name contains 'KNIT'",
+  "kit": { …the accessory checklist, on EVERY scan… },
+  "next_action": "Waiting for its accessories — scan the kit to issue them.",
+  "warnings": []
+}
+```
+
+**`part` is optional and you should usually omit it.** The system infers LEATHER
+vs LINING from the garment's own history — the operator should not be asked a
+question the system can answer. `ACCESSORY` is the exception and must always be
+sent explicitly, because an inferred accessory scan *spends stock*.
+
+**`next_action` is a finished sentence.** Render it directly as the primary line
+on the scan result. `awaiting` is the same information as chips if you want both.
+
+**`kit` now rides every scan, not just accessory scans** — the operator holding
+the lining is the person best placed to fetch the buttons too, and they will not
+open a second screen to find out they are owed.
+
+### `POST /store/send`
+
+```jsonc
+// request
+{"piece_ids": ["…"], "piece_barcodes": ["PC-2234"]}   // either or both
+
+// response
+{"count_sent": 2, "sent": ["PC-2234", "PC-2235"],
+ "not_ready": [{"piece": "PC-2236", "missing": "lining", "state": "holding_leather",
+                "reason": "PC-2236 is still awaiting its lining. It takes a lining because its style name contains 'KNIT'."}],
+ "not_found": [],
+ "message": "2 garment(s) sent to line-stitching; 1 not ready"}
+```
+
+**Partial accept.** One incomplete garment never loses the complete ones selected
+with it. Render `sent` and `not_ready` as two lists — do not treat a non-empty
+`not_ready` as a failed request.
+
+### `GET /store/pieces?state=&style_id=&limit=` · `GET /store/pieces/{piece_code}`
+
+The lookup is deliberately open to **every floor role and HR**. The DM assigns
+somebody to place garments who has no DM login; under the old routes they could
+not look a barcode up at all and had to go and find the DM.
+
+> **Screen design.** The store screen is now a *list of garments*, not a grid of
+> boxes. Group by `store_state`, and lead each row with `holding` and
+> `next_action`. The old drawer grid (200 numbered cells) has nothing to render
+> any more — delete it rather than porting it.
+
+---
+
+## 0.6 NEW: Reject & rework — `/inspections/*`
+
+**Raise:** every manager + HR. **Approve/decline:** DM, MD only.
+
+A garment finished FUSING and was rejected at PASTING. Before this release there
+was no way to send it back; the only route was a database edit.
+
+### `POST /inspections`
+
+```jsonc
+// a PASS — closed immediately, nobody approves it
+{"piece_barcode": "PC-2234", "found_at_stage": "PASTING", "verdict": "PASS"}
+
+// a REJECT — goes to the DM
+{"piece_barcode": "PC-2234",
+ "found_at_stage": "PASTING",
+ "verdict": "REJECT",
+ "action": "REDO",                    // FIX = repair here | REDO = send it back
+ "return_to_stage": "FUSING",         // required for REDO; the rejector chooses
+ "defect_type": "WORKMANSHIP",        // WORKMANSHIP | PRODUCT_DAMAGE
+ "responsible_employee_id": "…",      // REQUIRED for WORKMANSHIP, REFUSED for PRODUCT_DAMAGE
+ "responsible_stage": "FUSING",
+ "reason": "fusing lifted at the seam"}
+```
+
+**The accountability rule is enforced, so build the form around it.** Make
+`defect_type` the first choice, and let it drive the rest:
+
+- **WORKMANSHIP** → reveal a *required* employee + stage picker.
+  A 422 comes back if they are missing.
+- **PRODUCT_DAMAGE** → *hide* the employee picker entirely.
+  Sending one is a 422: a flawed hide is the supplier's problem, and putting it
+  against a worker who did nothing wrong teaches the floor to stop reporting
+  damage at all.
+
+**`return_to_stage` should be a dropdown of stages the piece has already passed**
+— the API 409s on anything else, and you can populate it from
+`GET /production/piece-state`'s `completed_stages`.
+
+### `POST /inspections/{id}/approve` · `/decline`
+
+Body `{"note": "…"}` is optional. Only after **approve** does the garment move.
+
+### What happens after approval
+
+- The piece re-walks **everything the redo invalidated**: redo FUSING on a piece
+  rejected at LINE_STITCHING and it must be fused, pasted and line-stitched
+  again, in order.
+- Those events come back with `is_rework: true`, so cost is separable.
+- While the rejection is **pending**, the piece is `rejected_blocked` in the
+  production log — it stops moving until the DM decides.
+
+### `GET /inspections?status=&limit=` — the DM's queue
+### `GET /inspections/pieces/{piece_code}` — one garment's history
+### `GET /inspections/responsibility?employee_id=`
+
+```jsonc
+[{"employee_id": "…", "employee": "FATIMA", "stage": "FUSING", "rejections": 2}]
+```
+
+WORKMANSHIP only. Product damage never appears here.
+
+---
+
+## 0.7 NEW: Job work (outsourcing) — `/jobwork/*`
+
+**Dispatch/receive:** DM, MD. **Read:** all floor roles + HR.
+
+### `POST /jobwork/vendors` · `GET /jobwork/vendors?active_only=true`
+
+```jsonc
+{"name": "ABC Tailors", "contact": "98000 00000", "note": null}
+→ {"vendor_id": "…", "name": "ABC Tailors", "contact": "…", "note": null, "is_active": true}
+```
+
+Registering the same name twice returns the original, not a 409.
+
+### `POST /jobwork/dispatch`
+
+```jsonc
+// request
+{"vendor_id": "…", "stage": "LINE_STITCHING",
+ "piece_ids": ["…", "…"],
+ "expected_back": "2026-09-25",
+ "rate_per_piece": 45.0, "currency": "INR",   // OPTIONAL — omit if not per-piece
+ "note": null}
+
+// response
+{"job_id": "…", "vendor": "ABC Tailors", "stage": "LINE_STITCHING",
+ "status": "OUT", "dispatched_at": "…", "expected_back": "2026-09-25",
+ "rate_per_piece": 45.0, "currency": "INR",
+ "pieces_out": 2, "pieces_back": 0, "pieces_rejected": 0, "pieces_short": 0,
+ "cost": 0.0,                 // rate × pieces that CAME BACK
+ "overdue": false,
+ "skipped": [{"piece_id": "…", "piece": "PC-9", "reason": "already out at XYZ Stitching"}]}
+```
+
+### `POST /jobwork/{job_id}/receive`
+
+```jsonc
+// request — omit piece_ids and everything still out is treated as returned
+{"piece_ids": null,
+ "rejected_ids": ["…"],    // came back badly done
+ "short_ids": [],          // never came back
+ "work_date": null}
+```
+
+Returns the same job shape with `status` now `PARTIAL` or `RETURNED`.
+
+**`cost` counts only pieces that came back.** Rejected and short are never paid
+for, and they are kept apart on purpose: a missing garment is a loss to chase
+with the vendor, a bad one is a quality conversation.
+
+### `GET /jobwork?status=&vendor_id=&overdue=true&limit=`
+
+> **Screen design.** Two views earn their place: *what is out right now* (group
+> by vendor, show `pieces_out` and days elapsed) and *what is late*
+> (`?overdue=true`). Put the overdue count somewhere permanent — a dispatch
+> nobody chases is how garments go missing, and that is the whole reason this
+> module exists.
+
+---
+
+## 0.8 CHANGED: Materials — `/materials/*`
+
+### Leather is now tracked hide by hide
+
+`POST /materials/lots` and `POST /materials/receive` accept an optional
+`sheets` array. **LEATHER only** — a 422 comes back for anything else, because a
+5,000-button packet is one barcode and a count, not 5,000 labels.
+
+```jsonc
+// request addition
+{"category": "LEATHER", "article": "SUEDE-A32", "colour": "NAVY",
+ "attributes": {"thickness": "1.2", "dcm": 552},
+ "sheets": [{"dcm": 43}, {"dcm": 47}, {"dcm": 47}]}
+
+// response addition — the labels to print
+"sheets": [{"sheet_id": "…", "code": "LS-000001", "dcm": 43.0,
+            "status": "IN_STOCK", "cutting_row_id": null}]
+```
+
+`POST /materials/receive` also returns `sheet_reconciliation` when the delivery
+was sheeted:
+
+```jsonc
+{"sheets_total": 8, "sheets_by_status": {"IN_STOCK": {"count": 8, "dcm": 363.0}},
+ "sheet_dcm_in_store": 363.0, "lot_on_hand": 363.0,
+ "difference": 0.0, "reconciled": true}
+```
+
+A mismatch **warns, it does not block** — refusing a delivery over two
+decimetres of measurement slop is how a store learns to stop sheeting.
+
+### `GET /materials/lots/{id}` gained five fields
+
+```jsonc
+"received": 390.0,        // everything that EVER arrived  ← was missing entirely
+"rejected": 15.0,         // supplier quality history
+"deliveries": 3,
+"sheets_total": 12,
+"sheets_by_status": {"IN_STOCK": {"count": 10, "dcm": 460.0},
+                     "CONSUMED": {"count": 2, "dcm": 92.0}}
+```
+
+> **This fixes the "Received shows 0" bug.** It showed 0 because the field did
+> not exist — nothing ever summed the receipts. `received − on_hand = consumed`
+> now reconciles exactly, so you can show all three on the stock card.
+
+### New reads
+
+| Endpoint | Returns |
+|---|---|
+| `GET /materials/lots/{id}/history` | every delivery of that lot, newest first |
+| `GET /materials/leather-by-style?style_id=` | arrived / consumed / available per style, **split original vs rework** |
+| `GET /materials/pieces/{piece_id}/consumption` | what one garment took, hide by hide |
+
+```jsonc
+// leather-by-style row
+{"style_name": "CLERMONT", "article": "SUEDE-A32", "colour": "NAVY", "uom": "dcm",
+ "arrived": 1000.0, "consumed": 920.0,
+ "consumed_original": 860.0, "consumed_rework": 60.0,   // ← the honest split
+ "on_hand": 80.0, "reserved": 0.0, "available": 80.0,
+ "pieces": 2, "per_piece": 460.0}
+```
+
+### HR can now write
+
+HR was read-only on stock, which is why a wrong lot got fixed in the database by
+hand. HR can now create, edit, adjust, delete and receive. HR still **cannot**
+approve a PO-mismatch substitution (a costing decision) or run payroll.
+
+### Accessories only reach their own size
+
+`style_material_spec` lines gained **`garment_size`**. A line with
+`garment_size: "L"` reaches only size-L garments; `null` means every size.
+
+When the DM adds an accessory whose material `size` reads as a garment size
+(`S`/`M`/`L`/`XL`/`XXL` or `38`–`62`), `garment_size` defaults to it
+automatically — so a zip labelled **L** matches L garments with no extra data
+entry. A **60cm** zip or an **18L** button is correctly *not* read as a garment
+size and stays on every size.
+
+> **Design note.** On the recipe grid, show `garment_size` as its own column
+> separate from `size`. They look alike and mean different things: `size` is the
+> material's size (60cm zip), `garment_size` is which jackets it belongs on.
+
+---
+
+## 0.9 CHANGED: Barcode — `/barcode/resolve`
+
+### New type `LEATHER_SHEET`
+
+```jsonc
+{"code": "LS-000003", "type": "LEATHER_SHEET", "active": true,
+ "sheet": {"sheet_id": "…", "code": "LS-000003", "dcm": 47.0,
+           "status": "IN_STOCK", "cutting_row_id": null},
+ "lot": { …the parent lot: article, colour, on_hand… },
+ "next_expected_scan": "PIECE"}
+```
+
+Both blocks are returned: the scan must answer *which hide* **and** *what article
+and colour is it*, and only the lot knows the second half.
+
+### `next_expected_scan` no longer returns `"DRAWER"`
+
+| Scanned | Next |
+|---|---|
+| `EMPLOYEE` | `"PIECE"` |
+| `LEATHER_LOT` / `LINING_LOT` / `ACCESSORY_LOT` / `LEATHER_SHEET` | `"PIECE"` |
+| `PIECE` | `null` — **the piece is the end of the scan, not the middle** |
+| `DRAWER` (legacy label) | `null` |
+
+If your scan flow has a "now scan the drawer" step, delete it.
+
+---
+
+## 0.10 CHANGED: Production — correcting a record
+
+Two new endpoints replace editing the database by hand.
+
+| Call | Roles | Use |
+|---|---|---|
+| `PATCH /production/events/{id}/reassign?employee_id=&reason=` | managers + HR | wrong worker on real work — **stock untouched** |
+| `DELETE /production/events/{id}?reason=` | DM, MD | the record should not exist — **stock returned** |
+
+`reason` is **required** on delete and the API 422s without it.
+
+Both return **409** if the event falls inside a **CLOSED payroll run**: that run
+is the document the cash was counted against and is never recomputed, so the fix
+there is a payroll adjustment rather than a quiet edit underneath it.
+
+> **Design note.** Offer *Reassign* prominently and bury *Delete*. Reassign is
+> the everyday correction; delete erases evidence and moves stock, and should
+> feel like it.
+
+---
+
+## 0.11 CHANGED: Imports
+
+`POST /imports/breakdown/{order_number}/release` no longer returns
+`pieces_waiting_for_drawer`, and `grow_drawer_pool` on the release body is
+ignored. There is no pool to wait for — the bottleneck is removed, so the
+"N pieces have no drawer" banner should come out of the upload screen.
+
+---
+
+## 0.12 CHANGED: Dashboards
+
+`GET /dashboard/store/drawers/{id}` and `/movement` still exist but read frozen
+history. For live state use `GET /store/pieces`.
+
+`GET /dashboard/direct-manager/pieces/{piece_code}` now accepts **either** code —
+the compact `PC-222223` a scanner returns, or the long
+`N1-BF27P010501-SUEDE_BOMBER-NAVY-S-034`. Previously only the long one worked,
+which is why the Analytics & Alert screen errored.
+
+---
+
+## 0.13 NEW: Correcting a person — employee reads and attendance CRUD
+
+Two gaps closed. Both are about the same thing: **a record naming the wrong
+person is not a typo, it is a wage going to the wrong worker.**
+
+### `GET /employees/{employee_id}`
+
+The single-employee read the edit screen opens on. Previously the only way to
+show one worker was to pull the whole roster and filter it in the browser.
+
+Same gate as the roster: **every internal role; CLIENT and VIEWER are refused
+(403)** because the row carries phone and email. **HR / DM / MD additionally see
+`monthly_salary`** — everyone else gets the row without it.
+
+### `PATCH /attendance/{attendance_id}` — the re-allocation
+
+**This is the important one, and it is not "edit a field".**
+
+The real mistake on the floor is not *"nobody was here"*. Security scans a card
+at the gate; the card said MAJID, the worker who actually did the day's cutting
+was SALIM. By the time anybody notices, MAJID has twelve cutting events against
+his name — and the wage for them, because **wages are computed from the events,
+not from the attendance.**
+
+So changing `employee_id` **moves that day's production events with it, in the
+same action**, and the response says how many:
+
+```json
+{
+  "attendance_id": "a1b2c3d4-...",
+  "employee_id": "e5f60718-...",
+  "work_date": "2026-09-18",
+  "check_in_at": "2026-09-18T03:32:10Z",
+  "check_out_at": null,
+  "is_late": false, "is_short": false, "is_overtime": false,
+  "production_events_moved": 12,
+  "message": "Re-allocated to the correct worker; 12 production event(s) for 2026-09-18 moved with it."
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `employee_id` | **re-allocation** — the day's events move too |
+| `check_in_at` / `check_out_at` | corrected times; `is_late` / `is_short` / `is_overtime` are **recomputed**, never left saying the old thing |
+| `reason` | free text, written to the audit row |
+
+**Roles:** SECURITY · HR · MD · DM — every attendance operator. A gate operator
+who mis-scans must be able to fix it without going to find somebody.
+
+**Errors**
+
+| Code | When |
+|---|---|
+| `404` | no such attendance record |
+| `409` | the target worker is **already marked present** that day — one punch per worker per day is a database constraint, so this is said plainly instead of surfacing as a 500 |
+| `409` | the day falls inside a **CLOSED payroll run** |
+
+### `DELETE /attendance/{attendance_id}?reason=`
+
+**Roles: HR · MD · DM only.** SECURITY may *correct* a punch but not remove one —
+taking somebody off the day's roster decides whether they are paid for it.
+
+`reason` is **required** and 422s when blank.
+
+**It refuses with 409 when the worker has production events that day**, and the
+refusal names the better operation:
+
+> *This worker has 3 production event(s) on 2026-09-18, so the work was really
+> done — the usual cause is a swapped card, not an absent worker. Re-allocate
+> the attendance to the right person instead (PATCH this record with the correct
+> `employee_id`); the events move with it.*
+
+Deleting instead would leave those events dated to a day the worker was never
+marked present — which the production log's own presence gate would have refused
+to create.
+
+> **Design note.** Build the correction screen around **re-allocate**, with a
+> worker picker, and put delete behind a second click. The count of events that
+> will move belongs on the confirm button (`"Move 12 events to SALIM"`), because
+> that number is the size of what the operator is about to do.
+
+---
+
+## 0.14 Suggested build order
+
+If you are updating the frontend incrementally, this order keeps the app working
+at every step:
+
+1. **Fix the breakages** (§0.2) — swap `/drawers/*` for `/store/*`, stop reading
+   `drawer`. One afternoon, and nothing is broken afterwards.
+2. **Render `blocked[]` generically** (§0.3) — one component, and every current
+   and future gate explains itself.
+3. **The store screen** (§0.5) — a list of garments. Deleting the 200-cell grid
+   removes more code than it adds.
+4. **The cutting grid** (§0.4) — the biggest new screen, and the one that saves
+   the most time daily. Build it as a spreadsheet.
+5. **Reject & rework** (§0.6) — the defect form plus the DM's queue.
+6. **Job work** (§0.7) — dispatch, receive, and an overdue list.
+
+Steps 1–3 are net deletions. Only 4–6 add screens.
+
+---
+---
+
 # Table of Contents
+
+**START HERE**
+0. **What changed in this release** — breaking changes, new modules, build order
 
 **FOUNDATION**
 1. Base URL and versioning
@@ -45,7 +715,8 @@
 13. Lots and stock · 14. Suppliers · 15. The style recipe
 
 **THE FLOOR**
-16. Production · 17. Drawers
+15b. Cutting grid *(new)* · 16. Production · 17. ~~Drawers~~ → **Store** *(new)* ·
+17b. Inspections *(new)* · 17c. Job work *(new)*
 
 **PEOPLE**
 18. Attendance
@@ -292,9 +963,13 @@ A `500` carries a correlation id — **show it to the user**:
 
 ## 6. Endpoint index
 
-**136 endpoints.**
+**158 endpoints** under `/api/v1`, excluding the Procurement module (Phase 2 —
+it has its own reference) and `/chat`. New in this release: **Cutting (8)**,
+**Store (4)**, **Inspections (6)**, **Job work (5)**, plus 3 new material reads,
+2 production corrections, 2 attendance corrections and the single-employee read.
+**Drawers (9) are withdrawn.**
 
-### Identity (10)
+### Identity (11)
 | Method | Path | Roles |
 |---|---|:--|
 | `POST` | `/auth/login` | public |
@@ -305,6 +980,7 @@ A `500` carries a correlation id — **show it to the user**:
 | `POST` | `/users/clients` | DM MD |
 | `GET` | `/employees` | internal |
 | `POST` | `/employees` | DM HR MD |
+| `GET` | `/employees/{id}` | internal |
 | `PATCH` | `/employees/{id}` | DM HR MD |
 | `DELETE` | `/employees/{id}` | DM MD |
 
@@ -319,19 +995,37 @@ A `500` carries a correlation id — **show it to the user**:
 
 ### Materials (21)
 **Lots (7):** `POST`/`GET` `/materials/lots` · `GET`/`PATCH`/`DELETE` `/materials/lots/{id}` · `PATCH` `/materials/lots/{id}/adjust` · `GET` `/materials/spec`
-**Stock & receiving (2):** `GET` `/materials/stock` · `POST` `/materials/receive`
+**Stock & receiving (2):** `GET` `/materials/stock` · `POST` `/materials/receive` *(both now take an optional `sheets[]` for LEATHER — §0.8)*
+**Consumption reads (3, new):** `GET` `/materials/lots/{id}/history` · `GET` `/materials/leather-by-style` · `GET` `/materials/pieces/{id}/consumption`
 **Issues (1):** `POST` `/materials/issues`
 **Suppliers (3):** `POST` `/suppliers/orders` · `PATCH` `/suppliers/orders/{id}` · `PATCH` `/suppliers/orders/{id}/spec`
 **Recipe (8):** `GET`/`PUT` `/styles/{id}/material-spec` · `POST` `/styles/{id}/material-spec/lines` · `PATCH`/`DELETE` `/styles/{id}/material-spec/lines/{lid}` · `POST` `/styles/{id}/material-spec/confirm` · `POST` `/styles/{id}/material-spec/copy-from` · `GET` `/styles/{id}/material-spec/requirement`
 
-### Production (9)
-`GET` `/production/operations` · `GET` `/production/skus` · `GET` `/production/events` · `GET` `/production/styles/{id}/progress` · `GET` `/production/skus/{id}/pieces` · `GET` `/production/piece-state` · **`POST` `/production/log`** · `POST` `/production/cutting` *(410)* · `POST` `/production/scan` *(410)*
+### Cutting (8) — NEW · §0.4
+`GET` `/cutting/grid` · `POST` `/cutting/rows/generate` · `PATCH` `/cutting/rows/{id}` · `POST` `/cutting/rows/{id}/approve` · `POST` `/cutting/rows/{id}/reopen` · `POST` `/cutting/rows/{id}/sheets` · `PATCH`/`DELETE` `/cutting/rows/{id}/sheets/{sid}`
+*Roles: CUTTING_MANAGER, DM, MD.*
 
-### Drawers (9)
-`GET` `/drawers` · `GET`/`POST` `/drawers/pool` · `POST` `/drawers/allocate-waiting` · `GET` `/drawers/by-code/{code}` · `POST` `/drawers/send` · `GET` `/drawers/{id}` · `POST` `/drawers/store-scan` · `POST` `/drawers/{id}/receive` *(deprecated)*
+### Production (11)
+`GET` `/production/operations` · `GET` `/production/skus` · `GET` `/production/events` · `GET` `/production/styles/{id}/progress` · `GET` `/production/skus/{id}/pieces` · `GET` `/production/piece-state` · **`POST` `/production/log`** · **`PATCH` `/production/events/{id}/reassign`** *(new)* · **`DELETE` `/production/events/{id}`** *(new)* · `POST` `/production/cutting` *(410)* · `POST` `/production/scan` *(410)*
+
+### Store (4) — NEW, replaces Drawers · §0.5
+**`POST` `/store/scan`** · **`POST` `/store/send`** · `GET` `/store/pieces` · `GET` `/store/pieces/{piece_code}`
+*Scan/send: STORE_MANAGER, STITCHING_MANAGER, DM, MD. Read: all floor roles + HR.*
+
+### Inspections (6) — NEW · §0.6
+`POST` `/inspections` · `POST` `/inspections/{id}/approve` · `POST` `/inspections/{id}/decline` · `GET` `/inspections` · `GET` `/inspections/responsibility` · `GET` `/inspections/pieces/{code}`
+*Raise: all managers + HR. Approve/decline: DM, MD only.*
+
+### Job work (5) — NEW · §0.7
+`POST`/`GET` `/jobwork/vendors` · `POST` `/jobwork/dispatch` · `POST` `/jobwork/{id}/receive` · `GET` `/jobwork`
+*Dispatch/receive: DM, MD. Read: all floor roles + HR.*
+
+### ~~Drawers (9)~~ — WITHDRAWN, all routes 404 · §0.2
+Replaced by **Store** above. Old DRAWER barcodes still resolve (a printed sticker
+must not 404) but return `next_expected_scan: null` and frozen history.
 
 ### Attendance (12)
-`POST` `/attendance/scan-check-in` · `POST` `/attendance/check-in` · `POST` `/attendance/check-out` · `POST` `/attendance/proxy/check-in` · `POST` `/attendance/proxy/check-out` · `POST` `/attendance/daily-workers` · `GET` `/attendance/me` · `GET` `/attendance/me/status` · `GET`/`PATCH` `/attendance/config` · `GET` `/attendance/history` · `GET` `/attendance/today`
+`POST` `/attendance/scan-check-in` · `POST` `/attendance/check-in` · `POST` `/attendance/check-out` · `POST` `/attendance/proxy/check-in` · `POST` `/attendance/proxy/check-out` · `POST` `/attendance/daily-workers` · `GET` `/attendance/me` · `GET` `/attendance/me/status` · `GET`/`PATCH` `/attendance/config` · `GET` `/attendance/history` · `GET` `/attendance/today` · `PATCH` `/attendance/{id}` · `DELETE` `/attendance/{id}`
 
 ### Wages (16)
 `GET` `/wages/orders` · `GET` `/wages/styles` · `GET` `/wages/rate-sheet` · `GET` `/wages/rate-history` · `POST` `/wages/rates` · `POST` `/wages/rates/bulk` · `GET`/`POST` `/wages/runs` · `GET` `/wages/runs/{id}` · `DELETE` `/wages/runs/{id}` · `POST` `/wages/runs/{id}/recompute` · `POST` `/wages/runs/{id}/reopen` · `POST` `/wages/runs/{id}/close` · `GET` `/wages/runs/{id}/breakdown` · `GET` `/wages/runs/{id}/pieces` · `GET` `/wages/ledger`
@@ -547,7 +1241,37 @@ No phone, no email, no password, no role. **No `app_user` row is created.**
 
 ---
 
-### 9.3 `PATCH /employees/{employee_id}`
+### 9.3 `GET /employees/{employee_id}`
+
+**One worker.** **Roles:** every internal role. **CLIENT and VIEWER are refused (403)** — same gate as the roster, and for the same reason: the row carries phone and email.
+
+This is what the edit screen and the worker card open on. Before it existed the only way to show one person was to fetch the whole roster and filter in the browser, which meant every screen that showed one worker downloaded every worker's phone number.
+
+**Response `200` — for HR / DM / MD** (includes salary)
+```json
+{
+  "id": "c3d4e5f6-0718-293a-4b5c-6d7e8f9001a2",
+  "name": "Ramesh Kumar",
+  "designation": "CUTTER",
+  "wage_type": "piece_rate",
+  "is_active": true,
+  "phone": null,
+  "email": null,
+  "role": null,
+  "employee_barcode": "EMP-000123",
+  "monthly_salary": null
+}
+```
+
+**For every other internal role** the shape is the same **without `monthly_salary`** — a supervisor reading the floor roster has no business seeing pay.
+
+`is_active: false` is a **normal 200**, not a 404. A worker who has left is still readable — their production events and wage lines reference them, and a name that stops resolving turns last quarter's payroll into an unanswerable question. Only the **card** stops working (`GET /barcode/resolve` → **410 Gone**).
+
+**Errors:** `404` no such employee · `403` CLIENT or VIEWER.
+
+---
+
+### 9.4 `PATCH /employees/{employee_id}`
 
 **Edit an employee.** **Roles:** DM · HR · MD. All fields optional.
 
@@ -562,7 +1286,7 @@ Granting a login later requires **both** `role` and `password` together — eith
 
 ---
 
-### 9.4 `DELETE /employees/{employee_id}`
+### 9.5 `DELETE /employees/{employee_id}`
 
 **Soft-delete + retire the card.** **Roles:** DM · MD only — **HR can edit but not remove.**
 
@@ -570,13 +1294,14 @@ Granting a login later requires **both** `role` and `password` together — eith
 ```json
 {
   "employee_id": "c3d4e5f6-0718-293a-4b5c-6d7e8f9001a2",
-  "is_active": false,
-  "barcode_retired": true,
+  "active": false,
   "history_preserved": true
 }
 ```
 
-**The employee row, every production event and every wage line stay intact.** Scanning the retired card returns **410 Gone**.
+Deleting somebody already inactive is **not an error** — it returns `200` with `"already_inactive": true` in place of `history_preserved`, so a double-click does not produce a scary red box for a no-op.
+
+**The employee row, every production event and every wage line stay intact.** Scanning the retired card returns **410 Gone** — a distinct answer from `404`, which means the code never existed at all.
 
 ---
 ---
@@ -2562,7 +3287,17 @@ Behind the door gate sits the per-stage **Gate 1**.
 
 ---
 
-## 17. Drawers
+## 17. ~~Drawers~~ — WITHDRAWN
+
+> **This entire chapter is retired.** Every `/drawers/*` route returns 404.
+> The store is now a state on the garment: see **§0.5** for `/store/*`, and
+> **§0.2** for the endpoint-by-endpoint replacement table.
+>
+> The text below is kept for one release so the old behaviour stays readable
+> while the drawer tables are still in the database (retained, unwritten, for
+> audit). It describes endpoints that no longer exist — do not build against it.
+
+### Retired reference (historical)
 
 *Router:* `app/modules/drawers/router.py`
 
@@ -3082,6 +3817,92 @@ Kept working for one release so a frontend mid-deploy does not break.
 **PATCH** accepts any subset. Shift policy is a **database row**, not config — HR changes it without a redeploy.
 
 > The geofence fields (`factory_lat`, `factory_lon`, `radius_m`) still exist on the model but are **unused**. The privileged/public response split is retained in case the fence returns.
+
+### 18.10 `PATCH /attendance/{attendance_id}`
+
+**Correct a punch — and re-allocate the day's work with it.** **Roles:** SECURITY · HR · MD · DM (every attendance operator).
+
+**The mistake this exists for is not "nobody was here".** Security scans a card at the gate; the card said MAJID, the worker who actually did the cutting was SALIM. By the time anybody notices, MAJID has a day's events against his name — **and the wage, because wages are computed from the events, not from the attendance.**
+
+So changing `employee_id` is not editing a field. It is *"this was the wrong person"*, and the events filed under that name are just as wrong as the punch. **They move in the same action**, or the money follows the wrong worker no matter how many times the attendance is corrected.
+
+**Request** — every field optional
+```json
+{
+  "employee_id": "e5f60718-293a-4b5c-6d7e-8f9001a2b3c4",
+  "reason": "card swapped at the gate"
+}
+```
+
+| Field | Effect |
+|---|---|
+| `employee_id` | **re-allocation** — that day's production events move too |
+| `check_in_at` | corrected arrival; the flags are recomputed |
+| `check_out_at` | corrected departure; the flags are recomputed |
+| `reason` | free text, written to the `ATTENDANCE_CORRECTED` audit row |
+
+**Response `200`**
+```json
+{
+  "attendance_id": "a1b2c3d4-5e6f-7081-92a3-b4c5d6e7f809",
+  "employee_id": "e5f60718-293a-4b5c-6d7e-8f9001a2b3c4",
+  "work_date": "2026-09-18",
+  "check_in_at": "2026-09-18T03:32:10Z",
+  "check_out_at": null,
+  "is_late": false,
+  "is_short": false,
+  "is_overtime": false,
+  "production_events_moved": 12,
+  "message": "Re-allocated to the correct worker; 12 production event(s) for 2026-09-18 moved with it."
+}
+```
+
+`production_events_moved` is **0** for a pure time correction and non-zero only for a re-allocation. Show it — it is the size of what the operator just did.
+
+**The flags are recomputed, never carried forward.** A corrected punch still claiming `is_short` from the old times would be worse than not correcting it at all.
+
+**Only that day moves.** A swapped card is one day's mistake; yesterday's events stay where they are.
+
+**Errors**
+
+| Code | When |
+|---|---|
+| `404` | no such attendance record, or the employee to re-allocate to does not exist |
+| `409` | **the target is already marked present that day.** One punch per worker per day is a database constraint, so it is refused in words rather than surfacing as a 500: *"PADMA is already marked present on 2026-09-18…"* |
+| `409` | the day falls inside a **CLOSED payroll run** — that run is the document the cash was counted against and is never recomputed, so the fix is a payroll adjustment, not a quiet edit underneath it |
+
+---
+
+### 18.11 `DELETE /attendance/{attendance_id}?reason=`
+
+**Remove a punch that should never have been made.** **Roles:** HR · MD · DM **only**.
+
+SECURITY is deliberately absent: an operator who mis-scans should be able to **correct** it without going to find anybody, but **removing** the record decides whether somebody is paid for the day at all, and that stays with HR and management.
+
+**`reason` is required** and the API **422s** when it is blank or whitespace. It is the only thing that makes the deletion reviewable afterwards.
+
+**It refuses when the worker has production events that day** — `409`, naming the better operation:
+
+```json
+{
+  "detail": "This worker has 3 production event(s) on 2026-09-18, so the work was really done — the usual cause is a swapped card, not an absent worker. Re-allocate the attendance to the right person instead (PATCH this record with the correct employee_id); the events move with it. If the work genuinely should not exist, delete those events first."
+}
+```
+
+Deleting would leave those events dated to a day the worker was never marked present — a state **the production log's own presence gate would have refused to create.**
+
+**Response `200`**
+```json
+{
+  "attendance_id": "a1b2c3d4-5e6f-7081-92a3-b4c5d6e7f809",
+  "deleted": true,
+  "message": "Attendance record removed."
+}
+```
+
+**Errors:** `404` not found · `422` no reason · `409` production events that day · `409` closed payroll run · `403` SECURITY.
+
+> **Design note.** One screen, two buttons, very different weights. **Re-allocate** is primary with a worker picker and a live count on the confirm (`"Move 12 events to SALIM"`). **Delete** sits behind a second click with a mandatory reason box — and when the 409 comes back, offer *"Re-allocate instead"* as the action, because that is what the operator actually meant.
 
 ---
 ---

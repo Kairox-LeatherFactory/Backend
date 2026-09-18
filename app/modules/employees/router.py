@@ -3,7 +3,7 @@
 modules/employees/router.py — Employee HTTP API (async)
 ================================================================================
 """
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette import status
 from fastapi import HTTPException
@@ -64,6 +64,43 @@ async def create_employee(
     phone, no email, no password, no app_user row. They get an employee barcode
     back so their card can be printed and scanned at the gate."""
     return await EmployeeService(db).create(body, actor=actor)
+
+@router.get("/{employee_id}",
+            response_model=schemas.EmployeeReadWithPay | schemas.EmployeeRead)
+async def get_employee(
+    employee_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """ONE employee. The read the CRUD set was missing.
+
+    Every other operation on an employee existed — list, create, update,
+    delete — but opening one required fetching the whole roster and filtering
+    client-side, which is wrong on a factory with several hundred workers and
+    impossible once the list is paged.
+
+    SALARY IS STILL HR/DM/MD ONLY, the same rule the list follows: the response
+    model widens to EmployeeReadWithPay for those roles and stays EmployeeRead
+    for everyone else, so this route cannot become a side door to pay data.
+    """
+    # THE ROSTER IS INTERNAL — the same gate the list route applies. Redacting
+    # salary alone was not enough there (EmployeeRead still carries phone and
+    # email), and this route must not become the side door around it.
+    if user.role in {UserRole.CLIENT, UserRole.VIEWER}:
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "The employee roster is internal.")
+    svc = EmployeeService(db)
+    emp = await svc.get(employee_id)
+    if emp is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Employee not found.")
+    pay_roles = {UserRole.HR, UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR}
+    model = (schemas.EmployeeReadWithPay if user.role in pay_roles
+             else schemas.EmployeeRead)
+    row = model.model_validate(emp)
+    codes = await svc.barcodes_for([emp.id])
+    row.employee_barcode = codes.get(emp.id)
+    return row
+
 
 @router.patch("/{employee_id}", response_model=schemas.EmployeeRead)
 async def update_employee(

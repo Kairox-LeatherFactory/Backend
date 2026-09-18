@@ -122,7 +122,7 @@ def build_preview(source) -> ImportPreview:
         ws = wb[sheet_name]
         key = _client_key(sheet_name)
         cp = preview.clients.setdefault(key, ClientPreview(key=key))
-
+    
         # ONE parse. Its verdict is the sheet's type — they cannot disagree,
         # because they are the same answer.
         lines, warns, verdict = parse_order_sheet(ws)

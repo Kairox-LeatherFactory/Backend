@@ -218,6 +218,18 @@ class LogResult(BaseModel):
     sequence_blocked: list[str]
     skill_blocked: list[str]
     merge_blocked: list[str]
+    # GATE 5 — the piece's approved cutting row names a DIFFERENT cutter. The
+    # employee barcode is the verification half of the two-scan cutting flow;
+    # this bucket is what makes it verification rather than decoration.
+    assignment_blocked: list[str] = []
+    # GATE 6 — a rejection on this garment is waiting for the DM, so it does not
+    # move. The defect must not travel further down the line while the decision
+    # is outstanding.
+    rejected_blocked: list[str] = []
+    # GATE 7 — the garment was dispatched to an outside factory and is not in the
+    # building. Its stage is logged when it is booked back in, against the
+    # vendor rather than an employee.
+    offsite_blocked: list[str] = []
     # Pieces whose inferred stage this role may not log, in a MIXED batch where
     # other stages WERE permitted. An all-denied batch is still a 403.
     role_blocked: list[str] = Field(default_factory=list)

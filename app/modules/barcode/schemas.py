@@ -17,10 +17,21 @@ class BarcodeResolve(BaseModel):
     employee: dict | None = None
     drawer: dict | None = None
     lot: dict | None = None
+    # ONE HIDE, when a LEATHER_SHEET label is scanned. Declared explicitly
+    # because this model is a response_model: FastAPI SERIALISES THROUGH IT and
+    # silently drops any key it does not name. The service returned `sheet`
+    # correctly and the operator still saw nothing — a scan that answered "552
+    # dcm of SUEDE-A32" (true of the LOT) and said nothing about the skin in
+    # their hand. A missing field here is invisible at the service layer and only
+    # shows up through the HTTP door, which is why this model gets an entry for
+    # every block resolve() can return.
+    sheet: dict | None = None
     # True when this is a legacy long piece code kept scannable after the
     # compact-code switch (bug #19) — the scan works, the label wants reprinting.
     is_alias: bool = False
-    # "PIECE" / "DRAWER" / null — which code to present next. Answered for EVERY
+    # "PIECE" / null — which code to present next. Never "DRAWER" any more:
+    # the store scan is the worker and the garment, so a PIECE is the END of the
+    # scan rather than the middle of it. Answered for EVERY
     # barcode type, including EMPLOYEE (the first scan of every workflow, which
     # used to come back null). Guidance; store_scan remains the authority.
     next_expected_scan: str | None = None

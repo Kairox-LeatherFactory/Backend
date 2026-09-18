@@ -23,8 +23,8 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
 
-from app.core.enums import DrawerPart, DrawerState, ScreenContext
-from app.modules.drawers.service import DrawerService
+from app.core.enums import StorePart, StoreState, DrawerPart, DrawerState, ScreenContext
+from app.modules.store.service import StoreService
 from app.modules.production.models import ProductionEvent
 from app.modules.production.service import ProductionService
 
@@ -182,15 +182,14 @@ async def test_line_stitching_is_blocked_until_the_drawer_is_sended(
     assert blocked["merge_blocked"] == [piece.code]
     assert blocked["count_logged"] == 0
 
-    drawers = DrawerService(db)
-    await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                             part=DrawerPart.LEATHER)
+    store = StoreService(db)
+    await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                             part=StorePart.LEATHER)
     # The lining half may only go in once the lining is actually cut.
     await ready_for_store(piece, leather=False)
-    await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                             part=DrawerPart.LINING)
-    await drawers.transition(drawer.id, "RECEIVED", actor_id=None)
-    await drawers.transition(drawer.id, "SENDED", actor_id=None)
+    await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                             part=StorePart.LINING)
+    await store.send(piece_ids=[piece.id], actor_user_id=None)
 
     released = await _log(db, stitching_mgr, paster, [piece.id])
     assert released["stage"] == "LINE_STITCHING"
@@ -297,33 +296,36 @@ async def test_an_empty_batch_is_400(db, operations, cutter, cutting_mgr):
 
 
 @pytest.mark.asyncio
-async def test_package_export_recycles_the_drawer(
+async def test_package_export_takes_the_garment_out_of_the_store(
     db, operations, pieces, cutter, paster, tailor, cutting_mgr, stitching_mgr,
     md, leather_lot, ready_for_store
 ):
     """The ONLY point a drawer frees: the piece has shipped."""
     piece, drawer = pieces[0]
-    drawers = DrawerService(db)
+    store = StoreService(db)
 
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
     await _log(db, stitching_mgr, cutter, [piece.id])           # FUSING
     await _log(db, stitching_mgr, paster, [piece.id])           # PASTING
-    await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                             part=DrawerPart.LEATHER)
+    await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                             part=StorePart.LEATHER)
     await ready_for_store(piece, leather=False)                 # the lining cut
-    await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                             part=DrawerPart.LINING)
-    await drawers.transition(drawer.id, "RECEIVED", actor_id=None)
-    await drawers.transition(drawer.id, "SENDED", actor_id=None)
+    await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                             part=StorePart.LINING)
+    await store.send(piece_ids=[piece.id], actor_user_id=None)
 
     for expected in ("LINE_STITCHING", "SHELL_STITCHING", "FINAL_FINISH",
                      "FINAL_INSPECTION", "PACKAGE_EXPORT"):
         res = await _log(db, md, tailor, [piece.id])
         assert res["stage"] == expected and res["count_logged"] == 1
 
-    await db.refresh(drawer)
-    assert drawer.state == DrawerState.WAITING.value
-    assert drawer.current_piece_id is None
+    # THE GARMENT LEAVES THE STORE, and that is now the whole of it. A drawer
+    # recycled because the BOX was reused; a garment ships once, so there is no
+    # pool to return anything to. Its parts are cleared with it.
+    await db.refresh(piece)
+    assert piece.store_state == StoreState.WAITING.value
+    assert piece.leather_in is False
+    assert piece.lining_in is False
 
 
 # ══════════════════════════════════════════════════ reads
@@ -339,8 +341,8 @@ async def test_the_piece_checklist_returns_its_envelope(
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
     # Cut is not enough to store: the leather side hands off at PASTING.
     await ready_for_store(piece, lining=False)
-    await DrawerService(db).store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                                       part=DrawerPart.LEATHER)
+    await StoreService(db).store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                                       part=StorePart.LEATHER)
 
     out = await ProductionService(db).list_pieces_for_sku(
         sku_id=order_tree["sku"].id)
@@ -355,7 +357,7 @@ async def test_the_piece_checklist_returns_its_envelope(
     assert first["event_stage"] == "LEATHER_CUTTING"    # the real event
     assert first["current_stage"] == "STORE"            # what the UI shows
     assert first["in_store"] is True
-    assert first["store_status"] == DrawerState.HOLDING_LEATHER.value
+    assert first["store_status"] == StoreState.HOLDING_LEATHER.value
     assert "awaiting lining" in first["current_stage_label"]
 
 

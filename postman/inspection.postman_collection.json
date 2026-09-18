@@ -1,0 +1,240 @@
+{
+  "info": {
+    "name": "KairoX \u00b7 Inspection",
+    "description": "Reject and rework, recorded against the stage RESPONSIBLE for the defect rather than the stage it was found at. The DM approves the re-walk.\n\nSETUP\n  1. Set `base_url` (default http://127.0.0.1:8000).\n  2. Import `user.postman_collection.json` and run Login.\n  3. Paste `access_token` from that response into this collection's\n     `token` variable. Every request here inherits bearer auth.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Approve",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/inspections/{{inspection_id}}/approve",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "inspections",
+            "{{inspection_id}}",
+            "approve"
+          ],
+          "variable": [
+            {
+              "key": "inspection_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "The DM agrees: the garment goes back (or is fixed where it stands).",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"note\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Decline",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/inspections/{{inspection_id}}/decline",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "inspections",
+            "{{inspection_id}}",
+            "decline"
+          ],
+          "variable": [
+            {
+              "key": "inspection_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "The DM disagrees: the garment stays where it is and carries on.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"note\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "For Piece",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/inspections/pieces/{{piece_code}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "inspections",
+            "pieces",
+            "{{piece_code}}"
+          ],
+          "variable": [
+            {
+              "key": "piece_code",
+              "value": ""
+            }
+          ]
+        },
+        "description": "One garment's inspection history, oldest first."
+      },
+      "response": []
+    },
+    {
+      "name": "List Inspections",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/inspections",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "inspections"
+          ],
+          "query": [
+            {
+              "key": "status",
+              "value": "",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "200",
+              "description": "",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "Open rejections by default \u2014 the DM's queue."
+      },
+      "response": []
+    },
+    {
+      "name": "Raise Inspection",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/inspections",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "inspections"
+          ]
+        },
+        "description": "Record a PASS, or raise a REJECT for the DM.\n\nA PASS closes immediately \u2014 there is nothing to approve about a garment that\nis fine, and making somebody sign one off means nobody records passes at all.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"piece_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"piece_barcode\": \"\",\n  \"found_at_stage\": \"\",\n  \"verdict\": \"\",\n  \"action\": \"\",\n  \"return_to_stage\": \"\",\n  \"defect_type\": \"\",\n  \"responsible_employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"responsible_stage\": \"\",\n  \"reason\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Responsibility",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/inspections/responsibility",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "inspections",
+            "responsibility"
+          ],
+          "query": [
+            {
+              "key": "employee_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "Defects by the worker answerable for them.\n\nWORKMANSHIP ONLY. Product damage names nobody, so counting it here would put\na supplier's bad hide onto a person's record.\n\nDeclared BEFORE /pieces/{code} so the literal segment wins the match \u2014 FastAPI\nresolves in declaration order, and the other route would otherwise swallow\n\"responsibility\" as a piece code."
+      },
+      "response": []
+    }
+  ]
+}

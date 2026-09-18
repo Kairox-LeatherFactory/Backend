@@ -1,0 +1,205 @@
+{
+  "info": {
+    "name": "KairoX \u00b7 Store",
+    "description": "Scan employee + piece \u2014 two scans, not three. Send releases a batch into line-stitching, which is the ONLY gate LINE_STITCHING has.\n\nSETUP\n  1. Set `base_url` (default http://127.0.0.1:8000).\n  2. Import `user.postman_collection.json` and run Login.\n  3. Paste `access_token` from that response into this collection's\n     `token` variable. Every request here inherits bearer auth.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Find Piece",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/store/pieces/{{piece_code}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "store",
+            "pieces",
+            "{{piece_code}}"
+          ],
+          "variable": [
+            {
+              "key": "piece_code",
+              "value": ""
+            }
+          ]
+        },
+        "description": "WHERE IS THIS GARMENT \u2014 bug #15, and now a one-line answer.\n\nUnder the drawer flow this meant looking up which numbered box held it. There\nis no box: the garment's own record says what it is holding and what it is\nwaiting for."
+      },
+      "response": []
+    },
+    {
+      "name": "List Pieces",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/store/pieces",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "store",
+            "pieces"
+          ],
+          "query": [
+            {
+              "key": "state",
+              "value": "",
+              "description": "waiting|merged|holding_leather|holding_lining|holding_both|received|sended",
+              "disabled": true
+            },
+            {
+              "key": "style_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "200",
+              "description": "",
+              "disabled": true
+            }
+          ]
+        },
+        "description": ""
+      },
+      "response": []
+    },
+    {
+      "name": "Record Manual Issue",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/materials/issues",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "materials",
+            "issues"
+          ]
+        },
+        "description": "Record a material issued to one garment OUTSIDE its spec. Spends stock.\n\nTHE ESCAPE HATCH THAT MAKES THE FROZEN RECIPE ACCEPTABLE. A released style's\nspec cannot be edited \u2014 its garments are already being issued against it \u2014 so\na wrong article is corrected by recording what was ACTUALLY handed over, not\nby rewriting the recipe underneath live pieces.\n\nRepeatable on purpose: three corrections on one garment are three real\nevents, and none of them makes the kit checklist think a spec line was\nsatisfied.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"piece_barcode\": \"\",\n  \"piece_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"lot_barcode\": \"\",\n  \"employee_barcode\": \"\",\n  \"employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"qty\": 0,\n  \"note\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Send",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/store/send",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "store",
+            "send"
+          ]
+        },
+        "description": "Release complete garments. One incomplete never loses the complete ones.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"piece_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"piece_barcodes\": [\n    \"\"\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Store Scan",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/store/scan",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "store",
+            "scan"
+          ]
+        },
+        "description": "Scan the worker, scan the garment. The drawer scan is gone.\n\nBarcodes are resolved to ids HERE so the service sees ids only\n(CLAUDE.md \u00a715) \u2014 the same split the production log uses.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"employee_barcode\": \"\",\n  \"employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"piece_barcode\": \"\",\n  \"piece_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"part\": \"\",\n  \"lines\": [\n    {\n      \"spec_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"qty\": 0,\n      \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\"\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    }
+  ]
+}

@@ -22,11 +22,11 @@ import datetime
 import pytest
 from sqlalchemy import select
 
-from app.core.enums import (DrawerPart, DrawerState, KitStatus, ProductionStage,
+from app.core.enums import (StorePart, StoreState, KitStatus, ProductionStage,
                             ScreenContext)
 from app.modules.barcode.models import (MaterialLot, PieceMaterialIssue,
                                         StyleMaterialSpec)
-from app.modules.drawers.service import DrawerService
+from app.modules.store.service import StoreService
 from app.modules.production.service import ProductionService
 
 TODAY = datetime.date.today()
@@ -84,7 +84,7 @@ async def test_a_jacket_with_a_recipe_walks_the_chain_and_spends_its_kit_once(
     drawer_id = drawer.id
     button, zipper = kitted_style["button"], kitted_style["zip"]
     btn_before, zip_before = await _on_hand(db, button.id), await _on_hand(db, zipper.id)
-    svc, drawers = ProductionService(db), DrawerService(db)
+    svc, drawers = ProductionService(db), StoreService(db)
 
     # ── 1 · the two cut paths, each charging its own lot ─────────────────────
     r = await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
@@ -110,36 +110,37 @@ async def test_a_jacket_with_a_recipe_walks_the_chain_and_spends_its_kit_once(
                         piece_ids=[piece.id], work_date=TODAY,
                         screen=ScreenContext.PIPELINE)                # PASTING
 
-    # ── 3 · storage — and the drawer does NOT receive itself this time ───────
-    await drawers.store_scan(drawer_id=drawer_id, piece_id=piece.id,
-                             part=DrawerPart.LEATHER)
-    s = await drawers.store_scan(drawer_id=drawer_id, piece_id=piece.id,
-                                 part=DrawerPart.LINING)
+    # ── 3 · storage — and it does NOT receive itself this time ──────────────
+    store = StoreService(db)
+    await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                             part=StorePart.LEATHER)
+    s = await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                                 part=StorePart.LINING)
     assert s["holding"] == "HOLDING BOTH"
     assert s["auto_received"] is False, (
         "the kit is still owed — receiving here is what made it unissuable")
-    assert s["state"] == DrawerState.HOLDING_BOTH.value
+    assert s["store_state"] == StoreState.HOLDING_BOTH.value
     assert "ACCESSORIES" in s["awaiting"]
     # The operator holding the lining is told what else to fetch, on this scan.
     assert "BTN-4H" in s["kit"]["summary_line"]
 
     # ── 4 · an unkitted drawer cannot leave the store ────────────────────────
-    blocked = await drawers.send_batch(drawer_ids=[drawer_id], actor_id=dm.id)
+    blocked = await store.send(piece_ids=[piece.id], actor_user_id=dm.id)
     assert blocked["sent"] == []
     assert "accessory kit" in blocked["not_ready"][0]["reason"]
 
     # ── 5 · the kit scan: the money moves here ───────────────────────────────
-    k = await drawers.store_scan(drawer_id=drawer_id, piece_id=piece.id,
-                                 part=DrawerPart.ACCESSORY,
-                                 employee_id=cutter[0].id, entered_by="STORE")
+    k = await store.store_scan(piece_id=piece.id,
+                                part=StorePart.ACCESSORY,
+                                employee_id=cutter[0].id, entered_by="STORE")
     assert k["kit"]["status"] == KitStatus.ISSUED.value
     assert k["auto_received"] is True                  # now it completes
-    assert k["state"] == DrawerState.RECEIVED.value
+    assert k["store_state"] == StoreState.RECEIVED.value
     assert await _on_hand(db, button.id) == pytest.approx(btn_before - 4)
     assert await _on_hand(db, zipper.id) == pytest.approx(zip_before - 1)
 
     # ── 6 · the send now succeeds and opens the merge gate ──────────────────
-    out = await drawers.send_batch(drawer_ids=[drawer_id], actor_id=dm.id)
+    out = await store.send(piece_ids=[piece.id], actor_user_id=dm.id)
     assert out["count_sent"] == 1
 
     # ── 7 · the rest of the chain, to the shipping box ──────────────────────
@@ -157,11 +158,10 @@ async def test_a_jacket_with_a_recipe_walks_the_chain_and_spends_its_kit_once(
         assert r["count_logged"] == 1, r["message"]
 
     # ── 8 · the drawer recycles with ALL THREE buckets empty ────────────────
-    await db.refresh(drawer)
-    assert drawer.state == DrawerState.WAITING.value
-    assert (drawer.leather_in, drawer.lining_in, drawer.accessories_in) == (
+    await db.refresh(piece)
+    assert piece.store_state == StoreState.WAITING.value
+    assert (piece.leather_in, piece.lining_in, piece.accessories_in) == (
         False, False, False)
-    assert drawer.current_piece_id is None
 
     # ── 9 · and the ledger still says what this garment cost, across the run ─
     rows = (await db.execute(

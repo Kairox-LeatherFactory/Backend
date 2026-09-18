@@ -56,6 +56,7 @@ from app.modules.clients.models import (
     SKU, Client, ClientOrder, Style, style_in_production,
 )
 from app.modules.employees.models import Employee
+from app.modules.barcode.models import BarcodeRegistry
 from app.modules.production.models import Operation, Piece, ProductionEvent
 
 # ── canonical stage codes (Operation.code equals these uppercase values) ──────
@@ -1643,7 +1644,23 @@ class DashboardRepository:
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .outerjoin(Operation, Operation.id == Piece.current_operation_id)
             .outerjoin(Drawer, Drawer.current_piece_id == Piece.id)
-            .where(Piece.code == piece_code)
+            # BUG #29 — ACCEPT EITHER CODE A GARMENT ANSWERS TO.
+            #
+            # A piece has TWO live codes in the registry: the compact primary
+            # printed on the sticker (PC-222223) and the long business identity
+            # kept as an alias (N1-BF27P010501-SUEDE_BOMBER-NAVY-S-034). Matching
+            # only Piece.code accepted the long one and 404'd the short one — so
+            # the Analytics and Alert screen, which passes the compact code
+            # because that is what the scanner returns, could never open a piece.
+            #
+            # The registry is the one place that already knows both, so the
+            # lookup goes through it rather than the caller being told which
+            # spelling this particular screen must use.
+            .where(or_(Piece.code == piece_code,
+                       Piece.id.in_(
+                           select(BarcodeRegistry.piece_id)
+                           .where(BarcodeRegistry.code == (piece_code or "").strip().upper(),
+                                  BarcodeRegistry.piece_id.is_not(None)))))
         )).first()
         if head is None:
             return None

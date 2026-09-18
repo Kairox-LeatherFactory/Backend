@@ -60,6 +60,7 @@ import app.modules.bom.models               # noqa: F401
 import app.modules.inventory.models         # noqa: F401
 
 from app.core.enums import (
+    StoreState,
     BarcodeStatus, BarcodeType, DrawerState, ProductionStage, UserRole, WageType,
 )
 from app.modules.barcode.models import BarcodeRegistry, Drawer, MaterialLot, MaterialSupplier
@@ -232,6 +233,46 @@ async def ready_for_store(db, operations, cutter):
 
 
 @pytest_asyncio.fixture
+async def in_store(db, operations, cutter):
+    """`await in_store(piece)` → both parts scanned in, garment complete.
+
+    The store replaced the drawer, so the prerequisite for a merge-gate test is
+    no longer "put it in a box" but "scan its parts in". This runs the real
+    StoreService so the test exercises the same path the floor does.
+    """
+    from app.modules.store.service import StoreService
+
+    async def _f(piece, *, leather=True, lining=True):
+        svc = StoreService(db)
+        await _ready_for_store(db, operations, piece, cutter[0].id,
+                               leather=leather, lining=lining)
+        from app.core.enums import StorePart
+        if leather:
+            await svc.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                                 part=StorePart.LEATHER.value)
+        if lining:
+            await svc.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                                 part=StorePart.LINING.value)
+        await db.refresh(piece)
+        return piece
+    return _f
+
+
+@pytest_asyncio.fixture
+async def sent_from_store(db, in_store, dm):
+    """`await sent_from_store(piece)` → complete AND released, so the merge gate
+    is open. Completeness and release are different things; this does both."""
+    from app.modules.store.service import StoreService
+
+    async def _f(piece):
+        await in_store(piece)
+        await StoreService(db).send(piece_ids=[piece.id], actor_user_id=dm.id)
+        await db.refresh(piece)
+        return piece
+    return _f
+
+
+@pytest_asyncio.fixture
 async def cut_pieces(db, operations, cutter, pieces):
     """`pieces`, but every one of them already through BOTH cut paths.
 
@@ -319,8 +360,13 @@ def stitching_mgr():
 # ── helper: mint pieces the way premint does (for tests that need pieces) ────
 @pytest_asyncio.fixture
 async def pieces(db, order_tree):
-    """5 pieces of the SKU, each merged to a drawer, needs_lining=True — the
-    state after breakdown upload, before any cutting."""
+    """5 pieces of the SKU, needs_lining=True — the state after breakdown upload.
+
+    THE DRAWER IS VESTIGIAL HERE. It is still created so the tuple shape
+    `(piece, drawer)` that dozens of call sites unpack keeps working, but nothing
+    reads it any more: the store lives on `piece.store_state` since
+    20260902_store_piece. A freshly minted piece is WAITING — not in the store
+    yet — which is exactly what premint now writes."""
     sku = order_tree["sku"]
     out = []
     for seq in range(1, 6):
@@ -333,6 +379,8 @@ async def pieces(db, order_tree):
             p.needs_lining = True
         if hasattr(p, "drawer_id"):
             p.drawer_id = drawer.id
+        if hasattr(p, "store_state"):
+            p.store_state = StoreState.WAITING.value
         db.add(p)
         await db.flush()
         drawer.current_piece_id = p.id

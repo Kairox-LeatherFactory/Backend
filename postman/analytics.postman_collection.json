@@ -1,0 +1,336 @@
+{
+  "info": {
+    "name": "KairoX \u00b7 Analytics",
+    "description": "Factory overview, the order/style explorer, stage spread, freight-risk alerts and one garment's whole life story. READ-ONLY \u2014 analytics owns no tables and never writes.\n\nSETUP\n  1. Set `base_url` (default http://127.0.0.1:8000).\n  2. Import `user.postman_collection.json` and run Login.\n  3. Paste `access_token` from that response into this collection's\n     `token` variable. Every request here inherits bearer auth.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Consumption",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/analytics/consumption",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "analytics",
+            "consumption"
+          ],
+          "query": [
+            {
+              "key": "order_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "style_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "",
+              "disabled": true
+            }
+          ]
+        },
+        "description": ""
+      },
+      "response": []
+    },
+    {
+      "name": "Employee Rate Analytics",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/analytics/employee-rates",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "analytics",
+            "employee-rates"
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "2026-08-01",
+              "description": "",
+              "disabled": false
+            },
+            {
+              "key": "end",
+              "value": "2026-08-01",
+              "description": "",
+              "disabled": false
+            },
+            {
+              "key": "employee_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "style_code",
+              "value": "",
+              "description": "",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "Per-employee rate / piece / earnings analytics. Cost data \u2014 DM, MD, HR only."
+      },
+      "response": []
+    },
+    {
+      "name": "Explorer",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/analytics/explorer",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "analytics",
+            "explorer"
+          ],
+          "query": [
+            {
+              "key": "include_pieces",
+              "value": "True",
+              "description": "",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "Left-panel nav tree: Client -> Order -> Style -> Piece, scoped to the\nsigned-in user. CLIENT-role users see only their own client."
+      },
+      "response": []
+    },
+    {
+      "name": "Freight Risk",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/analytics/alerts/freight-risk",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "analytics",
+            "alerts",
+            "freight-risk"
+          ]
+        },
+        "description": "REMOVED (change-list item 1). Always 410. Use GET /dashboard/alerts."
+      },
+      "response": []
+    },
+    {
+      "name": "Order Tree",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/analytics/orders/{{order_id}}/tree",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "analytics",
+            "orders",
+            "{{order_id}}",
+            "tree"
+          ],
+          "variable": [
+            {
+              "key": "order_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Order landing view: styles with piece count + current-stage distribution."
+      },
+      "response": []
+    },
+    {
+      "name": "Overview",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/analytics/overview",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "analytics",
+            "overview"
+          ]
+        },
+        "description": "REMOVED (change-list item 1). Always 410. Use the role dashboards."
+      },
+      "response": []
+    },
+    {
+      "name": "Piece Detail",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/analytics/pieces/detail",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "analytics",
+            "pieces",
+            "detail"
+          ],
+          "query": [
+            {
+              "key": "piece_code",
+              "value": "",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "sku_code",
+              "value": "",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "seq",
+              "value": "0",
+              "description": "",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "One piece by piece_code OR (sku_code + seq): header + grouped stages."
+      },
+      "response": []
+    },
+    {
+      "name": "Piece Life Story",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/analytics/pieces/{{piece_code}}/story",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "analytics",
+            "pieces",
+            "{{piece_code}}",
+            "story"
+          ],
+          "variable": [
+            {
+              "key": "piece_code",
+              "value": ""
+            }
+          ]
+        },
+        "description": ""
+      },
+      "response": []
+    },
+    {
+      "name": "Stage Spread",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/analytics/alerts/stage-spread",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "analytics",
+            "alerts",
+            "stage-spread"
+          ]
+        },
+        "description": "REMOVED (change-list item 1). Always 410. Use GET /dashboard/alerts."
+      },
+      "response": []
+    },
+    {
+      "name": "Style Detail",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/analytics/styles/{{style_id}}/detail",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "analytics",
+            "styles",
+            "{{style_id}}",
+            "detail"
+          ],
+          "variable": [
+            {
+              "key": "style_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "One style: every piece with its full stage history (employee + date/time)."
+      },
+      "response": []
+    }
+  ]
+}

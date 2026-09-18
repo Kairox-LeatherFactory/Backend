@@ -200,3 +200,19 @@ def test_a_rerun_tops_up_without_duplicating(fk_db):
     # 9 pieces × (compact primary + long alias + drawer label) = 27, and a re-run
     # must not add a second compact code to a piece that already has one.
     assert fk_db.scalar(select(func.count(BarcodeRegistry.id))) == 27
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RETIRED WITH THE DRAWER POOL.
+#
+# This file's subject was premint's FOUR-PHASE flush: drawers first with a NULL
+# current_piece_id, then pieces, then close the piece<->drawer cycle, then
+# barcodes. Phases 1 and 3 existed ONLY because that cycle could not be inserted
+# in one pass.
+#
+# premint no longer creates drawers at all (the 200-slot pool was the bottleneck
+# the store change removed), so the flush is two phases and there is no cycle to
+# order. What survives — pieces and their barcodes land together, and a re-run
+# tops up without duplicating — is asserted by the premint tests that remain.
+# ══════════════════════════════════════════════════════════════════════════════
+pytestmark = pytest.mark.skip(reason="The 4-phase flush existed only for the piece<->drawer FK cycle; premint mints no drawers since 20260902_store_piece.")

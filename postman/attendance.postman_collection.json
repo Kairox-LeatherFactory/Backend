@@ -1,0 +1,494 @@
+{
+  "info": {
+    "name": "KairoX \u00b7 Attendance",
+    "description": "Two doors \u2014 the card scan at the gate and the manual fallback \u2014 plus the corrections. PATCH with a new employee_id RE-ALLOCATES the day and moves that day's production events with it.\n\nSETUP\n  1. Set `base_url` (default http://127.0.0.1:8000).\n  2. Import `user.postman_collection.json` and run Login.\n  3. Paste `access_token` from that response into this collection's\n     `token` variable. Every request here inherits bearer auth.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Add Daily Worker",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/attendance/daily-workers",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance",
+            "daily-workers"
+          ]
+        },
+        "description": "Onboard a daily-wage worker on the floor. No login is created any more \u2014\nthe worker gets an employee record and a printable card, nothing else. Stays\nat DM/HR/MD (NOT widened to SUPERVISOR): adding people to the payroll is a\ndeliberate authority. The service gate is aligned to match.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"\",\n  \"designation\": \"\",\n  \"phone\": \"\",\n  \"daily_rate\": 0\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Check In",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/attendance/check-in",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance",
+            "check-in"
+          ]
+        },
+        "description": "An OPERATOR records their own arrival (their login is linked to an\nemployee row). Workers never reach this \u2014 they have no login.\n\nThe body is OPTIONAL: with the geofence removed there is nothing to send.\n`{}`, `{\"lat\": .., \"lon\": ..}` (ignored) and no body at all all work.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"lat\": 0,\n  \"lon\": 0\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Check Out",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/attendance/check-out",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance",
+            "check-out"
+          ]
+        },
+        "description": "An OPERATOR records their own departure. Body optional \u2014 see check_in.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"lat\": 0,\n  \"lon\": 0\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Correct Attendance",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/attendance/{{attendance_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance",
+            "{{attendance_id}}"
+          ],
+          "variable": [
+            {
+              "key": "attendance_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Fix a punch, or re-allocate it to the worker who was actually here.\n\nSending a different `employee_id` moves that day's production events too, in\nthe same transaction \u2014 otherwise attendance would say one name while the\ncutting log paid another, and wages are computed from the events.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"check_in_at\": \"2026-08-01T09:00:00Z\",\n  \"check_out_at\": \"2026-08-01T09:00:00Z\",\n  \"reason\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Delete Attendance",
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/attendance/{{attendance_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance",
+            "{{attendance_id}}"
+          ],
+          "query": [
+            {
+              "key": "reason",
+              "value": "",
+              "description": "",
+              "disabled": false
+            }
+          ],
+          "variable": [
+            {
+              "key": "attendance_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Remove a punch that should never have been made. `reason` is required.\n\nRefused (409) when the worker has production events that day: the work was\nreally done, so the cause is almost certainly a swapped card and the right\nfix is to re-allocate rather than delete."
+      },
+      "response": []
+    },
+    {
+      "name": "Get Config",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/attendance/config",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance",
+            "config"
+          ]
+        },
+        "description": "Shift policy \u2014 start time, length, grace, timezone.\n\nThe privileged/public split (F44) existed to keep the fence coordinates away\nfrom non-managers. LOCATION IS REMOVED, so both shapes now return the same\nfields; the branch is kept so the split returns intact if the fence does."
+      },
+      "response": []
+    },
+    {
+      "name": "History",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/attendance/history",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance",
+            "history"
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "2026-08-01",
+              "description": "",
+              "disabled": false
+            },
+            {
+              "key": "end",
+              "value": "2026-08-01",
+              "description": "",
+              "disabled": false
+            },
+            {
+              "key": "employee_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "Attendance history for one employee.\n\nF36: only operators / floor leads may read a worker's history; CLIENT and\nVIEWER cannot reach it. (The self-service branch is gone with the employee\nlogin \u2014 a worker's own history is read by whoever is helping them, and\n/attendance/me still serves a staff login's own record.)"
+      },
+      "response": []
+    },
+    {
+      "name": "My History",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/attendance/me",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance",
+            "me"
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "2026-08-01",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "end",
+              "value": "2026-08-01",
+              "description": "",
+              "disabled": true
+            }
+          ]
+        },
+        "description": ""
+      },
+      "response": []
+    },
+    {
+      "name": "My Status",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/attendance/me/status",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance",
+            "me",
+            "status"
+          ]
+        },
+        "description": "Server-anchored data for the live shift countdown. Frontend computes a\none-time (server_now - device_now) offset and ticks toward shift_end_at."
+      },
+      "response": []
+    },
+    {
+      "name": "Proxy Check In",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/attendance/proxy/check-in",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance",
+            "proxy",
+            "check-in"
+          ]
+        },
+        "description": "Manual check-in fallback for one or more employees (card failed / forgotten).\nSECURITY / HR / MD / DM. Works for ANY wage type. Only `employee_ids` is\nrequired \u2014 the operator's position is no longer asked for.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"employee_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"lat\": 0,\n  \"lon\": 0\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Proxy Check Out",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/attendance/proxy/check-out",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance",
+            "proxy",
+            "check-out"
+          ]
+        },
+        "description": "Manual check-out fallback. Same four operators, any wage type.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"employee_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"lat\": 0,\n  \"lon\": 0\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Scan Check In",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/attendance/scan-check-in",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance",
+            "scan-check-in"
+          ]
+        },
+        "description": "Check in/out by scanning an employee barcode (direction = \"in\" | \"out\").\n\nNo position is requested or stored \u2014 `lat`/`lon` are accepted and ignored.\n\nTHE primary attendance door. Every employee has a card and no employee has a\nlogin, so the operator standing at the gate \u2014 SECURITY / HR / MD / DM \u2014 scans\nevery card, monthly or daily, including their own colleagues'.\n`proxy=True` marks the MANUAL fallback (card won't scan / forgotten).",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"employee_barcode\": \"\",\n  \"direction\": \"\",\n  \"lat\": 0,\n  \"lon\": 0,\n  \"proxy\": false,\n  \"reason\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Today Roster",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/attendance/today",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance",
+            "today"
+          ]
+        },
+        "description": "Whole-floor roster. Operators + floor leads only."
+      },
+      "response": []
+    },
+    {
+      "name": "Update Config",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/attendance/config",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance",
+            "config"
+          ]
+        },
+        "description": "",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"shift_start\": \"\",\n  \"shift_length_hours\": 0,\n  \"late_grace_minutes\": 0,\n  \"timezone\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    }
+  ]
+}

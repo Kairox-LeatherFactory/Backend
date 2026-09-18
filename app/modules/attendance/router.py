@@ -201,6 +201,60 @@ async def history(
     return await AttendanceService(db).history(employee_id, start, end)
 
 
+# ══════════════════════════════════════════════ correcting a punch (CRUD)
+# The mistake this exists for is a SWAPPED CARD: security scans MAJID, the
+# worker was SALIM, and by the time anyone notices MAJID has a day's cutting
+# against his name. So the correction is re-allocation, not deletion — see
+# attendance/corrections.py.
+#
+# EDIT is every operator: a gate operator who mis-scans should fix it without
+# going to find anybody. DELETE decides whether somebody is paid for the day at
+# all, so it stays with HR and management.
+_ATTENDANCE_DELETERS = require_roles(
+    UserRole.HR, UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER)
+
+
+@router.patch("/{attendance_id}",
+              response_model=schemas.AttendanceCorrectionResult)
+async def correct_attendance(
+    attendance_id: uuid.UUID,
+    body: schemas.AttendanceCorrection,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator),
+):
+    """Fix a punch, or re-allocate it to the worker who was actually here.
+
+    Sending a different `employee_id` moves that day's production events too, in
+    the same transaction — otherwise attendance would say one name while the
+    cutting log paid another, and wages are computed from the events.
+    """
+    from app.modules.attendance.corrections import AttendanceCorrectionService
+    return await AttendanceCorrectionService(db).update(
+        attendance_id, employee_id=body.employee_id,
+        check_in_at=body.check_in_at, check_out_at=body.check_out_at,
+        reason=body.reason, actor_user_id=user.id, actor_name=user.name)
+
+
+@router.delete("/{attendance_id}",
+               response_model=schemas.AttendanceDeleteResult)
+async def delete_attendance(
+    attendance_id: uuid.UUID,
+    reason: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_ATTENDANCE_DELETERS),
+):
+    """Remove a punch that should never have been made. `reason` is required.
+
+    Refused (409) when the worker has production events that day: the work was
+    really done, so the cause is almost certainly a swapped card and the right
+    fix is to re-allocate rather than delete.
+    """
+    from app.modules.attendance.corrections import AttendanceCorrectionService
+    return await AttendanceCorrectionService(db).delete(
+        attendance_id, reason=reason, actor_user_id=user.id,
+        actor_name=user.name)
+
+
 @router.get("/today", response_model=list[schemas.AttendanceRead])
 async def today_roster(
     db: AsyncSession = Depends(get_db),

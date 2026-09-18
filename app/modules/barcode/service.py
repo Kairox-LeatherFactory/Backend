@@ -27,6 +27,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import (
+    StoreState,
     MERGE_GATE_ENTRY, BarcodeStatus, BarcodeType, DrawerState, next_chain_stage,
 )
 from app.core.store_display import holding_label
@@ -80,6 +81,15 @@ class BarcodeService:
             out["employee"] = await self._employee_payload(row.employee_id)
         elif row.type == BarcodeType.DRAWER.value and row.drawer_id:
             out["drawer"] = await self._drawer_payload(row.drawer_id)
+        elif row.type == BarcodeType.LEATHER_SHEET.value and row.material_sheet_id:
+            # BEFORE the generic lot branch, which would otherwise swallow it:
+            # a LEATHER_SHEET row carries material_lot_id too, so the `elif
+            # row.material_lot_id` below matches it and would answer "this is
+            # 363 dcm of SUEDE-A32" — true of the LOT and useless about the hide
+            # in the operator's hand. Both are returned, the hide first.
+            out["sheet"] = await self._sheet_payload(row.material_sheet_id)
+            if row.material_lot_id:
+                out["lot"] = await self._lot_payload(row.material_lot_id)
         elif row.material_lot_id:
             out["lot"] = await self._lot_payload(row.material_lot_id)
         out["next_expected_scan"] = self._next_expected_scan(out)
@@ -100,31 +110,35 @@ class BarcodeService:
 
             EMPLOYEE  → PIECE    the worker is identified; the garment is next
             LOT       → PIECE    a material was named; scan what it is cut for
-            DRAWER    → PIECE    when a piece is merged to it (else nothing to pair)
-            PIECE     → DRAWER   while its drawer is still accumulating parts
+            SHEET     → PIECE    a hide was named; scan what it is cut for
+            PIECE     → None     there is no second code to pair with it
 
-        GUIDANCE ONLY. The authority on whether a scan is legal remains
-        DrawerService.store_scan, which still rejects a piece scanned into the
-        wrong drawer with a 409. This says what to reach for, not what is allowed.
+        PIECE NO LONGER ASKS FOR A DRAWER, and that is the whole point of the
+        store change. The old flow was employee → DRAWER → piece, so a piece scan
+        answered "now find the box". There is no box: the store scan is two
+        codes, the worker and the garment, and after the garment there is nothing
+        left to present. What the piece is waiting for is a STAGE, and
+        `next_stage` below is what carries that.
+
+        GUIDANCE ONLY. The authority on whether a scan is legal is
+        StoreService.store_scan. This says what to reach for, not what is
+        allowed.
         """
         if payload.get("employee") is not None:
             return "PIECE"
         if payload.get("lot") is not None:
             return "PIECE"
 
-        drawer = payload.get("drawer")
-        if drawer is not None:
-            # A drawer with no piece merged to it has nothing to ask for yet.
-            return "PIECE" if drawer.get("current_piece_id") else None
+        if payload.get("sheet") is not None:
+            return "PIECE"
 
-        piece = payload.get("piece")
-        if piece is not None:
-            pd = piece.get("drawer") or {}
-            # Still accumulating → the drawer is what pairs with this piece. Once
-            # it holds everything, the piece's next move is a production stage,
-            # not another scan — `next_stage` below carries that answer.
-            if pd.get("code") and not (pd.get("leather_in") and pd.get("lining_in")):
-                return "DRAWER"
+        # A legacy DRAWER label still resolves (the registry rows are kept for
+        # audit), but it can no longer ask for a pairing scan — there is nothing
+        # to pair it with.
+        if payload.get("drawer") is not None:
+            return None
+
+        # A PIECE is the END of the store scan, not the middle of it.
         return None
 
     async def _next_production_step(self, payload: dict) -> dict:
@@ -161,11 +175,20 @@ class BarcodeService:
                     "next_stage_blocked_reason": None}
 
         blocked = None
-        drawer = piece.get("drawer") or {}
-        if stage is MERGE_GATE_ENTRY and drawer.get("state") != DrawerState.SENDED.value:
-            where = f"drawer {drawer['code']}" if drawer.get("code") else "its drawer"
-            blocked = (f"{where} must hold leather + lining and be sent from the "
-                       f"Drawers List before {stage.value} can be logged.")
+        # THE STORE IS ON THE GARMENT NOW, so the advisory reads the piece rather
+        # than a drawer. This is the SOFT half of the merge gate — it tells the
+        # scan screen what is coming — and it has to agree with the hard gate in
+        # ProductionService._merge_ok or the screen promises a stage the log then
+        # refuses.
+        from app.modules.production.models import Piece as _Piece
+        store_state = None
+        piece_row = await self.db.get(_Piece, uuid.UUID(piece["piece_id"]))
+        if piece_row is not None:
+            store_state = piece_row.store_state
+        if stage is MERGE_GATE_ENTRY and store_state != StoreState.SENDED.value:
+            blocked = (f"{piece.get('code') or 'This garment'} must hold its "
+                       f"leather + lining in the store and be released before "
+                       f"{stage.value} can be logged.")
         elif stage.is_cut_entry:
             # A piece with no cut event yet is reached from a cut SCREEN, never by
             # pipeline inference — say so rather than implying a pipeline scan.
@@ -365,6 +388,27 @@ class BarcodeService:
         """The kit checklist for a piece. Lazy import keeps the graph acyclic."""
         from app.modules.materials.style_spec_service import StyleSpecService
         return await StyleSpecService(self.db).material_requirement_block(piece_id)
+
+    async def _sheet_payload(self, sheet_id) -> dict:
+        """One hide, as the scan gun should report it.
+
+        `status` is the operative field: the same label reads IN_STOCK on the
+        shelf, ALLOCATED once a draft row claims it, ISSUED in the cutter's hands
+        and CONSUMED after the cut is logged. An operator scanning a hide is
+        almost always asking which of those it is.
+        """
+        from app.modules.barcode.models import MaterialSheet
+        sheet = await self.db.get(MaterialSheet, sheet_id)
+        if sheet is None:
+            return {}
+        return {
+            "sheet_id": str(sheet.id),
+            "code": sheet.code,
+            "dcm": float(sheet.dcm or 0),
+            "status": sheet.status,
+            "cutting_row_id": (str(sheet.cutting_row_id)
+                               if sheet.cutting_row_id else None),
+        }
 
     async def _lot_payload(self, lot_id: uuid.UUID) -> dict:
         r = await self.repo.lot_card(lot_id)

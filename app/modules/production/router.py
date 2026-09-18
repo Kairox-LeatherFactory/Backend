@@ -24,6 +24,8 @@ from pydantic import BaseModel, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from decimal import Decimal
+
 from app.core.enums import ScreenContext , UserRole
 from app.modules.barcode.service import BarcodeService
 from app.modules.production.service import ProductionService
@@ -219,6 +221,71 @@ async def _spec_dcm(db: AsyncSession, piece_ids: list, screen: ScreenContext):
     return next(iter(values)), "style_spec"
 
 
+async def _approved_cutting(db, piece_ids: list, screen: ScreenContext):
+    """What the cutting grid already decided for these garments, if anything.
+
+    CUTTING V2, THE POINT OF IT. The manager has already entered the hides, their
+    measurements, the article, the colour and the cutter, and signed the row off.
+    Asking the cutter to re-type any of that at the scan gun is the duplicate work
+    the whole feature exists to delete — and re-typing is where the wrong article
+    got recorded (bugs #23/#27).
+
+    LEATHER ONLY. A cutting row is a list of hides; lining is cut by the metre and
+    has no sheet-level record to retrieve.
+
+    Returns (rows_by_piece, lot_id, dcm_per_piece, warnings). Any of the last
+    three may be None, in which case the caller falls straight back to the typed
+    path — a piece with no approved row must behave exactly as it does today.
+
+    A BATCH THAT DISAGREES IS NOT AVERAGED. Two garments approved against
+    different lots are two different spends, and the single per-batch decrement
+    cannot express that; guessing one would charge the wrong leather. So it
+    declines and lets the manager scan them separately, rather than silently
+    picking one — the same rule _spec_dcm already follows.
+    """
+    if screen is not ScreenContext.LEATHER_CUT or not piece_ids:
+        return {}, None, None, []
+
+    from app.core.enums import CuttingRowStatus
+    from app.modules.cutting.service import CuttingService
+    from app.modules.materials.service import MaterialService
+    svc = CuttingService(db)
+    rows = await svc.repo.rows_for_pieces(piece_ids)
+    approved = {pid: r for pid, r in rows.items()
+                if r.status == CuttingRowStatus.APPROVED.value}
+    if not approved:
+        return {}, None, None, []
+
+    mats = MaterialService(db)
+    lot_ids, dcms, warnings = set(), set(), []
+    for pid, row in approved.items():
+        sheets = await mats.repo.sheets_for_row(row.id)
+        if not sheets:
+            continue
+        lot_ids.add(sheets[0].material_lot_id)
+        dcms.add(Decimal(str(row.total_dcm or 0)))
+
+    if len(lot_ids) > 1:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"These garments were approved against {len(lot_ids)} different "
+            f"leather lots, and one scan can only spend one. Scan each lot's "
+            f"pieces separately.")
+    if len(dcms) > 1:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"These garments were approved with different leather totals "
+            f"({', '.join(f'{float(d):g}' for d in sorted(dcms))} dcm). Scan "
+            f"them separately so each is charged what it actually took.")
+
+    if len(approved) != len(piece_ids):
+        warnings.append(
+            f"{len(approved)} of {len(piece_ids)} scanned garments have an "
+            f"approved cutting row; the rest fall back to typed consumption.")
+    return (approved, next(iter(lot_ids), None),
+            float(next(iter(dcms))) if dcms else None, warnings)
+
+
 async def _resolve_cut_lot(
     db: AsyncSession, cons: Consumption, screen: ScreenContext,
 ) -> tuple[uuid.UUID | None, uuid.UUID | None]:
@@ -337,7 +404,18 @@ async def log_batch(
     # Bugs #9/#10: the cut screen may name the material by article/colour/
     # thickness instead of by lot id. Resolved to ids HERE so the service still
     # sees ids only, exactly as barcodes are.
+    # ── CUTTING V2 FIRST, THE TYPED PATH AS THE FALLBACK ────────────────────
+    # An approved cutting row already names the lot and the measured total, so
+    # neither is asked for again. Anything the caller DID send still wins: a
+    # manager correcting a row at the gun is making a deliberate choice, and
+    # overriding him from a stored plan would be the system arguing with the
+    # person holding the leather.
+    approved_rows, row_lot_id, row_dcm, cut_warnings = await _approved_cutting(
+        db, piece_ids, screen)
+
     leather_lot_id, lining_lot_id = await _resolve_cut_lot(db, cons, screen)
+    if leather_lot_id is None and row_lot_id is not None:
+        leather_lot_id = row_lot_id
 
     # ── THE DCM, AND WHERE IT CAME FROM ─────────────────────────────────────
     # Resolved HERE, beside the lot, for the same reason: the service must keep
@@ -350,18 +428,74 @@ async def log_batch(
     # and the screen prefills the field, so the operator still confirms the
     # number that reaches the ledger.
     dcm, source = cons.dcm, ("typed" if cons.dcm is not None else None)
+    if dcm is None and row_dcm is not None:
+        dcm, source = row_dcm, "cutting_row"
     if dcm is None and cons.use_style_spec and screen in SCREEN_TO_STAGE:
         dcm, source = await _spec_dcm(db, piece_ids, screen)
 
-    return await svc.log_batch(
+    result = await svc.log_batch(
         user=user, employee_id=employee_id, piece_ids=piece_ids,
         work_date=body.work_date, screen=screen,
         leather_lot_id=leather_lot_id, lining_lot_id=lining_lot_id,
-        consumption_qty=dcm, consumption_source=source, preview=body.preview)
+        consumption_qty=dcm, consumption_source=source, preview=body.preview,
+        cutting_rows=approved_rows)
+    if cut_warnings:
+        result["cutting_warnings"] = cut_warnings
+    return result
 
 
 
 # ── deprecated shims (one release) ───────────────────────────────────────────
+# ══════════════════════════════════════════════ correcting a production record
+# BUG #8 — "Manager Zahoor assigned a piece to the wrong employee during cutting,
+# so we had to delete the record directly from the database." Two operations,
+# because they are two different mistakes; see production/corrections.py.
+_REASSIGNERS = require_roles(
+    UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER, UserRole.HR,
+    UserRole.CUTTING_MANAGER, UserRole.LINING_MANAGER,
+    UserRole.STITCHING_MANAGER)
+# DELETING ERASES EVIDENCE AND MOVES STOCK, so it is DM/MD only.
+_DELETERS = require_roles(UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER)
+
+
+@router.patch("/events/{event_id}/reassign")
+async def reassign_event(
+    event_id: uuid.UUID,
+    employee_id: uuid.UUID,
+    reason: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_REASSIGNERS),
+):
+    """Put the right worker's name on work that really happened.
+
+    The stage and the stock are untouched — the garment WAS cut. Only who did it
+    was recorded wrongly, and the wage follows because it is derived from this
+    row rather than stored against it.
+    """
+    from app.modules.production.corrections import CorrectionService
+    return await CorrectionService(db).reassign(
+        event_id, employee_id=employee_id, reason=reason,
+        actor_user_id=user.id, actor_name=user.name)
+
+
+@router.delete("/events/{event_id}")
+async def delete_event(
+    event_id: uuid.UUID,
+    reason: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_DELETERS),
+):
+    """Remove a record that should never have existed, and return its stock.
+
+    `reason` is REQUIRED: this is the operation that erases evidence, and why it
+    happened is the only thing that makes it reviewable. The route it replaces —
+    a DELETE in the database — had nowhere to put one.
+    """
+    from app.modules.production.corrections import CorrectionService
+    return await CorrectionService(db).delete(
+        event_id, reason=reason, actor_user_id=user.id, actor_name=user.name)
+
+
 @router.post("/cutting", deprecated=True)
 async def cutting_removed():
     raise HTTPException(

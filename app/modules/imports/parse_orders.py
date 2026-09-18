@@ -244,7 +244,7 @@ def parse_order_sheet(ws) -> tuple[list[OrderLine], list[str], str]:
 
 
     solved_header = None
-    if not header_rows:
+    if not header_rows: #what will happen if header rows is true !!
         solved_header, solved_band = find_header_row(ws)
         if solved_header is None:
             warnings.append(

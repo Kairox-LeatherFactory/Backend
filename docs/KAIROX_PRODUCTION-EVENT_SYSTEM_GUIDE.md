@@ -1,7 +1,7 @@
 # KairoX ERP — Production & Traceability
 ## System, Business & Module Guide
 
-**Modules covered:** Users · Employees · Clients · Imports · Barcode · Materials · Production · Drawers · Attendance · Wages · Analytics · Dashboard
+**Modules covered:** Users · Employees · Clients · Imports · Barcode · Materials · **Cutting** · Production · **Store** *(replaces Drawers)* · **Inspections** · **Job Work** · Attendance · Wages · Analytics · Dashboard
 
 **Audience:** this one document is written for three readers at once.
 
@@ -34,26 +34,29 @@
 10. The barcode system — the spine
 11. Materials, lots and the style recipe
 12. Production — one log, two doors, four gates
-13. Drawers and the merge gate
-14. Attendance
-15. Wages
-16. Analytics and the manager dashboards
+13. Cutting — the grid that replaced the spreadsheet
+14. The store and the merge gate
+15. Inspections — reject and rework
+16. Job work — garments that leave the building
+17. Attendance
+18. Wages
+19. Analytics and the manager dashboards
 
 **PART C — FOR FRONTEND DEVELOPERS**
-17. The screen inventory
-18. State machines you must render
-19. Scan-driven UX — the patterns that matter
-20. The error contract
-21. Badges, chips and status vocabulary
+20. The screen inventory
+21. State machines you must render
+22. Scan-driven UX — the patterns that matter
+23. The error contract
+24. Badges, chips and status vocabulary
 
 **PART D — FOR BACKEND DEVELOPERS**
-22. Architecture and the layering rules
-23. Module map — every file and what it is for
-24. The data model
-25. Cross-module choreography
-26. The key algorithms
-27. Configuration and migration notes
-28. A code-review checklist
+25. Architecture and the layering rules
+26. Module map — every file and what it is for
+27. The data model
+28. Cross-module choreography
+29. The key algorithms
+30. Configuration and migration notes
+31. A code-review checklist
 
 **APPENDICES**
 A. Glossary
@@ -75,7 +78,7 @@ That single idea is what everything else hangs off.
 
 ### What "per-piece" actually means
 
-Most factory systems track **batches**: *"200 jackets went to stitching today."* This one tracks **pieces**: *"garment PC-004821 — a size-50 black CLERMONT, the 17th of its SKU — was cut by Ramesh on the 4th from leather lot A-338, stored in drawer DRW-0042, line-stitched by Farid on the 9th, and is currently waiting for final inspection."*
+Most factory systems track **batches**: *"200 jackets went to stitching today."* This one tracks **pieces**: *"garment PC-004821 — a size-50 black CLERMONT, the 17th of its SKU — was cut by Ramesh on the 4th from leather lot A-338 across nine named hides, stored and released from the store, line-stitched by Farid on the 9th, and is currently waiting for final inspection."*
 
 Every question a client, a manager or an auditor can ask about one garment has an exact answer, months later.
 
@@ -85,11 +88,11 @@ Every question a client, a manager or an auditor can ask about one garment has a
    ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
    │  1. INTAKE  │──▶│  2. RELEASE │──▶│ 3. PRODUCE  │──▶│  4. STORE   │──▶│  5. PAY     │
    └─────────────┘   └─────────────┘   └─────────────┘   └─────────────┘   └─────────────┘
-   Client order      DM checks the     Every stage is    Parts merge in    Wages computed
-   sheet uploaded    breakdown, then   scanned against   drawers until     from the very
-   as a breakdown.   RELEASES it.      a piece barcode   the garment is    same scan
-   Nothing minted    Barcodes minted.  by the manager    complete, then    events. One
-   yet — it is a     Drawers merged.   who owns that     released onward   line per person
+   Client order      DM checks the     Every stage is    Parts merge on    Wages computed
+   sheet uploaded    breakdown, then   scanned against   the garment       from the very
+   as a breakdown.   RELEASES it.      a piece barcode   until it is       same scan
+   Nothing minted    Barcodes minted   by the manager    complete, then    events. One
+   yet — it is a     per garment.      who owns that     released onward   line per person
    draft.            THE MINT.         stage.            in a batch.       per run.
 ```
 
@@ -116,7 +119,7 @@ Alongside those five, three supporting systems run continuously: **attendance** 
 | Batches lose their identity when split | **The piece is the tracked unit.** There are no bundles. Each garment has its own barcode, so splitting a batch costs nothing |
 | Someone logs the wrong stage | **The caller never picks a stage.** The login screen fixes the cut path; every other stage is inferred from the piece's own history |
 | Work gets logged out of order | **The sequence gate.** A piece cannot be pasted before it is fused |
-| A jacket reaches stitching with no lining | **The merge gate.** Line-stitching is blocked until the drawer holds everything that garment needs |
+| A jacket reaches stitching with no lining | **The merge gate.** Line-stitching is blocked until the garment holds everything it needs and the store has released it |
 | The wrong worker is credited | **The skill gate** warns when a cutter is logged on a pasting job, and every event names the worker whose card was scanned |
 | Someone logs work for a person who is not in the building | **Production logging requires today's attendance** |
 | Leather consumption is guesswork | The two cut stages capture **actual consumption per piece**, decrementing a named lot |
@@ -157,7 +160,7 @@ Client  ── BOGGI MILANO
 
 The Direct Manager uploads the breakdown workbook. It is parsed and **previewed** first — nothing is written. When they commit, the styles and SKUs land as **DRAFT** rows.
 
-**Nothing is minted yet.** No barcodes, no pieces, no drawers. The DM can now see the whole breakdown as an editable table and correct what the sheet got wrong — article numbers, thickness, colours, quantities, prices. Breakdown sheets are hand-made from a client order and a spec sheet, and the first pass is routinely wrong in small ways.
+**Nothing is minted yet.** No barcodes and no pieces. The DM can now see the whole breakdown as an editable table and correct what the sheet got wrong — article numbers, thickness, colours, quantities, prices. Breakdown sheets are hand-made from a client order and a spec sheet, and the first pass is routinely wrong in small ways.
 
 ### Step 3 — Release: the mint
 
@@ -165,16 +168,16 @@ When the breakdown is correct, the DM **releases** the styles. For each style th
 
 > **Does this garment need a lining?**
 
-This is not optional and it is not inferred. `null` is rejected — *"we never asked"* is a real state and the system will not proceed from it. The answer is stamped on the style, copied onto every piece it mints, and from that moment decides two things: whether the garment has a lining-cutting stage at all, and whether its drawer must hold **both** parts before line-stitching.
+This is not optional and it is not inferred. `null` is rejected — *"we never asked"* is a real state and the system will not proceed from it. The answer is stamped on the style, copied onto every piece it mints, and from that moment decides two things: whether the garment has a lining-cutting stage at all, and whether **both** parts must reach the store before line-stitching.
 
 Release then creates, atomically:
 - the **Piece** rows — one per ordered unit, numbered 1..N within the SKU,
 - each piece's **barcode** — a compact `PC-…` code that gets printed, plus a long human-readable alias,
-- a **Drawer merge** — each piece is assigned a physical drawer from a finite pool.
+- each piece's **store state** — `WAITING`, meaning it exists but no part of it has reached the store yet.
 
-Our jacket now exists. It is piece seq 17, barcode `PC-004821`, merged to drawer `DRW-0042`.
+Our jacket now exists. It is piece seq 17, barcode `PC-004821`.
 
-> **The drawer pool is finite — 200 drawers by default.** If a release outruns it, the pieces are still minted and still have barcodes, but they have no drawer. They cannot be stored, so they cannot pass the merge gate. The response says exactly how many are waiting, and the DM can grow the pool.
+> **Nothing is allocated and nothing can run out.** Release used to assign each piece a physical drawer from a finite pool of 200, and a release that outran the pool left garments minted but unstorable. The store is now a state on the garment itself, so `pieces_waiting_for_drawer` is gone from the release response — along with the shortage it counted.
 
 ### Step 4 — Cutting
 
@@ -199,25 +202,27 @@ If someone scans a piece for pasting that has not been fused, that one piece com
 
 ### Step 6 — The store
 
-The cut parts go to the store. The scan order is **employee → drawer → piece**, and the drawer comes before the piece deliberately: the merge map is the authority, so a piece scanned into the wrong drawer is a **409**, not a re-assignment.
+The cut parts go to the store. The scan is **employee, then piece** — two scans, not three. The drawer scan is gone, because the piece barcode already says which garment it is and the drawer only ever said where it happened to be sitting.
 
-The system infers whether the part arriving is leather or lining from the piece's own cut history. Once the drawer holds everything that garment needs — leather, and lining if the style declared one — it **automatically reaches RECEIVED**. Nobody presses a button to assert a fact the server already computed.
+The system infers whether the part arriving is leather or lining from the piece's own cut history. Once the garment holds everything it needs — leather, and lining if the style declared one — it **automatically reaches RECEIVED**. Nobody presses a button to assert a fact the server already computed.
+
+A part cannot be parked before it has been made: storing a lining on a garment nobody has cut a lining for is a **409**. The store is where a finished part is put down, not where an unfinished one waits.
 
 Accessories are different. Scanning `part=ACCESSORY` issues the garment's whole accessory kit from the style's recipe and **spends stock**. It is never inferred — a wrongly guessed kit would move money nobody asked to move.
 
 ### Step 7 — Send
 
-The Store Manager opens the drawers list, filters to the **send queue**, ticks the drawers that are ready, and sends them as one batch. Sending sets each drawer to **SENDED** — and that is exactly what the production merge gate reads.
+The Store Manager opens the store list, filters to the **send queue**, ticks the garments that are ready, and sends them as one batch. Sending sets each piece's store state to **SENDED** — and that is exactly what the production merge gate reads.
 
-Our jacket's drawer is sent. `PC-004821` is now eligible for line-stitching.
+Our jacket is sent. `PC-004821` is now eligible for line-stitching.
 
 ### Step 8 — Line stitching onward
 
-The Stitching Manager scans it. This time the **merge gate** applies: is the drawer SENDED? Yes. The piece logs.
+The Stitching Manager scans it. This time the **merge gate** applies: has the store sent this garment? Yes. The piece logs.
 
 Then SHELL_STITCHING → FINAL_FINISH → FINAL_INSPECTION → PACKAGE_EXPORT. The last two are **approvals**, not floor work: no manager role owns them, so only DM/MD/HR can log them.
 
-When PACKAGE_EXPORT is logged, drawer `DRW-0042` **recycles back to WAITING** and becomes available for the next garment.
+When PACKAGE_EXPORT is logged, the garment's store flags are **cleared** — there is no pool to return it to, because there is no pool.
 
 ### Step 9 — Payroll
 
@@ -227,7 +232,7 @@ The run is closed and **frozen**. It is the document the cash was counted agains
 
 ### Step 10 — Forever
 
-Six months later a client complaint arrives about one jacket. Scanning its barcode returns: every stage, who worked it, on what date, whether it was reworked, which leather lot it was cut from, how much was consumed, which drawer held it, and what accessories it was issued.
+Six months later a client complaint arrives about one jacket. Scanning its barcode returns: every stage, who worked it, on what date, whether it was reworked, which leather lot it was cut from, which individual hides went into it, how much was consumed, and what accessories it was issued.
 
 ---
 
@@ -236,11 +241,11 @@ Six months later a client complaint arrives about one jacket. Scanning its barco
 | Role | Value | What they do |
 |---|---|---|
 | **Managing Director** | `managing_director` | Superuser. Bypasses every role gate. Final authority on payroll changes and deletions |
-| **Direct Manager** | `direct_manager` | The operational lead. Uploads and releases breakdowns, manages clients and users, sets rates, runs payroll, grows the drawer pool. Also bypasses stage gates |
+| **Direct Manager** | `direct_manager` | The operational lead. Uploads and releases breakdowns, manages clients and users, sets rates, runs payroll, sends garments to outside factories. Also bypasses stage gates |
 | **Cutting Manager** | `cutting_manager` | Logs **leather cutting only**. Pinned to the LEATHER_CUT screen. Creates material lots when leather arrives |
 | **Lining Manager** | `lining_manager` | Logs the **lining-cut path**. Pinned to the LINING_CUT screen |
-| **Stitching Manager** | `stitching_manager` | Logs **every post-cut floor stage** — fusing, pasting, line-stitching, shell-stitching, final finish. Also sends drawers |
-| **Store Manager** | `store_manager` | Runs the store hub: scans parts into drawers, reads the drawers list, sends batches onward, records off-spec material issues. **Store functions only** — this role cannot log a production stage |
+| **Stitching Manager** | `stitching_manager` | Logs **every post-cut floor stage** — fusing, pasting, line-stitching, shell-stitching, final finish. Also releases garments from the store |
+| **Store Manager** | `store_manager` | Runs the store hub: scans parts onto garments, reads the store list, sends batches onward, records off-spec material issues. **Store functions only** — this role cannot log a production stage |
 | **Supervisor** | `supervisor` | Reads the floor roster and dashboards. No attendance writes, no user creation |
 | **HR** | `hr` | Employees, wages visibility, designation backfill, attendance operator |
 | **Security** | `security` | **Gate operator.** Scans employee cards in and out. Nothing else |
@@ -278,12 +283,12 @@ The `employee` role value still exists in the enum only because `app_user.role` 
 | **Breakdown committed** | Styles and SKUs land as DRAFT | `breakdown_status: DRAFT`, `pieces_minted: 0` |
 | **Breakdown corrected** | Article, thickness, colours, quantities all right | The breakdown table shows what you expect |
 | **Recipe confirmed** | The style's material spec is signed off | `material_spec_confirmed_at` is set |
-| **Released** | Pieces exist, barcodes minted, drawers merged | `production_status: RELEASED`, `minted_pieces > 0` |
-| **Drawers allocated** | `pieces_waiting_for_drawer: 0` | The release response, and `GET /drawers/pool` |
+| **Released** | Pieces exist, barcodes minted | `production_status: RELEASED`, `minted_pieces > 0` |
+| **Cut sheet approved** | The hides for each garment are named and frozen | The cutting row's `status: APPROVED` |
 | **Cut** | An event at LEATHER_CUTTING (and LINING_CUTTING if lined) | The piece's completed stages |
-| **Stored** | The drawer holds everything the garment needs | Drawer state `received`, `can_send: true` |
-| **Sent** | The drawer is SENDED | The piece is eligible for line-stitching |
-| **Finished** | An event at PACKAGE_EXPORT | The drawer recycles to WAITING |
+| **Stored** | The garment holds everything it needs | Store state `received`, `can_send: true` |
+| **Sent** | Store state is SENDED | The piece is eligible for line-stitching |
+| **Finished** | An event at PACKAGE_EXPORT | The store flags are cleared |
 | **Paid** | A frozen wage run covering the work | Run status `closed` |
 
 ---
@@ -373,7 +378,19 @@ Deleting an employee is a **soft delete**: `is_active: false`, and their barcode
 
 **The employee row, every production event and every wage line stay intact.** You delete the scannable code, never the person or their record. Scanning the retired card returns **410 Gone** — distinguishable from *"never existed"*, so the screen can say *"this card was deactivated"* rather than *"invalid barcode"*.
 
-### 7.6 Salary is redacted
+### 7.6 Reading one worker
+
+`GET /employees/{employee_id}` is the single-worker read — what the edit screen
+and the worker card open on. Before it existed, the only way to show one person
+was to fetch the whole roster and filter it in the browser, which meant every
+screen showing one worker downloaded every worker's phone number.
+
+**An inactive worker is a normal `200`, not a `404`.** Someone who has left is
+still readable, because their production events and wage lines reference them and
+a name that stops resolving turns last quarter's payroll into an unanswerable
+question. Only the **card** stops working.
+
+### 7.7 Salary is redacted
 
 The roster returns salary **only** to HR, DM and MD. And the roster itself is internal — a CLIENT or VIEWER token is refused outright, because the row carries phone and email too.
 
@@ -445,7 +462,7 @@ The upload itself is guarded three ways: extension, a hard **size cap** streamed
 
 This is the change that matters most.
 
-> **`POST /imports/commit` writes DRAFT styles and SKUs. It creates no pieces, no barcodes and no drawer merges.** The response says so explicitly: `release_required: true`, `pieces_minted: 0`.
+> **`POST /imports/commit` writes DRAFT styles and SKUs. It creates no pieces and no barcodes.** The response says so explicitly: `release_required: true`, `pieces_minted: 0`.
 
 The sheet lands as an editable table. The DM reviews it and corrects what is wrong.
 
@@ -469,7 +486,7 @@ All of them **409 once the style is RELEASED**: its pieces carry printed barcode
 
 1. **Piece** rows — one per ordered unit.
 2. **Per-piece barcodes** — the compact `PC-XXXXXX` that gets printed, plus the long alias so older labels still resolve.
-3. **The drawer merge** — each piece assigned a drawer from the pool.
+3. **The store state** — each piece starts at `WAITING`; nothing is allocated and nothing can run out.
 4. The style stamped RELEASED with the actor and time, plus an `audit_log` row.
 
 ### 9.5 The lining declaration
@@ -496,11 +513,16 @@ The request body uses `extra="forbid"`, so a misspelt or misplaced field is a 42
 
 An already-released style comes back in `rejected` with its reason; the rest still release. **Read `minted`, not the HTTP status.**
 
-### 9.7 The drawer-pool warning
+### 9.7 There is no longer a pool to run out of
 
-Watch `minted.pieces_waiting_for_drawer`. The pool is finite. Pieces beyond the free drawers are minted with barcodes but nowhere to be stored — so they cannot pass the merge gate until a drawer frees up or the pool is grown.
+`minted.pieces_waiting_for_drawer` **is gone from the release response**, and
+`grow_drawer_pool` on the release body is ignored.
 
-`grow_drawer_pool: true` on the release call, or `POST /drawers/pool` afterwards, clears it.
+It used to count the garments a release had minted beyond the 200 free drawers —
+real barcodes with nowhere to be stored, and therefore unable to pass the merge
+gate until a drawer freed up. The store is now a state on the garment, so the
+shortage cannot happen and the banner that reported it should come off the upload
+screen.
 
 ### 9.8 The order index
 
@@ -524,7 +546,7 @@ Ordered **most-recently-worked-on first** — the newest of the order's creation
 
 ### 10.1 One registry, one front door
 
-`barcode_registry` is the single table every scan resolves through. Each printed code — a piece, a material lot, a drawer, an employee card — has exactly one row carrying its `type`, its `status`, and a nullable foreign key to the domain row it names.
+`barcode_registry` is the single table every scan resolves through. Each printed code — a piece, a material lot, an individual leather hide, an employee card — has exactly one row carrying its `type`, its `status`, and a nullable foreign key to the domain row it names.
 
 **`GET /barcode/resolve?code=…` is one indexed lookup:**
 
@@ -544,7 +566,8 @@ That 404/410 split is the whole point. A retired employee card and a typo are di
 |---|---|---|
 | `PIECE` | **Release** | No — permanent garment identity |
 | `LEATHER_LOT` / `LINING_LOT` / `ACCESSORY_LOT` | Material lot created | No |
-| `DRAWER` | Pool creation | No — static code, recycling state |
+| `DRAWER` | *(withdrawn)* | Historical rows only — the drawer module is unrouted |
+| `LEATHER_SHEET` | A hide is received or added to a cutting row | No — one label per physical hide |
 | `EMPLOYEE` | Employee created | **Yes** — reissue / deactivate |
 
 ### 10.3 One piece, two codes
@@ -572,9 +595,9 @@ A scan does not just say *what* the code is. It also carries:
 
 | Field | Meaning |
 |---|---|
-| `next_expected_scan` | `"PIECE"` / `"DRAWER"` / null — which code to present next. Answered for **every** type, including EMPLOYEE, which is the first scan of every workflow |
+| `next_expected_scan` | `"PIECE"` / null — which code to present next. Answered for **every** type, including EMPLOYEE, which is the first scan of every workflow. A PIECE returns **null**: the garment is the end of the scan, not the middle of it |
 | `next_stage` + `next_stage_label` | The production stage this piece is due at, derived by **the same helper the write path uses** |
-| `next_stage_blocked_reason` | Set when that stage cannot be logged yet — e.g. the drawer has not been sent |
+| `next_stage_blocked_reason` | Set when that stage cannot be logged yet — e.g. the store has not released the garment |
 
 That last pair matters: the stage is **still reported** even when blocked. The screen shows where the piece is going *and* what is holding it there.
 
@@ -728,9 +751,13 @@ LINING_CUTTING  ┘
    → FINAL_FINISH → FINAL_INSPECTION → PACKAGE_EXPORT
 ```
 
-**Two entry stages, one join.** Leather and lining are cut independently, by different managers, on different screens. They have **no predecessor**. Everything after the drawer merge is a single linear chain.
+**Two entry stages, one join.** Leather and lining are cut independently, by different managers, on different screens. They have **no predecessor**. Everything after the store merge is a single linear chain.
 
-That breaks the naive "one linear predecessor" model, so the code is explicit about it: `predecessor()` returns the leather-side predecessor for the leather chain, and **None for LINE_STITCHING** — because line-stitching's precondition is not *"pasting done"* but *"leather and lining both merged in the drawer"*, which the **completeness gate** enforces, not the sequence gate.
+That breaks the naive "one linear predecessor" model, so the code is explicit about it: `predecessor()` returns the leather-side predecessor for the leather chain, and **None for LINE_STITCHING** — because line-stitching's precondition is not *"pasting done"* but *"leather and lining both in the store, and the store has released it"*, which the **completeness gate** enforces, not the sequence gate.
+
+> **This is why the completeness gate is load-bearing rather than decorative.** It
+> is the *only* gate on LINE_STITCHING. Remove it and a garment can be stitched
+> before it was ever cut, with nothing in the system to contradict the record.
 
 > **Why stage order is in code, not config.** The `operation` table stays the source of truth for labels and rates. But the stage **order**, the two parallel cut paths, the **role → stage** map and the **designation → stage** map are business law. Encoding order against `Operation.sequence` alone would mean a stray UPDATE to a sequence number silently reorders the factory. Codes are stable; sequence numbers are not.
 
@@ -758,7 +785,7 @@ Cheapest and most-likely-to-fail first.
 | **1** | **ROLE** — may this role log this stage? | **Whole request** | **403** |
 | **2** | **SKILL** — may this designation work this stage? | **Per piece** | Warning, still logged |
 | **3** | **SEQUENCE** — has the piece completed the previous chain stage? | **Per piece** | `sequence_blocked` |
-| **4** | **MERGE** — for LINE_STITCHING only: is the drawer SENDED? | **Per piece** | `merge_blocked` |
+| **4** | **MERGE** — for LINE_STITCHING only: has the store sent this garment? | **Per piece** | `merge_blocked` |
 
 **Gate 1 is whole-request** because the role is wrong for the whole batch — there is nothing per-piece about it. **Gates 2–4 are per-piece** so that one bad piece never loses the thirty-nine good ones a manager scanned with it.
 
@@ -814,7 +841,7 @@ Send `code` + `employee_barcode` and read three fields:
 
 It exists because stage inference and all three per-piece gates used to run only at **write** time, so the UI had to guess: it made the operator pick a stage by hand, and it left later stage cards scannable before their predecessor was done. This answers both from the server, **using the very same predicates the log enforces** — so a card the UI opens is a card the log will accept.
 
-It also carries the piece's `drawer`, its `stages[]` cards (each `completed` / `next` / `locked` / `not_applicable`, with the gate and reason for a locked one), the `actor` block (name, designation, whether they are checked in, any skill anomaly), the `material_requirement` kit checklist, and `sku` progress.
+It also carries the piece's store state, its `stages[]` cards (each `completed` / `next` / `locked` / `not_applicable`, with the gate and reason for a locked one), the `actor` block (name, designation, whether they are checked in, any skill anomaly), the `material_requirement` kit checklist, and `sku` progress.
 
 ### 12.7 The response
 
@@ -830,7 +857,7 @@ It also carries the piece's `drawer`, its `stages[]` cards (each `completed` / `
 | `skill_warnings[]` | Gate-2 anomalies that still logged |
 | `stock_warning` | A cut that went short |
 | `sku_progress` | `{total, done, remaining, closed}` for the stage just logged. **`closed: true` means stop offering this style for scanning** |
-| `drawer_by_piece` | Each piece's drawer state |
+| `drawer_by_piece` | Each piece's **store** state. The key keeps its old name so existing clients do not break; read it as the garment's store state |
 | `kit_by_piece` | Deliberately lean — `kit_required`, `kit_status`, `outstanding`. A forty-piece batch carrying full requirement blocks would dwarf the rest of the response |
 | `message` | One sentence for the scan screen |
 
@@ -842,102 +869,416 @@ It also carries the piece's `drawer`, its `stages[]` cards (each `completed` / `
 
 ---
 
-## 13. Drawers and the merge gate
+## 13. Cutting — the grid that replaced the spreadsheet
 
-**Module:** `app/modules/drawers/` · **URL prefix:** `/api/v1/drawers`
+**Module:** `app/modules/cutting/` · **URL prefix:** `/api/v1/cutting`
 
-### 13.1 A static code with a recycling state
+### 13.1 The problem
+
+The cutting manager kept the real record in Excel: which hides went to which
+garment, the DCM on each one, what came back, what was adjusted. Then he typed
+the finished bundle into the ERP a second time. **Two systems, double work, and
+the ERP could not answer the one question the whole module exists for — how much
+leather did this jacket actually cost?** V1 only started recording once the
+bundle was already cut, by which time the hides were gone.
+
+### 13.2 A hide is a thing, and it has a barcode
+
+**One leather sheet is one physical hide.** You cannot make a garment from one —
+it takes **seven to twelve** — so the lot-level barcode could never say which
+skins went into which jacket. **Every hide now gets its own printed label**
+(`BarcodeType.LEATHER_SHEET`), which is the MD's requirement and the thing that
+makes per-piece leather cost real rather than an average.
 
 ```
-WAITING ──(release)──▶ MERGED ──▶ HOLDING_LEATHER ─┐
-                          │       HOLDING_LINING ──┼──▶ HOLDING_BOTH
-                          │                        │
-                          └────────────────────────┴──▶ RECEIVED ──▶ SENDED
-                                                                       │
-                                              (piece ships) ───────────┘
-                                                       ▼
-                                                    WAITING
+material_lot            "NAPPA-77 / PINE GREEN / 1.2mm"   ← what the material IS
+   └── material_sheet   LS-000123, 44 dcm, IN_STOCK       ← one physical hide
 ```
 
-The **code never changes**. The state cycles. `current_piece_id` moves over the drawer's life.
+A sheet's status is a fact about where it is, not a balance:
 
-### 13.2 The store scan
+```
+IN_STOCK ──▶ ALLOCATED ──▶ ISSUED ──▶ CONSUMED
+    ▲            │            │
+    └── RETURNED ┘            └──▶ SCRAPPED
+```
 
-**The order is employee → drawer → piece**, and all three are enforced server-side.
+**A sheet is fully consumed by the row it is issued to** — it never spans two
+garments. That is why a status is enough and no per-hide balance is kept.
 
-- **The employee scan is mandatory.** The store scan used to accept no actor at all — the one door on the floor where *"who did this"* was unanswerable. A rule the frontend alone enforces is a rule that disappears the moment anything else calls the API.
-- **The drawer comes before the piece** because the merge map is the authority. A piece scanned into the wrong drawer is a **409**, not a re-assignment.
+`lot.on_hand` stays the leather stock figure in dcm and remains what production
+decrements. Sheets are the detail beneath it. The consistency check
+(`Σ IN_STOCK sheet dcm == on_hand`) is **reported, never enforced** — a mismatch
+is something a human needs to see, not a reason to refuse a delivery.
 
-`part` is **optional**. The server infers LEATHER vs LINING from the piece's own cut history and what the drawer is still missing. Send it only to override.
+### 13.3 One row is one garment
 
-**`part=ACCESSORY` is explicit-only and never inferred.** The worst a wrong LEATHER/LINING guess can do is set the wrong boolean, which a human can undo. An inferred ACCESSORY would **spend stock** — it decrements every accessory lot on the style's spec — so a mis-inference would move money nothing on the floor asked to move.
+```
+cutting_row     piece · style · colour · article · size · rc_no
+                cutter_employee_id · work_date
+                target_dcm      what the allocator aimed at
+                total_dcm       DERIVED from its sheets — never typed
+                status          DRAFT → APPROVED → LOGGED
+```
 
-The accessory scan is **idempotent**: a second tap issues nothing and returns the same 200.
+Sheets attach by `material_sheet.cutting_row_id`, so *"the hides on this row"* is
+one indexed read **and a hide can never be on two rows.**
 
-**Every scan returns the `kit` block**, cut parts included, so the person at the drawer can see what accessories the garment still needs without leaving the screen.
+### 13.4 How many hides — the size baseline
 
-### 13.3 Completeness, not sequence
+The DM is not asked for a per-piece DCM, so the system needs a defensible
+default. `app/core/leather_norms.py` holds a pure size → DCM table, validated
+against the factory's own sheets (six rows averaging **46 dcm per hide**) and
+against the leather trade's 45–55 sq ft per jacket:
 
-The gate is about **completeness**, not order:
+| Size | Target dcm | ≈ hides @46 |
+|---|---|---|
+| XS | 340 | 7 |
+| S | 370 | 8 |
+| M | 400 | 9 |
+| L | 430 | 9 |
+| XL | 465 | 10 |
+| XXL | 500 | 11 |
+| XXXL | 540 | 12 |
 
-- A **lined** jacket needs leather **and** lining before its drawer is complete.
-- A **leather-only** piece (`needs_lining: false`) is complete on leather alone.
+Italian numeric sizes ride the same ladder (46=XS, 48=S, 50=M, 52=L, 54=XL,
+56=XXL, 58+=XXXL).
 
-**RECEIVED is now reached automatically** the moment a drawer holds everything its garment needs. The old flow — press RECEIVED, then press SEND, one drawer at a time — is gone, because RECEIVED asserted a fact the server had already computed.
+**It is explicitly an estimate.** The style's own `style_material_spec` leather
+`qty_per_piece` wins whenever it exists, and `target_source` on every row says
+which number was used — `"style_spec"` (somebody measured it and signed it off)
+or `"size_baseline"` (this system's estimate) — so the manager knows whether to
+expect to correct it.
 
-> **`needs_lining` on every drawer row is the EFFECTIVE requirement**, resolved from the style, the SKU and the cut history — **not** the stored `piece.needs_lining` flag, which is written once at release and is wrong for most of a live order. When the two disagree, `lining_reason` says why.
+### 13.5 The grid, and why every cell is editable
 
-### 13.4 Send — the decision that stayed
+`POST /cutting/rows/generate` creates one DRAFT row per un-cut piece of the
+chosen style + colour and allocates hides nearest-fit first until the running
+total reaches the target. Allocated hides move to `ALLOCATED` so two rows cannot
+claim the same skin.
 
-SEND is a **decision**, so it stayed. And it became **plural**, because the store never releases one drawer at a time.
+Then **the manager edits every cell** — cutter, size, rc_no, article, colour —
+because that is what he was doing in Excel, and the grid has to be at least as
+good as the thing it replaces. Adding and removing hides is the flow he named
+directly: *the cutter came back and needed one more skin.*
 
-`POST /drawers/send` takes drawer ids and nothing else. **There is no destination to pick**: lining is upstream of the store, so a merged drawer has exactly one way forward.
+- `POST /cutting/rows/{id}/sheets` — scan it, pick it, or create it
+- `DELETE /cutting/rows/{id}/sheets/{sheet_id}` — **returns it to `IN_STOCK`**
+- `PATCH /cutting/rows/{id}/sheets/{sheet_id}` — correct a hide's DCM
 
-Sending sets each drawer to SENDED, which is exactly what the production merge gate reads. The whole selected bunch of pieces becomes eligible for LINE_STITCHING in one action.
+All of it free and unaudited **while the row is DRAFT**. Nothing has been claimed
+yet, so there is nothing to protect.
 
-**Partial accept:** a drawer that is not yet RECEIVED comes back in `not_ready` with its reason; the rest are still sent. **Check `count_sent`, not the HTTP status.**
+### 13.6 Approval is a wall, not a checkbox
 
-**Who may send:** MD, DM, Store Manager — **and the Stitching Manager.** That last one is a deliberate scope change: sending is what releases a batch into line-stitching, and on the floor the stitching manager is the one who walks to the store and takes the drawers. Requiring a DM to press the button made the store a bottleneck on a decision the stitching manager was already making physically. It is a **role grant on the store surface, not a production permission** — `STAGE_ROLE_ACCESS` is untouched. Cutting and lining managers are still excluded: they put parts **in**; they do not decide what leaves.
+`POST /cutting/rows/{id}/approve` freezes the row: these hides, this total, this
+cutter. Sheets move `ALLOCATED → ISSUED`, `total_dcm` is frozen, and any further
+edit is a **409**. Undoing it is a `reopen`, and both are audited
+(`CUTTING_ROW_APPROVED` / `CUTTING_ROW_REOPENED`).
 
-### 13.5 The drawers list
+> **`AuditLog.actor_user_id` is an `app_user.id` — the LOGIN.** The row's
+> `cutter_employee_id` is a **worker**, in a different table, with no login at
+> all. Passing the scanned employee id here is the mistake that produced a 500 in
+> the old store scan. The worker belongs in the audit `after` payload, as data.
 
-`GET /drawers` is the store's working screen.
+### 13.7 What the cutter's scan does with it
 
-**Ordered most-recently-worked-on first by default.** *"Worked on"* means the newest of: merged to a garment, part scanned in, received, sent, or released back to the pool. Every row carries `last_activity_at` **and** `last_activity` (`"merged"` / `"scanned"` / `"received"` / `"sent"` / `"released"`) — a timestamp with no verb tells the operator *when* something happened but not *what*, which is the half they need to decide whether to open the drawer.
+`POST /production/log` is unchanged in shape. When a cut scan resolves a piece
+that has an **APPROVED** row, the router pulls `article`, `colour`, `lot` and
+`total_dcm` from that row instead of demanding them on the request —
+`consumption_source: "CUTTING_ROW"` in the response says so.
 
-This replaced an ordering that could not see three of those five events: a merge and a store scan wrote no timestamp at all, and a release nulled the received/sent stamps, so the drawer that had just shipped sank to the bottom.
+**The operator types nothing.** It was entered once, on the grid, and signed off.
 
-Pass `sort=seq` for the print sheet — DRW-0001…DRW-0200 in drawer order.
+On success the row goes `APPROVED → LOGGED` and its hides `ISSUED → CONSUMED`.
+Stock timing is **unchanged**: approve reserves, logging consumes, and the single
+per-batch decrement is the same one production always did.
 
-Two search affordances work together: **`code=`** is a case-insensitive *contains*, so "42" and "drw-004" both work. **`pin_codes=`** replays the client's own recently-searched list to float those drawers above everything else — nothing about a search is stored server-side, because that is one operator's session, not a fact about the factory. Pinned rows are flagged so the UI can band them separately.
+A piece with no approved row keeps the old typed path exactly, so nothing on the
+floor breaks mid-migration.
 
-**`sendable=true` is the send queue** — drawers that hold everything their garment needs, waiting for someone to tick and send them. `can_send` applies the same rule the send endpoint enforces, so **the queue can never offer a row the server refuses.**
+### 13.8 Attendance is on this screen for a reason
 
-A row with `barcode: null` is a drawer with no registry code. It cannot be scanned, so print nothing for it — and the list **shows** it rather than silently dropping it, because that is a broken label somebody needs to fix.
-
-### 13.6 The pool
-
-The pool is **fixed at 200** and grows only when a DM or MD says so.
-
-`GET /drawers/pool` reports the pool size, free drawers, and how many minted pieces have **no drawer** — plus `shortfall`, what a DM would have to add right now to clear the list.
-
-`POST /drawers/pool` adds N permanent barcoded drawers **and immediately drains the waiting list into them** — growing the pool while leaving pieces waiting would leave a DM staring at empty drawers beside a waiting list. It is capped at 1000 per call as a typo guard: `add: 20000` would mint twenty thousand permanent drawers and there is no un-mint.
-
-`POST /drawers/allocate-waiting` merges drawer-less pieces into whatever drawers are currently free. Safe to call repeatedly; a no-op when there is nothing to place.
+The grid shows who is **present today**, from `AttendanceService.today_roster()`.
+The manager must not be able to pick a name that cannot legally be logged
+against — production refuses an absent worker, and a grid that offers one is a
+grid that produces a 400 an hour later with no explanation attached to it.
 
 ---
 
-## 14. Attendance
+## 14. The store and the merge gate
+
+**Module:** `app/modules/store/` · **URL prefix:** `/api/v1/store`
+
+> **Drawers are withdrawn.** `/api/v1/drawers/*` is unrouted — not renamed, not
+> deprecated. This chapter describes what replaced it, and why.
+
+### 14.1 Why the drawer had to go
+
+There were **200 physical drawers**. A style releases a hundred-plus garments,
+the run stalls mid-chain, the next fifty have nowhere to go — and re-allocating
+by hand was too complicated for the DM to actually do. The drawer was a
+**bottleneck that earned nothing**: it was a place to put a thing, and the system
+was modelling the place instead of the thing.
+
+**The store is now a state on the garment.** It has no capacity, nothing runs
+out, and `pieces_waiting_for_drawer` has disappeared from every screen it used to
+appear on — because the shortage it counted no longer exists.
+
+### 14.2 The state, and where it lives
+
+Five columns on `piece`: `store_state`, `leather_in`, `lining_in`,
+`accessories_in`, `store_entered_at`. The same seven states the drawer had, minus
+the pool:
+
+```
+WAITING ──▶ HOLDING_LEATHER ─┐
+            HOLDING_LINING ──┼──▶ HOLDING_BOTH ──▶ RECEIVED ──▶ SENDED
+                             │
+              (piece ships) ─┴──────────────────────────────────▶ WAITING
+```
+
+The migration copied each drawer's state onto the piece it was holding, so
+nothing in flight was lost. The drawer tables remain, **unwritten, for audit**.
+
+### 14.3 The scan: employee, piece, enter
+
+**Two scans, not three.** The drawer scan is gone, and that is the whole
+"make merging easy" fix — the piece barcode already says which garment it is, and
+the drawer only ever said where it happened to be sitting.
+
+`POST /store/scan` takes an **employee** and a **piece**. Both are mandatory:
+
+- **The employee scan is not optional.** The store scan used to accept no actor
+  at all — the one door on the floor where *"who did this"* was unanswerable. A
+  rule only the frontend enforces is a rule that disappears the moment anything
+  else calls the API.
+- **Who may stand at this screen:** Store Manager, Stitching Manager, DM, MD.
+  Managers scan too, not only workers — the store is not always staffed.
+
+`part` is **optional**. The server infers LEATHER vs LINING from the piece's own
+cut history and what the garment is still missing. Send it only to override.
+
+**`part=ACCESSORY` is explicit-only and never inferred.** The worst a wrong
+LEATHER/LINING guess can do is set a boolean a human can flip back. An inferred
+ACCESSORY would **spend stock** — it decrements every accessory lot on the
+style's spec — so a mis-inference would move money nothing on the floor asked to
+move. The accessory scan is **idempotent**: a second tap issues nothing and
+returns the same 200.
+
+**A part cannot be parked before it has been made.** Storing a lining on a
+garment with no `LINING_CUTTING` event is a **409**: the store is where a
+*finished* part is put down, not where an unfinished one waits.
+
+**Every scan returns the `kit` block**, cut parts included, so the person at the
+screen sees what the garment still needs without leaving it.
+
+### 14.4 Completeness, not sequence
+
+- A **lined** jacket needs leather **and** lining before it is complete.
+- A **leather-only** piece (`needs_lining: false`) is complete on leather alone.
+
+**RECEIVED is reached automatically** the moment a garment holds everything it
+needs. The old flow — press RECEIVED, then press SEND, one drawer at a time — is
+gone, because RECEIVED asserted a fact the server had already computed.
+
+> **`needs_lining` on every store row is the EFFECTIVE requirement**, resolved
+> from the style, the SKU and the cut history — **not** the stored
+> `piece.needs_lining` flag, which is written once at release and is wrong for
+> most of a live order. When the two disagree, `lining_reason` says why.
+
+### 14.5 Send — the decision that stayed
+
+SEND is a **decision**, so it stayed, and it is **plural**, because the store
+never releases one garment at a time.
+
+`POST /store/send` takes piece ids or piece barcodes and nothing else. **There is
+no destination to pick**: lining is upstream of the store, so a complete garment
+has exactly one way forward.
+
+Sending sets `store_state = SENDED`, which is exactly what the production merge
+gate reads. The whole selected bunch becomes eligible for LINE_STITCHING in one
+action.
+
+**Partial accept:** a garment that is not yet complete comes back in `not_ready`
+with its reason; the rest are still sent. **Check `count_sent`, not the HTTP
+status.**
+
+**Who may send:** MD, DM, Store Manager — **and the Stitching Manager.** That
+last one is deliberate: sending is what releases a batch into line-stitching, and
+on the floor the stitching manager is the one who walks to the store and takes
+the garments. Requiring a DM to press the button made the store a bottleneck on a
+decision the stitching manager was already making physically. It is a **role
+grant on the store surface, not a production permission** — `STAGE_ROLE_ACCESS`
+is untouched. Cutting and lining managers are still excluded: they put parts
+**in**; they do not decide what leaves.
+
+### 14.6 THE GATE — and why this chapter matters most
+
+**`_merge_ok` is the ONLY gate on LINE_STITCHING.**
+
+`_sequence_ok` returns `True` early for that stage, because `LINE_STITCHING` has
+no chain predecessor by design — the two cut paths run in parallel and converge
+here. So if the store state ever stops gating line-stitching, **a garment could
+be stitched before it was ever cut, and nothing in the system would contradict
+it.**
+
+That is why the piece-level gate was written and tested *before* a single line of
+drawer code was removed, and why the end-to-end flow asserts the refusal by name.
+
+### 14.7 The store list
+
+`GET /store/pieces` is the store's working screen — filter by `state`,
+`style_id`, or a piece code. `GET /store/pieces/{piece_code}` is one garment, and
+it is reachable by **every floor-facing role**, so the person physically placing
+pieces can look one up without DM access.
+
+There is no pool screen, no shortfall, and no "allocate waiting pieces". Those
+endpoints existed to manage a scarcity that no longer exists.
+
+---
+
+## 15. Inspections — reject and rework
+
+**Module:** `app/modules/production/inspection.py` · **URL prefix:** `/api/v1/inspections`
+
+### 15.1 The gap this closed
+
+Rework was **refused on the write path and counted on the read path** — the
+dashboards reported a number the API would not let anybody produce. And a defect
+found at final inspection had nowhere to go: the garment was simply logged again,
+so the record said the work was done twice and never said it was done *wrong*.
+
+### 15.2 A defect names a stage, and a stage names a person
+
+`POST /inspections` records a **reject** or a **rework** against a piece, with
+the stage **responsible** for the defect — not the stage it was found at. A seam
+that opens at final finish is a line-stitching defect, and the difference is the
+whole point: `GET /inspections/responsibility` is the report that says where
+defects are actually being created.
+
+`Designation.QC_INSPECTOR` already existed in the vocabulary, unused. It is now
+this module's designation.
+
+### 15.3 The DM approves the re-walk
+
+A rejection is a **decision about money** — somebody's work is being sent back —
+so it is proposed and then approved:
+
+```
+POST /inspections                     an inspector records it
+POST /inspections/{id}/approve        DM agrees — the piece re-walks from the
+                                      responsible stage
+POST /inspections/{id}/decline        DM disagrees — nothing moves
+```
+
+On approval the piece's position moves back to the responsible stage, and the
+stages after it are invalidated so they must be logged again.
+
+### 15.4 The re-walk is counted, not timestamped
+
+The obvious implementation compares `created_at` against `resolved_at`. It cannot
+work here: `created_at` is **naive, with one-second resolution**, and
+`resolved_at` is **timezone-aware, with microseconds** — so the comparison is
+never true and a re-walked garment stalls forever.
+
+The working implementation **counts**: `event_counts_by_stage` against
+`resolved_redo_spans`. A stage is satisfied when it has been logged more times
+than it has been sent back.
+
+And the span is bounded — `index[target] < here <= index[found]` — because
+invalidating every stage after the defect would demand re-logging stages the
+garment had never reached, which is how SHELL_STITCHING came to be logged twice.
+
+---
+
+## 16. Job work — garments that leave the building
+
+**Module:** `app/modules/jobwork/` · **URL prefix:** `/api/v1/jobwork`
+
+### 16.1 The gap
+
+When a deadline is short, tailoring — or cutting, or lining — goes to another
+factory. Nothing modelled it. The garments stopped moving, nobody could say where
+they were, and **the money paid for the work was recorded nowhere.**
+
+### 16.2 Three tables
+
+```
+vendor          name · contact · is_active
+job_work        vendor · stage · dispatched_at · expected_back · returned_at · status
+job_work_piece  job_work · piece · status (OUT | BACK | SHORT | REJECTED)
+```
+
+Registering the same vendor name twice **returns the first one**. A duplicate is
+not a mistake worth blocking with a 409.
+
+### 16.3 GATE 7 — a garment that is away cannot be scanned here
+
+`POST /jobwork/dispatch` sends garments out, and they stop being scannable
+in-house until they return. Otherwise the system records line-stitching done
+*here* on a jacket sitting twenty miles away, and nothing would ever contradict
+it.
+
+The refusal **names the vendor** — `offsite_blocked`, with a `blocked[]` reason
+carrying the vendor's name — because "this piece is blocked" is not actionable
+and "this piece is at SUNRISE TAILORS" is: somebody can go and get it.
+
+**One garment at a vendor does not lose the tray.** Like every other per-piece
+gate, the good pieces scanned alongside it still log.
+
+A piece already out at another vendor is **skipped and reported**, never
+double-booked: two open records claiming one garment would each look satisfied by
+the other's return.
+
+### 16.4 The vendor's work IS the stage
+
+`POST /jobwork/{id}/receive` books garments back in **and logs the stage the
+vendor performed.** The work really happened, so the garment must advance and the
+progress counts must include it.
+
+But it is logged with **`employee_id = NULL` and `vendor_id` set**. Nobody on our
+payroll did it, so **no wage line may be generated** — and because the wage query
+inner-joins Employee, the event drops out of payroll on its own rather than by a
+special case somebody has to remember to write.
+
+Receiving twice does not log the stage twice.
+
+### 16.5 Only what came back is paid for
+
+*"Even when we give it to the outside factory we are paying for each piece, so we
+have to track that."*
+
+`rate_per_piece` is **optional** — some work is quoted per piece, some is settled
+another way, and demanding a number nobody has yet means the dispatch does not
+get recorded at all. A job with no rate reports `cost: null`, **not `0`**,
+because zero reads as free.
+
+**SHORT and REJECTED are kept apart** because they lead to different
+conversations: a missing garment is a loss to chase with the vendor, a badly-made
+one is a quality matter. **Neither is work delivered, and neither is paid for.**
+
+A return where some pieces are still out is `PARTIAL` — *"the job is back"* is a
+different statement from *"every piece is back"*.
+
+### 16.6 Overdue is the alert
+
+`expected_back` goes on the dispatch, and `GET /jobwork?overdue=true` is the
+chase list. **A dispatch nobody chases is how garments go missing.**
+
+---
+
+## 17. Attendance
 
 **Module:** `app/modules/attendance/` · **URL prefix:** `/api/v1/attendance`
 
-### 14.1 Every write comes from an operator
+### 17.1 Every write comes from an operator
 
 **Only four roles may write attendance: SECURITY, HR, MD, DM.**
 
 Nobody else on the floor has a login, so there is nothing else it could be. Both doors share **one dependency**, so the barcode door and the manual door can never drift apart.
 
-### 14.2 Two doors
+### 17.2 Two doors
 
 **The barcode door (primary):** `POST /attendance/scan-check-in` with the card code and a direction of `"in"` or `"out"`. The operator standing at the gate scans every card — monthly or daily, including their colleagues'.
 
@@ -945,7 +1286,7 @@ Nobody else on the floor has a login, so there is nothing else it could be. Both
 
 `/attendance/check-in` and `/check-out` are now an **operator recording their own** arrival and departure — their login is linked to an employee row. The body is optional; identity comes from the token and the timestamp is set server-side to block client-side clock manipulation.
 
-### 14.3 One row per person per day
+### 17.3 One row per person per day
 
 `work_date` uniqueness is enforced **at the database level**, so a duplicate check-in is physically impossible rather than merely discouraged. Check-in is **idempotent** — a re-tap is a no-op.
 
@@ -953,27 +1294,92 @@ Nobody else on the floor has a login, so there is nothing else it could be. Both
 
 Three flags are computed **at write time** so dashboards never recompute on read: `is_late`, `is_short`, `is_overtime`.
 
-### 14.4 Shift policy is data, not code
+### 17.4 Shift policy is data, not code
 
 A single `shift_config` row holds the start time, shift length, grace minutes and the factory timezone — so HR can change them without a redeploy. The timezone is the single source of truth for interpreting wall-clock policy and for deciding which calendar day a punch belongs to. Storage stays UTC; the timezone is applied only at the business-logic and display boundaries.
 
-### 14.5 Location tracking is removed
+### 17.5 Location tracking is removed
 
 No route asks for, validates or stores a position. Check-in succeeds on identity alone.
 
 `lat` and `lon` are still **accepted and ignored** on the bodies that used to require them, so a client that still sends coordinates gets a 201 rather than a 422. The geofence columns remain mapped on the model because they are NOT NULL in Postgres with no server default — removing them for real is a migration, not a comment-out.
 
-### 14.6 It gates production
+### 17.6 It gates production
 
 **Production logging requires the employee to be present today.** That is the link between the two modules: work cannot be recorded for someone who is not in the building.
 
+### 17.7 Correcting a punch — and why it is re-allocation, not deletion
+
+**The real mistake on the floor is not "nobody was here".**
+
+Security scans a card at the gate. The card said MAJID; the worker who actually
+did the day's cutting was SALIM. By the time anybody notices, MAJID has twelve
+cutting events against his name — **and the wage for them, because wages are
+computed from the events, not from the attendance.**
+
+So the correction the floor needs is not *"delete the attendance"*. It is
+**re-allocate it to the right person, and take the day's work with it.** The work
+happened; it was simply filed under the wrong name, and the name is on both
+records.
+
+`PATCH /attendance/{id}` with a new `employee_id` moves the punch **and every
+production event that worker has on that date**, in one action, under one reason,
+with one audit row. The response says how many events moved, so the operator sees
+the size of what they just did.
+
+**Why they move in the same action.** Leaving them behind splits one mistake into
+two jobs, and the second is the one nobody remembers to do: attendance would say
+SALIM was here while the cutting log still paid MAJID. The money would follow the
+wrong worker no matter how many times the attendance was corrected.
+
+**Only that day moves.** A swapped card is one day's mistake; yesterday's events
+stay where they are.
+
+**Correcting a time recomputes the flags.** A corrected punch still claiming
+`is_short` from the old times would be worse than not correcting it at all.
+
+### 17.8 Delete is narrower than edit
+
+| Operation | Roles | Why |
+|---|---|---|
+| `PATCH` — correct / re-allocate | SECURITY · HR · MD · DM | a gate operator who mis-scans must be able to fix it without going to find anybody |
+| `DELETE` — remove the record | **HR · MD · DM only** | it decides whether somebody is paid for the day at all |
+
+**A reason is mandatory on delete** (422 without it) — it is the only thing that
+makes the removal reviewable afterwards.
+
+**And a delete is refused when the worker has production events that day** (409),
+with the refusal naming the better operation. The work was really done, so the
+cause is a swapped card rather than an absent worker — and deleting would leave
+those events dated to a day the worker was never marked present, a state **the
+production log's own presence gate would have refused to create.**
+
+### 17.9 A closed payroll run is a wall
+
+Both operations refuse with **409** when the day falls inside a **CLOSED** wage
+run — the same rule production events follow, and for the same reason. A closed
+run is the document the cash was counted against and is **never recomputed**, so
+a change underneath it would leave the payroll disagreeing with the days it
+claims to summarise. The fix there is a payroll adjustment, not a quiet edit.
+
+**An OPEN run does not block anything** — nothing has been paid yet, so the
+recompute picks the correction up.
+
+### 17.10 One punch per worker per day, said in words
+
+`work_date` uniqueness is a **database constraint**, so re-allocating onto
+somebody who was already marked present that day would collide. The service
+checks first and returns a **409 naming the person** — *"PADMA is already marked
+present on 2026-09-18"* — rather than letting an `IntegrityError` surface as a
+500 the operator cannot act on.
+
 ---
 
-## 15. Wages
+## 18. Wages
 
 **Module:** `app/modules/wages/` · **URL prefix:** `/api/v1/wages`
 
-### 15.1 Rates are date-effective
+### 18.1 Rates are date-effective
 
 A rate is `(style, operation, rate, effective_from)`. A mid-period rate change prices **each day at the rate in force that day**. Nothing is retroactively re-priced.
 
@@ -981,7 +1387,7 @@ The rate screens never show or accept a UUID — `style_code` and `operation_cod
 
 `GET /wages/styles` carries `rated_operations / total_operations` per style, so **unpriced styles are visible before payroll runs and silently pays zero for them.**
 
-### 15.2 Two payrolls, not one
+### 18.2 Two payrolls, not one
 
 This is the central idea of the module. The fork is on the **employee population**, and it exists because the two populations are priced by incompatible facts.
 
@@ -997,13 +1403,13 @@ A monthly run **may** carry an order or style as a **label** for the payroll scr
 
 **A piece run and a monthly run over the same window do not conflict.** Their populations are disjoint, and together they are one complete payroll for that fortnight — compute both.
 
-### 15.3 One line per employee per run
+### 18.3 One line per employee per run
 
 PIECE_RATE and MONTHLY are **mutually exclusive** — never both on one line. `pieces` is always 0 for monthly.
 
 Behind each summary line sits a `wage_line_detail` row per `(employee, style, operation)` cell, carrying the pieces, the rate applied and the amount. That is what makes the three breakdown folds possible.
 
-### 15.4 The run lifecycle
+### 18.4 The run lifecycle
 
 ```
                  ┌──── recompute (free) ────┐
@@ -1030,7 +1436,7 @@ Behind each summary line sits a `wage_line_detail` row per `(employee, style, op
 
 **Delete** exists because the overlap guard has always named it. `create_run` commits an OPEN run **before** any line is written, so a compute that died halfway left a committed empty run permanently occupying that window, blocking every later run over those dates, with no way to clear it. It refuses a CLOSED run unless explicitly confirmed: deleting a frozen run destroys the record of a payment that actually happened. **To change a frozen run, reopen and recompute** — that keeps the audit trail. Deleting is for runs that should never have existed.
 
-### 15.5 The overlap guard
+### 18.5 The overlap guard
 
 Two runs that would pay the same money twice is a **409 naming the run that blocks you** and what to do about it.
 
@@ -1039,7 +1445,7 @@ Before paying anyone, check two fields on the response:
 - **`unrated_operations`** — stages with no rate in force. They pay **zero**, silently, unless you look.
 - **`gap_days`** — days in the window that no run covers.
 
-### 15.6 The result screens
+### 18.6 The result screens
 
 | Endpoint | What it gives |
 |---|---|
@@ -1053,7 +1459,7 @@ Per-piece amounts come from the run's **frozen** rate for that cell. Nothing is 
 
 The ledger is ordered by **when a run was computed**, not by its period: the question the ledger answers is *"what did we just run"*.
 
-### 15.7 Who may see it
+### 18.7 Who may see it
 
 Wages are visible only to **HR, DM and MD**.
 
@@ -1063,13 +1469,13 @@ HR **reads** payroll. DM and MD **authorise changes** to it — recompute, reope
 
 ---
 
-## 16. Analytics and the manager dashboards
+## 19. Analytics and the manager dashboards
 
 **Modules:** `app/modules/analytics/` and `app/modules/dashboard/` · **Prefixes:** `/api/v1/analytics`, `/api/v1/dashboard`
 
 Both are **read-only** and **own no tables**. Every query reads other modules' models.
 
-### 16.1 What moved, and why
+### 19.1 What moved, and why
 
 The standalone **Analytics Overview** and **Risk Alerts** screens have been **removed** — they return **410 Gone** with a message naming the replacement.
 
@@ -1077,7 +1483,7 @@ The reasoning: the bottleneck and the alerts were the only parts of those pages 
 
 They are 410 rather than deleted for the same reason the old production routes are: a 404 on a screen that worked yesterday reads as *"the server is broken"*.
 
-### 16.2 Analytics — the drill-down
+### 19.2 Analytics — the drill-down
 
 ```
 /explorer  ──▶  /orders/{id}/tree  ──▶  /styles/{id}/detail  ──▶  /pieces/detail
@@ -1090,7 +1496,7 @@ Plus two features that stand on their own:
 
 Analytics is a **live** view. Payroll of record stays the frozen wage run, and the two legitimately differ mid-period.
 
-### 16.3 The five dashboards
+### 19.3 The five dashboards
 
 Each is a **composite** — one call returns a whole screen.
 
@@ -1099,10 +1505,13 @@ Each is a **composite** — one call returns a whole screen.
 | **Cutting** | Cutting Manager | KPIs, current order, per-cutter performance, leather lots, per-order progress, 14-day trend |
 | **Lining** | Lining Manager | The same shape for the lining leg, plus **upcoming work** — leather-cut pieces not yet lining-cut |
 | **Stitching** | Stitching Manager | Top KPIs, the **pre-store** (fusing/pasting) and **post-store** (line/shell/final) blocks, the store handoff, the running style's funnel, per-stage employee performance |
-| **Store** | Store Manager | Drawer KPIs, current styles in store, the filterable drawer grid, held drawers, empty drawers available for reuse |
+| **Store** | Store Manager | Store KPIs, current styles in store, the filterable garment list, what is held and what is ready to send |
+| **Cutting grid** | Cutting Manager | One row per garment, the hides on each, the present-cutters picker, approve / reopen |
+| **Inspections** | QC Inspector, DM | Record a reject or rework against the responsible stage; the DM's approval queue |
+| **Job work** | DM, MD | Dispatch to a vendor, the overdue chase list, book returns and see what they cost |
 | **Direct Manager** | DM / MD | The factory-wide control panel — **composed from the four stage dashboards' own aggregates**, so this screen and the four can never disagree |
 
-### 16.4 The alerts
+### 19.4 The alerts
 
 `GET /dashboard/alerts` returns three blocks, most-actionable first:
 
@@ -1114,7 +1523,7 @@ Each is a **composite** — one call returns a whole screen.
 
 `alert_count` is what a badge should render. **Empty lists are a good day, not a missing feature.**
 
-### 16.5 Piece tracking — one handler, six URLs
+### 19.5 Piece tracking — one handler, six URLs
 
 A piece's history is the same history whichever screen is asking. `/dashboard/pieces/{code}` is canonical; five per-stage aliases exist so each dashboard keeps its own URL namespace.
 
@@ -1128,7 +1537,7 @@ Three neighbouring reads answer genuinely different questions — worth keeping 
 | `/dashboard/pieces/{code}` | The **full stage history** with the STORE overlay and consumption |
 | `/analytics/pieces/{code}/story` | The analytics **life story** |
 
-### 16.6 Two honesty features
+### 19.6 Two honesty features
 
 **The consumption grid is one stage per response.** It previously returned both cut stages while joining the leather lot, so lining-cut events appeared with a blank lot and their quantities counted toward leather totals. Asking for a consumption grid on any non-cut stage is a **422**, not a silently empty list — it is a question with no answer.
 
@@ -1140,15 +1549,15 @@ Three neighbouring reads answer genuinely different questions — worth keeping 
 
 Everything here can be built against the mock payloads in the companion *API Reference*. You do not need a running backend.
 
-## 17. The screen inventory
+## 20. The screen inventory
 
-### 17.1 The single most important UI rule
+### 20.1 The single most important UI rule
 
 > **The scan screen never asks the operator to pick a stage.**
 
 Send the piece barcode and the worker card to `GET /production/piece-state`, read `next_stage` and `ready_to_log`, and either post the log or render the blockers. An operator choosing a stage from a dropdown is an operator who will eventually choose the wrong one.
 
-### 17.2 Import & release
+### 20.2 Import & release
 
 **Screen: Order index** — `GET /imports/orders`. A searchable table with the rolled-up `breakdown_status` badge, `pieces_minted`, and a `breakdown_url` per row. Ordered most-recently-worked-on first.
 
@@ -1185,8 +1594,6 @@ Build:
 │  CLERMONT   60 pieces    Needs lining?   ( ) Yes  ( ) No   ⚠    │
 │  CARNABY    40 pieces    Needs lining?   (•) Yes  ( ) No        │
 │                                                                 │
-│  ⓘ Drawer pool: 143 free · 100 needed                          │
-│  [x] Grow the drawer pool if short                              │
 │                                                                 │
 │              [ Cancel ]          [ Release ]  ← disabled        │
 └────────────────────────────────────────────────────────────────┘
@@ -1195,11 +1602,11 @@ Build:
 Build:
 - **Disable Release until every style has an explicit yes/no.** Never default the radio. `null` is a real state and the server rejects it.
 - Offer a **"same answer for all"** control that maps to the top-level `needs_lining` — that is a declaration, not a guess.
-- Show the drawer pool position **before** releasing. Read `GET /drawers/pool`.
-- On the response, render `minted` per style and **`pieces_waiting_for_drawer` prominently** if non-zero.
+- **Delete the drawer-pool banner and the "grow the pool" checkbox.** There is no pool: `pieces_waiting_for_drawer` is gone from the response and `grow_drawer_pool` on the body is ignored. Release can no longer outrun anything.
+- On the response, render `minted` per style.
 - `rejected[]` entries are per-style with reasons. **Read `minted`, not the HTTP status.**
 
-### 17.3 The scan screens
+### 20.3 The scan screens
 
 **Screen: Cut screen** (Cutting / Lining Manager)
 
@@ -1233,7 +1640,7 @@ Build:
 ├───────────────────────────────────────────────────────────────────┤
 │  PC-004821    CLERMONT · BLACK · 50 · #017                        │
 │  Now:  PASTING ✓          Next:  LINE_STITCHING                   │
-│  Drawer DRW-0042 · holding both · SENDED ✓                        │
+│  Store: leather + lining ✓ · SENDED ✓                             │
 │                                                                    │
 │  ✅ Ready to log                        [ Log ]                    │
 └───────────────────────────────────────────────────────────────────┘
@@ -1243,11 +1650,11 @@ Blocked variant:
 
 ```
 │  Now:  PASTING ✓          Next:  LINE_STITCHING                   │
-│  Drawer DRW-0042 · holding leather · waiting for LINING           │
+│  Store: leather only · waiting for LINING                         │
 │                                                                    │
 │  🔒 Blocked                                                        │
-│     merge   — the drawer has not been sent                        │
-│     Ask the store to complete and send this drawer.               │
+│     merge   — the store has not released this garment             │
+│     Ask the store to complete and send it.                        │
 ```
 
 Build:
@@ -1277,49 +1684,54 @@ Build:
 - Handle `stage: "MIXED"` — read `stage_by_piece`.
 - Offer **`preview: true`** as a "check before logging" affordance.
 
-### 17.4 The store screens
+### 20.4 The store screens
 
-**Screen: Drawers list**
+**Screen: Store list** — `GET /store/pieces`
+
+> **This replaces the 200-cell drawer grid, and it is a net deletion.** The old
+> screen rendered a fixed board of boxes and asked the operator to find the right
+> one. This one is a filterable list of garments. There is no capacity bar, no
+> free-drawer count and no shortfall, because none of those things exist any more.
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────────┐
-│  Drawers    [search: 42       ]   ☑ send queue only    sort: recent ▾          │
-├────────┬──────────┬───────────────────┬─────────┬──────────┬─────────────────┤
-│ DRW-   │ STATE    │ HOLDING           │ GARMENT │ CAN SEND │ ACTIVITY        │
-├────────┼──────────┼───────────────────┼─────────┼──────────┼─────────────────┤
-│ 0042 📌│ received │ leather + lining ✓│ #017    │  ✅      │ received · 2m   │
-│ 0117   │ holding  │ leather only      │ #023    │  ✕       │ scanned · 14m   │
-│ 0008   │ waiting  │ empty             │  —      │  ✕       │ released · 1h   │
-├────────┴──────────┴───────────────────┴─────────┴──────────┴─────────────────┤
+│  Store    [search: PC-0048   ]   ☑ ready to send only    state: all ▾          │
+├────────────┬──────────┬───────────────────┬────────────┬──────────┬──────────┤
+│ PIECE      │ STATE    │ HOLDING           │ GARMENT    │ CAN SEND │ SINCE    │
+├────────────┼──────────┼───────────────────┼────────────┼──────────┼──────────┤
+│ PC-004821  │ received │ leather + lining ✓│ CLERMONT   │  ✅      │ 2m       │
+│ PC-004822  │ holding  │ leather only      │ CLERMONT   │  ✕       │ 14m      │
+│ PC-004901  │ waiting  │ nothing yet       │ CARNABY    │  ✕       │ —        │
+├────────────┴──────────┴───────────────────┴────────────┴──────────┴──────────┤
 │  ☑ 1 selected                                     [ Send selected ]           │
 └───────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Build:
-- **`state` and `holding` are different questions.** State is the lifecycle; holding is what is physically inside. They stop agreeing at `received` and `sended`. Render both.
+- **`store_state` and `holding` are different questions.** The state is the lifecycle; holding is what has physically arrived. They stop agreeing at `received` and `sended`. Render both.
 - Drive the Send checkbox off **`can_send`** — it applies the same rule the server enforces, so the queue can never offer a row the server refuses.
-- Render `last_activity` **with** `last_activity_at`: *"sent · 2 min ago"*.
-- Keep the client-side recently-searched list and replay it as `pin_codes`. Band pinned rows separately — a pinned drawer from last week must not look like the busiest drawer on the floor.
-- A row with `barcode: null` is a **broken label**: show it, do not print it.
-- Use `needs_lining` from the row (the effective requirement), and show `lining_reason` when present.
+- Use `needs_lining` from the row (the **effective** requirement, resolved from the style, the SKU and the cut history), and show `lining_reason` when present. Do not read the piece's stored flag.
+- Search accepts the compact `PC-…` code and the long alias. Scanning a garment should jump straight to its row.
 
-**Screen: Store scan** — enforce the order visually: employee → drawer → piece. All three are enforced server-side anyway, but the screen should make the sequence obvious.
+**Screen: Store scan** — **employee, then piece.** Two fields, not three. The drawer step is gone, and removing it is the whole "make merging easy" change: the piece barcode already identifies the garment.
 
 Render the `kit` block on **every** scan, not just accessory ones — the person holding the leather is the one who also has to find the buttons. `status: NOT_REQUIRED` means **hide the checklist**, not render an empty one. *"No accessories declared"* and *"accessories declared but none issued"* are different facts.
 
 On an accessory scan, show `issued_now`, `already_issued`, `outstanding` and — importantly — **`unresolved`**, where a line could not be matched to a lot (`reason: NONE` or `AMBIGUOUS` with candidate lot ids).
 
-`auto_received: true` deserves a visible confirmation: *"This drawer is now complete and ready to send."*
+`auto_received: true` deserves a visible confirmation: *"This garment is now complete and ready to send."*
+
+A **409** on a lining scan means the lining has not been cut yet. Say that, and offer the lining-cut screen — the operator is holding a part the system has no record of anybody making.
 
 **`sent: false` plus `next_action`** exists because scanning is **not** completion. Say so explicitly.
 
-### 17.5 Attendance
+### 20.5 Attendance
 
 The gate screen is one input and two buttons: scan a card, in or out. Show the resolved worker's name and photo-less identity card immediately, then the result — late flag, whether this was a re-tap (idempotent no-op).
 
 Keep the manual door one click away for a failed card. `/attendance/today` is the roster.
 
-### 17.6 Wages
+### 20.6 Wages
 
 **Screen: Order cards → style cards → rate sheet.** Three levels. The `n of m priced` badge at each level is the point — unpriced styles pay zero silently.
 
@@ -1349,7 +1761,7 @@ Keep the manual door one click away for a failed card. `/attendance/today` is th
 
 `scope_is_label: true` must render differently from a genuine narrowing. `recompute_count > 0` or `reopen_count > 0` should be visible on the header — a rebuilt run is a different document from the one paid against.
 
-### 17.7 Dashboards
+### 20.7 Dashboards
 
 Each is one call. Render the composite. Read **`meta.unsupported`** and render those figures as *"not tracked"* rather than as zero.
 
@@ -1357,17 +1769,17 @@ The alerts block belongs on **every** manager dashboard, with `alert_count` as a
 
 ---
 
-## 18. State machines you must render
+## 21. State machines you must render
 
 **Style production status**
 
 | From | Action | To | Guard |
 |---|---|---|---|
-| `DRAFT` | release | `RELEASED` | Every style must declare `needs_lining`. **Mints pieces + barcodes + drawers** |
+| `DRAFT` | release | `RELEASED` | Every style must declare `needs_lining`. **Mints pieces + barcodes** |
 | `DRAFT` | cancel | `CANCELLED` | |
 | `RELEASED` | *(nothing)* | — | Frozen. Re-release only tops up quantity |
 
-**Drawer state**
+**Store state** *(on the piece — formerly the drawer's)*
 
 | From | Trigger | To |
 |---|---|---|
@@ -1404,9 +1816,9 @@ LINING_CUTTING  ─┘                                        │
 
 ---
 
-## 19. Scan-driven UX — the patterns that matter
+## 22. Scan-driven UX — the patterns that matter
 
-### 19.1 The resolve-first pattern
+### 22.1 The resolve-first pattern
 
 Every workflow starts with a scan of unknown type. Call `GET /barcode/resolve?code=…` and branch on `type`:
 
@@ -1415,7 +1827,8 @@ const r = await resolve(code);
 switch (r.type) {
   case "EMPLOYEE":     return setActor(r.employee);        // next_expected_scan tells you what's next
   case "PIECE":        return setPiece(r.piece);
-  case "DRAWER":       return setDrawer(r.drawer);
+  case "LEATHER_SHEET": return setSheet(r.sheet);   // one physical hide
+  // case "DRAWER":    withdrawn — historical codes only
   case "LEATHER_LOT":
   case "LINING_LOT":
   case "ACCESSORY_LOT": return setLot(r.lot);
@@ -1432,7 +1845,7 @@ Handle the three outcomes distinctly:
 
 **Use `next_expected_scan` to drive the wizard.** It is answered for every type, including EMPLOYEE — the first scan of every workflow.
 
-### 19.2 The state-then-log pattern
+### 22.2 The state-then-log pattern
 
 ```
    scan piece + scan worker
@@ -1447,11 +1860,11 @@ Handle the three outcomes distinctly:
 
 The read uses the same predicates as the write, so **a card the UI opens is a card the log will accept.**
 
-### 19.3 Batch accumulation
+### 22.3 Batch accumulation
 
 Cut and pipeline screens accumulate scans, then post once. Show a running count, allow removal, and offer `preview: true` before committing a large tray.
 
-### 19.4 Never poll
+### 22.4 Never poll
 
 Nothing in Phase 1 is asynchronous. Every write is synchronous and returns its full result. There is no 202, no task id, no SSE. Post and render.
 
@@ -1459,14 +1872,14 @@ Nothing in Phase 1 is asynchronous. Every write is synchronous and returns its f
 
 ---
 
-## 20. The error contract
+## 23. The error contract
 
-### 20.1 The shape
+### 23.1 The shape
 
 FastAPI's `detail` wrapper, containing either a plain string or a structured object:
 
 ```json
-{ "detail": "No drawer with code 'DRW-9999'." }
+{ "detail": "No piece with code 'PC-9999'." }
 ```
 ```json
 { "detail": { "error": "stale_revision", "current_revision": 7 } }
@@ -1487,7 +1900,7 @@ Validation failures from Pydantic come back as an **array** of `{loc, msg, type}
 
 Every `500` carries a `request_id`. **Show it** — support traces the failure by it.
 
-### 20.2 Status codes
+### 23.2 Status codes
 
 | Code | Means | Do |
 |---|---|---|
@@ -1503,12 +1916,12 @@ Every `500` carries a `request_id`. **Show it** — support traces the failure b
 | `422` | Validation | Field-level, or a domain sentence |
 | `500` | Server error | Show `request_id` |
 
-### 20.3 The 409s and 410s worth handling individually
+### 23.3 The 409s and 410s worth handling individually
 
 | Situation | Meaning | UI response |
 |---|---|---|
 | Released style edited | Frozen — barcodes printed | Drive editability off `production_status` |
-| Piece scanned into wrong drawer | The merge map is the authority | *"This garment belongs in DRW-xxxx"* |
+| Lining stored before it was cut | The store holds finished parts, not pending ones | *"Log the lining cut first"* |
 | Ambiguous material lot | Several lots match the typed spec | **Render the named candidates and let them pick** |
 | Lot retire with stock reserved | Reservations outstanding | Say what is holding it |
 | Lot spec collision | Two lots a cutter cannot tell apart | Offer the existing lot |
@@ -1519,7 +1932,7 @@ Every `500` carries a `request_id`. **Show it** — support traces the failure b
 | **410 on a barcode** | Retired card / lot / piece | *"This was deactivated"* |
 | **410 on an endpoint** | Removed deliberately | The message names the replacement |
 
-### 20.4 The 422s that are really business rules
+### 23.4 The 422s that are really business rules
 
 | Where | Message |
 |---|---|
@@ -1534,7 +1947,7 @@ Every `500` carries a `request_id`. **Show it** — support traces the failure b
 
 ---
 
-## 21. Badges, chips and status vocabulary
+## 24. Badges, chips and status vocabulary
 
 | Family | Value | Colour | Note |
 |---|---|---|---|
@@ -1542,8 +1955,11 @@ Every `500` carries a `request_id`. **Show it** — support traces the failure b
 | | `RELEASED` | green | Frozen; barcodes exist |
 | | `CANCELLED` | red, struck | |
 | **Breakdown rollup** | `NOT_UPLOADED` grey · `DRAFT` amber · `PARTIALLY_RELEASED` blue · `RELEASED` green · `CANCELLED` red | | |
-| **Drawer state** | `waiting` grey · `merged` blue · `holding_leather` / `holding_lining` amber · `holding_both` teal · `received` green · `sended` **purple** | | Purple: it has left the store |
-| **Drawer holding** | `EMPTY` · `HOLDING LEATHER` · `HOLDING LINING` · `HOLDING BOTH` | | **Different question from state** |
+| **Store state** | `waiting` grey · `merged` blue · `holding_leather` / `holding_lining` amber · `holding_both` teal · `received` green · `sended` **purple** | | Purple: it has left the store |
+| **Store holding** | `EMPTY` · `HOLDING LEATHER` · `HOLDING LINING` · `HOLDING BOTH` | | **Different question from state** |
+| **Sheet status** | `IN_STOCK` grey · `ALLOCATED` blue · `ISSUED` amber · `CONSUMED` green · `RETURNED` / `SCRAPPED` red | | One physical hide |
+| **Cutting row** | `DRAFT` grey · `APPROVED` green · `LOGGED` teal · `CANCELLED` red | | `APPROVED` is read-only |
+| **Job work** | `OUT` amber · `PARTIAL` blue · `BACK` green · `SHORT` / `REJECTED` red | | Overdue overrides with red |
 | **Stage card** | `completed` green ✓ · `next` **blue, prominent** · `locked` grey 🔒 · `not_applicable` faint | | |
 | **Log outcome** | `logged` green · `rework` amber ↻ · `not_found` grey · `completed` teal | | |
 | | `sequence_blocked` / `merge_blocked` / `role_blocked` **red** | | |
@@ -1562,13 +1978,13 @@ Every `500` carries a `request_id`. **Show it** — support traces the failure b
 
 # PART D — FOR BACKEND DEVELOPERS
 
-## 22. Architecture and the layering rules
+## 25. Architecture and the layering rules
 
-### 22.1 A modular monolith
+### 25.1 A modular monolith
 
 One deployable FastAPI app, twelve internal modules (plus five Phase-2 ones). Cross-module calls go **through services**, never repositories or models.
 
-### 22.2 The three layers
+### 25.2 The three layers
 
 ```
    ROUTER      HTTP only. Resolve the role dependency, resolve BARCODES TO IDS,
@@ -1582,7 +1998,7 @@ One deployable FastAPI app, twelve internal modules (plus five Phase-2 ones). Cr
 
 **Barcode resolution happens in the router.** That is deliberate and load-bearing: the service then sees ids only, so the barcode door and the manual door converge before any business logic runs and cannot behave differently.
 
-### 22.3 Where business law lives
+### 25.3 Where business law lives
 
 Four things are **code, not config**, and `core/enums_barcode.py` is where they live:
 
@@ -1595,7 +2011,7 @@ The `operation` table remains the source of truth for **labels and rates** — t
 
 `operation_access` is a runtime **escape hatch** on top of the enum default, so an MD can grant an exception without a deploy.
 
-### 22.4 One helper, both paths
+### 25.4 One helper, both paths
 
 `next_chain_stage(completed_codes)` is pure — a set of codes in, a stage out, no database.
 
@@ -1603,17 +2019,17 @@ It exists so the **write** path (which decides what a scan logs) and the **read*
 
 **When you add a stage, add it here and both sides move together.**
 
-### 22.5 Async discipline
+### 25.5 Async discipline
 
-Every blocking call goes through `run_in_threadpool` — openpyxl parsing, the sync bulk loader, drawer-pool operations. The event loop is never blocked.
+Every blocking call goes through `run_in_threadpool` — openpyxl parsing and the sync bulk loader. The event loop is never blocked.
 
 The import path deliberately keeps the **proven sync loader** and runs it in a worker thread rather than rewriting it as async.
 
 ---
 
-## 23. Module map — every file and what it is for
+## 26. Module map — every file and what it is for
 
-### 23.1 `users/` — 502 lines
+### 26.1 `users/` — 502 lines
 
 | File | Lines | Purpose |
 |---|---|---|
@@ -1626,7 +2042,7 @@ The import path deliberately keeps the **proven sync loader** and runs it in a w
 
 > **Why `deps.py` is in users and not core:** it depends on the concrete `User` model, and core must not import modules (enforced by import-linter). `core/security.py` keeps only the model-agnostic primitives.
 
-### 23.2 `employees/` — 642 lines
+### 26.2 `employees/` — 642 lines
 
 | File | Lines | Purpose |
 |---|---|---|
@@ -1636,7 +2052,7 @@ The import path deliberately keeps the **proven sync loader** and runs it in a w
 | `repository.py` | 80 | |
 | `models.py` | 52 | |
 
-### 23.3 `clients/` — 1,116 lines
+### 26.3 `clients/` — 1,116 lines
 
 | File | Lines | Purpose |
 |---|---|---|
@@ -1647,12 +2063,12 @@ The import path deliberately keeps the **proven sync loader** and runs it in a w
 | `schemas.py` | 136 | |
 | `utlis.py` | 85 | *(sic)* |
 
-### 23.4 `imports/` — 3,234 lines
+### 26.4 `imports/` — 3,234 lines
 
 | File | Lines | Purpose |
 |---|---|---|
 | `breakdown.py` | 834 | **The breakdown table, edits, cancel, and RELEASE** |
-| `premint.py` | 579 | **The mint** — pieces, barcodes, drawer merges, pool management |
+| `premint.py` | 579 | **The mint** — pieces and barcodes. The four-phase flush collapsed to two when the pool went: phases 1 and 3 existed only for the piece↔drawer FK cycle |
 | `router.py` | 536 | 9 endpoints. Also holds the release-request validation |
 | `load_to_db.py` | 423 | The idempotent bulk loader |
 | `_size_band.py` | 398 | Size-band parsing |
@@ -1661,7 +2077,7 @@ The import path deliberately keeps the **proven sync loader** and runs it in a w
 | `import_engine.py` | 168 | `build_preview` |
 | `parse_production.py` | 160 | |
 
-### 23.5 `barcode/` — 1,957 lines
+### 26.5 `barcode/` — 1,957 lines
 
 | File | Lines | Purpose |
 |---|---|---|
@@ -1671,7 +2087,7 @@ The import path deliberately keeps the **proven sync loader** and runs it in a w
 | `router.py` | 178 | 10 endpoints |
 | `schemas.py` | 145 | |
 
-### 23.6 `materials/` — 2,855 lines
+### 26.6 `materials/` — 2,855 lines
 
 | File | Lines | Purpose |
 |---|---|---|
@@ -1683,7 +2099,7 @@ The import path deliberately keeps the **proven sync loader** and runs it in a w
 | `schemas.py` | 200 | |
 | `style_spec_schemas.py` | 91 | |
 
-### 23.7 `production/` — 2,287 lines
+### 26.7 `production/` — 2,287 lines
 
 | File | Lines | Purpose |
 |---|---|---|
@@ -1693,7 +2109,13 @@ The import path deliberately keeps the **proven sync loader** and runs it in a w
 | `schemas.py` | 327 | **The rich `LogResult` and `PieceState`** |
 | `models.py` | 130 | `operation`, `operation_access`, `style_operation`, `piece`, `production_event` |
 
-### 23.8 `drawers/` — 1,844 lines
+### 26.8 `drawers/` — 1,844 lines · **WITHDRAWN**
+
+> **Not mounted.** `app/main.py` keeps the import and the `include_router` call
+> commented out with the reason beside them, and the files stay on disk so the
+> history of how the store used to work is readable. Nothing calls into them.
+> Its replacement is `store/` — see chapter 14.
+
 
 | File | Lines | Purpose |
 |---|---|---|
@@ -1703,7 +2125,54 @@ The import path deliberately keeps the **proven sync loader** and runs it in a w
 
 *No `models.py` — the `drawer` table lives in `barcode/models.py`.*
 
-### 23.9 `attendance/` — 1,063 lines
+### 26.9 `cutting/` — the grid
+
+`models.py` `cutting_row` · `schemas.py` the grid contract · `repository.py` all
+DB access · `service.py` the allocator, the sheet add/remove, approve and reopen ·
+`router.py` HTTP only.
+
+**The allocator is the only interesting algorithm here**: nearest-fit hides from
+`IN_STOCK`, matching the article and colour, until the running dcm reaches the
+size's target. It moves what it takes to `ALLOCATED`, so two rows can never claim
+the same skin. `app/core/leather_norms.py` holds the size → dcm table it aims at —
+a pure module with no imports, beside `kit_rules.py` and `lining_rules.py`.
+
+---
+
+### 26.10 `store/` — what replaced `drawers/`
+
+No `models.py`: **the store's state lives on `piece`**, which is the whole point
+of the change. `service.py` carries `store_scan`, `send`, `list_pieces`,
+`piece_row`, `needs_lining` and `release_nocommit`.
+
+`needs_lining` and `_needs_lining_map` were **relocated here, not deleted** —
+production calls them from three places and would have broken silently.
+
+---
+
+### 26.11 `jobwork/` — garments at an outside factory
+
+`models.py` `vendor`, `job_work`, `job_work_piece` · `service.py` dispatch,
+receive, the cost roll-up and `current_job_for_piece` (which is what the
+production gate calls) · `router.py` HTTP only.
+
+`production_event.vendor_id` FKs to `vendor`, which is why
+`app/main.py` imports `jobwork.models` near the top — the shared MetaData has to
+see the table before the production models resolve their FK.
+
+---
+
+### 26.12 Inspections — inside `production/`
+
+`inspection.py`, `inspection_router.py` and `inspection_schemas.py` sit in
+`production/` rather than in a module of their own, because a rejection is a
+statement about a production event and the re-walk is a production concept. Its
+sibling is `corrections.py` — reassign and delete for an event that named the
+wrong worker.
+
+---
+
+### 26.13 `attendance/` — 1,063 lines
 
 | File | Lines | Purpose |
 |---|---|---|
@@ -1714,7 +2183,7 @@ The import path deliberately keeps the **proven sync loader** and runs it in a w
 | `repository.py` | 61 | |
 | `geofence.py` | 44 | **Vestigial** — the feature is removed |
 
-### 23.10 `wages/` — 3,074 lines
+### 26.14 `wages/` — 3,074 lines
 
 | File | Lines | Purpose |
 |---|---|---|
@@ -1725,7 +2194,7 @@ The import path deliberately keeps the **proven sync loader** and runs it in a w
 | `models.py` | 175 | `rate`, `wage_run`, `wage_line`, `wage_line_detail` |
 | `proration.py` | 68 | Monthly calendar pricing |
 
-### 23.11 `analytics/` — 1,365 lines · `dashboard/` — 4,425 lines
+### 26.15 `analytics/` — 1,365 lines · `dashboard/` — 4,425 lines
 
 | File | Lines | Purpose |
 |---|---|---|
@@ -1741,21 +2210,21 @@ Neither module owns a table.
 
 ---
 
-## 24. The data model
+## 27. The data model
 
-### 24.1 Conventions
+### 27.1 Conventions
 
 `UUIDMixin` (portable `GUID`) + `TimestampMixin` on every table. Money `Numeric(12,2)`; quantities `Numeric(12,3)` or `(14,3)`; semi-structured data `JSON_VARIANT`.
 
 **Status columns are `VARCHAR` storing a `str`-Enum's `.value` — with one exception.**
 
-### 24.2 The one native enum
+### 27.2 The one native enum
 
 **`app_user.role` is a native Postgres enum (`user_role`).** Everything else in Phase 1 is VARCHAR.
 
-That has a sharp migration consequence — see §27.2.
+That has a sharp migration consequence — see §30.2.
 
-### 24.3 The tables
+### 27.3 The tables
 
 ```
 IDENTITY
@@ -1776,13 +2245,16 @@ PRODUCTION
   operation               code, label, sequence  (labels + rates = config)
   operation_access        role → operation runtime override
   style_operation         which operations a style actually uses
-  piece                   ★ ONE GARMENT. (sku_id, seq) unique. needs_lining, drawer_id
+  piece                   ★ ONE GARMENT. (sku_id, seq) unique. needs_lining,
+                            store_state, leather_in, lining_in, accessories_in,
+                            store_entered_at   (drawer_id retained, unwritten)
   production_event        ★ THE CENTRAL TABLE. one worker, one op, ONE PIECE, one day
                             + leather_lot_id / lining_lot_id / consumption_qty at cuts
 
 BARCODE & STORE           (all in barcode/models.py)
   barcode_registry        ★ every scannable code. type, status, is_alias, 7 nullable FKs
-  drawer                  static code, recycling state, current_piece_id
+  drawer                  static code, recycling state  — FROZEN, audit only
+  material_sheet          ★ ONE PHYSICAL HIDE. dcm, status, cutting_row_id
   material_lot            category/subtype/article/colour/thickness/size, on_hand, attributes
   material_reservation    soft allocation
   material_receipt        approved / rejected quantities
@@ -1790,6 +2262,16 @@ BARCODE & STORE           (all in barcode/models.py)
   supplier_order          ORDERED → ARRIVED
   style_material_spec     ★ THE RECIPE. style or SKU-scoped lines
   piece_material_issue    ★ THE ISSUE LEDGER. what was actually given to one garment
+
+CUTTING
+  cutting_row             ★ ONE GARMENT'S CUT SHEET. target/total dcm, status,
+                            cutter, rc_no  (its hides join by material_sheet)
+
+QUALITY & OUTSOURCING
+  piece_inspection        reject / rework + the stage RESPONSIBLE for the defect
+  vendor                  an outside factory
+  job_work                a dispatch: vendor, stage, dates, status, rate
+  job_work_piece          one garment on that dispatch (OUT | BACK | SHORT | REJECTED)
 
 ATTENDANCE
   shift_config            singleton policy row
@@ -1806,7 +2288,14 @@ CROSS-CUTTING (core/models.py)
   document / notification shared with Phase 2
 ```
 
-### 24.4 The piece ↔ drawer cycle
+### 27.4 The piece ↔ drawer cycle *(historical)*
+
+> The store no longer uses either end of this link — `piece.store_state` replaced
+> it. Both columns survive so in-flight data and the audit trail stay readable,
+> and the FK rules below still govern them. It is documented because the
+> `ondelete` reasoning applies to every 1:1 cycle in the schema, not because the
+> drawer is still in use.
+
 
 `piece.drawer_id` and `drawer.current_piece_id` are the same 1:1 link read from opposite ends — and they are **not interchangeable**:
 
@@ -1819,7 +2308,7 @@ The cycle is deliberate. What was missing was a rule for what happens when one e
 
 `use_alter=True` sits on the **drawer** side, and that placement is about DDL ordering, not delete semantics. A cycle means `create_all` cannot topologically sort `{piece, drawer}`; SQLAlchemy silently resolved it by moving **every** foreign key on **both** tables out to `ALTER TABLE`. SQLite cannot execute those, so on the test harness `piece` was created with **no FKs at all** — `sku_id` included. Marking this one back-pointer as the alterable edge lets the sort succeed, `piece` keeps its constraints inline, and the integration test that runs `PRAGMA foreign_keys=ON` can still catch a bad insert order.
 
-### 24.5 `SET NULL` on the registry
+### 27.5 `SET NULL` on the registry
 
 Every nullable FK on `barcode_registry` carries SET NULL, so a parent row can actually be deleted instead of being pinned forever.
 
@@ -1832,7 +2321,7 @@ On this table that is the least comfortable rule, because a registry row exists 
 
 ---
 
-## 25. Cross-module choreography
+## 28. Cross-module choreography
 
 ```
   ClientService.create_client / add_order
@@ -1881,9 +2370,9 @@ On this table that is the least comfortable rule, because a registry row exists 
 
 ---
 
-## 26. The key algorithms
+## 29. The key algorithms
 
-### 26.1 Stage inference
+### 29.1 Stage inference
 
 ```python
 def next_chain_stage(completed_codes):
@@ -1899,7 +2388,7 @@ Pure. No database. Called by both the write path and both read paths.
 
 **"Furthest completed, plus one"**, not "first not completed" — a reworked or out-of-order piece advances from how far it actually got.
 
-### 26.2 The four gates
+### 29.2 The four gates
 
 ```
 GATE 1  ROLE       role in _STAGE_BYPASS_ROLES?           → pass
@@ -1925,7 +2414,7 @@ GATE 4  MERGE      stage is not LINE_STITCHING?           → pass
 
 **Gate 2 fails open on purpose.** Seeded data carries uncatalogued job titles, and refusing to record work because HR has not backfilled a vocabulary is worse than a warning.
 
-### 26.3 Completeness
+### 29.3 Completeness
 
 ```
   needs_lining = EFFECTIVE requirement (style → SKU → cut history)
@@ -1938,11 +2427,11 @@ GATE 4  MERGE      stage is not LINE_STITCHING?           → pass
   SENDED → the merge gate opens for that piece
 ```
 
-### 26.4 Part inference
+### 29.4 Part inference
 
 Reads the piece's cut history and what the drawer is already holding. Returns **LEATHER or LINING and nothing else** — never ACCESSORY, because a mis-inferred kit spends stock. `part_inferred` on the response stays honest about whether the server chose.
 
-### 26.5 Wage computation
+### 29.5 Wage computation
 
 ```
   1. GUARD          overlap with an existing run over this window?  → 409 naming it
@@ -1959,7 +2448,7 @@ Reads the piece's cut history and what the drawer is already holding. Returns **
 
 Recompute repeats 3–5 with the **same window and scope**, keeping the run id and incrementing `recompute_count`.
 
-### 26.6 The stock decrement
+### 29.6 The stock decrement
 
 ```
   per batch, once, in the same transaction as the events:
@@ -1974,9 +2463,9 @@ The garment is physically cut. Refusing to record it would lose the traceability
 
 ---
 
-## 27. Configuration and migration notes
+## 30. Configuration and migration notes
 
-### 27.1 Settings that change behaviour
+### 30.1 Settings that change behaviour
 
 | Setting | Effect |
 |---|---|
@@ -1985,7 +2474,7 @@ The garment is physically cut. Refusing to record it would lose the traceability
 | Shift policy | **Not config** — it is a database row, editable by HR |
 | Drawer pool size | **Not config** — a real table, grown by DM/MD |
 
-### 27.2 The native-enum trap
+### 30.2 The native-enum trap
 
 **`app_user.role` is a native Postgres enum.** Adding a member to `UserRole` in Python is **not enough** — Postgres needs the label added to the type:
 
@@ -2000,17 +2489,17 @@ if op.get_bind().dialect.name == "postgresql":
 
 This bit `lining_manager`, `security` and `merchandiser`. Write the name exactly as it appears left of the `=` in `core/enums.py`. The schema's other native enums (`attendance_source`, `wage_type`, `run_status`) are all uppercase names — match them.
 
-### 27.3 Model imports
+### 30.3 Model imports
 
 **Every model module must be imported in `main.py`** so `Base.metadata` sees every table. A missed import makes Alembic autogenerate try to **DROP** the table.
 
 `barcode.models` holds the barcode, material, drawer, supplier, style-spec and issue-ledger tables. `dashboard` and `analytics` own none — verify that before adding a model-import line for them.
 
-### 27.4 Router locking
+### 30.4 Router locking
 
 Manager-only routers are wrapped with `block_employees`. **Auth, users, attendance and `/barcode/resolve` stay open** at the router level — the attendance write routes do their own operator gate, and resolve must stay reachable from the attendance screen.
 
-### 27.5 Route ordering
+### 30.5 Route ordering
 
 FastAPI matches in **registration order**. Three files depend on it:
 
@@ -2022,7 +2511,7 @@ FastAPI matches in **registration order**. Three files depend on it:
 
 Style codes are **query** parameters, not path segments, for a related reason: a code like `JP-CLERMONT_VEST` is fine in a path, but the day someone imports a style whose name slugs to something containing a slash, a path parameter breaks and a query parameter does not.
 
-### 27.6 Known traps — do not reintroduce
+### 30.6 Known traps — do not reintroduce
 
 | Trap | Symptom |
 |---|---|
@@ -2037,7 +2526,7 @@ Style codes are **query** parameters, not path segments, for a related reason: a
 
 ---
 
-## 28. A code-review checklist
+## 31. A code-review checklist
 
 ### Layering
 - [ ] Router contains no business logic — dependency, **barcode→id resolution**, delegate.
@@ -2161,8 +2650,14 @@ Style codes are **query** parameters, not path segments, for a related reason: a
 
 | Action | Written when |
 |---|---|
-| `DRAWER_RECEIVED` | A drawer reaches completeness |
+| `DRAWER_RECEIVED` | A garment reaches completeness in the store *(name kept from the drawer era)* |
 | `DRAWER_SENDED` | A batch is released to line-stitching |
+| `CUTTING_ROW_APPROVED` | A cut sheet is frozen — these hides, this total, this cutter |
+| `CUTTING_ROW_REOPENED` | An approved cut sheet is un-frozen |
+| `ATTENDANCE_CORRECTED` | A punch is edited, or **re-allocated** — the `after` payload carries `reallocated_from` and `production_events_moved` |
+| `ATTENDANCE_DELETED` | A punch is removed. `reason` is mandatory |
+| `PRODUCTION_EVENT_REASSIGNED` | Work was filed against the wrong worker |
+| `PRODUCTION_EVENT_DELETED` | A record that should not exist is removed, and its stock returned |
 | `EMPLOYEE_BARCODE_REISSUE` | A card is replaced |
 | `EMPLOYEE_BARCODE_DEACTIVATE` | A worker leaves |
 | `MATERIAL_RECEIVED` | A delivery is received |

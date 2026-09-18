@@ -180,13 +180,34 @@ async def test_salary_is_returned_only_to_hr_dm_md(client, role, expect_pay):
 
 # ═══════════════════════════════════════════════════ materials + imports
 @pytest.mark.asyncio
-@pytest.mark.parametrize("role", [UserRole.SUPERVISOR, UserRole.HR, UserRole.VIEWER])
+@pytest.mark.parametrize("role", [UserRole.SUPERVISOR, UserRole.VIEWER])
 async def test_only_lot_writers_may_create_a_material_lot(client, role):
+    """HR IS NO LONGER IN THIS LIST — see the test below for why."""
     _as(role)
     r = await client.post(f"{API}/materials/lots", json={
         "category": "LEATHER", "article": "A", "colour": "BLACK",
         "attributes": {"thickness": "1.2mm", "dcm": 100}})
     assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_hr_may_write_to_inventory(client):
+    """CHANGED DELIBERATELY (backend fix #2).
+
+    HR could read stock but not correct it, so when HR created a wrong material
+    lot the fix was made directly in the database — no audit row, no reason, no
+    way for anyone to see it afterwards. That is the worst possible way to change
+    a stock figure, and the permission was what forced it.
+
+    HR now has the same lot rights as the floor managers, so an untracked DB edit
+    becomes a tracked API call. What HR still cannot do is approve a
+    PO-mismatch substitution (a costing decision, DM/MD only) or run payroll.
+    """
+    _as(UserRole.HR)
+    r = await client.post(f"{API}/materials/lots", json={
+        "category": "LEATHER", "article": "HR-A", "colour": "BLACK",
+        "attributes": {"thickness": "1.2mm", "dcm": 100}})
+    assert r.status_code == 201, r.text
 
 
 @pytest.mark.asyncio
