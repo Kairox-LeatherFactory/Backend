@@ -50,6 +50,7 @@ import json
 import yaml
 from fastapi import HTTPException
 from sqlalchemy import delete
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
@@ -62,7 +63,7 @@ from app.modules.bom.dcm import (
     estimate_area_dcm,
     style_signature,
 )
-from app.core.enums import DocumentKind
+from app.core.enums import DocumentKind, UserRole
 from app.modules.bom.enums import (
     BomItemCategory,
     BomStatus,
@@ -761,7 +762,40 @@ class BomService:
         await self.db.flush()                      # populate spec_sheet.id, no commit
 
         identity = self._identity_from_breakdown(row)
-        result = await self.generate_bom(
+        # UPDATED 2026-09-17 (Hamthan): the `row.bom_id is not None` replay above is a
+        # check-then-act, and generation runs in Celery — pressing "generate" twice for
+        # the same style enqueues two tasks that both read bom_id=None before either
+        # commits, so the loser's INSERT hits uq_bom_submission_style and the whole task
+        # died with an unhandled IntegrityError traceback. The unique constraint IS the
+        # correct arbiter; this just teaches the loser to read the winner's BOM and
+        # return the same idempotent replay the fast path returns, so a double-click is
+        # indistinguishable from a single one.
+        try:
+            result = await self._generate_style_bom(user, row, spec_sheet, spec_bytes,
+                                                    spec_name, identity)
+        except IntegrityError:
+            await self.repo.rollback()
+            existing = await self.repo.get_bom_by_submission(
+                row.submission_id, style_signature=row.style_signature)
+            if existing is None:
+                raise
+            logger.info("generate_bom_for_style: style=%s lost the generation race, "
+                        "replaying bom=%s", order_style_id, existing.id)
+            fresh = await self.repo.get_order_style(order_style_id)
+            if fresh is not None and fresh.bom_id is None:
+                fresh.bom_id = existing.id          # heal the link the loser never wrote
+                await self.repo.commit()
+            return self._replay_response(existing)
+        row.bom_id = uuid.UUID(result["bom"]["id"])   # return shape is {"bom": {"id": ...}}
+        await self.repo.commit()
+        return result
+
+    async def _generate_style_bom(self, user, row, spec_sheet, spec_bytes: bytes,
+                                  spec_name: str, identity: "StyleIdentity") -> dict:
+        """The generate_bom call for ONE breakdown style. Split out of
+        generate_bom_for_style (2026-09-17) purely so the caller can wrap it in the
+        unique-violation replay guard without burying it in a 25-line try block."""
+        return await self.generate_bom(
             user,
             spec_sheet=spec_sheet,
             spec_bytes=spec_bytes,
@@ -785,9 +819,6 @@ class BomService:
             confirmed_pattern_id=(row.pattern_reference_id
                                   if row.dxf_match_status == "confirmed" else None),
         )
-        row.bom_id = uuid.UUID(result["bom"]["id"])   # return shape is {"bom": {"id": ...}}
-        await self.repo.commit()
-        return result
 
     _CODE_RE = re.compile(r"[A-Z]{1,4}[- ]?\d{3,6}(?:[- ]?[A-Z0-9]{1,4})?")
 
@@ -1439,6 +1470,23 @@ class BomService:
     _EDIT_FIELDS = {"dcm", "qty_per_garment", "unit_price"}
     _EDITABLE_STATES = {BomStatus.DRAFT.value, BomStatus.READY_FOR_REVIEW.value}
 
+    # UPDATED 2026-09-17 (Hamthan): per-role narrowing of _EDIT_FIELDS. Every caller of
+    # PATCH /boms/{id}/items could previously write every field, so the cutting manager
+    # — whose job on this screen is to check the BOM and sign it off — could also rewrite
+    # the consumption figures the DM prepared. The cutting manager is now limited to
+    # `unit_price`; DM/MD keep the full set. A role that is absent from this map is
+    # unrestricted, which keeps service-level callers that pass a bare object (and the
+    # cross-module callers that pass no real user) working exactly as before.
+    _ROLE_EDIT_FIELDS: dict[str, set[str]] = {
+        UserRole.CUTTING_MANAGER.value: {"unit_price"},
+    }
+
+    @classmethod
+    def _editable_fields_for(cls, user) -> set[str]:
+        role = getattr(user, "role", None)
+        role = role.value if hasattr(role, "value") else role
+        return cls._ROLE_EDIT_FIELDS.get(role, cls._EDIT_FIELDS)
+
     async def edit_bom_items(self, user, bom_id: uuid.UUID, base_revision: int,
                              edits: list[dict]) -> dict:
         bom = await self._load_bom(bom_id)
@@ -1455,6 +1503,7 @@ class BomService:
 
         before = self._bom_snapshot(bom)
         by_id = {str(i.id): i for i in bom.items}
+        allowed_fields = self._editable_fields_for(user)
         dcm_changed = False
         for e in edits:
             item = by_id.get(str(e.get("bom_item_id")))
@@ -1464,6 +1513,15 @@ class BomService:
             field_ = e.get("field")
             if field_ not in self._EDIT_FIELDS:
                 raise HTTPException(422, detail={"error": "unsupported_field", "field": field_})
+            # A real field, just not one this role may write — 403, not 422: the request
+            # is well formed, the caller simply is not allowed to make this change.
+            if field_ not in allowed_fields:
+                raise HTTPException(403, detail={
+                    "error": "field_not_permitted_for_role",
+                    "field": field_,
+                    "allowed_fields": sorted(allowed_fields),
+                    "message": (f"Your role may only edit {', '.join(sorted(allowed_fields))} "
+                                f"on a BOM line.")})
             try:
                 value = Decimal(str(e.get("value")))
             except (InvalidOperation, TypeError, ValueError):
@@ -1513,36 +1571,94 @@ class BomService:
                 "error": "invalid_state_for_confirmation",
                 "current_status": bom.status,
                 "message": "Cutting confirmation is only allowed on a draft BOM."})
+        # UPDATED 2026-09-17 (Hamthan): READY_FOR_REVIEW was accepted above, so posting
+        # confirm-cutting a second time on the SAME BOM went straight through — it
+        # re-stamped cutting_confirmed_by/at over the first confirmation, re-ran the §10
+        # template back-fill, re-recorded the DXF yield observations, and raised a
+        # SECOND round of review notifications at the MD for a BOM already sitting in
+        # their queue. Confirmation is a signature, not a toggle: once it is on the row,
+        # the only ways off it are an edit that changes a DCM (edit_bom_items clears it)
+        # or reopen_bom after a rejection. READY_FOR_REVIEW stays in the tuple above so
+        # those paths, which leave cutting_confirmed_at NULL, can still confirm.
+        if bom.cutting_confirmed_at is not None:
+            raise HTTPException(409, detail={
+                "error": "already_confirmed",
+                "current_status": bom.status,
+                "cutting_confirmed_at": bom.cutting_confirmed_at.isoformat(),
+                "cutting_confirmed_by": (str(bom.cutting_confirmed_by)
+                                         if bom.cutting_confirmed_by else None),
+                "message": ("This BOM is already confirmed for cutting. Edit a "
+                            "consumption figure, or reopen it after a rejection, to "
+                            "confirm again.")})
         now = datetime.now(timezone.utc)
         bom.cutting_confirmed_by = getattr(user, "id", None)
         bom.cutting_confirmed_at = now
         bom.status = BomStatus.READY_FOR_REVIEW.value
+        # UPDATED 2026-09-17 (Hamthan): snapshot the four item fields this method needs
+        # BEFORE repo.save(). save() ends in db.refresh(bom); Bom.items is mapped
+        # cascade="all, delete-orphan", and "all" includes refresh-expire, so that
+        # refresh expired the collection AND every BomItem in it. The loop below then
+        # touched an expired attribute, triggering an implicit lazy load on an async
+        # session and killing the whole request with sqlalchemy.exc.MissingGreenlet.
+        # (expire_on_commit=False on both session factories does NOT cover this — it is
+        # refresh(), not the commit, doing the expiring.) The §10 consumption-template
+        # back-fill and the DXF yield observations below are the entire point of
+        # confirm-cutting, and neither had ever run. Holding plain values rather than
+        # ORM rows is what makes this safe: nothing here can be re-expired.
+        # test_bom_regression.py::test_r8 documented this as a live bug, left unfixed on
+        # purpose so its traceback WAS the bug report; both it and
+        # test_confirm_cutting_moves_draft_to_ready_for_review now pass.
+        items = [(i.category, i.qty_per_garment, i.uom, i.name) for i in bom.items]
         await self.repo.save(bom)
 
         if identity is None:
             identity = await self._resolve_identity(bom)
         backfilled = 0
+        # UPDATED 2026-09-17 (Hamthan): `sig` can legitimately come back None —
+        # style_signature() returns None when the identity carries no customer_ref, no
+        # internal_ref and no name, which is every BOM whose order sheet did not extract
+        # (the "manual_entry_required" path). style_consumption_template.style_signature
+        # is NOT NULL, so the back-fill below then died with an IntegrityError and took
+        # the whole confirmation down with it. This was invisible until the
+        # refresh-expire bug above was fixed, because the loop never reached an INSERT.
+        #
+        # Fall back to bom.style_signature — the column the BOM was generated with
+        # ('tower', 'clermont', ...), which is exactly the key the per-style flow wants
+        # — and if there is still nothing, skip the back-fill. A template keyed on no
+        # style is one that nothing could ever look up again, so writing it is
+        # pointless; refusing the CONFIRMATION over it would be far worse, since that is
+        # the cutting manager's sign-off and the gate the MD's approval waits on. The
+        # skip is surfaced in the response (`warnings`) rather than passing silently.
+        skipped_reason = None
         if identity is not None:
             sig = style_signature(customer_ref=identity.customer_ref,
-                                  internal_ref=identity.internal_ref, name=identity.name)
+                                  internal_ref=identity.internal_ref,
+                                  name=identity.name) or bom.style_signature
+            if not sig:
+                skipped_reason = "no_style_signature"
+                logger.warning("confirm_cutting: bom=%s has no resolvable style "
+                               "signature — consumption-template back-fill skipped",
+                               bom.id)
+                identity = None
+        if identity is not None:
             pattern = await self.repo.get_current_pattern(sig, client_id=identity.client_id)
             base_size = bom.dcm_base_size
             gt_id = bom.garment_type_id
-            for item in bom.items:
-                if item.category in MATERIAL_DCM_CATEGORIES and item.qty_per_garment is not None:
+            for category, qty_per_garment, uom, name in items:
+                if category in MATERIAL_DCM_CATEGORIES and qty_per_garment is not None:
                     await self.repo.upsert_consumption_template(
                         client_id=identity.client_id, style_signature=sig,
-                        garment_type_id=gt_id, material_category=item.category,
-                        size=base_size or "", dcm_value=item.qty_per_garment,
-                        uom=item.uom, confirmed_by=getattr(user, "id", None),
+                        garment_type_id=gt_id, material_category=category,
+                        size=base_size or "", dcm_value=qty_per_garment,
+                        uom=uom, confirmed_by=getattr(user, "id", None),
                         confirmed_at=now, source_bom_id=bom.id,
                     )
                     backfilled += 1
-                    if pattern is not None and item.category in (
+                    if pattern is not None and category in (
                             BomItemCategory.MAIN_MATERIAL.value, BomItemCategory.SUB_MATERIAL.value):
-                        obs = learn_yield(pattern, category=item.category, size=bom.dcm_base_size,
-                                        species=dcm.species_of(item.name),
-                                        confirmed_dcm_sf=item.qty_per_garment)
+                        obs = learn_yield(pattern, category=category, size=base_size,
+                                        species=dcm.species_of(name),
+                                        confirmed_dcm_sf=qty_per_garment)
                         if obs:
                             await self.repo.add_yield_observation(
                                 obs, source_bom_id=bom.id, confirmed_by=getattr(user,"id",None), confirmed_at=now)
@@ -1561,7 +1677,8 @@ class BomService:
         return {"bom_id": str(bom.id), "status": bom.status,
                 "cutting_confirmed_at": now.isoformat(),
                 "templates_backfilled": backfilled,
-                "notifications_created": len(notes)}
+                "notifications_created": len(notes),
+                "warnings": [skipped_reason] if skipped_reason else []}
 
     async def approve_bom(self, user, bom_id: uuid.UUID, *, lock: bool = False) -> dict:
         """Stage-3 MD approve/lock. REFUSES a BOM whose cutting_confirmed_at is null."""
@@ -1570,6 +1687,29 @@ class BomService:
             raise HTTPException(409, detail={
                 "error": "cutting_confirmation_required",
                 "message": "The cutting manager must confirm the BOM before approval."})
+        # UPDATED 2026-09-17 (Hamthan): approve checked ONLY cutting_confirmed_at, never
+        # bom.status — so unlike its mirror image reject_bom (which gates on
+        # READY_FOR_REVIEW and refuses anything approved/locked/exported), approve
+        # accepted a BOM in ANY state that still carried a confirmation stamp. That
+        # meant: re-approving an already-approved BOM (re-stamping approved_by/at,
+        # re-running the inventory check and the production-board advance), approving a
+        # BOM the MD had just REJECTED without anyone reopening it, and approving one
+        # already EXPORTED. The two endpoints are supposed to be a matched pair — one
+        # decision, taken once, on a BOM that is waiting for a decision — so approve now
+        # enforces exactly the entry condition reject already did.
+        if bom.status == BomStatus.REJECTED.value:
+            raise HTTPException(409, detail={
+                "error": "bom_rejected",
+                "current_status": bom.status,
+                "rejection_reason": bom.rejection_reason,
+                "message": "Reopen the rejected BOM before approving it."})
+        if bom.status != BomStatus.READY_FOR_REVIEW.value:
+            raise HTTPException(409, detail={
+                "error": "not_ready_for_review",
+                "current_status": bom.status,
+                "approved_at": bom.approved_at.isoformat() if bom.approved_at else None,
+                "message": ("Only a BOM awaiting review can be approved; this one is "
+                            f"already '{bom.status}'.")})
         before = self._bom_snapshot(bom)
         now = datetime.now(timezone.utc)
         await self._materialize_breakdown(user, bom)
@@ -1701,9 +1841,19 @@ class BomService:
         if bom.status == BomStatus.EXPORTED.value and bom.export_document_id is not None:
             doc = await self.repo.get_document(bom.export_document_id)
             if doc is not None:
+                # UPDATED 2026-09-17 (Hamthan): this replay already re-used the stored
+                # PDF rather than rendering a new one, but its response was
+                # byte-for-byte what a FIRST export returns — so posting /export twice
+                # looked exactly like the BOM had been exported twice, with nothing in
+                # the payload to say otherwise. The flags below make the replay legible:
+                # `replay` says no new document was produced, `exported_at` is the
+                # ORIGINAL export's timestamp (unchanged by this call), and no second
+                # BOM_EXPORT audit row is written.
                 return {"bom_id": str(bom.id), "status": bom.status,
                         "export_document_id": str(doc.id), "sha256": doc.sha256,
-                        "mime": doc.mime, "storage_url": doc.storage_url}
+                        "mime": doc.mime, "storage_url": doc.storage_url,
+                        "replay": True,
+                        "exported_at": bom.exported_at.isoformat() if bom.exported_at else None}
 
         view = self._bom_view(bom)
         identity = await self._resolve_identity(bom)
@@ -1751,7 +1901,8 @@ class BomService:
                                  "mime": mime})
         return {"bom_id": str(bom.id), "status": bom.status,
                 "export_document_id": str(doc.id), "sha256": sha,
-                "mime": mime, "storage_url": doc.storage_url}
+                "mime": mime, "storage_url": doc.storage_url,
+                "replay": False, "exported_at": now.isoformat()}
 
     async def get_bom(self, bom_id: uuid.UUID) -> dict:
         return self._bom_view(await self._load_bom(bom_id))

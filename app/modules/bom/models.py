@@ -110,9 +110,24 @@ class Bom(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "bom"
     __table_args__ = (
         UniqueConstraint("client_order_id", "style_id", name="uq_bom_order_style"),
-        UniqueConstraint("submission_id", name="uq_bom_submission"),
-         UniqueConstraint("submission_id", "style_signature",
-                         name="uq_bom_submission_style"),   # replaces uq_bom_submission
+        # UPDATED 2026-09-17 (Hamthan): REMOVED UniqueConstraint("submission_id",
+        # name="uq_bom_submission"). It was left behind when the per-style flow
+        # landed, next to a uq_bom_submission_style that was already annotated
+        # "replaces uq_bom_submission" — but nothing ever dropped it, in the model
+        # or in a migration, so BOTH were live in Postgres.
+        #
+        # One order sheet breaks down into MANY styles (submission
+        # 55e27857-3e0d-4b0c-a261-8218d76b1345 has eight: clermont, flavio,
+        # francis, shinobi, tower, virgilio, vest, favio) and each gets its own
+        # BOM. The single-column constraint allowed only the FIRST of them:
+        # clermont generated fine, then every later style's INSERT died with
+        # "duplicate key value violates unique constraint uq_bom_submission" deep
+        # inside the Celery worker (bom.generate_bom_for_style), where the 202
+        # the operator already got can never report it. The composite constraint
+        # below is the rule that was actually intended — one BOM per style per
+        # submission — and is now the only one.
+        UniqueConstraint("submission_id", "style_signature",
+                         name="uq_bom_submission_style"),
     )
     # A Stage-2 BOM is now born from the order + spec sheets ALONE, anchored on the
     # submission. The Client→Order→Style→SKU breakdown is created (and back-linked into

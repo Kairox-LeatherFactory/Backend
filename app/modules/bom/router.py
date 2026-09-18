@@ -6,6 +6,7 @@ modules/bom/router.py — Stage-2/3 BOM API + the in-app notification surface
 Endpoints (under /api/v1/procurement, preserving the pre-split URLs):
 
   GET  /boms/{id}                     the editable BOM tree
+  GET  /boms/{id}/items               the item rows + the revision to PATCH against
   PATCH/boms/{id}/items               bulk edit (optimistic revision lock)
   POST /boms/{id}/confirm-cutting     the cutting-manager gate (§10)
   POST /boms/{id}/approve | /reject | /reopen | /export    Stage-3 lifecycle
@@ -18,10 +19,19 @@ and reads the cross-cutting core `notification` table.
 LAYERING: this router is a THIN HTTP shell — every handler just resolves the role
 dependency, unpacks the request body, and delegates to BomService / NotificationService.
 No business logic here (house rule). Role gates: _DMMD (DM+MD), _CUTTING (cutting mgr;
-MD/DM bypass as superusers), _MD (MD only — the sole approver/rejecter/exporter).
+MD/DM bypass as superusers), _MD (MD only — the sole approver/rejecter/exporter; as of
+2026-09-17 this is require_exact_roles, so DM no longer bypasses it).
+
+WHO TOUCHES A BOM (the Stage-2/3 separation of duties)
+  DM/MD          generate it, edit any field (dcm, qty_per_garment, unit_price), reopen.
+  CUTTING_MANAGER read it (GET /boms/{id}, GET /boms/{id}/items), edit unit_price ONLY
+                 (BomService._ROLE_EDIT_FIELDS), and sign it off once via confirm-cutting.
+  MD             approve / reject / export — and nobody else, because the person who
+                 prepares the BOM must not be the person who approves it.
 
 FUNCTION GUIDE  (path → handler → service call → returns)
   GET   /boms/{id}                 get_bom          → BomService.get_bom            the editable tree (dict)
+  GET   /boms/{id}/items           get_bom_items    → BomService.get_bom            {bom_id, status, revision, currency, order_qty, items[]}
   PATCH /boms/{id}/items           patch_bom_items  → edit_bom_items                {revision, recomputed, reconfirm_required}
   POST  /boms/{id}/confirm-cutting confirm_cutting  → confirm_cutting               {status, templates_backfilled, ...}
   POST  /boms/{id}/approve         approve_bom      → approve_bom(lock=?)           {status, inventory_check_id}  [MD]
@@ -50,7 +60,7 @@ from app.modules.bom.notification_service import NotificationService
 from app.modules.bom.schemas import(BomApproveRequest, BomBulkPatch, BomRejectRequest, ClientChecksPut, CostCatalogPut, 
 FabricRoleIn, PomMappingIn,AttachmentsIn, BreakdownAccepted, BreakdownOut, StyleBomAccepted, OrderStyleOut,DxfYieldIn)
 from app.modules.bom.service import BomService
-from app.modules.users.deps import get_current_user, require_roles
+from app.modules.users.deps import get_current_user, require_exact_roles, require_roles
 from app.modules.users.models import User
 from app.modules.bom.tasks import (
     build_order_breakdown_for_submission, generate_bom_for_style_task,
@@ -61,13 +71,38 @@ router = APIRouter(prefix="/procurement", tags=["Procurement — Stage 2/3 BOM"]
 
 _DMMD = require_roles(UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR)
 _CUTTING = require_roles(UserRole.CUTTING_MANAGER)
-_MD = require_roles(UserRole.MANAGING_DIRECTOR)
+# UPDATED 2026-09-17 (Hamthan): was require_roles(MANAGING_DIRECTOR), which this file
+# has always DOCUMENTED as "MD only — the sole approver/rejecter/exporter" but never
+# actually enforced: require_roles waves SUPERUSER_ROLES through, and that tuple still
+# holds DIRECT_MANAGER, so the DM who prepares and edits a BOM could also approve,
+# reject and export it. Separation of duties is the whole point of the Stage-3 gate, so
+# it now uses require_exact_roles (no superuser bypass) — see users/deps.py.
+#
+# NOTE FOR DEPLOY: this needs a real MANAGING_DIRECTOR login to exist. Run
+# `python scripts/ensure_roles.py --apply` first — the seeded staff accounts in this
+# environment currently include no MD at all.
+_MD = require_exact_roles(UserRole.MANAGING_DIRECTOR)
 
 
 @router.get("/boms/{bom_id}")
 async def get_bom(bom_id: uuid.UUID, db: AsyncSession = Depends(get_db),
                   _: User = Depends(_CUTTING)):
     return await BomService(db).get_bom(bom_id)
+
+
+# UPDATED 2026-09-17 (Hamthan): only PATCH /boms/{id}/items existed, so a cutting
+# manager GETting the items — the one BOM screen that role actually needs, and the
+# natural URL to reach for — got a bare 405 Method Not Allowed with no hint that the
+# tree lives at GET /boms/{id} instead. This returns the same items array the full BOM
+# view carries, plus the header fields the caller needs to PATCH it back (`revision` is
+# the base_revision for the optimistic lock).
+@router.get("/boms/{bom_id}/items")
+async def get_bom_items(bom_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                        _: User = Depends(_CUTTING)):
+    view = await BomService(db).get_bom(bom_id)
+    return {"bom_id": view["id"], "status": view["status"],
+            "revision": view["revision"], "currency": view["currency"],
+            "order_qty": view["order_qty"], "items": view["items"]}
 
 
 @router.patch("/boms/{bom_id}/items")

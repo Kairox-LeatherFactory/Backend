@@ -18,9 +18,17 @@ Two kinds of guard live here:
       confirmation), so the pair together prove the loophole is narrow, not
       wide open.
 
-R1/R2  — reject_bom leaves cutting_confirmed_at untouched, and approve_bom does
-         not check status -> a rejected-but-still-"confirmed" BOM can be
-         approved without ever calling reopen.
+UPDATED 2026-09-17 (Hamthan): three of the guards below described bugs rather
+than desired behaviour, and all three are now fixed — so R2, R7 and R8 assert
+the OPPOSITE of what they used to, each in the same commit as its fix, which is
+the procedure kind (a) above lays out. R2b, R7c and R4's DM/CM split were added
+alongside them. Kind (a) guards left in this file today: none.
+
+R1/R2  — R1: reject_bom leaves cutting_confirmed_at untouched. R2: approve_bom
+         used not to check status either, so a rejected-but-still-"confirmed"
+         BOM could be approved without ever calling reopen. approve_bom now
+         requires READY_FOR_REVIEW (the same gate reject_bom always had), so R2
+         asserts a 409 and R2b covers the double-approve case.
 R3     — reopen_bom clears cutting_confirmed_at, which puts R1's gap back
          behind the "cutting_confirmation_required" gate.
 R4     — the §10 reconfirm flip fires only for MATERIAL_DCM_CATEGORIES fields,
@@ -29,22 +37,28 @@ R5     — edit_bom_items' optimistic lock is a real compare-and-swap
          (claim_revision), not just the earlier equality check.
 R6     — export_bom's idempotent replay returns the SAME document instead of
          re-rendering (dedup by bom.export_document_id, short-circuit).
-R7     — RBAC: DIRECT_MANAGER passes the "_MD"-only router gates (approve/
-         reject/export) because SUPERUSER_ROLES bypasses require_roles
-         entirely — verified at the router layer via api_client/as_role, since
-         that bypass lives in users.deps, not in BomService.
-R8     — isolates a LIVE BUG found while writing this suite: confirm_cutting
-         (service.py ~1327-1338) commits+refreshes `bom` via repo.save, which
-         expires the `items` relationship, then immediately loops
-         `for item in bom.items:` — an implicit async lazy-load that raises
-         `sqlalchemy.exc.MissingGreenlet`. R1-R7 need a BOM in "already cutting
-         confirmed" state as a PRECONDITION, not as their subject, so they set
-         that state directly via `_mark_cutting_confirmed` (defined below)
-         instead of calling the real (broken) method — R8 is the one test
-         that calls it for real and isolates the bug with nothing else in the
-         way. Left unfixed deliberately: R8 asserts the intended behaviour, so
-         its failure itself is the bug report — run this file, take the
-         MissingGreenlet traceback under R8 to the backend dev.
+R7     — RBAC: DIRECT_MANAGER used to pass the "_MD"-only router gates
+         (approve/reject/export) because SUPERUSER_ROLES bypasses require_roles
+         entirely. The gate is now require_exact_roles(MANAGING_DIRECTOR), so R7
+         asserts the 403, R7b keeps the cutting-manager contrast case and R7c
+         proves the MD itself still gets through. Verified at the router layer
+         via api_client/as_role, since the bypass lives in users.deps, not in
+         BomService.
+R8     — was a LIVE BUG found while writing this suite, FIXED 2026-09-17:
+         confirm_cutting commits+refreshes `bom` via repo.save, and because
+         Bom.items is cascade="all, delete-orphan" ("all" includes
+         refresh-expire) that refresh expired the collection AND every BomItem
+         in it; the `for item in bom.items:` loop right after was an implicit
+         async lazy-load raising `sqlalchemy.exc.MissingGreenlet`. It now
+         snapshots the item values it needs before the save. Fixing it exposed a
+         second failure directly underneath — a NULL style_signature hitting a
+         NOT NULL column in the template back-fill — which now falls back to
+         bom.style_signature and otherwise skips the back-fill.
+         R1-R7 need a BOM in "already cutting confirmed" state as a
+         PRECONDITION, not as their subject, so they still set that state
+         directly via `_mark_cutting_confirmed` (defined below) rather than
+         calling the real method; R8 remains the one test that calls it for
+         real, with nothing else in the way.
 ================================================================================
 """
 from decimal import Decimal
@@ -131,21 +145,41 @@ async def test_r1_reject_does_not_clear_cutting_confirmation(svc, draft_bom, cut
 
 @pytest.mark.integrity
 async def test_r2_a_rejected_bom_can_still_be_approved_without_reopen(svc, draft_bom, cutting_mgr, md, db):
-    """Direct consequence of R1: approve_bom's ONLY gate is
-    `cutting_confirmed_at is not None` — it never re-reads bom.status. So a
-    REJECTED BOM that was confirmed before rejection is still approvable.
-    This test exists so that behaviour is a documented, tested fact rather than
-    a surprise found in production. If the product decision is to close this,
-    the fix belongs in approve_bom (re-check status) — and this test should
-    then assert the opposite (409) instead of being deleted."""
+    """UPDATED 2026-09-17 (Hamthan): CLOSED, and this test now asserts the
+    opposite — exactly as the original docstring instructed ("If the product
+    decision is to close this, the fix belongs in approve_bom (re-check status)
+    — and this test should then assert the opposite (409)").
+
+    Was: approve_bom's ONLY gate was `cutting_confirmed_at is not None`, so a
+    REJECTED BOM that had been confirmed before rejection could be approved
+    with no reopen in between. approve_bom now requires READY_FOR_REVIEW, the
+    same entry condition its mirror image reject_bom has always had."""
     bom, _leather = draft_bom
     await _mark_cutting_confirmed(db, bom, cutting_mgr)
     await svc.reject_bom(md, bom.id, reason="wrong leather grade")
     await db.refresh(bom)
     assert bom.status == BomStatus.REJECTED.value
 
-    result = await svc.approve_bom(md, bom.id)     # no reopen in between
-    assert result["status"] == BomStatus.APPROVED.value
+    with pytest.raises(HTTPException) as ei:
+        await svc.approve_bom(md, bom.id)          # no reopen in between
+    assert ei.value.status_code == 409
+    assert ei.value.detail["error"] == "bom_rejected"
+    await db.refresh(bom)
+    assert bom.status == BomStatus.REJECTED.value  # and nothing moved
+
+
+@pytest.mark.integrity
+async def test_r2b_an_approved_bom_cannot_be_approved_twice(svc, draft_bom, cutting_mgr, md, db):
+    """The other half of the same gap: re-approving re-stamped approved_by/at and
+    re-ran the inventory check + production-board advance every time it was called."""
+    bom, _leather = draft_bom
+    await _mark_cutting_confirmed(db, bom, cutting_mgr)
+    await svc.approve_bom(md, bom.id)
+
+    with pytest.raises(HTTPException) as ei:
+        await svc.approve_bom(md, bom.id)
+    assert ei.value.status_code == 409
+    assert ei.value.detail["error"] == "not_ready_for_review"
 
 
 # ══════════════════════════════════════════ R3 — reopen closes the gap in the normal flow
@@ -171,13 +205,18 @@ async def test_r3_reopen_clears_the_confirmation_so_approve_is_blocked_again(svc
 
 # ══════════════════════════════════════════ R4 — the §10 reconfirm flip is field-scoped
 @pytest.mark.integrity
-async def test_r4_reconfirm_flip_is_scoped_to_dcm_qty_not_price(svc, draft_bom, cutting_mgr, db):
+async def test_r4_reconfirm_flip_is_scoped_to_dcm_qty_not_price(svc, draft_bom, cutting_mgr, dm, db):
     """`dcm_changed` (and therefore reconfirm_required + the draft revert) must
     be driven by a dcm/qty_per_garment edit on a MATERIAL_DCM_CATEGORIES line —
     a unit_price-only edit on the very same line, on the very same
     already-confirmed BOM, must NOT trip it. This is the one-line difference
     between EI‑L2 and EI‑L3 in the QA test plan, pinned as one test so the two
-    branches can't silently drift onto the same behaviour."""
+    branches can't silently drift onto the same behaviour.
+
+    UPDATED 2026-09-17 (Hamthan): the dcm leg is now driven by the DM. The price
+    leg stays on the cutting manager, because unit_price is precisely what
+    _ROLE_EDIT_FIELDS still lets that role write — so this test also pins the two
+    halves of the new per-role field split against each other."""
     bom, leather = draft_bom
     await _mark_cutting_confirmed(db, bom, cutting_mgr)
     confirmed_revision = bom.revision
@@ -198,7 +237,7 @@ async def test_r4_reconfirm_flip_is_scoped_to_dcm_qty_not_price(svc, draft_bom, 
     assert bom.cutting_confirmed_at is not None
 
     dcm_edit = await svc.edit_bom_items(
-        cutting_mgr, bom.id, base_revision=bom.revision,
+        dm, bom.id, base_revision=bom.revision,
         edits=[{"bom_item_id": str(leather.id), "field": "dcm", "value": 41.0}])
     assert dcm_edit["reconfirm_required"] is True
     assert bom.status == BomStatus.DRAFT.value
@@ -263,17 +302,34 @@ async def test_r6_export_replay_returns_the_same_document_not_a_new_one(svc, dra
 
 # ══════════════════════════════════════════ R7 — router-level RBAC bypass (system layer)
 @pytest.mark.security
-async def test_r7_direct_manager_bypasses_the_md_only_approve_gate(api_client, as_role, draft_bom, cutting_mgr, svc, db):
-    """approve_bom's router dependency is `require_roles(MANAGING_DIRECTOR)`,
+async def test_r7_direct_manager_is_refused_the_md_only_approve_gate(api_client, as_role, draft_bom, cutting_mgr, svc, db):
+    """UPDATED 2026-09-17 (Hamthan): CLOSED — this asserted a 200 and now asserts
+    a 403.
+
+    Was: approve_bom's router dependency is `require_roles(MANAGING_DIRECTOR)`,
     documented ("MD") as MD-only — but users.deps.require_roles lets every
     SUPERUSER_ROLES member through regardless of the roles it names, and
-    DIRECT_MANAGER is one. Verified over HTTP (not at the service layer,
-    which has no opinion on roles) so a future change to require_roles or to
-    SUPERUSER_ROLES is caught here first."""
+    DIRECT_MANAGER is one, so the DM who prepares and edits the BOM could also
+    approve it. The gate is now require_exact_roles(MANAGING_DIRECTOR), which has
+    no superuser bypass. Verified over HTTP (not at the service layer, which has
+    no opinion on roles) so a future change to require_roles, require_exact_roles
+    or SUPERUSER_ROLES is caught here first."""
     bom, _leather = draft_bom
     await _mark_cutting_confirmed(db, bom, cutting_mgr)
 
     as_role(UserRole.DIRECT_MANAGER)
+    resp = await api_client.post(f"/api/v1/procurement/boms/{bom.id}/approve")
+    assert resp.status_code == 403
+
+
+@pytest.mark.security
+async def test_r7c_managing_director_still_passes_the_gate(api_client, as_role, draft_bom, cutting_mgr, db):
+    """The other side of R7: tightening the gate must not have closed it on the
+    one role it exists for."""
+    bom, _leather = draft_bom
+    await _mark_cutting_confirmed(db, bom, cutting_mgr)
+
+    as_role(UserRole.MANAGING_DIRECTOR)
     resp = await api_client.post(f"/api/v1/procurement/boms/{bom.id}/approve")
     assert resp.status_code == 200
     assert resp.json()["status"] == BomStatus.APPROVED.value

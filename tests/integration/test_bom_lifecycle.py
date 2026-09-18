@@ -17,20 +17,19 @@ approve_bom are the two writes that move money and lock state, so they get the
 deepest coverage here (stale-revision races, the §10 reconfirm flip, the
 cutting-confirmation gate on approve).
 
-KNOWN LIVE BUG — confirm_cutting (service.py ~1327-1338): `await self.repo.save(bom)`
-commits AND refreshes `bom`, which expires the `items` relationship; the very next
-line, `for item in bom.items:`, then tries an implicit lazy-load of that relationship
-outside of any greenlet context, and SQLAlchemy's async ORM raises
-`sqlalchemy.exc.MissingGreenlet`. Reproduced standalone (not a fixture/harness
-artifact). `test_confirm_cutting_moves_draft_to_ready_for_review` below calls the
-real (broken) method and currently fails with that traceback — that failure IS the
-bug report; run this file, take the MissingGreenlet traceback to the backend dev.
-The fix is small (capture `items = list(bom.items)` before `repo.save`, iterate
-that instead of `bom.items`) but is intentionally NOT applied here.
-Every OTHER test that just needs "a cutting-confirmed BOM" as a precondition uses
-the `_mark_cutting_confirmed` helper below instead of calling the real method —
-so a downstream test (edit/approve/reject/reopen/export) still fails for ITS OWN
-reason, not as a bystander of this unrelated bug.
+FIXED 2026-09-17 (Hamthan) — was: KNOWN LIVE BUG in confirm_cutting.
+`await self.repo.save(bom)` commits AND refreshes `bom`; because Bom.items is mapped
+cascade="all, delete-orphan" and "all" includes refresh-expire, that refresh expired
+the collection AND every BomItem in it, so the very next line, `for item in
+bom.items:`, attempted an implicit lazy-load outside any greenlet context and
+SQLAlchemy's async ORM raised `sqlalchemy.exc.MissingGreenlet`.
+`test_confirm_cutting_moves_draft_to_ready_for_review` below calls the real method
+and now passes. confirm_cutting snapshots the item values it needs before the save —
+plain tuples, not ORM rows, so nothing in the loop can be re-expired.
+Every OTHER test that just needs "a cutting-confirmed BOM" as a precondition still
+uses the `_mark_cutting_confirmed` helper below rather than the real method, so a
+downstream test (edit/approve/reject/reopen/export) keeps failing for ITS OWN reason
+and never as a bystander.
 ================================================================================
 """
 from decimal import Decimal
@@ -268,20 +267,47 @@ async def test_edit_rejected_bom_points_at_reopen(svc, draft_bom, db):
     assert _detail(ei)["error"] == "bom_rejected"
 
 
-async def test_edit_dcm_after_cutting_confirm_reopens_the_gate(svc, draft_bom, cutting_mgr, db):
+async def test_edit_dcm_after_cutting_confirm_reopens_the_gate(svc, draft_bom, cutting_mgr, dm, db):
     """§10: a DCM/qty edit on a material line, after cutting was confirmed, must
-    force the BOM back to draft and clear the confirmation."""
+    force the BOM back to draft and clear the confirmation.
+
+    UPDATED 2026-09-17 (Hamthan): the edit is made by the DM now, not the cutting
+    manager. _ROLE_EDIT_FIELDS limits CUTTING_MANAGER to unit_price, so a DCM edit
+    from that role is a 403 — see the test directly below. The gate this test is
+    actually about (a DCM change invalidating an existing confirmation) is
+    unchanged and still fires for whoever is allowed to make the change."""
     bom, leather, _ = draft_bom
     await _mark_cutting_confirmed(db, bom, cutting_mgr)
     assert bom.cutting_confirmed_at is not None
 
     result = await svc.edit_bom_items(
-        cutting_mgr, bom.id, base_revision=bom.revision,
+        dm, bom.id, base_revision=bom.revision,
         edits=[{"bom_item_id": str(leather.id), "field": "dcm", "value": 50.0}])
     assert result["reconfirm_required"] is True
     await db.refresh(bom)
     assert bom.cutting_confirmed_at is None
     assert bom.status == BomStatus.DRAFT.value
+
+
+async def test_edit_dcm_as_cutting_manager_is_forbidden(svc, draft_bom, cutting_mgr):
+    """The cutting manager checks and signs off the BOM; only DM/MD rewrite the
+    consumption figures on it."""
+    bom, leather, _ = draft_bom
+    with pytest.raises(HTTPException) as ei:
+        await svc.edit_bom_items(
+            cutting_mgr, bom.id, base_revision=bom.revision,
+            edits=[{"bom_item_id": str(leather.id), "field": "dcm", "value": 50.0}])
+    assert ei.value.status_code == 403
+    assert _detail(ei)["error"] == "field_not_permitted_for_role"
+    assert _detail(ei)["allowed_fields"] == ["unit_price"]
+
+
+async def test_edit_unit_price_as_cutting_manager_is_allowed(svc, draft_bom, cutting_mgr):
+    bom, leather, _ = draft_bom
+    result = await svc.edit_bom_items(
+        cutting_mgr, bom.id, base_revision=bom.revision,
+        edits=[{"bom_item_id": str(leather.id), "field": "unit_price", "value": 3.0}])
+    assert result["revision"] == 2
 
 
 async def test_edit_price_only_after_cutting_confirm_leaves_the_gate_intact(svc, draft_bom, cutting_mgr, db):
