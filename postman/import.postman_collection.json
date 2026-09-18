@@ -1,0 +1,361 @@
+{
+  "info": {
+    "name": "KairoX \u00b7 Import",
+    "description": "Breakdown upload: preview, commit, edit, then RELEASE. Release is the mint \u2014 it creates the pieces and their barcodes and cannot be undone.\n\nSETUP\n  1. Set `base_url` (default http://127.0.0.1:8000).\n  2. Import `user.postman_collection.json` and run Login.\n  3. Paste `access_token` from that response into this collection's\n     `token` variable. Every request here inherits bearer auth.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Breakdown Table",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/imports/breakdown/{{order_number}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "imports",
+            "breakdown",
+            "{{order_number}}"
+          ],
+          "variable": [
+            {
+              "key": "order_number",
+              "value": ""
+            }
+          ]
+        },
+        "description": "THE BREAKDOWN, AS A TABLE. Styles + their SKUs + release status.\n\nThis is the screen between upload and production. Rows with\n`production_status: DRAFT` are editable and have minted nothing; rows with\nRELEASED have real barcoded garments behind them (`minted_pieces`) and are\nread-only.\n\n`needs_lining` per style is the same verdict the store completeness gate will\napply, so the DM can see before releasing whether these garments will need a\nlining leg merged in the drawer."
+      },
+      "response": []
+    },
+    {
+      "name": "Cancel Breakdown Styles",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/imports/breakdown/{{order_number}}/cancel",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "imports",
+            "breakdown",
+            "{{order_number}}",
+            "cancel"
+          ],
+          "variable": [
+            {
+              "key": "order_number",
+              "value": ""
+            }
+          ]
+        },
+        "description": "Withdraw DRAFT styles so they stop appearing on the release screen.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"style_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Commit Import",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/imports/commit",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "imports",
+            "commit"
+          ]
+        },
+        "description": "Validate order number, parse, and write SKUs INTO that order (idempotent).\n\nNOTHING IS MINTED HERE ANY MORE (change-list item 9). The sheet lands as\nDRAFT styles you can correct; per-piece barcodes and drawer merges are\ncreated only when the DM releases a style. The response carries\n`release_required: true` and `pieces_minted: 0` to say so.\n\nNext call: GET /imports/breakdown/{order_number}.\n\nTHE ORDER NUMBER IN THIS RESPONSE IS A RECEIPT, NOT THE ONLY COPY. The order\nis a permanent row (this endpoint 404s rather than create one), and every\norder is listed at GET /imports/orders with its breakdown status and a\n`breakdown_url`. Losing this response loses nothing \u2014 re-open the order from\nthat index."
+      },
+      "response": []
+    },
+    {
+      "name": "Delete Breakdown Sku",
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/imports/breakdown/skus/{{sku_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "imports",
+            "breakdown",
+            "skus",
+            "{{sku_id}}"
+          ],
+          "variable": [
+            {
+              "key": "sku_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Drop a line the sheet should not have had. DRAFT + zero minted pieces only."
+      },
+      "response": []
+    },
+    {
+      "name": "List Orders",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/imports/orders",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "imports",
+            "orders"
+          ],
+          "query": [
+            {
+              "key": "q",
+              "value": "",
+              "description": "Search order number OR client name \u2014 case-insensitive CONTAINS, so '1579' and 'jack' both work.",
+              "disabled": true
+            },
+            {
+              "key": "client_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "One client's orders.",
+              "disabled": true
+            },
+            {
+              "key": "status",
+              "value": "",
+              "description": "NOT_UPLOADED | DRAFT | PARTIALLY_RELEASED | RELEASED | CANCELLED \u2014 the breakdown rollup, not the order's own state.",
+              "disabled": true
+            },
+            {
+              "key": "has_breakdown",
+              "value": "False",
+              "description": "true = orders whose breakdown sheet is committed; false = orders still waiting for one.",
+              "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "QUERY. EVERY ORDER, PERMANENTLY \u2014 the index the breakdown screen opens from.\n\nPOST /imports/commit answers with the order number, and that response used to\nbe the only place it appeared: close the tab and\nGET /imports/breakdown/{order_number} was unreachable unless somebody had\nwritten the number down. Nothing was ever actually lost \u2014 `client_order` is a\npermanent table, and commit REQUIRES the order to already exist so it never\ncreates one \u2014 but there was no way to LIST orders:\nGET /clients/{client_id}/orders needs a client id you may not have, and the\nanalytics explorer returns a nested tree rather than a clickable index.\n\nClick a row, call the `breakdown_url` it carries, and you are on the\nbreakdown table for that order.\n\n`breakdown_status` is rolled up from the order's styles, so the list says\nwhat still needs doing without opening anything:\n\n  NOT_UPLOADED        the order exists; no breakdown sheet committed yet\n  DRAFT               sheet uploaded, nothing released, nothing minted\n  PARTIALLY_RELEASED  some styles in production, some still editable\n  RELEASED            every live style released and minting pieces\n  CANCELLED           every style on the order was cancelled\n\nORDERED MOST-RECENTLY-WORKED-ON FIRST \u2014 the newest of the order's creation\nand its last-written style \u2014 so an order whose sheet landed this morning\noutranks one raised months ago and never touched. `order_date` is the\nclient's date and says nothing about what the factory is handling now.\n\n`pieces_minted` is the count of real barcoded garments behind the order, so a\nRELEASED row can be told apart from one that released and produced nothing."
+      },
+      "response": []
+    },
+    {
+      "name": "Patch Breakdown Sku",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/imports/breakdown/skus/{{sku_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "imports",
+            "breakdown",
+            "skus",
+            "{{sku_id}}"
+          ],
+          "variable": [
+            {
+              "key": "sku_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Correct one DRAFT line \u2014 the SKU, its parent style, or both at once.\n\nSend `style: {...}` alongside the SKU fields to edit the style in the same\ncall; the two are written in ONE transaction, so the screen can never end up\nwith the colour saved and the article not.\n\n409 once the style is RELEASED: its pieces carry printed barcodes, and\nrewriting the breakdown behind a garment already on the floor is how a\nfactory loses traceability. To make MORE of a released style, raise the\nquantity on a new upload and release again \u2014 release tops up.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"qty_ordered\": 0,\n  \"color_name\": \"\",\n  \"color_code\": \"\",\n  \"size\": \"\",\n  \"knit_color\": \"\",\n  \"nylon_color\": \"\",\n  \"style\": {\n    \"name\": \"\",\n    \"article\": \"\",\n    \"code\": \"\",\n    \"gender\": \"\",\n    \"label\": \"\",\n    \"thickness\": \"\",\n    \"season\": \"\",\n    \"customer_ref\": \"\",\n    \"internal_ref\": \"\",\n    \"unit_price\": 0,\n    \"currency\": \"\",\n    \"needs_lining\": false\n  }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Patch Breakdown Style",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/imports/breakdown/styles/{{style_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "imports",
+            "breakdown",
+            "styles",
+            "{{style_id}}"
+          ],
+          "variable": [
+            {
+              "key": "style_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Correct a DRAFT style on its own \u2014 name, article, code, thickness, price,\nseason, refs, or its lining declaration.\n\nThe style-only door. `PATCH /breakdown/skus/{sku_id}` edits a style through\nits SKU, which is what the table row does; this is for the style header,\nwhich has no SKU to hang off. Same DRAFT-only rule, same audit row.\n\nA style `code` collision is a 409, not a 500: the column is unique because\nthe code is what a barcode caption and a rate card resolve through.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"\",\n  \"article\": \"\",\n  \"code\": \"\",\n  \"gender\": \"\",\n  \"label\": \"\",\n  \"thickness\": \"\",\n  \"season\": \"\",\n  \"customer_ref\": \"\",\n  \"internal_ref\": \"\",\n  \"unit_price\": 0,\n  \"currency\": \"\",\n  \"needs_lining\": false\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Preview Import",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/imports/preview",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "imports",
+            "preview"
+          ]
+        },
+        "description": "Dry-run. Validates the order number first, then parses (no writes)."
+      },
+      "response": []
+    },
+    {
+      "name": "Release Breakdown Styles",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/imports/breakdown/{{order_number}}/release",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "imports",
+            "breakdown",
+            "{{order_number}}",
+            "release"
+          ],
+          "variable": [
+            {
+              "key": "order_number",
+              "value": ""
+            }
+          ]
+        },
+        "description": "RELEASE STYLES INTO PRODUCTION. This is the mint.\n\nCreates, atomically and only now: the Piece rows, their per-piece barcodes\n(compact PC-XXXXXX + the long alias), and the drawer merge for each. Stamps\neach style RELEASED with the actor and the time, and writes an audit_log row.\n\nEVERY STYLE MUST DECLARE ITS LINING:\n\n    {\"styles\": [{\"style_id\": \"\u2026\", \"needs_lining\": true},\n                {\"style_id\": \"\u2026\", \"needs_lining\": false}]}\n\nWhen ONE answer covers the whole batch, send it once at the top level:\n\n    {\"style_ids\": [\"\u2026\", \"\u2026\"], \"needs_lining\": true}\n\nThat is a declaration, not a guess \u2014 `lining_declared` comes back true. A\nper-style answer in `styles` overrides the top-level one, so the common case\ncan be broadcast and the exceptions named. `style_ids` WITHOUT a top-level\nanswer is the deprecated inference path and still warns.\n\nThat answer is stamped on the style, copied onto every piece it mints, and\nfrom then on decides two things: whether the garment has a LINING_CUTTING\nstage at all, and whether its drawer must hold BOTH parts before the piece\nmay enter line-stitching. A style declared `false` skips the lining cut and\nclears the store on its leather alone.\n\nIT OUTRANKS THE SYSTEM'S OWN GUESS, IN BOTH DIRECTIONS \u2014 including declaring\na style named \"\u2026KNIT\" as leather-only. That is the point of asking: inference\noff a style name cannot know that a particular wool shell has no lining, and\nthe DM holding the spec sheet can. The declaration is audited with the actor\nand the time, which is what makes switching a lining requirement OFF a\ntraceable decision rather than a silent one.\n\nIT CANNOT BE CHANGED AFTER RELEASE. Pieces are minted against it and their\nbarcodes are printed. Fix it before releasing (PATCH the style), not after.\n\nPARTIAL ACCEPT: an already-released style comes back in `rejected` with its\nreason; the rest still release. Read `minted`, not the HTTP status.\n\nWATCH `minted.pieces_waiting_for_drawer`. The drawer pool is finite. Pieces\nbeyond the free drawers are minted with no drawer \u2014 they have barcodes but\nnowhere to be stored, so they cannot pass the merge gate until a drawer frees\nup or the pool is grown. Send `grow_drawer_pool: true`, or call\nPOST /drawers/pool, to clear it.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"styles\": [\n    {\n      \"style_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"needs_lining\": false\n    }\n  ],\n  \"style_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"needs_lining\": false,\n  \"grow_drawer_pool\": false\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    }
+  ]
+}

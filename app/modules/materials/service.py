@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.enums import (
     BarcodeType, MaterialCategory, SupplierOrderStatus, resolve_spec, uom_for,
 )
-from app.core.enums import UserRole
+from app.core.enums import UserRole, MaterialCategory, SheetStatus
 from app.modules.barcode.repository import BarcodeRepository
 from app.modules.materials.repository import MaterialRepository
 
@@ -202,6 +202,29 @@ class MaterialService:
         caption = self._caption(cat, subtype, body, attrs, qty, uom)
         bc = await self.barcodes.mint_lot_code_nocommit(
             lot.id, _LOT_BARCODE_TYPE[cat], caption)
+
+        # THE HIDES, IF THIS DELIVERY WAS SHEETED. Same transaction as the lot
+        # and its label: a lot that exists without the hides it was created with
+        # is a stock figure nobody can trace, which is the state this feature
+        # exists to end.
+        # THE CREATE IS A DELIVERY TOO, and it needs its receipt row.
+        #
+        # Without this, `received` (bug #26) undercounts by exactly the opening
+        # quantity: a lot created with 90 dcm and later topped up by 300 read
+        # on_hand 390 / received 300, and the two disagreed with nothing to
+        # explain the gap. The material physically arrived when the lot was
+        # created — that is what creating it means — so it is a receipt like any
+        # other and the history should show it as the first one.
+        self.repo.add_receipt_nocommit(
+            material_lot_id=lot.id, supplier_order_id=None,
+            approved_qty=qty, rejected_qty=Decimal(0), received_by=None)
+
+        sheets = await self._mint_sheets_for(lot, getattr(body, "sheets", None),
+                                             declared_qty=qty)
+        sheet_rows = [{"sheet_id": s.id, "code": s.code, "dcm": float(s.dcm),
+                       "status": s.status, "cutting_row_id": None}
+                      for s in sheets]
+
         await self.db.commit()
         await self.db.refresh(lot)
 
@@ -211,6 +234,130 @@ class MaterialService:
             "article": lot.article, "colour": lot.colour,
             "on_hand": float(lot.on_hand), "used": 0.0, "reserved": 0.0,
             "available": float(lot.on_hand), "uom": lot.uom,
+            "sheets": sheet_rows,
+        }
+
+    async def _mint_sheets_for(self, lot, sheets, *, declared_qty=None) -> list:
+        """Mint the hides a create/receive supplied, and check they add up.
+
+        THE SUM IS CHECKED AND WARNED ABOUT, NOT ENFORCED. If the operator types
+        ten hides that total 418 dcm against a declared 420, the delivery is
+        still received: the discrepancy is two decimetres of measurement slop, and
+        refusing the whole receipt over it would teach the store to stop sheeting.
+        A LOUD difference is a different matter, and it shows up in the
+        reconciliation block on the response where a human can see it.
+        """
+        if not sheets:
+            return []
+        minted = await self.mint_sheets_nocommit(lot, [
+            s if isinstance(s, dict) else {"dcm": s.dcm, "note": s.note}
+            for s in sheets])
+        if declared_qty is not None:
+            total = sum((Decimal(str(m.dcm)) for m in minted), Decimal(0))
+            gap = Decimal(str(declared_qty)) - total
+            if abs(gap) >= Decimal("0.001"):
+                self.decrement_warnings.append({
+                    "kind": "sheet_sum_mismatch",
+                    "lot_id": str(lot.id),
+                    "declared_qty": float(declared_qty),
+                    "sheet_total": float(total),
+                    "difference": float(gap),
+                    "note": (f"{len(minted)} sheet(s) total {float(total):g} dcm "
+                             f"but the delivery was entered as "
+                             f"{float(declared_qty):g} dcm. The stock figure "
+                             f"follows the delivery; check the sheet "
+                             f"measurements."),
+                })
+        return minted
+
+    # ══════════════════════════════════════════════════════════════════════
+    # LEATHER SHEETS — one hide, one barcode
+    # ══════════════════════════════════════════════════════════════════════
+    # WHY THIS LIVES BESIDE THE LOT AND NOT IN THE CUTTING MODULE. A hide is a
+    # STOCK item first: it is received, measured and shelved long before any
+    # garment claims it, and it goes back to the shelf when a cutter returns it.
+    # The cutting row is one episode in its life, not its owner.
+
+    async def mint_sheets_nocommit(self, lot, sheets: list, *,
+                                   received_at=None) -> list:
+        """Create N hides against a lot and give each one its own barcode.
+
+        NO COMMIT — the caller owns the transaction, so the hides, their labels
+        and the receipt that brought them in all land together or not at all. A
+        half-sheeted delivery is worse than an unsheeted one, because the stock
+        figure and the hide count would disagree with nothing to say why.
+
+        LEATHER ONLY, AND THAT IS A RULE ABOUT FUNGIBILITY, NOT A LIMITATION.
+        A metre of lining is any other metre and a button is any other button —
+        one code for the packet and a count that goes down says everything true
+        about them. A hide is individually measured, individually priced and
+        issued to one named cutter for one garment, so it is the only material
+        here whose individual identity carries information.
+        """
+        from datetime import datetime, timezone
+        if (lot.category or "").upper() != MaterialCategory.LEATHER.value:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"Only LEATHER is tracked sheet by sheet. This lot is "
+                f"{lot.category}, which is measured by {lot.uom} and counted on "
+                f"the lot, not per piece.")
+
+        now = received_at or datetime.now(timezone.utc)
+        seq = await self.repo.next_sheet_seq()
+        out = []
+        for entry in sheets:
+            raw = entry.get("dcm") if isinstance(entry, dict) else getattr(entry, "dcm", None)
+            note = entry.get("note") if isinstance(entry, dict) else getattr(entry, "note", None)
+            try:
+                dcm = Decimal(str(raw))
+            except Exception:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                    f"Sheet dcm must be a number (got {raw!r}).")
+            if dcm <= 0:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    "Every sheet needs a dcm greater than 0 — the measurement "
+                    "written on the hide is what the whole ledger is built on.")
+            seq += 1
+            sheet = self.repo.add_sheet_nocommit(
+                code=f"LS-{seq:06d}", material_lot_id=lot.id, dcm=dcm,
+                status=SheetStatus.IN_STOCK.value, received_at=now, note=note)
+            out.append(sheet)
+
+        await self.db.flush()          # need sheet.id for each barcode
+        for sheet in out:
+            # SYNC, unlike mint_lot_code_nocommit: that one awaits _next_code to
+            # derive a serial from the database. A sheet's code is already
+            # allocated above, so there is nothing to look up.
+            self.barcodes.mint_sheet_code_nocommit(
+                sheet,
+                caption=f"{lot.article}"
+                        f"{' · ' + lot.colour if lot.colour else ''}"
+                        f" · {float(sheet.dcm):g} dcm")
+        return out
+
+    async def sheet_reconciliation(self, lot) -> dict:
+        """Does the hide count agree with the stock figure? REPORTED, not enforced.
+
+        `lot.on_hand` stays the authority — it is what every existing consumption
+        path, shortfall warning and analytics read already uses, and sheets are
+        the detail beneath it. Making them agree by constraint would mean refusing
+        a delivery nobody had time to sheet, which is how a floor learns to work
+        around the system. So the mismatch is surfaced and left visible.
+        """
+        in_store = await self.repo.sheet_dcm_in_store(lot.id)
+        on_hand = Decimal(str(lot.on_hand or 0))
+        counts = await self.repo.sheet_counts_by_status(lot.id)
+        sheeted = sum(v["count"] for v in counts.values())
+        return {
+            "sheets_total": sheeted,
+            "sheets_by_status": counts,
+            "sheet_dcm_in_store": float(in_store),
+            "lot_on_hand": float(on_hand),
+            "difference": float(on_hand - in_store),
+            # A lot with no hides at all is not a mismatch, it is a lot received
+            # before sheet tracking existed (or a delivery nobody sheeted).
+            "reconciled": sheeted == 0 or abs(on_hand - in_store) < Decimal("0.001"),
         }
  
     @staticmethod
@@ -250,18 +397,28 @@ class MaterialService:
         reserved = await self.repo.active_reserved(lot_id)
         barcodes = await self.repo.barcodes_by_lot([lot_id])
         spec = resolve_spec(lot.category, lot.subtype) or {}
+        # BUG #26. `received` was rendering as 0 because no read path ever summed
+        # the material_receipt rows — the number had no source, not a wrong one.
+        totals = (await self.repo.received_totals([lot_id])).get(lot_id, {})
+        # #18 — how many hides this lot has taken in, for the lot directory.
+        sheets = await self.repo.sheet_counts_by_status(lot_id)
         return {
             "lot_id": lot.id, "barcode": barcodes.get(lot.id),
             "category": lot.category, "subtype": lot.subtype,
             "article": lot.article, "colour": lot.colour,
             "thickness": lot.thickness, "size": lot.size, "uom": lot.uom,
-            "on_hand": float(self._display_stock(
-                lot.on_hand, lot.used, reserved)[0]),
-            "used": float(lot.used or 0),
-            "reserved": float(self._display_stock(
-                lot.on_hand, lot.used, reserved)[1]),
-            "available": float(self._display_stock(
-                lot.on_hand, lot.used, reserved)[2]),
+            "on_hand": float(lot.on_hand or 0),
+            "reserved": float(reserved),
+            "available": float((lot.on_hand or Decimal(0)) - reserved),
+            # WHAT EVER ARRIVED, beside what is left. on_hand is the remainder
+            # after consumption; received answers "how much of this have we
+            # bought", which is a different question and the one the stock screen
+            # was asking.
+            "received": totals.get("received", 0.0),
+            "rejected": totals.get("rejected", 0.0),
+            "deliveries": totals.get("deliveries", 0),
+            "sheets_total": sum(v["count"] for v in sheets.values()),
+            "sheets_by_status": sheets,
             "attributes": dict(lot.attributes or {}),
             "supplier_id": lot.supplier_id,
             "is_active": bool(lot.is_active),
@@ -272,7 +429,106 @@ class MaterialService:
                 - {"article", "colour"}),
             "required_attributes": sorted(spec.get("required", [])),
         }
- 
+
+    async def lot_history(self, lot_id: uuid.UUID) -> dict:
+        """Every delivery of one lot, newest first — #16.
+
+        WHY THIS IS A READ AND NOT A NEW TABLE. material_receipt has recorded
+        approved and rejected quantities on every receive since receiving was
+        built; the gap was never the data, it was that nothing exposed it. So the
+        "purchase history" feature is one query and a route, not a migration.
+        """
+        lot = await self.repo.get_lot(lot_id)
+        if not lot:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Material lot not found.")
+        rows = await self.repo.receipts_for_lot(lot_id)
+        totals = (await self.repo.received_totals([lot_id])).get(lot_id, {})
+        return {
+            "lot_id": lot.id, "article": lot.article, "colour": lot.colour,
+            "uom": lot.uom, "on_hand": float(lot.on_hand or 0),
+            "received": totals.get("received", 0.0),
+            "rejected": totals.get("rejected", 0.0),
+            "receipts": [{
+                "receipt_id": r.id,
+                "approved_qty": float(r.approved_qty or 0),
+                "rejected_qty": float(r.rejected_qty or 0),
+                "supplier_order_id": r.supplier_order_id,
+                "received_by": r.received_by,
+                "received_at": r.created_at.isoformat() if r.created_at else None,
+            } for r in rows],
+        }
+
+    async def leather_by_style(self, *, style_id=None) -> list:
+        """Arrived / consumed / available, per style — #19.
+
+        REPORTED: "the system only shows the available quantity — arrived and
+        consumed quantities are not shown."
+
+        All three now come from places that already record them, which is why
+        this is a read and not a new ledger:
+            arrived   Sigma material_receipt.approved_qty   (#26 made this real)
+            consumed  Sigma production_event.consumption_qty at the cut stages
+            available lot.on_hand minus active reservations
+
+        THE CONSUMED FIGURE IS SPLIT BY REWORK (#3). "This style cost X, of which
+        Y was rework" is the question the split exists for, and averaging the two
+        hides how much the floor is losing to defects.
+        """
+        rows = await self.repo.consumption_by_style(style_id=style_id)
+        rework = await self.repo.rework_consumption_by_style(style_id=style_id)
+
+        out = []
+        for row in rows:
+            lots = await self.repo.find_lots(
+                category=MaterialCategory.LEATHER.value,
+                article=row["article"], colour=row["colour"])
+            arrived = 0.0
+            on_hand = 0.0
+            reserved = 0.0
+            if lots:
+                totals = await self.repo.received_totals([l.id for l in lots])
+                arrived = sum(v["received"] for v in totals.values())
+                for lot in lots:
+                    on_hand += float(lot.on_hand or 0)
+                    reserved += float(await self.repo.active_reserved(lot.id))
+            consumed = row["consumed"]
+            rw = rework.get(row["style_id"], 0.0)
+            out.append({
+                **row,
+                "arrived": arrived,
+                "consumed": consumed,
+                # The honest split: what the garments were supposed to cost, and
+                # what defects added on top.
+                "consumed_rework": rw,
+                "consumed_original": max(0.0, consumed - rw),
+                "on_hand": on_hand,
+                "reserved": reserved,
+                "available": on_hand - reserved,
+                "per_piece": (consumed / row["pieces"]) if row["pieces"] else None,
+            })
+        return out
+
+    async def piece_consumption(self, piece_id) -> dict:
+        """What ONE garment took, hide by hide — #17 / #28.
+
+        REPORTED: "there is no visibility into overall DCM spend or piece-level
+        DCM consumption."
+        """
+        rows = await self.repo.consumption_by_piece(piece_id)
+        total = sum(r["qty"] for r in rows)
+        rework = sum(r["qty"] for r in rows if r["is_rework"])
+        sheets = await self.repo.sheets_for_row_by_piece(piece_id)
+        return {
+            "piece_id": piece_id,
+            "total": total,
+            "rework": rework,
+            "original": total - rework,
+            "events": rows,
+            # The actual hides, when the garment was cut through the new grid.
+            "sheets": [{"code": sh.code, "dcm": float(sh.dcm or 0),
+                        "status": sh.status} for sh in sheets],
+        }
+
     async def update_lot(self, lot_id: uuid.UUID, patch: dict) -> dict:
         """Correct a lot's IDENTITY — article, colour, thickness, size, supplier.
 
@@ -646,6 +902,13 @@ class MaterialService:
             self.repo.add_reservation_nocommit(
                 target_lot.id, Decimal(str(body.reserve_for_required)),
                 reason="receiving reservation")
+
+        # THE HIDES IN THIS DELIVERY. Against target_lot, not `lot`: on an
+        # approved substitution the leather physically went into the substitute
+        # lot, and sheeting it to the ordered lot would file real hides under an
+        # article nobody received.
+        minted = await self._mint_sheets_for(
+            target_lot, getattr(body, "sheets", None), declared_qty=approved)
  
         order_status = None
         if order and order.status != SupplierOrderStatus.ARRIVED.value:
@@ -680,6 +943,14 @@ class MaterialService:
             "supplier_order_status": order_status,
             "substituted": substituted,
             "mismatch_fields": mismatch or None,
+            "sheets": [{"sheet_id": s.id, "code": s.code, "dcm": float(s.dcm),
+                        "status": s.status, "cutting_row_id": None}
+                       for s in minted],
+            # Only when this delivery was sheeted. A lot nobody sheets has
+            # nothing to reconcile, and returning a zeroed block for it would
+            # read as a mismatch rather than as an absence.
+            "sheet_reconciliation": (
+                await self.sheet_reconciliation(target_lot) if minted else None),
         }
 
     # ── consumption hooks (the cutting log and the store kit) ────────────────

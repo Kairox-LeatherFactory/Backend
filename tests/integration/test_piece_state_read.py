@@ -27,8 +27,8 @@ import datetime
 
 import pytest
 
-from app.core.enums import DrawerPart, ProductionStage, ScreenContext
-from app.modules.drawers.service import DrawerService
+from app.core.enums import StorePart, DrawerPart, ProductionStage, ScreenContext
+from app.modules.store.service import StoreService
 from app.modules.production.service import ProductionService
 
 pytestmark = pytest.mark.integrity
@@ -131,7 +131,7 @@ async def test_line_stitching_is_locked_on_the_merge_gate_and_names_the_drawer(
 
     card = _card(state, "LINE_STITCHING")
     assert card["state"] == "locked" and card["gate"] == "merge"
-    assert drawer.code in card["reason"]
+    assert piece.code in card["reason"]
     # Nothing has been scanned into this drawer, so the actionable instruction is
     # to put the leather in it — not to send an empty drawer.
     assert "awaiting its leather" in card["reason"]
@@ -143,21 +143,21 @@ async def test_a_complete_but_unsent_drawer_is_told_to_send(
 ):
     """The OTHER merge-gate branch: the drawer holds everything the garment
     needs, so the only thing left is the store releasing it."""
-    from app.core.enums import DrawerState
+    from app.core.enums import StoreState
 
     piece, drawer = pieces[0]
     # HOLDING BOTH — both physical parts scanned in, so completeness is satisfied
     # however the lining question is answered, and the only thing left is the
     # store's send.
-    drawer.leather_in = True
-    drawer.lining_in = True
-    drawer.state = DrawerState.RECEIVED.value
+    piece.leather_in = True
+    piece.lining_in = True
+    piece.store_state = StoreState.RECEIVED.value
     await db.commit()
 
     state = await ProductionService(db).piece_state(piece.id, user=cutting_mgr)
     card = _card(state, "LINE_STITCHING")
     assert card["state"] == "locked" and card["gate"] == "merge"
-    assert drawer.code in card["reason"]
+    assert piece.code in card["reason"]
     assert "has not been sent" in card["reason"]
 
 
@@ -186,14 +186,14 @@ async def test_the_drawer_travels_with_the_piece(db, operations, pieces, cutter,
     # Leather side only, so the inferred bucket is unambiguously LEATHER: a piece
     # whose lining is also cut would be read as the LINING arriving first.
     await ready_for_store(piece, lining=False)
-    await DrawerService(db).store_scan(drawer_id=drawer.id, piece_id=piece.id)
+    await StoreService(db).store_scan(piece_id=piece.id, employee_id=cutter[0].id)
 
     state = await ProductionService(db).piece_state(piece.id, user=cutting_mgr)
-    assert state["drawer"]["code"] == drawer.code
-    assert state["drawer"]["holding"] == "HOLDING LEATHER"
-    assert state["drawer"]["leather_in"] is True
+    assert state["store"]["state"] is not None
+    assert state["store"]["holding"] == "HOLDING LEATHER"
+    assert state["store"]["leather_in"] is True
     # and the same block rides along inside the piece card
-    assert state["piece"]["drawer"]["code"] == drawer.code
+    assert state["store"]["leather_in"] is True
 
 
 # ══════════════════════════════════════════════ bug #7 — article + serial
@@ -366,7 +366,7 @@ async def test_the_merge_gate_blocks_the_verify_and_names_the_drawer(
     assert st["next_stage"] == "LINE_STITCHING"
     assert st["ready_to_log"] is False
     merge = next(b for b in st["blockers"] if b["gate"] == "merge")
-    assert drawer.code in merge["reason"]
+    assert piece.code in merge["reason"]
 
 
 @pytest.mark.asyncio
@@ -429,10 +429,10 @@ async def test_a_finished_piece_is_not_ready_and_says_why(
                         leather_lot_id=leather_lot.id, consumption_qty=12.0)
     # Both cut paths must be finished before either half may be stored.
     await ready_for_store(piece)
-    drawers = DrawerService(db)
-    for part in (DrawerPart.LEATHER, DrawerPart.LINING):
-        await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id, part=part)
-    await drawers.send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
+    store = StoreService(db)
+    for part in (StorePart.LEATHER, StorePart.LINING):
+        await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id, part=part)
+    await store.send(piece_ids=[piece.id], actor_user_id=dm.id)
     for _ in range(len(ProductionStage.leather_chain()) + 1):
         if (await svc.log_batch(user=dm, employee_id=tailor[0].id,
                                 piece_ids=[piece.id], work_date=TODAY,

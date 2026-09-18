@@ -22,9 +22,9 @@ import datetime
 
 import pytest
 
-from app.core.enums import DrawerPart, ProductionStage, ScreenContext
+from app.core.enums import StorePart, DrawerPart, ProductionStage, ScreenContext
 from app.modules.barcode.service import BarcodeService
-from app.modules.drawers.service import DrawerService
+from app.modules.store.service import StoreService
 from app.modules.production.service import ProductionService
 
 pytestmark = pytest.mark.integrity
@@ -50,28 +50,38 @@ async def test_a_lot_label_asks_for_the_piece(db, leather_lot):
 
 
 @pytest.mark.asyncio
-async def test_a_drawer_holding_a_piece_asks_for_that_piece(db, pieces):
+async def test_a_legacy_drawer_label_still_resolves_but_asks_for_nothing(db, pieces):
+    """The DRAWER registry rows are KEPT so old labels do not 404 — the drawer
+    tables are retained, unwritten, for audit. What they can no longer do is ask
+    for a pairing scan, because there is nothing left to pair them with."""
     _, drawer = pieces[0]
     out = await BarcodeService(db).resolve(drawer.code)
     assert out["type"] == "DRAWER"
-    assert out["next_expected_scan"] == "PIECE"
+    assert out["next_expected_scan"] is None
 
 
 @pytest.mark.asyncio
-async def test_a_piece_whose_drawer_is_still_filling_asks_for_the_drawer(db, pieces):
+async def test_a_piece_is_the_END_of_the_store_scan_not_the_middle(db, pieces):
+    """THE THREE-SCAN FLOW IS GONE, and this is where it shows.
+
+    It used to be employee → DRAWER → piece, so resolving a piece answered "now
+    go and find the box". There is no box: the store scan is the worker and the
+    garment, and after the garment there is nothing to present. What the piece is
+    waiting for is a STAGE, which `next_stage` in the same payload carries.
+    """
     piece, _ = pieces[0]
     out = await BarcodeService(db).resolve(piece.code)
-    assert out["next_expected_scan"] == "DRAWER"
+    assert out["next_expected_scan"] is None
 
 
 @pytest.mark.asyncio
-async def test_a_piece_whose_drawer_is_full_asks_for_no_further_scan(db, cut_pieces):
+async def test_a_piece_whose_drawer_is_full_asks_for_no_further_scan(db, cut_pieces, cutter):
     """Not a failure to answer — there IS no pairing scan left. The piece's next
     move is a production stage, which the same payload now reports."""
     piece, drawer = cut_pieces[0]
-    svc = DrawerService(db)
-    for part in (DrawerPart.LEATHER, DrawerPart.LINING):
-        await svc.store_scan(drawer_id=drawer.id, piece_id=piece.id, part=part)
+    svc = StoreService(db)
+    for part in (StorePart.LEATHER, StorePart.LINING):
+        await svc.store_scan(piece_id=piece.id, employee_id=cutter[0].id, part=part)
 
     out = await BarcodeService(db).resolve(piece.code)
     assert out["next_expected_scan"] is None
@@ -124,8 +134,8 @@ async def test_the_merge_gate_is_reported_and_names_the_drawer(
 
     out = await BarcodeService(db).resolve(piece.code)
     assert out["next_stage"] == "LINE_STITCHING"
-    assert drawer.code in out["next_stage_blocked_reason"]
-    assert "Drawers List" in out["next_stage_blocked_reason"]
+    assert piece.code in out["next_stage_blocked_reason"]
+    assert "store" in out["next_stage_blocked_reason"]
 
 
 @pytest.mark.asyncio
@@ -147,10 +157,10 @@ async def test_a_finished_piece_says_so_instead_of_going_quiet(
                             piece_ids=[piece.id], work_date=TODAY,
                             screen=ScreenContext.PIPELINE)
     await ready_for_store(piece, leather=False)
-    drawers = DrawerService(db)
-    for part in (DrawerPart.LEATHER, DrawerPart.LINING):
-        await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id, part=part)
-    await drawers.send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
+    store = StoreService(db)
+    for part in (StorePart.LEATHER, StorePart.LINING):
+        await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id, part=part)
+    await store.send(piece_ids=[piece.id], actor_user_id=dm.id)
     # Walk the rest of the chain until the server itself says there is nothing
     # left — a hard-coded count silently rots the moment a stage is added.
     for _ in range(len(ProductionStage.leather_chain()) + 1):

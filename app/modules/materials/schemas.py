@@ -4,6 +4,40 @@ import uuid
 from pydantic import BaseModel, Field
 
 
+class SheetIn(BaseModel):
+    """One physical hide arriving, as the tannery measured it.
+
+    `dcm` is the number written on the skin. It is the only required field
+    because it is the only one that differs per hide — article, colour and
+    thickness are the LOT's, and repeating them per sheet is how the two drift.
+    """
+    dcm: float = Field(gt=0)
+    note: str | None = None
+
+
+class SheetRead(BaseModel):
+    sheet_id: uuid.UUID
+    code: str                    # the printed label
+    dcm: float
+    status: str
+    cutting_row_id: uuid.UUID | None = None
+
+
+class SheetReconciliation(BaseModel):
+    """Do the hides add up to the lot's stock figure? Reported, never enforced.
+
+    A lot received before sheet tracking — or a delivery nobody had time to sheet
+    — has zero hides and is NOT a mismatch. `reconciled` says so; `difference`
+    says by how much when it is one.
+    """
+    sheets_total: int
+    sheets_by_status: dict = Field(default_factory=dict)
+    sheet_dcm_in_store: float
+    lot_on_hand: float
+    difference: float
+    reconciled: bool
+
+
 class LotCreate(BaseModel):
     category: str                       # LEATHER | LINING | ACCESSORY
     subtype: str | None = None          # LINING: PLAIN_LINING/RIBS/KNIT
@@ -23,6 +57,10 @@ class LotCreate(BaseModel):
     # call GET /materials/spec?category=&subtype= to get this list at runtime.
     attributes: dict = Field(default_factory=dict)
     supplier_id: uuid.UUID | None = None
+    # LEATHER only. One entry per physical hide, each with its own dcm. Omit
+    # it and the lot behaves exactly as it does today — a stock figure with no
+    # per-hide detail — so nothing already on the floor changes.
+    sheets: list[SheetIn] | None = None
 
 
 class LotRead(BaseModel):
@@ -42,6 +80,9 @@ class LotRead(BaseModel):
     available: float             # on_hand − reserved
     last_used_for_sku: bool = False   # pre-select this one, but SHOW that you did
     covers_required: bool | None = None   # null unless `required` was passed
+    received: float = 0.0             # BUG #26 — everything that ever arrived
+    rejected: float = 0.0
+    sheets_total: int = 0             # #18 — hides taken into this lot
 
 
 class LotOptions(BaseModel):
@@ -64,6 +105,10 @@ class LotListResult(BaseModel):
 class LotCreateResult(BaseModel):
     lot_id: uuid.UUID
     lot_barcode: str
+    # The hide labels to print, in the order they were created. Returned on the
+    # create so the store can print the sheet stickers in the same breath as the
+    # lot sticker instead of going looking for them.
+    sheets: list[SheetRead] = Field(default_factory=list)
     category: str
     subtype: str | None
     article: str
@@ -90,6 +135,15 @@ class LotDetail(BaseModel):
     used: float = 0.0
     reserved: float
     available: float          # DERIVED, never stored — on_hand − reserved
+    # BUG #26 — what has ever ARRIVED, which is a different question from what is
+    # left. A lot that took 500 dcm and spent 400 reads on_hand 100 / received
+    # 500. This used to render 0 because no read path summed the receipts.
+    received: float = 0.0
+    rejected: float = 0.0     # supplier quality history
+    deliveries: int = 0       # how many times this lot has been received into
+    # #18 — hides in this lot, for the lot directory.
+    sheets_total: int = 0
+    sheets_by_status: dict = Field(default_factory=dict)
     attributes: dict = Field(default_factory=dict)
     supplier_id: uuid.UUID | None = None
     is_active: bool = True
@@ -154,6 +208,8 @@ class ReceiveRequest(BaseModel):
     rejected_qty: float = Field(ge=0, default=0)
     reserve_for_required: float | None = None
     approve_mismatch: bool = False          # NEW: DM/MD accept a substitution
+    # LEATHER only. The hides in THIS delivery, each with its measurement.
+    sheets: list[SheetIn] | None = None
 
 
 class ReceiveResult(BaseModel):
@@ -166,6 +222,8 @@ class ReceiveResult(BaseModel):
     supplier_order_status: str | None
     substituted: bool = False               # NEW: received into a NEW lot
     mismatch_fields: list[str] | None = None  # NEW: which fields differed
+    sheets: list[SheetRead] = Field(default_factory=list)   # labels to print
+    sheet_reconciliation: SheetReconciliation | None = None
 
 
 class OrderSpecPatch(BaseModel):            # NEW: DM/MD edit an order's spec
@@ -203,3 +261,28 @@ class SupplierOrderPatchResult(BaseModel):
     order_id: uuid.UUID
     status: str
     arrived_at: str | None
+
+
+class ReceiptRow(BaseModel):
+    """One delivery against a lot — the purchase history (#16).
+
+    The rows have existed since receiving was built; there was simply no way to
+    read them back, so "what did we buy and when" was unanswerable from the app.
+    """
+    receipt_id: uuid.UUID
+    approved_qty: float
+    rejected_qty: float
+    supplier_order_id: uuid.UUID | None = None
+    received_by: uuid.UUID | None = None
+    received_at: str | None = None
+
+
+class LotHistory(BaseModel):
+    lot_id: uuid.UUID
+    article: str
+    colour: str | None = None
+    uom: str
+    on_hand: float
+    received: float
+    rejected: float
+    receipts: list[ReceiptRow] = Field(default_factory=list)

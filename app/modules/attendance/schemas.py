@@ -163,3 +163,35 @@ class ShiftConfigUpdate(BaseModel):
     # factory_lat: float | None = Field(None, ge=-90, le=90)
     # factory_lon: float | None = Field(None, ge=-180, le=180)
     # radius_m: int | None = Field(None, ge=10, le=5000)
+
+
+class AttendanceCorrection(BaseModel):
+    """Correct a punch. Every field optional; omitted means unchanged.
+
+    `employee_id` IS NOT AN ORDINARY FIELD EDIT. It means "this was the wrong
+    person", and the day's production events move with it — the work happened,
+    it was simply filed under the wrong name. The response says how many moved.
+    """
+    employee_id: uuid.UUID | None = None
+    check_in_at: datetime | None = None
+    check_out_at: datetime | None = None
+    reason: str | None = None
+
+
+class AttendanceCorrectionResult(BaseModel):
+    attendance_id: uuid.UUID
+    employee_id: uuid.UUID
+    work_date: date
+    check_in_at: datetime | None = None
+    check_out_at: datetime | None = None
+    is_late: bool = False
+    is_short: bool = False
+    is_overtime: bool = False
+    production_events_moved: int = 0
+    message: str
+
+
+class AttendanceDeleteResult(BaseModel):
+    attendance_id: uuid.UUID
+    deleted: bool
+    message: str

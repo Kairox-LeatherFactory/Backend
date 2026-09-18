@@ -14,14 +14,214 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.enums import SHEET_ALLOCATABLE, SheetStatus
 from app.modules.barcode.models import (
-    MaterialLot, MaterialReceipt, MaterialReservation, MaterialSupplier, SupplierOrder,
+    MaterialLot, MaterialReceipt, MaterialReservation, MaterialSheet,
+    MaterialSupplier, SupplierOrder,
 )
 
 
 class MaterialRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    # ── consumption, by style and by garment (#17 / #19 / #28) ───────────────
+    # The cut EVENT is where leather consumption lives — never the piece — so
+    # "what did this style cost in hide" is a sum over production_event, not a
+    # column anybody maintains. Splitting it by is_rework is what makes
+    # "of which N was rework" answerable (#3).
+
+    async def consumption_by_style(self, *, style_id=None, article=None) -> list:
+        from app.modules.clients.models import SKU, Style
+        from app.modules.production.models import Piece, ProductionEvent
+        stmt = (select(Style.id, Style.name, Style.article,
+                       MaterialLot.article, MaterialLot.colour, MaterialLot.uom,
+                       func.coalesce(func.sum(ProductionEvent.consumption_qty), 0),
+                       func.count(func.distinct(Piece.id)))
+                .join(Piece, Piece.id == ProductionEvent.piece_id)
+                .join(SKU, SKU.id == Piece.sku_id)
+                .join(Style, Style.id == SKU.style_id)
+                .join(MaterialLot,
+                      MaterialLot.id == ProductionEvent.leather_lot_id)
+                .where(ProductionEvent.consumption_qty.is_not(None))
+                .group_by(Style.id, Style.name, Style.article,
+                          MaterialLot.article, MaterialLot.colour,
+                          MaterialLot.uom))
+        if style_id:
+            stmt = stmt.where(Style.id == style_id)
+        if article:
+            stmt = stmt.where(MaterialLot.article == article)
+        return [{"style_id": r[0], "style_name": r[1], "style_article": r[2],
+                 "article": r[3], "colour": r[4], "uom": r[5],
+                 "consumed": float(r[6] or 0), "pieces": int(r[7])}
+                for r in (await self.db.execute(stmt)).all()]
+
+    async def rework_consumption_by_style(self, *, style_id=None) -> dict:
+        """{style_id: dcm spent on REWORK}. The other half of the cost split."""
+        from app.modules.clients.models import SKU, Style
+        from app.modules.production.models import Piece, ProductionEvent
+        stmt = (select(Style.id,
+                       func.coalesce(func.sum(ProductionEvent.consumption_qty), 0))
+                .join(Piece, Piece.id == ProductionEvent.piece_id)
+                .join(SKU, SKU.id == Piece.sku_id)
+                .join(Style, Style.id == SKU.style_id)
+                .where(ProductionEvent.consumption_qty.is_not(None),
+                       ProductionEvent.is_rework.is_(True))
+                .group_by(Style.id))
+        if style_id:
+            stmt = stmt.where(Style.id == style_id)
+        return {r[0]: float(r[1] or 0) for r in (await self.db.execute(stmt)).all()}
+
+    async def consumption_by_piece(self, piece_id) -> list:
+        """What one garment actually took, hide by hide (#17, #28)."""
+        from app.modules.production.models import Operation, ProductionEvent
+        res = await self.db.execute(
+            select(Operation.code, ProductionEvent.consumption_qty,
+                   ProductionEvent.is_rework, MaterialLot.article,
+                   MaterialLot.colour, MaterialLot.uom, ProductionEvent.work_date)
+            .join(Operation, Operation.id == ProductionEvent.operation_id)
+            .outerjoin(MaterialLot,
+                       MaterialLot.id == ProductionEvent.leather_lot_id)
+            .where(ProductionEvent.piece_id == piece_id,
+                   ProductionEvent.consumption_qty.is_not(None))
+            .order_by(ProductionEvent.work_date.asc()))
+        return [{"stage": r[0], "qty": float(r[1] or 0), "is_rework": bool(r[2]),
+                 "article": r[3], "colour": r[4], "uom": r[5],
+                 "work_date": r[6]} for r in res.all()]
+
+    # ── receipts: what has ever ARRIVED, as opposed to what is left ──────────
+    # BUG #26 — "the Received value is showing as 0 in the backend, even though
+    # material has been recorded". It was showing 0 because nothing ever asked.
+    # Every receive has always written a material_receipt row, but no read path
+    # summed them, so the field the stock screen renders had no source at all.
+    #
+    # RECEIVED IS NOT on_hand. on_hand is what is LEFT after consumption; received
+    # is everything that ever arrived. A lot that took 500 dcm and has spent 400
+    # reads on_hand 100 / received 500, and both numbers are needed to answer
+    # "how much of this article have we bought this season".
+
+    async def received_totals(self, lot_ids: list) -> dict:
+        """{lot_id: {"received": x, "rejected": y, "deliveries": n}} in ONE query.
+
+        Batched because the lot directory renders a page of lots at a time and a
+        per-row query is how a stock screen becomes slow enough to stop being
+        opened.
+        """
+        if not lot_ids:
+            return {}
+        res = await self.db.execute(
+            select(MaterialReceipt.material_lot_id,
+                   func.coalesce(func.sum(MaterialReceipt.approved_qty), 0),
+                   func.coalesce(func.sum(MaterialReceipt.rejected_qty), 0),
+                   func.count())
+            .where(MaterialReceipt.material_lot_id.in_(tuple(lot_ids)))
+            .group_by(MaterialReceipt.material_lot_id))
+        return {row[0]: {"received": float(row[1] or 0),
+                         "rejected": float(row[2] or 0),
+                         "deliveries": int(row[3] or 0)} for row in res.all()}
+
+    async def receipts_for_lot(self, lot_id: uuid.UUID) -> list:
+        """Every delivery of this lot, newest first — the purchase history (#16).
+
+        The rows have always been here; there was simply no way to read them.
+        """
+        res = await self.db.execute(
+            select(MaterialReceipt)
+            .where(MaterialReceipt.material_lot_id == lot_id)
+            .order_by(MaterialReceipt.created_at.desc()))
+        return list(res.scalars().all())
+
+    # ── sheets (LEATHER only) ────────────────────────────────────────────────
+    # A hide is a STOCK item first and a cutting-row member second: it exists
+    # before any row claims it and survives the row being deleted. So its data
+    # access lives here, with the lot it belongs to, not in the cutting module.
+
+    def add_sheet_nocommit(self, **kw) -> MaterialSheet:
+        sheet = MaterialSheet(**kw)
+        self.db.add(sheet)
+        return sheet
+
+    async def get_sheet(self, sheet_id: uuid.UUID) -> MaterialSheet | None:
+        return await self.db.get(MaterialSheet, sheet_id)
+
+    async def get_sheet_by_code(self, code: str) -> MaterialSheet | None:
+        res = await self.db.execute(
+            select(MaterialSheet)
+            .where(MaterialSheet.code == (code or "").strip().upper()))
+        return res.scalar_one_or_none()
+
+    async def next_sheet_seq(self) -> int:
+        """The next LS- serial.
+
+        COUNTS, RATHER THAN READING THE HIGHEST CODE. The barcode repository's
+        `_next_code` derives its counter from the lexicographically greatest code
+        in the prefix, which pins the counter at 0 forever the moment one
+        non-numeric code enters the namespace — a live, open bug that
+        test_one_non_numeric_code_jams_minting_for_that_prefix_forever documents
+        for EMP-. Sheets are minted only here, in bulk, inside one transaction,
+        so a count is both correct and immune to that failure.
+        """
+        return int(await self.db.scalar(
+            select(func.count()).select_from(MaterialSheet)) or 0)
+
+    async def sheets_for_lot(self, lot_id: uuid.UUID,
+                             statuses: set | None = None) -> list:
+        stmt = select(MaterialSheet).where(MaterialSheet.material_lot_id == lot_id)
+        if statuses:
+            stmt = stmt.where(MaterialSheet.status.in_(tuple(statuses)))
+        # Smallest hide first: the allocator wants to spend the offcuts before it
+        # breaks into a big skin, and a stable order makes allocation repeatable.
+        stmt = stmt.order_by(MaterialSheet.dcm.asc(), MaterialSheet.code.asc())
+        return list((await self.db.execute(stmt)).scalars().all())
+
+    async def sheets_for_row_by_piece(self, piece_id) -> list:
+        """The hides that went into one garment, via its cutting row.
+
+        Empty for a piece cut the old way (a typed dcm with no sheet record),
+        which is the honest answer: nobody wrote down which hides those were.
+        """
+        from app.modules.cutting.models import CuttingRow
+        res = await self.db.execute(
+            select(MaterialSheet)
+            .join(CuttingRow, CuttingRow.id == MaterialSheet.cutting_row_id)
+            .where(CuttingRow.piece_id == piece_id)
+            .order_by(MaterialSheet.code.asc()))
+        return list(res.scalars().all())
+
+    async def sheets_for_row(self, cutting_row_id: uuid.UUID) -> list:
+        res = await self.db.execute(
+            select(MaterialSheet)
+            .where(MaterialSheet.cutting_row_id == cutting_row_id)
+            .order_by(MaterialSheet.code.asc()))
+        return list(res.scalars().all())
+
+    async def allocatable_sheets(self, lot_id: uuid.UUID) -> list:
+        """Hides this lot can still give out — IN_STOCK or RETURNED.
+
+        ALLOCATED is deliberately excluded: re-offering a hide another draft row
+        already holds is the double-claim bug the status exists to prevent.
+        """
+        return await self.sheets_for_lot(lot_id, statuses=set(SHEET_ALLOCATABLE))
+
+    async def sheet_dcm_in_store(self, lot_id: uuid.UUID) -> Decimal:
+        """Σ dcm of the hides physically on the shelf for this lot.
+
+        Reconciled against lot.on_hand as a REPORTED check, never a constraint —
+        a delivery nobody sheeted must stay receivable.
+        """
+        val = await self.db.scalar(
+            select(func.coalesce(func.sum(MaterialSheet.dcm), 0))
+            .where(MaterialSheet.material_lot_id == lot_id,
+                   MaterialSheet.status.in_(tuple(SHEET_ALLOCATABLE))))
+        return Decimal(str(val or 0))
+
+    async def sheet_counts_by_status(self, lot_id: uuid.UUID) -> dict:
+        res = await self.db.execute(
+            select(MaterialSheet.status, func.count(), func.coalesce(func.sum(MaterialSheet.dcm), 0))
+            .where(MaterialSheet.material_lot_id == lot_id)
+            .group_by(MaterialSheet.status))
+        return {row[0]: {"count": int(row[1]), "dcm": float(row[2] or 0)}
+                for row in res.all()}
 
     # ── lots ─────────────────────────────────────────────────────────────────
     def add_lot_nocommit(self, **kw) -> MaterialLot:

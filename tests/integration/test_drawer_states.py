@@ -34,6 +34,35 @@ HOLDING BOTH AUTO-ADVANCES TO RECEIVED.
 
     SENDED stays manual, and is now plural: see test_drawer_batch_send.py.
 """
+
+import pytest
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RETIRED WITH THE DRAWER — the drawer state machine.
+#
+# There were 200 physical drawers. A style releases 100+ garments, stalled
+# mid-chain, and the surplus were minted onto a "waiting for a drawer" list that
+# the merge gate then refused to line-stitch — so the DM had to re-allocate boxes
+# by hand, which in practice did not happen. Since 20260902_store_piece the store
+# is a STATE on the garment (piece.store_state), and a state has no capacity.
+#
+# THE RULES THIS FILE ASSERTED ARE NOT LOST. Every one of them — completeness,
+# auto-receive, the store-entry gate, the lining verdict (including the stale
+# needs_lining flag that let a KNIT jacket reach PACKAGE_EXPORT unlined), the
+# merge gate that opens LINE_STITCHING, partial-accept send, the PACKAGE_EXPORT
+# release and the piece lookup — is carried forward in
+# tests/integration/test_store_merge.py, against the API the floor now uses.
+#
+# What is NOT carried forward, deliberately: "a piece scanned into the wrong
+# drawer is a 409". There is no wrong drawer. That rejection policed an
+# assignment the system invented at upload, and its absence is the feature.
+#
+# The file is kept rather than deleted so the drawer's behaviour stays readable
+# while the tables are still in the database (they are retained, unwritten, for
+# audit). It goes when they do.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
 import pytest
 from fastapi import HTTPException
 
@@ -41,7 +70,7 @@ from app.core.enums import DrawerPart, DrawerState
 from app.modules.drawers.service import DrawerService
 from app.modules.production.models import Piece
 
-pytestmark = pytest.mark.integrity
+pytestmark = [pytest.mark.integrity, pytest.mark.skip(reason="Drawers are retired; see tests/integration/test_store_merge.py")]
 
 
 async def _scan(db, drawer, piece, part):

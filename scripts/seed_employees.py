@@ -96,15 +96,16 @@ def digits(phone) -> str | None:
 # Add a new login by adding one dict here; nothing else changes.
 # ══════════════════════════════════════════════════════════════════════════
 STAFF = [
-    dict(name="Ramesh", designation="SECURITY",          salary=23100, phone="7302905187", email=None,                     role=UserRole.SECURITY),
+    # dict(name="Ramesh", designation="SECURITY",          salary=23100, phone="7302905187", email=None,                     role=UserRole.SECURITY),
     dict(name="Abirami Arivazhagan",  designation="HR",                salary=25000, phone="8072753495", email="admin@ptexports.com",    role=UserRole.HR),
     dict(name="JAYASRI",              designation="HR",                salary=16000, phone="7603956073", email=None,                     role=UserRole.HR),
-    dict(name="MOHAMMED TANZEEL",     designation="MERCHANDISER",      salary=32500, phone="9941346771", email="tanzeel@ptexports.com",  role=UserRole.MERCHANDISER),
+    # dict(name="MOHAMMED TANZEEL",     designation="MERCHANDISER",      salary=32500, phone="9941346771", email="tanzeel@ptexports.com",  role=UserRole.MERCHANDISER),
     dict(name="Zahoor Ahmed C",       designation="MANAGER",           salary=69190, phone="9840889486", email="garments@ptexports.com", role=UserRole.DIRECT_MANAGER),
     dict(name="K Niyamathullah",      designation="STITCHING_MANAGER", salary=35750, phone="9629542708", email=None,                     role=UserRole.STITCHING_MANAGER),
     dict(name="Apsar Khan J",         designation="STITCHING_MANAGER", salary=40000, phone="9843430881", email=None,                     role=UserRole.STITCHING_MANAGER),
     dict(name="Ragavan L",            designation="CUTTING_MANAGER",   salary=47465, phone="8825935258", email=None,                     role=UserRole.CUTTING_MANAGER),
-    # dict(name="Nasuruddin",            designation="LINING_MANAGER",   salary=25322, phone="9884227592", email=None,                     role=UserRole.LINING_MANAGER),
+    dict(name="Ramesh",            designation="SECURITY",   salary=25322, phone="7302905187", email=None,                     role=UserRole.SECURITY),
+    dict(name="Pakkar Mufaiz",            designation="MANAGING_DIRECTOR",   salary=25322, phone="8754477767", email=None,                     role=UserRole.DIRECT_MANAGER),
     # NOTE: no salary on record for the two MDs. They are stored MONTHLY with a
     # NULL salary, which the wage run reports as `monthly_salary_missing`
     # (wages/service.py:479) rather than paying a 0.00 payslip. Correct, but it

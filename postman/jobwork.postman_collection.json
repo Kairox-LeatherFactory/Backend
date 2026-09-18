@@ -1,0 +1,218 @@
+{
+  "info": {
+    "name": "KairoX \u00b7 Jobwork",
+    "description": "Garments sent to an outside factory. A dispatched piece cannot be scanned in-house; the return logs the stage against the VENDOR, so it advances the garment without generating a wage.\n\nSETUP\n  1. Set `base_url` (default http://127.0.0.1:8000).\n  2. Import `user.postman_collection.json` and run Login.\n  3. Paste `access_token` from that response into this collection's\n     `token` variable. Every request here inherits bearer auth.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Create Vendor",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/jobwork/vendors",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobwork",
+            "vendors"
+          ]
+        },
+        "description": "Register an outside factory. Registering the same name twice returns the\noriginal rather than a 409 \u2014 a duplicate is not a mistake worth blocking.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"\",\n  \"contact\": \"\",\n  \"note\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Dispatch",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/jobwork/dispatch",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobwork",
+            "dispatch"
+          ]
+        },
+        "description": "Send garments out. They stop being scannable in-house until they return.\n\nA garment already out at another vendor is skipped and reported rather than\nsilently double-booked: two open records claiming one piece would each look\nsatisfied by the other's return.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"vendor_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"stage\": \"\",\n  \"piece_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"expected_back\": \"2026-08-01\",\n  \"rate_per_piece\": 0,\n  \"currency\": \"\",\n  \"note\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "List Jobs",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/jobwork",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobwork"
+          ],
+          "query": [
+            {
+              "key": "status",
+              "value": "",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "vendor_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "overdue",
+              "value": "False",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "200",
+              "description": "",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "What is out, what it will cost, and what is late back."
+      },
+      "response": []
+    },
+    {
+      "name": "List Vendors",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/jobwork/vendors",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobwork",
+            "vendors"
+          ],
+          "query": [
+            {
+              "key": "active_only",
+              "value": "True",
+              "description": "",
+              "disabled": true
+            }
+          ]
+        },
+        "description": ""
+      },
+      "response": []
+    },
+    {
+      "name": "Receive",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/jobwork/{{job_id}}/receive",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobwork",
+            "{{job_id}}",
+            "receive"
+          ],
+          "variable": [
+            {
+              "key": "job_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Book garments back in, and LOG the stage the vendor performed.\n\nThe work really happened, so the garment advances and the progress counts\ninclude it \u2014 but it is logged against the VENDOR, not an employee, so no\nwage line is generated for work nobody on our payroll did.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"piece_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"rejected_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"short_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"work_date\": \"2026-08-01\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    }
+  ]
+}

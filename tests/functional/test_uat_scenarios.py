@@ -26,8 +26,8 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from app.core.database import Base
-from app.core.enums import DrawerPart, ScreenContext
-from app.modules.drawers.service import DrawerService
+from app.core.enums import StorePart, ScreenContext
+from app.modules.store.service import StoreService
 from app.modules.production.service import ProductionService
 from app.modules.materials.service import MaterialService
 from app.modules.barcode.service import BarcodeService
@@ -170,11 +170,10 @@ async def test_uat5_lined_jacket_blocks_line_stitch_until_complete(
     assert blocked["merge_blocked"]
 
     # store both + DM releases
-    drawers = DrawerService(db)
-    await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id, part=DrawerPart.LEATHER)
-    await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id, part=DrawerPart.LINING)
-    await drawers.transition(drawer.id, "RECEIVED", actor_id=dm.id)
-    await drawers.transition(drawer.id, "SENDED", actor_id=dm.id)
+    store = StoreService(db)
+    await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id, part=StorePart.LEATHER)
+    await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id, part=StorePart.LINING)
+    await store.send(piece_ids=[piece.id], actor_user_id=dm.id)
 
     # AFTER: line-stitch succeeds
     ok = await prod.log_batch(user=stitching_mgr, employee_id=tailor[0].id,

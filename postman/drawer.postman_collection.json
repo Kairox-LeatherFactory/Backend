@@ -1,0 +1,90 @@
+{
+  "info": {
+    "name": "KairoX \u00b7 Drawer (WITHDRAWN)",
+    "description": "THE DRAWER MODULE IS GONE. `/api/v1/drawers/*` is unrouted \u2014 not renamed, not deprecated.\n\nWHY. There were 200 physical drawers. A style releases 100+ garments, the run stalls mid-chain, and the next 50 have nowhere to go; re-allocating by hand was too complicated for the DM to actually do. The drawer was a bottleneck that earned nothing.\n\nWHAT REPLACED IT. The store is now a STATE ON THE GARMENT, so it has no capacity and nothing runs out. Use `store.postman_collection.json`:\n    POST /drawers/store-scan   ->  POST /store/scan   (one scan fewer)\n    POST /drawers/send         ->  POST /store/send\n    GET  /drawers/by-code/{c}  ->  GET  /store/pieces/{piece_code}\n    GET  /drawers              ->  GET  /store/pieces\n    GET  /drawers/pool         ->  (nothing \u2014 there is no pool)\n\nThe two requests below are the only drawer-shaped endpoints left. They read FROZEN history for audit; they are not live state.\n\nSETUP\n  1. Set `base_url` (default http://127.0.0.1:8000).\n  2. Import `user.postman_collection.json` and run Login.\n  3. Paste `access_token` from that response into this collection's\n     `token` variable. Every request here inherits bearer auth.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Store Drawer Detail",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/store/drawers/{{drawer_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "store",
+            "drawers",
+            "{{drawer_id}}"
+          ],
+          "variable": [
+            {
+              "key": "drawer_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Store \u00a76 \u2014 full drawer info + who cut the leather / lining it holds."
+      },
+      "response": []
+    },
+    {
+      "name": "Store Drawer Movement",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/store/drawers/{{drawer_id}}/movement",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "store",
+            "drawers",
+            "{{drawer_id}}",
+            "movement"
+          ],
+          "variable": [
+            {
+              "key": "drawer_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Store \u00a717 \u2014 a drawer's movement history from the audit trail."
+      },
+      "response": []
+    }
+  ]
+}

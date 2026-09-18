@@ -29,12 +29,23 @@ from app.modules.users.models import User
 router = APIRouter(prefix="/materials", tags=["Materials"])
 sup_router = APIRouter(prefix="/suppliers", tags=["MaterialSuppliers"])
 
+# HR IS A WRITER HERE (#2). HR could read stock but not correct it, so a wrong
+# lot had to be fixed in the database by hand — which is what actually happened,
+# and is the worst possible way to change a stock figure: no audit row, no
+# reason, no chance for anyone to see it later. Giving HR the same lot rights as
+# the floor managers replaces an untracked DB edit with a tracked API call.
 _LOT_WRITERS = require_roles(
-    UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.CUTTING_MANAGER,UserRole.LINING_MANAGER)
+    UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.CUTTING_MANAGER,
+    UserRole.LINING_MANAGER, UserRole.HR)
 _STOCK_READERS = require_roles(
     UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.HR,
     UserRole.CUTTING_MANAGER, UserRole.STITCHING_MANAGER, UserRole.LINING_MANAGER, UserRole.SECURITY, UserRole.STORE_MANAGER)
 _DM = require_roles(UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR)
+# Receiving and supplier orders, with HR (#2). The mismatch-substitution approval
+# inside receive() stays DM/MD only — that one is a costing decision, not a
+# clerical one — so widening the door here does not widen that.
+_RECEIVERS = require_roles(
+    UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.HR)
 # The off-spec correction is made BY the store, at the drawer, so the store
 # manager needs it — waiting for a DM to record a swapped button is how the
 # correction stops being made at all.
@@ -113,6 +124,51 @@ async def list_lots(
 # ══════════════════════════════════════════════════════════════════════════════
 # Declared BEFORE /lots/{lot_id} would matter if any static segment followed
 # /lots; it does not, so ordering here is only readability.
+@router.get("/leather-by-style")
+async def leather_by_style(
+    style_id: uuid.UUID | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_STOCK_READERS),
+):
+    """Arrived / consumed / available per style — #19.
+
+    All three come from places that already record them, which is why this is a
+    read and not a new ledger. The consumed figure is split by rework (#3), so
+    "this style cost X, of which Y was defects" is answerable.
+    """
+    return await MaterialService(db).leather_by_style(style_id=style_id)
+
+
+@router.get("/pieces/{piece_id}/consumption")
+async def piece_consumption(
+    piece_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_STOCK_READERS),
+):
+    """What ONE garment took, hide by hide — #17 / #28.
+
+    A piece cut through the new grid lists its actual sheets. One cut the old way
+    (a typed dcm) lists none, which is the honest answer: nobody recorded which
+    hides those were.
+    """
+    return await MaterialService(db).piece_consumption(piece_id)
+
+
+@router.get("/lots/{lot_id}/history", response_model=schemas.LotHistory)
+async def lot_history(
+    lot_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_STOCK_READERS),
+):
+    """Every delivery of this lot, newest first — the purchase history (#16).
+
+    Declared BEFORE /lots/{lot_id} so the literal path segment wins: FastAPI
+    matches in declaration order, and the bare route would otherwise swallow
+    "history" as a lot id and 422 on the UUID parse.
+    """
+    return await MaterialService(db).lot_history(lot_id)
+
+
 @router.get("/lots/{lot_id}", response_model=schemas.LotDetail)
 async def get_lot(
     lot_id: uuid.UUID,
@@ -153,7 +209,7 @@ async def adjust_lot(
     lot_id: uuid.UUID,
     body: schemas.LotAdjust,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(_DM),
+    user: User = Depends(_RECEIVERS),
 ):
     """A COUNTED STOCK CORRECTION: +/- delta, with a reason, audited.
 
@@ -169,7 +225,7 @@ async def adjust_lot(
 async def retire_lot(
     lot_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(_DM),
+    user: User = Depends(_RECEIVERS),
 ):
     """RETIRE a lot — deactivate it and retire its barcode. Never a hard delete.
 
@@ -208,7 +264,7 @@ async def stock(
 async def receive(
     body: schemas.ReceiveRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(_DM),
+    user: User = Depends(_RECEIVERS),
 ):
     """approved adds to stock; a PO-mismatch is rejected (409) unless a DM/MD
     sends approve_mismatch=true, which receives it into a new substitute lot."""

@@ -157,6 +157,27 @@ class ProductionRepository:
         await self.db.commit()
 
     # --- events ---
+    async def event_counts_by_stage(self, piece_id) -> dict:
+        """{stage code: how many events this piece has at it}.
+
+        COUNTS, NOT TIMESTAMPS, and that is deliberate. The first version of the
+        rework re-walk compared each event's created_at against the redo's
+        resolved_at — and it could never work: created_at comes from the database
+        (naive, one-second resolution) while resolved_at is a Python aware
+        datetime with microseconds, so an event written in the SAME second as the
+        redo sorted BEFORE it and the re-walk stalled, re-logging one stage
+        forever.
+
+        A count has no clock in it. A stage that has been logged twice has been
+        done twice, whatever the machine thinks the time is.
+        """
+        res = await self.db.execute(
+            select(Operation.code, func.count())
+            .join(ProductionEvent, ProductionEvent.operation_id == Operation.id)
+            .where(ProductionEvent.piece_id == piece_id)
+            .group_by(Operation.code))
+        return {code: int(n) for code, n in res.all()}
+
     async def add_event_nocommit(self, **kw) -> ProductionEvent:
         """Create a production event and keep it in the current transaction.
 

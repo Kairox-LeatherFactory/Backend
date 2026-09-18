@@ -26,9 +26,15 @@ from __future__ import annotations
 from app.core.enums import KitStatus
 
 
-def drawer_complete(*, leather_in: bool, lining_in: bool, accessories_in: bool,
-                    needs_lining: bool, kit_required: bool) -> bool:
-    """Does this drawer hold everything the garment in it is ever going to get?
+def piece_complete(*, leather_in: bool, lining_in: bool, accessories_in: bool,
+                   needs_lining: bool, kit_required: bool) -> bool:
+    """Does the store hold everything this garment is ever going to get?
+
+    THIS FUNCTION NEVER WAS ABOUT DRAWERS. Every argument is a fact about the
+    GARMENT — its leather arrived, its lining arrived, its kit was issued, it
+    takes a lining at all, it declares accessories at all. The drawer was only
+    where those facts happened to be written down, which is exactly why removing
+    the drawer cost this predicate a rename and nothing else.
 
     COMPLETENESS IS NOT THE SAME QUESTION AS THE DRAWER'S STATE. `state` names
     what is physically in there (HOLDING_LEATHER, HOLDING_BOTH); this says
@@ -142,3 +148,11 @@ def release_blockers(*, style_name: str, confirmed_at, no_accessories,
             f"that it needs none. Add the accessory lines, or confirm the spec "
             f"with no_accessories: true.")
     return out
+
+
+# ── COMPATIBILITY ────────────────────────────────────────────────────────────
+# `drawer_complete` was this function's name while the store was a drawer. The
+# alias exists so the drawer module — which is being retired, not rewritten —
+# keeps importing something real during the changeover. New code calls
+# piece_complete; when the drawer module goes, this goes with it.
+drawer_complete = piece_complete

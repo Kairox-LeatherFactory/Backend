@@ -57,7 +57,9 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.core.enums import BarcodeStatus, BarcodeType, DrawerState
+from app.core.enums import (
+    BarcodeStatus, BarcodeType, DrawerState, StoreState,
+)
 from app.modules.barcode.models import BarcodeRegistry, Drawer
 from app.modules.barcode.repository import (
     SHORT_CODE_PREFIX, decode_short, encode_short,
@@ -375,30 +377,24 @@ def premint_order(db: Session, order, *, style_ids=None,
                 piece.needs_lining = needs_lining
             new_pieces.append(piece)
 
-            # 2) allocate a drawer from the pool (reuse empty, else mint, else
-            #    the piece goes on the waiting list with drawer_id NULL).
-            drawer = allocator.take()
-            if drawer is not None:
-                drawer.state = DrawerState.MERGED.value
-                # current_piece_id is NOT set yet — piece.id does not exist in
-                # the DB until phase 2, and fk_drawer_current_piece_id_piece is
-                # checked immediately. Deferred to phase 3.
-                links.append((drawer, piece))
-                # A fresh merge starts with neither part in.
-                drawer.leather_in = False
-                drawer.lining_in = False
-                # THE MERGE IS AN ACT ON THE DRAWER, and until now the only one
-                # that left no trace of when it happened: received_at/sended_at
-                # are being cleared on the line below, and created_at belongs to
-                # the drawer's manufacture, not to this garment. Without this
-                # stamp a drawer merged five seconds ago sorts below one nothing
-                # has touched in a month.
-                drawer.last_activity_at = datetime.now(timezone.utc)
-                drawer.last_activity_kind = "merged"
-                drawer.received_at = None
-                drawer.sended_at = None
-                if hasattr(piece, "drawer_id"):
-                    piece.drawer_id = drawer.id
+            # 2) NO DRAWER IS ALLOCATED ANY MORE.
+            #
+            # This is where the 200-slot bottleneck was. A style releases 100+
+            # garments; the pool ran dry partway down and the remainder were
+            # minted with drawer_id NULL onto a "waiting for a drawer" list. The
+            # merge gate then refused to line-stitch them — a piece with no
+            # drawer could not be proven complete — so the DM had to re-allocate
+            # boxes by hand, which was complicated enough that it did not happen.
+            #
+            # The store is now a STATE on the garment (piece.store_state), and a
+            # state has no capacity. A freshly minted piece starts at WAITING and
+            # enters the store the moment a part is scanned in. Nothing is
+            # allocated, so nothing can run out.
+            #
+            # `piece.drawer_id` is left NULL and is no longer read by anything;
+            # the column and the drawer tables are kept so the historical link
+            # stays auditable. See 20260902_store_piece.
+            piece.store_state = StoreState.WAITING.value
 
             # 3) register the parent barcodes (the drawer barcode already exists —
             #    it is permanent and static; we do NOT re-register it on reuse).

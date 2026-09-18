@@ -132,8 +132,9 @@ def holding_label(*, leather_in: bool | None, lining_in: bool | None) -> str:
 def display_stage(
     *,
     current_event_stage: str | None,
-    drawer_state: str | None,
+    store_state: str | None = None,
     needs_lining: bool = True,
+    drawer_state: str | None = None,      # legacy alias, see below
 ) -> dict:
     """Resolve what the production/barcode UI should SHOW for a piece.
 
@@ -155,8 +156,15 @@ def display_stage(
         store_status   : the drawer sub-state driving the caption (or None)
         label          : a ready-to-render human caption
     """
+    # `drawer_state` IS THE OLD NAME OF `store_state`, and the values are
+    # identical — the migration copied drawer.state onto piece.store_state
+    # unchanged, precisely so this overlay, the label tables, the dashboard
+    # filters and the analytics buckets all kept working without a translation
+    # layer. Accepting both keeps the drawer module (being retired, not
+    # rewritten) calling something real during the changeover.
     ev = (current_event_stage or "").strip().upper() or None
-    ds = (drawer_state or "").strip().lower() or None
+    ds = ((store_state if store_state is not None else drawer_state) or "")
+    ds = ds.strip().lower() or None
 
     # 1) The piece has an actual LINE_STITCHING (or later) event → it has left
     #    the store for real. Show the real event stage. (Once line-stitching is

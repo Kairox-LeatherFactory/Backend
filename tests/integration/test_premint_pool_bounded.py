@@ -26,6 +26,35 @@ test_premint_insert_order.py: premint runs on a sync Session inside the
 importer's transaction, and SQLite waves through FK violations unless asked not
 to.
 """
+
+import pytest
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RETIRED WITH THE DRAWER — the 200-drawer pool allocator.
+#
+# There were 200 physical drawers. A style releases 100+ garments, stalled
+# mid-chain, and the surplus were minted onto a "waiting for a drawer" list that
+# the merge gate then refused to line-stitch — so the DM had to re-allocate boxes
+# by hand, which in practice did not happen. Since 20260902_store_piece the store
+# is a STATE on the garment (piece.store_state), and a state has no capacity.
+#
+# THE RULES THIS FILE ASSERTED ARE NOT LOST. Every one of them — completeness,
+# auto-receive, the store-entry gate, the lining verdict (including the stale
+# needs_lining flag that let a KNIT jacket reach PACKAGE_EXPORT unlined), the
+# merge gate that opens LINE_STITCHING, partial-accept send, the PACKAGE_EXPORT
+# release and the piece lookup — is carried forward in
+# tests/integration/test_store_merge.py, against the API the floor now uses.
+#
+# What is NOT carried forward, deliberately: "a piece scanned into the wrong
+# drawer is a 409". There is no wrong drawer. That rejection policed an
+# assignment the system invented at upload, and its absence is the feature.
+#
+# The file is kept rather than deleted so the drawer's behaviour stays readable
+# while the tables are still in the database (they are retained, unwritten, for
+# audit). It goes when they do.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
 import pytest
 from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -158,3 +187,6 @@ def test_style_ids_scopes_the_mint_to_the_released_styles(fk_db):
 
     assert stats["pieces_minted"] == 3, "the unreleased style was minted too"
     assert fk_db.scalar(select(func.count(Piece.id))) == 3
+
+
+pytestmark = pytest.mark.skip(reason="Drawers are retired; see tests/integration/test_store_merge.py")

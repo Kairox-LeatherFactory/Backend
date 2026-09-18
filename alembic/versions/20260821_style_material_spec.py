@@ -14,7 +14,7 @@ WHAT THIS IS FOR
         piece_material_issue   the ledger   — what was actually issued, per piece
         drawer.accessories_in  the third bucket, beside leather_in / lining_in
         style.material_spec_*  the header: who confirmed the recipe, and whether
-                               they declared the style takes no accessories
+                            they declared the style takes no accessories
 
 NO BACKFILL, AND THAT IS THE BACK-COMPATIBILITY ARGUMENT.
     Every style that predates this migration has no spec lines, so

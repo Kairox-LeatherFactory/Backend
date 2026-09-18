@@ -60,6 +60,8 @@ from app.modules.production import models as _production     # noqa: F401
 from app.modules.wages import models as _wages              # noqa: F401
 from app.modules.attendance import models as _attendance    # noqa: F401
 from app.modules.barcode import models as _barcode          # noqa: F401  (barcode + materials + drawer + supplier + style-spec/issue-ledger tables all live here)
+from app.modules.jobwork import models as _jobwork            # noqa: F401  (vendor — production_event FKs to it)
+from app.modules.cutting import models as _cutting          # noqa: F401  (cutting_row — material_sheet FKs to it, so it must load with the barcode tables)
 from app.core import models as _core_models                 # noqa: F401
 from app.modules.procurement import models as _procurement  # noqa: F401  Stage 1
 from app.modules.bom import models as _bom                  # noqa: F401  Stage 2/3
@@ -94,7 +96,17 @@ from app.modules.barcode.router import emp_router as barcode_emp_router
 from app.modules.materials.router import router as materials_router
 from app.modules.materials.router import sup_router as suppliers_router
 from app.modules.materials.router import spec_router as style_spec_router
-from app.modules.drawers.router import router as drawers_router
+# DRAWERS ARE RETIRED — replaced by app/modules/store (20260902_store_piece).
+# There were 200 physical drawers; a style releases 100+ garments and stalled
+# mid-chain, so the DM had to re-allocate by hand and in practice did not. Every
+# fact the drawer held was a fact about the GARMENT and now lives on the piece.
+# The module and its tables are KEPT, unwritten, so the movement history stays
+# auditable — only the routes are withdrawn.
+# from app.modules.drawers.router import router as drawers_router
+from app.modules.cutting.router import router as cutting_router
+from app.modules.store.router import router as store_router
+from app.modules.production.inspection_router import router as inspection_router
+from app.modules.jobwork.router import router as jobwork_router
 
 from app.modules.users.deps import block_employees
 
@@ -268,7 +280,11 @@ app.include_router(suppliers_router,   prefix=API_PREFIX, dependencies=_LOCKED) 
 # locked like every other manager surface; its own routes then split read
 # (_STOCK_READERS — the floor needs the accessory list) from write (DM/MD).
 app.include_router(style_spec_router, prefix=API_PREFIX, dependencies=_LOCKED)
-app.include_router(drawers_router,     prefix=API_PREFIX, dependencies=_LOCKED)  # NEW
+# app.include_router(drawers_router,     prefix=API_PREFIX, dependencies=_LOCKED)  # NEW   # retired -> /store
+app.include_router(cutting_router,     prefix=API_PREFIX, dependencies=_LOCKED)  # Cutting V2
+app.include_router(store_router,       prefix=API_PREFIX, dependencies=_LOCKED)  # replaces /drawers
+app.include_router(inspection_router,  prefix=API_PREFIX, dependencies=_LOCKED)  # reject & rework
+app.include_router(jobwork_router,     prefix=API_PREFIX, dependencies=_LOCKED)  # outsourcing
 
 # Aug-20 stages (BOM/procurement/inventory/supplier_po) — locked.
 app.include_router(procurement_router, prefix=API_PREFIX, dependencies=_LOCKED)

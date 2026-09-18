@@ -281,6 +281,7 @@ class BarcodeRepository:
                           employee_id: uuid.UUID | None = None,
                           drawer_id: uuid.UUID | None = None,
                           material_lot_id: uuid.UUID | None = None,
+                          material_sheet_id: uuid.UUID | None = None,
                           order_id: uuid.UUID | None = None,
                           sku_id: uuid.UUID | None = None,
                           style_id: uuid.UUID | None = None,
@@ -289,6 +290,7 @@ class BarcodeRepository:
             code=_norm(code), type=type_.value, status=BarcodeStatus.ACTIVE.value,
             caption=caption, piece_id=piece_id, employee_id=employee_id,
             drawer_id=drawer_id, material_lot_id=material_lot_id,
+            material_sheet_id=material_sheet_id,
             order_id=order_id, sku_id=sku_id, style_id=style_id,
             is_alias=is_alias,
         )
@@ -381,6 +383,31 @@ class BarcodeRepository:
         code = await self._next_code(prefix)
         return self.register_nocommit(
             code=code, type_=type_, material_lot_id=material_lot_id, caption=caption)
+
+    def mint_sheet_code_nocommit(self, sheet, caption: str | None = None):
+        """One hide's label. The CODE IS THE SHEET'S OWN, not a generated serial.
+
+        WHY NOT `_next_code("LS")` LIKE EVERY OTHER MINT. `_next_code` derives its
+        counter from the lexicographically greatest code in the prefix and falls
+        back to 0 when that code's tail is not all digits — so ONE non-numeric
+        code in the namespace pins the counter at 0 permanently and every
+        subsequent mint collides on the unique index. That is a live, open bug for
+        the EMP- prefix (see the F16/F79/F99 regression test) and there is no
+        reason to enrol a new prefix in it.
+
+        MaterialSheet.code is already allocated from a COUNT inside the same
+        transaction that creates the hides, and it is already unique by
+        constraint. Reusing it means the label and the row cannot disagree, and
+        the registry row is a pure pointer.
+
+        BOTH LINKS ARE SET. A scan has to answer "which hide" and "what article
+        and colour is it" in one read; the sheet carries the first and only its
+        lot carries the second.
+        """
+        return self.register_nocommit(
+            code=sheet.code, type_=BarcodeType.LEATHER_SHEET,
+            material_sheet_id=sheet.id, material_lot_id=sheet.material_lot_id,
+            caption=caption)
 
     # ── retire / reissue (employee) ──────────────────────────────────────────
     async def retire_nocommit(self, row: BarcodeRegistry, reason: str) -> None:

@@ -130,13 +130,14 @@ async def test_a_department_counts_a_garment_once_however_many_of_its_stages_it_
     await _walk(db, piece, cutter=cutter, tailor=tailor, cutting_mgr=cutting_mgr,
                 dm=dm, leather_lot=leather_lot, stages=3)      # cut, fusing, pasting
 
-    from app.core.enums import DrawerPart
-    from app.modules.drawers.service import DrawerService
-    drawers = DrawerService(db)
+    from app.core.enums import StorePart
+    from app.modules.store.service import StoreService
+    store = StoreService(db)
     await ready_for_store(piece, leather=False)   # _walk covers the leather side
-    for part in (DrawerPart.LEATHER, DrawerPart.LINING):
-        await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id, part=part)
-    await drawers.send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
+    for part in (StorePart.LEATHER, StorePart.LINING):
+        await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                               part=part)
+    await store.send(piece_ids=[piece.id], actor_user_id=dm.id)
     # line, shell, final finish — all three Stitching stages
     for _ in range(3):
         await ProductionService(db).log_batch(

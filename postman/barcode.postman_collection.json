@@ -1,0 +1,388 @@
+{
+  "info": {
+    "name": "KairoX \u00b7 Barcode",
+    "description": "GET /barcode/resolve is every scan's front door: unknown code 404, retired card 410 Gone, otherwise the code's type and a live payload for it.\n\nSETUP\n  1. Set `base_url` (default http://127.0.0.1:8000).\n  2. Import `user.postman_collection.json` and run Login.\n  3. Paste `access_token` from that response into this collection's\n     `token` variable. Every request here inherits bearer auth.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Barcode Detail",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/barcode/detail",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "barcode",
+            "detail"
+          ],
+          "query": [
+            {
+              "key": "code",
+              "value": "",
+              "description": "The clicked/scanned barcode string.",
+              "disabled": false
+            }
+          ]
+        },
+        "description": "Full detail for one barcode (click-through from the history list). Same\nrich payload as /resolve, tenancy-scoped for CLIENT logins."
+      },
+      "response": []
+    },
+    {
+      "name": "Employee Barcode Action",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/employees/{{employee_id}}/barcode",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "employees",
+            "{{employee_id}}",
+            "barcode"
+          ],
+          "variable": [
+            {
+              "key": "employee_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Reissue a card (damaged/lost) or deactivate it (worker left). Deactivation\nNEVER deletes the employee or their history \u2014 it retires the scannable code.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"action\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "List Barcode Orders",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/barcode/orders",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "barcode",
+            "orders"
+          ]
+        },
+        "description": "Orders that have generated barcodes \u2014 the picker. Unique per order_number.\nShows minted count + generated date range so the user picks the right order."
+      },
+      "response": []
+    },
+    {
+      "name": "List Order Sku Options",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/barcode/orders/{{order_id}}/skus",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "barcode",
+            "orders",
+            "{{order_id}}",
+            "skus"
+          ],
+          "variable": [
+            {
+              "key": "order_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "SKU + style options to populate the filter dropdowns for this order."
+      },
+      "response": []
+    },
+    {
+      "name": "Material Barcodes",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/barcode/materials",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "barcode",
+            "materials"
+          ],
+          "query": [
+            {
+              "key": "category",
+              "value": "",
+              "description": "LEATHER | LINING | ACCESSORY",
+              "disabled": true
+            },
+            {
+              "key": "active_only",
+              "value": "True",
+              "description": "Hide retired lot labels.",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "THE MATERIAL-BARCODE SCREEN (change-list item 7).\n\nThe barcode section had screens for pieces, drawers and employee cards but\nnone for material lots \u2014 so a lot minted a code at creation and nobody could\nreprint it once the first label was lost or damaged.\n\nEach row carries `code` (encode as Code128) and `label_line` (typeset\nunderneath as text), the same convention as POST /barcode/print. A row with\n`status: retired` belongs to a retired lot: show it greyed, do not print it.\n\nNOTE FOR THE UI: the drawer screen's label reads \"bucket barcode\" and should\nread \"drawer barcode\". The backend has only ever called it DRAWER \u2014 there is\nno `bucket` anywhere in the API \u2014 so that rename is frontend-only."
+      },
+      "response": []
+    },
+    {
+      "name": "Order Barcode Analytics",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/barcode/orders/{{order_id}}/analytics",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "barcode",
+            "orders",
+            "{{order_id}}",
+            "analytics"
+          ],
+          "variable": [
+            {
+              "key": "order_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Per-order: planned vs generated vs balance (order total AND per style).\nIncludes duplicates=0 integrity proof and a half_minted flag."
+      },
+      "response": []
+    },
+    {
+      "name": "Order Barcode History",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/barcode/orders/{{order_id}}/barcodes",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "barcode",
+            "orders",
+            "{{order_id}}",
+            "barcodes"
+          ],
+          "query": [
+            {
+              "key": "sku_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "Filter to one SKU.",
+              "disabled": true
+            },
+            {
+              "key": "style_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "Filter to one style.",
+              "disabled": true
+            },
+            {
+              "key": "size",
+              "value": "",
+              "description": "Filter to one size (style+size).",
+              "disabled": true
+            },
+            {
+              "key": "status",
+              "value": "",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "date_from",
+              "value": "2026-08-01T09:00:00Z",
+              "description": "Generated at/after.",
+              "disabled": true
+            },
+            {
+              "key": "date_to",
+              "value": "2026-08-01T09:00:00Z",
+              "description": "Generated at/before.",
+              "disabled": true
+            },
+            {
+              "key": "page",
+              "value": "1",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "page_size",
+              "value": "50",
+              "description": "",
+              "disabled": true
+            }
+          ],
+          "variable": [
+            {
+              "key": "order_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "The history table: order \u2192 style \u2192 piece, filterable by SKU, style, or\nstyle+size, plus status and generated-date range. Paginated (JP ~= 1,273)."
+      },
+      "response": []
+    },
+    {
+      "name": "Print Labels",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/barcode/print",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "barcode",
+            "print"
+          ]
+        },
+        "description": "Code128-ready payload for one or many codes (or all pieces of a SKU/order).",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"codes\": [\n    \"\"\n  ],\n  \"sku_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"order_id\": \"00000000-0000-0000-0000-000000000000\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Resolve",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/barcode/resolve",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "barcode",
+            "resolve"
+          ],
+          "query": [
+            {
+              "key": "code",
+              "value": "",
+              "description": "The scanned/typed barcode string.",
+              "disabled": false
+            }
+          ]
+        },
+        "description": "Resolve any barcode to its type + live payload. 404 unknown, 410 retired."
+      },
+      "response": []
+    },
+    {
+      "name": "Resolve Order By Number",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/barcode/orders/by-number/{{order_number}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "barcode",
+            "orders",
+            "by-number",
+            "{{order_number}}"
+          ],
+          "variable": [
+            {
+              "key": "order_number",
+              "value": ""
+            }
+          ]
+        },
+        "description": "Resolve a human order_number to its picker row (id + minted counts)."
+      },
+      "response": []
+    }
+  ]
+}
