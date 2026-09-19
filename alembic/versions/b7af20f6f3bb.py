@@ -1,6 +1,6 @@
 """add new service tables
 Revision ID: b7af20f6f3bb
-Revises: 20260822_style_spec_optional_article
+Revises: 20260822_style_article
 Create Date: 2026-08-24 16:56:53.849124
 """
 from alembic import op
