@@ -10,7 +10,7 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
 ```json
 {
   "meta": {
-    "generated_for": "2026-09-18",
+    "generated_for": "2026-09-19",
     "scope": "all_clients",
     "unsupported": {
       "quality_rejection": "No quality/rejection table exists. produced / inspected / event-based rework are real; accepted / rejected / defective_pct are null until a PieceInspection (pass/reject/rework) model + migration lands.",
@@ -69,8 +69,8 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
 
 ```json
 {
-  "period_start": "2026-09-04",
-  "period_end": "2026-09-17",
+  "period_start": "2026-09-05",
+  "period_end": "2026-09-18",
   "order_number": "KJ2451"
 }
 ```
@@ -78,9 +78,9 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
 
 ```json
 {
-  "id": "87927237-88d1-4626-af24-b43e2132a1fb",
-  "period_start": "2026-09-04",
-  "period_end": "2026-09-17",
+  "id": "e0ce4f77-c816-4301-b837-233d26a79c90",
+  "period_start": "2026-09-05",
+  "period_end": "2026-09-18",
   "status": "closed",
   "run_kind": "piece",
   "scope_order_number": "KJ2451",
@@ -94,8 +94,8 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
   "unrated_operations": [],
   "lines": [
     {
-      "id": "d0cd813b-08e5-4ee2-b161-3d89872f70dd",
-      "employee_id": "240de8eb-7087-4d64-b3b0-b21d07a4e91f",
+      "id": "4fdc88ce-f508-4e4a-976c-503346fa40d8",
+      "employee_id": "423dffbf-01b8-49f5-a45e-6e89f63d557c",
       "employee_name": "RAGAVAN L",
       "designation": "CUTTER",
       "wage_type": "piece_rate",
@@ -132,8 +132,8 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
 
 ```json
 {
-  "period_start": "2026-09-04",
-  "period_end": "2026-09-17",
+  "period_start": "2026-09-05",
+  "period_end": "2026-09-18",
   "order_number": "KJ2452"
 }
 ```
@@ -141,9 +141,9 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
 
 ```json
 {
-  "id": "25185f5c-42bf-4c55-aa5f-a8cf8e862ced",
-  "period_start": "2026-09-04",
-  "period_end": "2026-09-17",
+  "id": "7fd9b76d-49c0-4ae4-87fe-1b7fa2de6703",
+  "period_start": "2026-09-05",
+  "period_end": "2026-09-18",
   "status": "closed",
   "run_kind": "piece",
   "scope_order_number": "KJ2452",
@@ -157,8 +157,8 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
   "unrated_operations": [],
   "lines": [
     {
-      "id": "6159ab34-b6e1-479c-93e2-d47772654403",
-      "employee_id": "240de8eb-7087-4d64-b3b0-b21d07a4e91f",
+      "id": "ff02d908-b39b-4e7b-8fab-d6d7de4bad16",
+      "employee_id": "423dffbf-01b8-49f5-a45e-6e89f63d557c",
       "employee_name": "RAGAVAN L",
       "designation": "CUTTER",
       "wage_type": "piece_rate",
@@ -195,8 +195,8 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
 
 ```json
 {
-  "period_start": "2026-09-04",
-  "period_end": "2026-09-17",
+  "period_start": "2026-09-05",
+  "period_end": "2026-09-18",
   "style_code": "KJ2451-CLERMONT-GOAT_SUEDE"
 }
 ```
@@ -204,23 +204,23 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
 
 ```json
 {
-  "detail": "This PIECE run (KJ2451-CLERMONT-GOAT_SUEDE) would pay work already covered by closed PIECE run 87927237-88d1-4626-af24-b43e2132a1fb (2026-09-04..2026-09-17, scope: KJ2451) \u2014 1 shared style(s) in common over the same dates, so those garments would be paid twice. Runs for DIFFERENT orders or styles over the same dates are allowed, and a PIECE run never collides with a MONTHLY one. Narrow this run, move the window, recompute run 87927237-88d1-4626-af24-b43e2132a1fb (POST /wages/runs/87927237-88d1-4626-af24-b43e2132a1fb/recompute), or delete it (DELETE /wages/runs/87927237-88d1-4626-af24-b43e2132a1fb) if it is wreckage from a failed compute."
+  "detail": "This PIECE run (KJ2451-CLERMONT-GOAT_SUEDE) would pay work already covered by closed PIECE run e0ce4f77-c816-4301-b837-233d26a79c90 (2026-09-05..2026-09-18, scope: KJ2451) \u2014 1 shared style(s) in common over the same dates, so those garments would be paid twice. Runs for DIFFERENT orders or styles over the same dates are allowed, and a PIECE run never collides with a MONTHLY one. Narrow this run, move the window, recompute run e0ce4f77-c816-4301-b837-233d26a79c90 (POST /wages/runs/e0ce4f77-c816-4301-b837-233d26a79c90/recompute), or delete it (DELETE /wages/runs/e0ce4f77-c816-4301-b837-233d26a79c90) if it is wreckage from a failed compute."
 }
 ```
 
-### 5. GET `/api/v1/wages/runs/87927237-88d1-4626-af24-b43e2132a1fb/breakdown`
+### 5. GET `/api/v1/wages/runs/e0ce4f77-c816-4301-b837-233d26a79c90/breakdown`
 > Where the money went: by style, by stage, by employee.
 **Response — `200`**
 
 ```json
 {
-  "run_id": "87927237-88d1-4626-af24-b43e2132a1fb",
-  "period_start": "2026-09-04",
-  "period_end": "2026-09-17",
+  "run_id": "e0ce4f77-c816-4301-b837-233d26a79c90",
+  "period_start": "2026-09-05",
+  "period_end": "2026-09-18",
   "status": "closed",
   "scope_order_number": "KJ2451",
   "scope_style_code": null,
-  "computed_at": "2026-09-18T11:57:54",
+  "computed_at": "2026-09-19T09:01:12",
   "recompute_count": 0,
   "reopen_count": 0,
   "total_amount": 50.0,
@@ -243,7 +243,7 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
       ],
       "employees": [
         {
-          "employee_id": "240de8eb-7087-4d64-b3b0-b21d07a4e91f",
+          "employee_id": "423dffbf-01b8-49f5-a45e-6e89f63d557c",
           "employee_name": "RAGAVAN L",
           "designation": "CUTTER",
           "pieces": 4,
@@ -265,7 +265,7 @@ Every exchange below is a real call through the FastAPI app (ASGI, throwaway SQL
   ],
   "by_employee": [
     {
-      "employee_id": "240de8eb-7087-4d64-b3b0-b21d07a4e91f",
+      "employee_id": "423dffbf-01b8-49f5-a45e-6e89f63d557c",
       "employee_name": "RAGAVAN L",
       "designation": "CUTTER",
       "pieces": 4,
