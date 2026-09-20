@@ -1,348 +1,339 @@
-# KairoX — Cutting V2, Drawer Removal & Store Merge, then the backend bug list
+# KairoX Phase-1 Backend — Audit, Bug-Fix & Scale-Out Plan
 
 ## Context
 
-Three things are being asked for, from two documents and your notes:
+The Phase-1 services (everything except `bom`, `procurement`, `supplier_po`, `inventory`,
+`intelligence`) have grown to ~30k LOC across 18 route groups and 158 endpoints, but have never
+had a consolidated correctness/performance audit. The app is about to carry real factory traffic:
+100+ concurrent users on a barcode-driven floor, where a manager scans batches of pieces and
+payroll is computed from those scans.
 
-1. **Cutting V2.** Kumar keeps the real cutting record in Excel (sheets, DCM per sheet, returns,
-   adjustments) and re-types the finished bundle into the ERP. Two systems, double work, and the
-   ERP cannot say how much leather was actually consumed. V1 only starts recording once the bundle
-   is already cut.
-2. **Drawers must go.** There are only 200 physical drawers. A style releases 100+ pieces, stalls
-   mid-chain, and the next 50 pieces have nowhere to go; re-allocating by hand is too complicated
-   for the DM. The drawer is a bottleneck that earns nothing. Store merge should be leather +
-   lining + the right accessories, scanned off the piece barcode, and it must be easy.
-3. **~20 backend fixes** from the bugs PDF, plus outsourcing tracking.
+I ran the full test suite and audited the in-scope code. The results say the system is
+**functionally broad but not production-hardened**:
 
-**Sequence you chose: Cutting V2 + Drawer/Store first, then everything else.**
+- **1396 pass / 20 fail / 10 error / 98 skip / 8 xpass** (267s).
+- At least one endpoint raises an unhandled `AttributeError` (guaranteed HTTP 500).
+- HR holds **write** authority over the entire payroll money path.
+- Material reservations are created but **never released** — stock silently drifts toward zero.
+- There is **zero row-level locking** anywhere in the in-scope codebase.
+- The connection pool caps the whole API at **12 sustained DB connections**, which is the hard
+  ceiling on the 100-user target regardless of how much CPU is added.
 
-### What the exploration changed about the approach
+Intended outcome: a delivered Word document that records the audit, the complexity analysis and
+the scale-out architecture; and a code change-set that fixes the P0 bugs, closes the API contract
+gaps, and makes the app horizontally scalable on AWS.
 
-The codebase is further along than CLAUDE.md describes, and three findings make this much cheaper
-than it looks:
-
-- **`STORE` is already a derived display concept**, not a stage. `core/store_display.display_stage()`
-  computes it from (last event, drawer state). Removing the drawer means repointing that one
-  function at a piece-level state — not inventing a store.
-- **`core/kit_rules.drawer_complete()` is not really about drawers.** It takes
-  `leather_in / lining_in / accessories_in / needs_lining / kit_required` — all facts about the
-  *garment*. It becomes `piece_complete()` with the same three clauses.
-- **`style_material_spec` already has a `size` column and a kit ledger that already tolerates a
-  NULL drawer** (`piece_material_issue.drawer_id` is nullable and already written as
-  `drawer.id if drawer is not None else None`).
-
-### The one thing that must not be missed
-
-**`_merge_ok` is the ONLY gate on LINE_STITCHING.** `_sequence_ok` returns `True` early for it
-(`production/service.py:162`, `prev is None`, because `LINE_STITCHING.predecessor()` returns None by
-design). Delete the drawer without replacing the gate and **line-stitching becomes completely
-ungated** — any piece could be stitched before it was ever cut. The replacement gate is not
-optional cleanup; it is the first thing to write.
+**User decisions taken (2026-09-19):**
+1. Deliverable = **Word document + implement all phases**.
+2. Infra = **AWS, deployed as a Docker image**; architecture choice delegated to this plan.
+3. Business-rule conflicts (skill-gate matrix etc.) = **flag with both readings, do not guess**.
 
 ---
 
-## Decisions locked (from your answers — do not relitigate)
+## Evidence base (all verified, not inferred)
 
-| Question | Decision |
-|---|---|
-| What is a leather sheet | One physical hide. **Each gets its own barcode** (MD's requirement). 7-12 per garment. |
-| What is one cutting-sheet row | **ONE garment** (one piece). |
-| Can a sheet span rows | **No** — a sheet is fully consumed by the row it is issued to. Status, not balance. |
-| When stock decrements | **At production log, as today.** Approve reserves; logging consumes. |
-| Auto-allocation target | Style spec DCM when it exists, else a **built-in size→DCM baseline** (below). Manager edits every cell regardless. |
-| Accessory barcodes | **One barcode per packet/lot, as today.** A 5,000-button packet is one barcode; the count decrements on merge. No per-unit labelling. |
-| Drawer data | **Migrate** state onto the piece, keep the drawer tables read-only for audit. |
-| Outsourcing | Dispatch + return ledger per piece, with the vendor record shaped so rates can be added later. |
-
-### The size → DCM baseline (researched, and checked against your own sheet)
-
-You said the DM is not asked for per-piece DCM, so the system needs a sensible default. Validated
-against your screenshot: all six rows average **46 dcm per hide** (43-63 range), and the leather
-trade puts a jacket at 45-55 sq ft = 418-511 dcm. Both agree.
-
-| Size | Target dcm | ≈ sheets @46 |
+| Measurement | Value | How obtained |
 |---|---|---|
-| XS | 340 | 7 |
-| S | 370 | 8 |
-| M | 400 | 9 |
-| L | 430 | 9 |
-| XL | 465 | 10 |
-| XXL | 500 | 11 |
-| XXXL | 540 | 12 |
-
-Italian numeric sizes map onto the same ladder (46=XS, 48=S, 50=M, 52=L, 54=XL, 56=XXL, 58+=XXXL).
-This lives in a new `app/core/leather_norms.py` beside `kit_rules.py` / `lining_rules.py`, as a pure
-table with the reasoning written down. **It is explicitly an estimate** — the style's
-`style_material_spec` leather `qty_per_piece` wins whenever it exists, and the manager edits the row
-either way. Note your screenshot rows run 5-7 sheets / ~290 dcm, below the 7-12 you quoted; the
-baseline sits between the two, which is what "near enough, then edit" means.
+| Live routes on the app | 233 (158 in-scope) | imported `app.main`, walked `app.routes` |
+| In-scope routes with **no** `response_model` | **55 / 158 (34%)** | same walk |
+| Committed `openapi.json` | 192 ops — **stale by 41** | parsed repo-root `openapi.json` |
+| Postman collections vs live routes | 0 mismatches — collections are current | normalized-path diff |
+| Raw `text()` SQL in scope | **0** — no SQL-injection surface | grep |
+| `with_for_update` / advisory locks in scope | **0** | grep |
+| `.commit()` in repository layer | **30** (13 in `wages/repository.py` alone) | grep |
+| `.commit()` in router layer | 2 (`drawers/router.py:211,245`) | grep |
+| Routers with no pagination params | production, clients, cutting, dashboard, users | grep |
+| DB pool | `pool_size=3, max_overflow=5`, no `pool_recycle`/`pool_timeout` | `core/database.py:88` |
+| Gunicorn workers | `WEB_CONCURRENCY:-4` | `entrypoint.sh:190`, `docker-compose.yml:79` |
 
 ---
 
-# PHASE 1 — Cutting V2 + Drawer removal + Store merge
+## Findings
 
-## 1A · Leather sheets on the material side
+### P0 — Critical (correctness, money, or guaranteed outage)
 
-**New table `material_sheet`** — child of `material_lot`, because "one lot per spec"
-(`materials/service.py:130-153`) forbids a second lot for the same article/colour/thickness, so a
-sheet cannot be a lot.
+**F-01 · Guaranteed 500 on the style material-spec path.**
+`app/modules/materials/style_spec_service.py:385` calls `self.materials._display_stock(...)`, but
+`self.materials` is a `MaterialRepository` while `_display_stock` is defined on `MaterialService`
+(`app/modules/materials/service.py:77`). Every call with `with_lot=True` and a resolved lot raises
+`AttributeError` → unhandled → 500. The test log shows this firing on
+`POST /api/v1/styles/{id}/material-spec/lines` (`app/main.py:245`).
+*Fix:* call it on the service, or promote `_display_stock` to a module-level pure function shared
+by both (preferred — it is already a `@staticmethod`).
 
-```
-material_sheet
-  id, material_lot_id (FK, CASCADE)
-  code            "LS-000123"  (its barcode)
-  dcm             Numeric(12,3)   the measurement written on the hide
-  status          IN_STOCK | ALLOCATED | ISSUED | CONSUMED | RETURNED | SCRAPPED
-  cutting_row_id  FK, nullable    which garment it went to
-  received_at, consumed_at
-```
+**F-02 · HR has write authority over the entire payroll money path.**
+`app/modules/wages/router.py:51` defines `_PAYROLL_READERS = require_roles(DM, MD, HR)` and then
+uses that **reader** dependency to guard writes:
+`POST /wages/rates` (:121), `POST /wages/rates/bulk` (:131), `POST /wages/runs` (:185),
+`DELETE /wages/runs/{id}` (:226), `POST /wages/runs/{id}/recompute` (:256).
+Only `/reopen` (:288) and `/close` (:306) correctly gate to DM/MD.
+CLAUDE.md §10 grants HR *visibility*, not authority. Today HR can set piece rates, start a run and
+**delete a payroll run**. Confirmed by 4 failing tests (`test_role_guards.py:147`,
+`test_payroll_uat.py:113,323`).
+*Fix:* split into `_PAYROLL_READERS` (DM/MD/HR) and `_PAYROLL_WRITERS` (DM/MD); apply writers to
+all mutating routes.
 
-- **New `BarcodeType.LEATHER_SHEET`** (`core/enums_barcode.py:331`) and a new nullable
-  `barcode_registry.material_sheet_id` FK — the established polymorphic-by-type pattern.
-- **`barcode/service.py:83`** — the three lot types currently fall through one
-  `elif row.material_lot_id:` branch. Add a `material_sheet_id` branch before it, returning the
-  sheet + its parent lot.
-- **`mint_lot_code_nocommit` assumes 1 barcode per lot** (`barcode/repository.py:376-383`) and
-  retirement uses `.limit(1)` on `material_lot_id` (`barcode/service.py:440-445`). Sheets get their
-  own mint/retire path; do not widen the lot path.
-- **`lot.on_hand` stays the leather stock figure in dcm** and remains the thing
-  `_decrement_nocommit` moves. Sheets are the detail beneath it; a consistency check
-  (`Σ IN_STOCK sheet dcm == on_hand`) is reported, not enforced, so a mismatch is visible rather
-  than blocking receiving.
+**F-03 · Material reservations are never released — stock drifts to phantom-zero.**
+`MaterialRepository.add_reservation_nocommit` is called (`materials/service.py:902`), but
+`consume_reservations_nocommit` (`materials/repository.py:374`, which sets `released_at` and flips
+status) is **called from nowhere in the codebase**. Every reservation stays `status="active"`
+forever, so `available = on_hand − reserved` decreases monotonically and never recovers. The code
+comment at `style_spec_service.py:391-393` admits this. Left alone, the material module strangles
+itself: every lot eventually reads as unavailable and the DM can never issue material.
+*Fix:* call `consume_reservations_nocommit` in the cut-stage consumption path, in the same
+transaction as the stock decrement and event writes; add a release path for cancelled requirements.
 
-**Receiving**: `POST /materials/receive` gains an optional `sheets: [{dcm}, …]` list. Supplying it
-mints that many sheet rows + barcodes and returns the codes for printing. This is also bugs **#6**
-(piece/sheet count for leather), **#7** (stop abusing `thickness` for sheet count) and **#18**
-(total sheets in the lot directory).
+**F-04 · No row-level locking anywhere → lost updates under concurrency.**
+Zero `with_for_update` / advisory locks in scope. Every read-modify-write is a race:
+`material_lot.on_hand` decrement at cutting, `drawer.state` transitions, `barcode_registry.status`
+on reissue, wage-line aggregation. Two cutting managers scanning against the same lot concurrently
+will both read the same `on_hand` and the second write silently overwrites the first — **stock is
+lost with no error**. This is latent today at low traffic and becomes routine at 100 users.
+*Fix:* `SELECT … FOR UPDATE` on the lot row before the decrement; a DB `CHECK (on_hand >= 0)`; and
+either `FOR UPDATE` or a `version_id_col` on `Drawer` for the state machine.
 
-## 1B · The Excel-style cutting sheet
+**F-05 · Transaction boundaries are scattered across layers.**
+30 commits in repositories, 2 in routers — directly against CLAUDE.md §15. `wages/repository.py`
+alone commits 13 times, so a wage run **cannot be atomic**: a failure part-way leaves a partially
+written run that the "closed run is a frozen snapshot" invariant then freezes.
+*Fix:* remove every repository/router commit; commit once per business operation in the service.
+Enforce with an import-linter contract or a CI grep.
 
-**New module `app/modules/cutting/`** (models, schemas, repository, service, router) — it is a new
-bounded concept, not an extension of production.
+**F-06 · Debug `print` of a bcrypt hash at import time.**
+`app/core/security.py:98` — `print(passw)`. Fires on every process start and writes a credential
+hash to stdout, i.e. straight into CloudWatch.
+*Fix:* delete.
 
-```
-cutting_row                       ONE GARMENT
-  id, piece_id (FK, nullable until bound)
-  style_id, sku_id, colour, article, size, rc_no
-  cutter_employee_id
-  work_date
-  status         DRAFT | APPROVED | LOGGED | CANCELLED
-  target_dcm     what the allocator aimed at
-  total_dcm      DERIVED from its sheets, never typed
-  approved_by, approved_at
-```
+### P1 — High
 
-Sheets attach by `material_sheet.cutting_row_id`, so "the sheets on this row" is one indexed read
-and a sheet can never be on two rows.
+**F-07 · Proxy attendance is not limited to piece-rate workers.**
+`test_attendance_integrity.py:356` — `DID NOT RAISE`. The documented restriction is unenforced.
 
-**Endpoints** (`/cutting`, roles CUTTING_MANAGER + DM + MD):
-- `GET /cutting/sheet?style_id=&colour=` — the grid. Style + colour chosen at the top and applied
-  to every row, as in your Excel.
-- `POST /cutting/rows/generate` — creates one DRAFT row per un-cut piece of the selected
-  style+colour and **auto-allocates sheets** (§ baseline above) from IN_STOCK sheets matching the
-  article + colour, nearest-fit first, until the running dcm reaches the target. Allocated sheets
-  go to `ALLOCATED` so two rows cannot claim the same hide.
-- `PATCH /cutting/rows/{id}` — edit any cell: cutter, size, rc_no, article, colour.
-- `POST /cutting/rows/{id}/sheets` / `DELETE …/sheets/{sheet_id}` — **the cutter-needs-one-more /
-  one-less flow you described.** Removing returns the sheet to `IN_STOCK`; adding takes it from
-  stock. Free and unaudited while DRAFT.
-- `PATCH /cutting/rows/{id}/sheets/{sheet_id}` — correct a sheet's DCM.
-- `POST /cutting/rows/{id}/approve` — the gate.
+**F-08 · `AttendanceRead` serialization crash.**
+`'AttendanceRead' object has no attribute 'recorded_by_user_id'` — the Pydantic model and the
+attendance payload disagree; any route returning it on that path 500s.
 
-**Approval** follows the existing audited-transition pattern exactly (`ProductionReleaseStatus` +
-`BreakdownService.release_styles`, `imports/breakdown.py:590-749`): a status enum, an actor, a
-timestamp and an `AuditLog` row. Two new `BarcodeAuditAction` members
-(`CUTTING_ROW_APPROVED`, `CUTTING_ROW_REOPENED`).
+**F-09 · Role gate fires *after* body validation → 422 instead of 403.**
+`test_role_guards.py:225` (`assert 422 == 403`): the lining manager creating a lining lot gets a
+validation error rather than a refusal. An unauthorized caller can probe payload shape. Gate order
+must be ROLE first (CLAUDE.md §8 gate 1 is whole-request).
 
-> **Trap:** `AuditLog.actor_user_id` FKs to `app_user.id`. Pass the **login's** id, never the scanned
-> `employee.id` — that exact mistake produced a 500 in the store scan
-> (`drawers/service.py:572-584`). The worker goes in the `after` payload as data.
+**F-10 · Importer style-key format regression.**
+`test_importer_v2.py:66,84` (`KeyError: 'NIPAL-NEW'`, `'GGZ'`) and `test_order_sheet_golden.py:142`
+(keys are now `GGZ-GARMENT…` where the golden expects `GGZ`). The breakdown sheet is the production
+source of truth (CLAUDE.md §15); a key-format change breaks order reconciliation.
 
-On approve: sheets move `ALLOCATED → ISSUED`, `total_dcm` is frozen, the row becomes read-only.
-Any later change is a reopen (audited) — matching your "edit freely before approval" instinct while
-keeping the money path honest.
+**F-11 · N+1 in the production scan hot path.**
+`production/service.py` issues per-piece awaited queries at :328 (`db.get(Piece)`), :556
+(`_sequence_ok`), :562 (`_merge_ok`), :655 (`has_event_at_op`) — **4–6 sequential round-trips per
+piece**. A 100-piece batch = 400–600 serial round-trips holding one of only 3 pooled connections.
+Same pattern in `store/service.py` (:101,:362,:370,:371) and `drawers/service.py` (:1048,:1081,:1088).
 
-**Attendance**: the grid shows who is present today via the existing
-`AttendanceService.today_roster()` (`attendance/service.py:420`), so the manager picks only cutters
-actually in the factory — your "check attendance in the cutting dashboard, not the production
-logger".
+**F-12 · 10 tests never execute — missing fixtures.**
+`fixture 'client' not found`, `fixture 'security_user' not found` across
+`test_attendance_integrity.py`, `test_employees_fixes.py`, `test_gates_pure.py`. These are silent
+coverage holes on attendance integrity and RBAC.
 
-## 1C · Production Logger retrieval
+**F-13 · Migration/model FK drift.**
+`test_fk_delete_rules.py:168` — nullable FKs exist in the models but are absent from the migration's
+`_NULLABLE_FKS` (e.g. `order_style.pattern_reference_id`), so the live DB never gets their delete
+rule. Deleting a parent will fail or orphan rows in production but not in SQLite tests.
 
-`POST /production/log` is unchanged in shape. When a cut scan resolves a piece that has an
-**APPROVED** cutting row, the router pulls `article`, `colour`, `lot`, `total_dcm` and the sheet list
-from that row instead of requiring them on the request. The service still does the single
-per-batch decrement it does today (`production/service.py:510-531`) — **stock timing is unchanged,
-as you chose.** On success the row goes `APPROVED → LOGGED` and its sheets `ISSUED → CONSUMED`.
+**F-14 · Missing pagination on list endpoints.**
+`production`, `clients`, `cutting`, `dashboard`, `users` routers declare no `limit`/`offset`/`page`.
+These return unbounded result sets; a year of production events will time out the request and blow
+worker memory.
 
-This is also bugs **#23** and **#27** (article & colour auto-filled on piece scan) and **#30**
-(per-piece DCM at sheet issue), and **#17/#28** fall out of it: DCM spend per piece is now the sum
-of real hides.
+### P2 — Medium (contract & maintainability)
 
-A piece with no approved row keeps today's typed path exactly, so nothing on the floor breaks
-mid-migration.
+**F-15 · 55 of 158 in-scope routes (34%) declare no `response_model`** — whole modules are
+untyped: `analytics` 10/10, `imports` 9/9, `styles` 8/8, `jobwork` 5/5, `production` 9/11. The
+OpenAPI schema therefore has no response type for them and the frontend cannot generate a typed
+client no matter how fresh the export is.
 
-## 1D · Drawer removal → piece-level store state
+**F-16 · Committed `openapi.json` is stale** — 192 operations vs 233 live (41 missing). Any
+frontend generating types from the checked-in file is working against an outdated contract.
+*Note:* the Postman collections under `postman/` **are** current — a normalized diff found zero
+mismatches. The gap is the OpenAPI artifact and the missing response types, not route coverage.
 
-**Move the store state from the drawer onto the piece.** Five columns on `piece`:
-`store_state`, `leather_in`, `lining_in`, `accessories_in`, `store_entered_at`.
+**F-17 · Employee update schema/allow-list disagreement.**
+`test_employees_invariants.py:213`. `EmployeeUpdate` (`schemas.py:121-122`) declares `role` and
+`password`; `service.py:224` excludes them from `data` and `service.py:235` omits them from
+`_ALLOWED`. *This is not a privilege-escalation hole* — `body.role` is handled separately at
+`service.py:246` behind a proper `_GRANTABLE` check. It is a contract inconsistency that the
+assertion correctly flags. Fix the assertion or the schema, not the auth.
 
-**Migration**: copy `drawer.state / leather_in / lining_in / accessories_in` onto the piece it
-currently holds, via `drawer.current_piece_id`. Nothing in flight is lost. The drawer tables stay,
-unwritten, for audit.
+**F-18 · Stale xfail markers on the money path.** 8 XPASS in the wage tests still cite "AUDIT F139
+(BLOCKER) — `Piece.style_id` does not exist". That blocker is fixed; the markers now hide real
+signal. Remove them.
 
-| Today | Becomes |
-|---|---|
-| `DrawerState` (7 values) | `StoreState`, same 7 values, on the piece |
-| `kit_rules.drawer_complete()` | `kit_rules.piece_complete()` — identical clauses |
-| `store_display.display_stage(drawer_state=…)` | `display_stage(store_state=…)` |
-| `DrawerService._needs_lining` / `_needs_lining_map` | **Relocate to a store service — do not delete.** Production calls them at `service.py:221, 711, 1011`. |
-| `_merge_ok` reads `drawer.state == SENDED` | reads `piece.store_state == SENDED` — **write this first** |
-| `POST /drawers/store-scan` (employee → drawer → piece) | `POST /store/scan` (employee → piece) — **one scan fewer; this is the "make merging easy" fix** |
-| `POST /drawers/send` | `POST /store/send` (piece ids) |
-| `release_nocommit` at PACKAGE_EXPORT | clears the piece's store flags; no pool to return to |
-| `STORE_MANAGER` role | kept, repointed at `/store` |
+### P3 — Flagged for a business decision (per your instruction, not guessed)
 
-**Premint** (`imports/premint.py`) loses `_build_drawer`, `_PoolAllocator`,
-`bootstrap_drawer_pool`, `allocate_waiting_pieces`, `grow_drawer_pool`, `drawer_pool_status` and
-`INITIAL_DRAWER_POOL`. The four-phase flush collapses to two — phases 1 and 3 existed *only* for the
-piece↔drawer FK cycle. **`pieces_waiting_for_drawer` disappears from four user-visible places**
-(breakdown upload response, release router, `/drawers/pool`, analytics `no_drawer` bucket) — that is
-the bottleneck you are removing, so it should vanish, not be renamed.
+**F-19 · Skill-gate matrix disagrees with its own test suite.**
+`test_gates_pure.py:41` fails for `CUTTER→FUSING`, `CUTTER→LINING_CUTTING`, `TAILOR→PASTING`. The
+tests assert these are permitted ("CUTTER covers fusing too"); the shipped matrix refuses them.
+- *If the tests are right:* cutters on the floor are currently blocked from logging fusing and
+  lining cuts, and tailors from pasting — a live production blocker.
+- *If the code is right:* the test file encodes a rule the factory rejected.
+Both readings go in the document with their floor impact; no code changes until you rule.
 
-**Also resolved:** bug **#15** (a separate page to find a piece) becomes trivial — there is no drawer
-to look up. `GET /store/pieces/{code}` already exists and needs only a wider role set so the person
-placing pieces can use it without DM access.
-
-Analytics and dashboard read drawer state in ~30 places (`analytics/service.py:216-276`,
-`dashboard/repository.py:1299-1645`). These are mechanical: swap the join to `piece.store_state`.
-The `_STORE_STATES` label table and the store KPIs keep working unchanged.
-
-## 1E · Easy merge + size-matched accessories
-
-**The merge scan**: scan employee, scan piece. The response already carries the kit checklist
-(`material_requirement_block`) — it now returns **only the accessories that match this garment's
-size**, and confirming issues them and decrements stock (which
-`issue_kit_nocommit` already does). That is your "scan the piece barcode and it tells you what
-accessories to merge".
-
-**Bug #10 — the size-matching bug. Root cause found.**
-`StyleSpecService.merge_lines` (`materials/style_spec_service.py:206-235`) keys lines on
-`(category, subtype, article)` and **never reads `SKU.size`**. All four consuming surfaces
-(`kit_required_for_piece`, `kit_by_pieces`, `material_requirement_block`, `issue_kit_nocommit`) go
-through it, so one fix corrects all four. Today a DM entering Thread S / M / L gets either all three
-on every piece (distinct articles) or silently only the last one (same article, distinct size).
-
-**The fix needs a new column, not the existing one.** `style_material_spec.size` means the
-*material's* size (`models.py:380`: "zip 60cm, button 18L"). Overloading it would be a trap. Add
-**`garment_size`** — "this line applies only to garments of this size; NULL = all sizes" — then:
-
-- add `garment_size` to `merge_lines`'s key tuple and filter by the piece's SKU size
-- when the DM adds an accessory line whose material `size` is a garment-size token (S/M/L/XL/XXL,
-  or 38-62), **default `garment_size` to it**. That gives your "zip size L automatically merges to
-  the L piece" with no extra data entry.
-
-> Note: `THREAD` has no `size` field in `MATERIAL_SPEC` at all
-> (`core/enums_barcode.py:439-442` — it takes `thickness` + `mtrs`). So the Thread S/M/L case must
-> be expressed through `garment_size`, which is exactly what the new column is for.
-
-> Watch: spec rows are frozen after release (`_assert_editable`), but the *effective* recipe is
-> computed at read time, so this fix changes what already-released styles resolve to. That is the
-> intent — it is the bug being fixed — but it must be called out in the release notes.
+**F-20 · Procurement/style-spec assertions** (`test_procurement_regression.py:140`,
+`test_procurement_service.py:209`, `test_style_material_spec.py`,
+`test_five_flows_e2e.py::test_flow5`) touch out-of-scope modules or straddle the boundary. Recorded
+in the document, excluded from the change-set.
 
 ---
 
-# PHASE 2 — Backend bug list, then outsourcing
+## Scale-out: why 100 concurrent users fails today
 
-Triaged from the PDF to **backend, major/medium only**. Frontend-only items (#4, #5, #9, #11, #14,
-#20, #21, #22, #24) are excluded as you asked, except where the backend must supply something.
-
-| # | Item | Work |
-|---|---|---|
-| 1 | Edit/delete everywhere | `PATCH`/`DELETE` for material lots; `adjust_lot` already exists and is audited — expose it and add delete-with-guard |
-| 2 | HR full inventory access | Add `HR` to the inventory/material role sets |
-| 3 | Stage-wise reject & rework | **New `PieceInspection` (pass/reject/rework) model** — the codebase already names this as the missing piece (`dashboard/service.py:893-898`). Rework today is refused on the write path (`service.py:479-481`) but counted on the read path; this closes that gap. `Designation.QC_INSPECTOR` exists unused and becomes its designation. |
-| 8 | Edit/delete a production assignment | Audited soft-delete + re-log of a `ProductionEvent` |
-| 12 | Edit accessories after release | Relax `_assert_editable` for accessory lines only, audited (`STYLE_MATERIAL_SPEC_AMENDED` already exists) |
-| 13 | 8-hour rule from check-in | Compute against `check_in + 8h`; warn, never block overtime |
-| 16 | Material purchase history | `material_receipt` rows already exist — add `GET /materials/lots/{id}/history` |
-| 17, 28 | DCM spend & consumption | Falls out of 1A/1C; add the roll-up endpoint |
-| 19 | Leather arrived/consumed/available by style | New analytics read over receipts + cut events |
-| 25 | Remove material from lot directory | The delete from #1 |
-| 26 | `Received` field shows 0 | **Real bug** — investigate the `receive` → lot-directory mapping (`materials/service.py:524-620`) |
-| 29 | Analytics uses `PC-222223` | Accept both the compact `PC-…` and the long alias code on `/dashboard/direct-manager/pieces/{code}` — the resolver already handles both (`test_compact_code_resolution.py`) |
-
-**Outsourcing** (your option 1, shaped so option 3 can follow):
+**The binding constraint is DB connections, not CPU.**
 
 ```
-job_work        vendor_id, stage, dispatched_at, expected_back, returned_at, status
-job_work_piece  job_work_id, piece_id, status (OUT | BACK | SHORT | REJECTED)
-vendor          name, contact, is_active   ( + rates later, without migration pain )
+4 gunicorn workers × pool_size 3          = 12 sustained connections
+4 workers × (pool_size 3 + overflow 5)    = 32 burst connections
 ```
 
-Nothing like this exists today — I checked `outsourc`, `subcontract`, `job_work`, `vendor`,
-`external`: zero hits outside the inbound supplier modules. A piece that is out shows
-`OUT AT <vendor> since <date>` on its trace, and overdue returns raise an alert.
+Each in-flight request holds a connection for its whole lifetime. With F-11's 4–6 round-trips per
+piece, one manager scanning 100 pieces occupies a connection for ~0.6–0.9s of pure network latency
+alone. 100 concurrent users ⇒ requests queue on `pool_timeout` (undefined, so it defaults to 30s)
+and then fail as 500s. Adding CPU changes nothing.
+
+Secondary blockers to horizontal scaling:
+- **In-process sweepers.** `app/main.py:182,184` start `_notification_sweeper` and
+  `_po_escalation_sweeper` as asyncio tasks inside the API process. With N replicas each escalation
+  fires N times. Must move to Celery beat (which the repo already runs, and already warns must
+  never be scaled).
+- **Migrations at container start.** `entrypoint.sh` runs `alembic upgrade head` when
+  `RUN_MIGRATIONS=true`. N replicas booting together race on the same migration.
+- **`api` publishes port 8000 directly** in `docker-compose.prod.yml` with no reverse proxy and no
+  `deploy.replicas` — the compose file cannot scale `api` at all (port conflict).
+- **No caching layer** for the read-heavy dashboard/analytics surface (22 + 10 routes), despite
+  Redis already being a dependency for Celery.
+- **`settings.debug` triggers `create_all`** (`main.py:162`) — schema drift if debug leaks to prod.
+- **No rate limiting, no GZip, no request timeout, no TrustedHost**; `/docs` and `/redoc` are
+  exposed unconditionally (`main.py:206-207`).
+- **CORS origins hardcoded in source** (`main.py:212-218`) with `allow_credentials=True` plus
+  wildcard methods and headers — a code change is needed to add a frontend domain.
+
+### Target AWS architecture (Docker image, as you use today)
+
+```
+Route 53 → ALB (TLS, /health + /ready target-group checks)
+            └── ECS Fargate service "api"   (N tasks, autoscaled on ALB RequestCountPerTarget)
+            └── ECS Fargate service "worker" (Celery, scales independently)
+            └── ECS Fargate service "beat"   (pinned at exactly 1 task — never scale)
+                     │
+              RDS Proxy ──► RDS/Aurora PostgreSQL   (or Supabase's pooler if you stay there)
+              ElastiCache Redis   (Celery broker + response cache + distributed locks)
+              S3 (uploads — replaces any container-local file storage)
+              ECR (the image you already build) · CloudWatch (logs/metrics) · Secrets Manager
+```
+
+Why this shape: it is the smallest change from "a Docker image on AWS". The same image runs as all
+three services with different entrypoint commands, which `entrypoint.sh` already supports
+(`api` / `worker` / `beat`).
+
+**Connection math with RDS Proxy.** Per task: `pool_size = 5`, `max_overflow = 5`,
+`pool_timeout = 10`, `pool_recycle = 1800`, `pool_pre_ping = True`. With 6 Fargate tasks that is 30
+sustained / 60 burst client-side connections, which RDS Proxy multiplexes down onto a much smaller
+server-side set — so the app scales past the Postgres `max_connections` wall instead of into it.
+Migrations move to a **one-off ECS task run before deployment**, never at task start.
 
 ---
 
-## Migrations
+## Complexity analysis (required by the deliverable)
 
-One per concern, `down_revision` chained off `alembic heads`:
+Every hot path gets a table row: **operation · current time · current space · post-fix time ·
+post-fix space · DB round-trips**. Worked examples the document will carry:
 
-1. `material_sheet` + `barcode_registry.material_sheet_id`
-2. `cutting_row` + the status enum
-3. `piece.store_state` + the four flags, **with the data copy from `drawer`**
-4. `style_material_spec.garment_size`
-5. `piece_inspection`
-6. `job_work`, `job_work_piece`, `vendor`
+| Path | Current | After | Note |
+|---|---|---|---|
+| `POST /production/log`, batch of N pieces | O(N) queries, 4–6 RTT each | O(1)–O(3) queries | batch-load pieces, prior events and drawer states in 3 `IN()` queries; gates become in-memory |
+| Pre-mint at breakdown upload, N pieces | N × 4 inserts, row-by-row | `bulk_insert_mappings` in chunks of 1000 | an order of 5,000 pieces is 20,000 inserts today |
+| `GET /dashboard/*` (22 routes) | per-request full aggregation | Redis-cached, 30–60s TTL | read-heavy, tolerates staleness |
+| `GET /analytics/*` (10 routes) | in-Python aggregation | push to SQL + cache | CLAUDE.md says analytics is a live read view |
+| Unbounded list endpoints | O(total rows) memory | O(page) | F-14 |
 
-Project rules that apply (CLAUDE.md §13): ids from `uuid4` in Python, no `JSONB`, no `ON CONFLICT`,
-no native PG enums for new columns (VARCHAR — the trap that broke three deploys), every constraint
-named explicitly to match `NAMING_CONVENTION`.
+Method: Big-O in **DB round-trips** (the real cost at this RTT), not just instruction count, plus
+measured p50/p95 from a k6 or Locust run at 25 / 50 / 100 / 200 virtual users, before and after.
 
-## Tests
+---
 
-Money paths first, per CLAUDE.md §14.
+## Work plan
 
-- **Must not move**: `test_importer_v2.py::test_known_client_totals` (GGZ 146 / NIPAL 259 /
-  RICANO 150 / KJ 347 / JP 2263 / NIPAL-NEW 393).
-- **Must be rewritten, not deleted** — ~90 drawer tests across
-  `test_drawer_states.py`, `test_drawer_batch_send.py`, `test_merge_gate.py`,
-  `test_send_unlocks_line_stitching.py`, `test_store_entry_gate.py`,
-  `tests/conftest.py`'s `pieces` fixture. Each asserts a real rule that survives the refactor; port
-  them to the piece-level store state rather than dropping coverage.
-- **New**: sheet allocation hits the target dcm; removing a sheet returns it to stock; a sheet can
-  never be on two rows; approve freezes the row and audits; the logger retrieves approved data and
-  decrements exactly once; **line-stitching is still blocked without a sent piece** (the gate
-  regression); a size-L accessory line never reaches an M garment; Thread S/M/L issues one line per
-  size.
-- `tests/unit/test_material_spec_pure.py:49` asserts `MATERIAL_SPEC` has no undocumented rows — it
-  trips if a row is added there.
+### Phase 0 — Safety net (do first)
+1. Fix the 10 fixture errors (F-12) so RBAC/attendance tests actually run — these are the tests that
+   would have caught F-02 and F-07.
+2. Remove the stale money-path xfail markers (F-18).
+3. Add a Postgres CI job (CLAUDE.md §14 already asks for this) — SQLite hides F-13 and every native
+   enum issue.
+
+### Phase 1 — P0 correctness & security
+Files: `materials/style_spec_service.py`, `materials/service.py`, `materials/repository.py`,
+`wages/router.py`, `core/security.py`, `production/service.py`, and every in-scope `repository.py`.
+4. F-01 promote `_display_stock` to a shared pure function; fix the call site.
+5. F-02 split `_PAYROLL_READERS` / `_PAYROLL_WRITERS`; regate the 5 mutating wage routes.
+6. F-03 wire `consume_reservations_nocommit` into the cut-stage consumption path.
+7. F-04 add `with_for_update()` on lot + drawer reads before mutation; add `CHECK (on_hand >= 0)`
+   in a migration.
+8. F-05 strip all repository/router commits; one commit per service operation.
+9. F-06 delete the `print`.
+
+### Phase 2 — P1 correctness
+10. F-07 restore the piece-rate restriction on proxy attendance.
+11. F-08 reconcile `AttendanceRead` with its payload.
+12. F-09 move the role gate ahead of body validation (router-level dependency, not in-handler).
+13. F-10 restore the importer style-key format against the golden workbook.
+14. F-13 add the missing nullable FKs to the migration's `_NULLABLE_FKS` + a new migration.
+15. F-11 batch the production scan path — this is also the single biggest scalability win.
+
+### Phase 3 — API contract
+16. F-15 add `response_model` to all 55 routes, starting with the fully-untyped modules
+    (`analytics`, `imports`, `styles`, `jobwork`, `production`).
+17. F-14 add a shared `Page[T]` envelope + `limit`/`offset` to the 5 unpaginated routers.
+18. Standardize the error envelope on the `{detail, request_id}` shape `main.py:247` already uses.
+19. F-16 regenerate `openapi.json` in CI on every merge so it can never drift again.
+
+### Phase 4 — Performance & AWS scale-out
+20. Pool config from env: `pool_size`, `max_overflow`, `pool_timeout`, `pool_recycle`,
+    `pool_pre_ping` in `core/config.py`, consumed by `core/database.py:88`.
+21. Move the two sweepers out of `main.py` lifespan into Celery beat.
+22. Move `alembic upgrade head` out of `entrypoint.sh` container start into a pre-deploy task.
+23. Add Redis response caching for `dashboard` + `analytics`; Redis-backed rate limiting; GZip;
+    TrustedHost; `/docs` gated on non-prod; CORS origins from env.
+24. Add the indexes the audit implies (attendance `(employee_id, work_date)` composite, and the
+    production/drawer filter columns) — measured with `EXPLAIN ANALYZE` on Postgres, not assumed.
+25. ECS/ALB task definitions + autoscaling policy; S3 for uploads; health/readiness wired to the
+    ALB target group.
+26. Load test at 25/50/100/200 VUs, before and after, to produce the document's numbers.
+
+### Phase 5 — Deliverable
+27. Produce the Word document (`.docx`) via the `anthropic-skills:docx` skill, containing: executive
+    summary; per-module audit with every `file:line` finding; the full 158-route API inventory with
+    auth/role/request/response and the response_model gap marked; the complexity tables; the
+    business-rule conflicts (F-19) with both readings; the AWS architecture with a diagram and the
+    connection math; the phased change plan; and the before/after load-test results.
+
+---
 
 ## Verification
 
-```bash
-cd "C:/Users/head user/Desktop/Hamthan/Clinets/2-Factor/Backend"
-python -W ignore -m pytest tests/ -q
-python verify/run_logic_checks.py     # pure predicates, no deps
-```
+- `pytest tests/ -v` — target: 0 failed, 0 errors. Every fix lands with a regression test; F-02,
+  F-03 and F-04 each get an explicit one (F-04's is a concurrent-scan test that must fail before
+  the lock and pass after).
+- `pytest -m money` in isolation before any release (the suite already defines this marker).
+- `python verify/run_logic_checks.py` — must stay at 49/49.
+- `lint-imports` (`.importlinter`) — extend with a contract that forbids `commit` outside the
+  service layer.
+- Postgres CI job proving the migrations and the native-enum path (CLAUDE.md §13 traps).
+- `EXPLAIN ANALYZE` on Postgres for each new index — no index is added on assumption.
+- k6/Locust at 25/50/100/200 VUs against a staging ECS deployment; record p50/p95/p99 and error
+  rate before and after Phase 4.
+- Manual smoke: barcode resolve → cut → store-scan → drawer RECEIVED/SENDED → line-stitch →
+  export → drawer recycles; then a wage run over that period.
 
-**Known baseline before any of this work: 11 failing / 970 passing.** I confirmed by stashing that
-all 11 are pre-existing and unrelated — 3 importer failures from `_client_key`'s commented-out
-grouping (`import_engine.py:26-28`), plus 8 in gates/attendance/employees. The bar for each phase is
-that this number does not grow.
+## Explicitly out of scope
 
-End-to-end, per phase: receive a leather lot with 10 sheets → generate a cutting row → edit sheets →
-approve → scan the piece in the logger → confirm one decrement and the sheets CONSUMED → store-scan
-leather, lining and kit off the piece barcode → send → line-stitch.
-
-## Risks
-
-| Risk | Handling |
-|---|---|
-| LINE_STITCHING left ungated during the drawer swap | Write the piece-level `_merge_ok` **first**, with its test, before any drawer code is removed |
-| ~90 drawer tests deleted rather than ported, losing real coverage | Port them; treat the count as a checklist |
-| Size-matching changes already-released styles' effective recipes | Intended, but flag in release notes and report which live styles change |
-| Sheet dcm sum drifting from `lot.on_hand` | Report the mismatch, never block receiving |
-| Phase 1 is large | 1A→1B→1C are independently shippable; 1D→1E must land together |
+`bom`, `procurement`, `supplier_po`, `inventory`, `intelligence` — not audited, not changed. Where
+an in-scope fix touches a shared seam (e.g. `materials` ↔ `inventory`, CLAUDE.md §12), the seam is
+preserved, not merged.

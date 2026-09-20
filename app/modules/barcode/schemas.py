@@ -155,3 +155,25 @@ class OrderSkuOption(BaseModel):
     size: str | None = None
     style_id: uuid.UUID
     style_name: str | None = None
+
+class MaterialBarcodeRow(BaseModel):
+    """One material-lot label on the reprint screen.
+
+    `code` is encoded as Code128; `label_line` is typeset underneath as text —
+    the same convention as POST /barcode/print. A row whose `status` is retired
+    belongs to a retired lot: show it greyed, do not print it.
+    """
+    code: str
+    type: str
+    status: str
+    caption: str | None = None
+    lot_id: uuid.UUID | None = None
+    category: str | None = None
+    subtype: str | None = None
+    article: str | None = None
+    colour: str | None = None
+    thickness: str | None = None
+    size: str | None = None
+    uom: str | None = None
+    on_hand: float = 0.0
+    label_line: str | None = None

@@ -41,13 +41,14 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import cached
 from app.core.database import get_db
 from app.core.enums import ProductionStage, UserRole
 from app.modules.dashboard.schemas import (
     CuttingDashboard, DirectManagerDashboard, DrawerDetail, DrawerMovementRow,
-    EmployeePieceRow, LiningDashboard, MaterialCutterTrace, OrderTracking,
-    PieceConsumptionRow, PieceTrace, StitchingDashboard, StoreDashboard,
-    StyleTracking,
+    EmployeePieceRow, FactoryAlerts, LiningDashboard, MaterialCutterTrace,
+    OrderTracking, PieceConsumptionRow, PieceTrace, StitchingDashboard,
+    StoreDashboard, StyleTracking,
 )
 from app.modules.dashboard.service import DashboardService
 from app.modules.users.deps import get_current_user, require_roles
@@ -82,8 +83,19 @@ async def cutting_dashboard(
     _: User = Depends(_DASHBOARD_READERS),
     scope: uuid.UUID | None = Depends(client_scope),
 ):
-    """The complete Cutting Manager Dashboard in one call (~11 grouped queries)."""
-    return await DashboardService(db).overview(client_scope=scope, order_id=order_id)
+    """The complete Cutting Manager Dashboard in one call (~11 grouped queries).
+
+    CACHED, AND BUSTED ON WRITE. Eleven grouped queries recomputed for every
+    manager with the screen open is the single heaviest read in the app. The
+    cache is invalidated the instant anyone logs a production event or a store
+    scan (core/cache.invalidate), so a cut shows up here immediately rather than
+    after a TTL — see core/cache.py for why that distinction matters on a floor.
+    """
+    return await cached(
+        "dash:cutting",
+        lambda: DashboardService(db).overview(client_scope=scope,
+                                              order_id=order_id),
+        scope=scope, order_id=order_id)
 
 
 @router.get("/cutting/employees/{employee_id}", response_model=list[EmployeePieceRow])
@@ -158,8 +170,12 @@ async def lining_dashboard(
     production + lining-material KPIs, current order, per-worker lining
     performance, lining lots, per-order progress, 14-day trend, and upcoming
     lining work (leather-cut pieces not yet lining-cut)."""
-    return await DashboardService(db).lining_overview(
-        client_scope=scope, order_id=order_id)
+    # Cached, busted on write — see the note on /cutting above.
+    return await cached(
+        "dash:lining",
+        lambda: DashboardService(db).lining_overview(
+            client_scope=scope, order_id=order_id),
+        scope=scope, order_id=order_id)
 
 
 @router.get("/lining/employees/{employee_id}", response_model=list[EmployeePieceRow])
@@ -217,8 +233,12 @@ async def stitching_dashboard(
     top KPIs, the pre-store (Pasting/Fusing) and post-store (Line/Shell/Final)
     stage blocks, the store handoff, the running style's stage funnel, per-stage
     employee performance, the 14-day per-stage trend, and per-order progress."""
-    return await DashboardService(db).stitching_overview(
-        client_scope=scope, order_id=order_id)
+    # Cached, busted on write — see the note on /cutting above.
+    return await cached(
+        "dash:stitching",
+        lambda: DashboardService(db).stitching_overview(
+            client_scope=scope, order_id=order_id),
+        scope=scope, order_id=order_id)
 
 
 @router.get("/stitching/employees/{employee_id}", response_model=list[EmployeePieceRow])
@@ -335,8 +355,13 @@ async def store_dashboard(
     """The complete Store Manager Dashboard in one call (~4 grouped queries):
     drawer KPIs, current styles in store, the filterable drawer grid, held
     drawers, and empty drawers available for reuse."""
-    return await DashboardService(db).store_overview(
-        client_scope=scope, style_id=style_id, state=state,
+    # Cached, busted on write — see the note on /cutting above.
+    return await cached(
+        "dash:store",
+        lambda: DashboardService(db).store_overview(
+            client_scope=scope, style_id=style_id, state=state,
+            material_type=material_type),
+        scope=scope, style_id=style_id, state=state,
         material_type=material_type)
 
 
@@ -385,7 +410,7 @@ async def store_traceability(
 # require_roles; MD/HR are admitted explicitly through _DASHBOARD_READERS. It is
 # factory-wide, so scope is passed through and is None for staff (a scoped CLIENT
 # still gets its own slice rather than a different code path).
-@router.get("/alerts")
+@router.get("/alerts", response_model=FactoryAlerts)
 async def factory_alerts(
     today: date | None = Query(None, description="Override 'today' for freight risk."),
     db: AsyncSession = Depends(get_db),
@@ -446,7 +471,11 @@ async def direct_manager_dashboard(
     /cutting, /lining, /stitching, /store can never disagree. Drill into any of
     them for stage detail. Read `meta.unsupported` — several quality and costing
     figures are null by design because no table backs them yet."""
-    return await DashboardService(db).direct_manager_overview(client_scope=scope)
+    # Cached, busted on write — see the note on /cutting above.
+    return await cached(
+        "dash:direct-manager",
+        lambda: DashboardService(db).direct_manager_overview(client_scope=scope),
+        scope=scope)
 
 
 @router.get("/direct-manager/orders/{order_id}", response_model=OrderTracking)

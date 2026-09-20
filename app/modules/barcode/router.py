@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette import status
 
 from app.core.database import get_db
+from app.core.pagination import Page, PageParams
 from app.core.enums import UserRole
 from app.modules.barcode import schemas
 from app.modules.barcode.service import BarcodeService
@@ -77,10 +78,11 @@ async def employee_barcode_action(
     return await svc.deactivate_employee_barcode(employee_id, actor_id=user.id)
 
 
-@router.get("/materials")
+@router.get("/materials", response_model=Page[schemas.MaterialBarcodeRow])
 async def material_barcodes(
     category: str | None = Query(None, description="LEATHER | LINING | ACCESSORY"),
     active_only: bool = Query(True, description="Hide retired lot labels."),
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_SCREEN_READERS),
 ):
@@ -97,18 +99,28 @@ async def material_barcodes(
     NOTE FOR THE UI: the drawer screen's label reads "bucket barcode" and should
     read "drawer barcode". The backend has only ever called it DRAWER — there is
     no `bucket` anywhere in the API — so that rename is frontend-only."""
-    return await BarcodeService(db).list_lot_barcodes(
-        category=category, active_only=active_only)
+    rows, total = await BarcodeService(db).page_lot_barcodes(
+        params, category=category, active_only=active_only)
+    return Page[schemas.MaterialBarcodeRow].of(
+        [schemas.MaterialBarcodeRow.model_validate(r) for r in rows],
+        total=total, params=params)
 
 
-@router.get("/orders", response_model=list[schemas.OrderPickerRow])
+@router.get("/orders", response_model=Page[schemas.OrderPickerRow])
 async def list_barcode_orders(
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_SCREEN_READERS),
 ):
     """Orders that have generated barcodes — the picker. Unique per order_number.
-    Shows minted count + generated date range so the user picks the right order."""
-    return await BarcodeService(db).list_orders()
+    Shows minted count + generated date range so the user picks the right order.
+
+    PAGED, newest minting first: this grows by one row per order for the life of
+    the factory."""
+    rows, total = await BarcodeService(db).page_orders(params)
+    return Page[schemas.OrderPickerRow].of(
+        [schemas.OrderPickerRow.model_validate(r) for r in rows],
+        total=total, params=params)
  
 @router.get("/orders/{order_id}/skus", response_model=list[schemas.OrderSkuOption])
 async def list_order_sku_options(

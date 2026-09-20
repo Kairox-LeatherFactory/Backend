@@ -812,6 +812,19 @@ def _release_sync(order_id, style_ids, user_name: str,
         declared = lining_by_style or {}
         for sid in style_ids:
             style = db.get(Style, sid)
+            if style is None:
+                # SAY WHAT WENT WRONG. The caller validated this style on the
+                # ASYNC session moments ago, so a miss here means the two
+                # sessions are not looking at the same data — a deleted style
+                # mid-request, or a misconfigured sync engine. Dereferencing
+                # anyway raised `'NoneType' has no attribute 'needs_lining'`,
+                # which is an unhandled 500 that says nothing about either
+                # cause.
+                raise RuntimeError(
+                    f"Style {sid} was accepted for release but is not visible "
+                    "to the synchronous session that mints its pieces. The "
+                    "async and sync engines are not pointing at the same "
+                    "database, or the style was deleted mid-request.")
             if sid in declared:
                 style.needs_lining = bool(declared[sid])
         # Flush the declarations so premint's db.get(Style, ...) sees them in

@@ -294,13 +294,31 @@ class AnalyticsService(BarcodeAnalyticsMixin):
         
     # =============================================== explorer navigation tree
     async def explorer_tree(self, *, client_id: uuid.UUID | None = None,
-                            include_pieces: bool = True) -> dict:
+                            include_pieces: bool = True,
+                            pieces_per_style: int = 100) -> dict:
         """Full Client -> Order -> Style -> Piece nav tree for the left explorer.
         Scoped to one client (CLIENT-role users) or all clients. Piece leaves are
         LIGHT — enough to render + click through to /pieces/detail; full history
         stays in the drill-downs. Built with 4 bounded queries, no N+1.
         Set include_pieces=False at scale to get the skeleton (styles + counts
-        only) and lazy-load pieces on style-expand."""
+        only) and lazy-load pieces on style-expand.
+
+        THE PIECE LEAVES ARE CAPPED at `pieces_per_style`. They were not, and
+        `include_pieces` defaults to True, so the ordinary call built a tree
+        containing EVERY GARMENT THE FACTORY HAS EVER MADE — one live order alone
+        runs to 1,425 pieces in a single style. An escape hatch that has to be
+        opted into does not help the caller who does not know it exists.
+
+        `piece_count` remains the TRUE total, from a COUNT rather than from
+        len(leaves), so the tree still shows "1,425" while carrying 100 of them;
+        `pieces_truncated` says so per style. That is the right shape for a
+        navigation tree: enough to render and click through, never the whole
+        table. Full detail stays in the drill-downs.
+        """
+        # A hard ceiling, not a suggestion: the parameter is reachable from the
+        # query string and a caller asking for 10,000 leaves per style is asking
+        # for the behaviour this cap exists to prevent.
+        pieces_per_style = max(1, min(int(pieces_per_style or 100), 500))
         cstmt = select(Client.id, Client.name).order_by(Client.name)
         if client_id:
             cstmt = cstmt.where(Client.id == client_id)
@@ -339,7 +357,10 @@ class AnalyticsService(BarcodeAnalyticsMixin):
                     .order_by(SKU.code, Piece.seq)
                 )).all()
                 for pid, sid, code, seq, cname, ccode, size, stage in rows:
-                    pieces_by_style.setdefault(sid, []).append({
+                    bucket = pieces_by_style.setdefault(sid, [])
+                    if len(bucket) >= pieces_per_style:
+                        continue          # cap the leaves, keep counting below
+                    bucket.append({
                         "piece_id": str(pid),
                         "piece_code": code,
                         "seq": seq,
@@ -347,7 +368,16 @@ class AnalyticsService(BarcodeAnalyticsMixin):
                         "size": size,
                         "current_stage": stage,
                     })
-                count_by_style = {sid: len(v) for sid, v in pieces_by_style.items()}
+                # COUNT IN SQL, not len() of the capped list — the tree must still
+                # report how many pieces a style really has.
+                crows = (await self.db.execute(
+                    select(SKU.style_id, func.count(Piece.id))
+                    .select_from(Piece)
+                    .join(SKU, SKU.id == Piece.sku_id)
+                    .where(SKU.style_id.in_(style_ids))
+                    .group_by(SKU.style_id)
+                )).all()
+                count_by_style = {sid: int(n) for sid, n in crows}
             else:
                 crows = (await self.db.execute(
                     select(SKU.style_id, func.count(Piece.id))
@@ -366,6 +396,8 @@ class AnalyticsService(BarcodeAnalyticsMixin):
                 "article": article,
                 "piece_count": count_by_style.get(sid, 0),
                 "pieces": pieces_by_style.get(sid, []),
+                "pieces_truncated": (
+                    len(pieces_by_style.get(sid, [])) < count_by_style.get(sid, 0)),
             })
 
         orders_by_client: dict[uuid.UUID, list[dict]] = {}
@@ -521,8 +553,21 @@ class AnalyticsService(BarcodeAnalyticsMixin):
 
     # ================================================================ LEVEL 2
     async def style_detail(self, style_id: uuid.UUID,
-                           *, client_scope: uuid.UUID | None = None) -> dict:
-        """One style with all its pieces, each carrying its full stage history."""
+                           *, client_scope: uuid.UUID | None = None,
+                           params=None) -> dict:
+        """One style with its pieces, each carrying its full stage history.
+
+        PAGED (`params`). This built TWO unbounded result sets: every piece of
+        the style, and every production event belonging to those pieces. On a
+        real order that is 1,425 pieces and roughly 11,400 events in one request,
+        assembled into a nested structure in Python — the single heaviest read in
+        the module.
+
+        The header (`totals`, `stages`, `store`) is computed by its own queries
+        and stays WHOLE-STYLE: those are the numbers a manager is actually
+        looking at, and they must not change because someone turned a page. Only
+        `pieces` pages, and `piece_count` remains the style's true total.
+        """
         stmt = (
             select(Style.name, Style.article, ClientOrder.order_number, Client.name,
                    Style.code, Style.production_status, Style.needs_lining,
@@ -545,30 +590,45 @@ class AnalyticsService(BarcodeAnalyticsMixin):
         # looking for when they ask why a style has stalled.
         from app.modules.barcode.models import Drawer
 
-        pieces = (await self.db.execute(
+        pieces_stmt = (
             select(Piece.id, Piece.code, Piece.seq, SKU.code,
                    SKU.color_name, SKU.color_code, SKU.size,
                    Drawer.code, Drawer.state, Drawer.leather_in, Drawer.lining_in)
             .join(SKU, SKU.id == Piece.sku_id)
             .outerjoin(Drawer, Drawer.id == Piece.drawer_id)
             .where(SKU.style_id == style_id)
-            .order_by(SKU.code, Piece.seq)
-        )).all()
+            .order_by(SKU.code, Piece.seq, Piece.id)
+        )
+        if params is not None:
+            from app.core.pagination import paginate_rows
+            pieces, style_piece_total = await paginate_rows(
+                self.db, pieces_stmt, params)
+        else:
+            pieces = (await self.db.execute(pieces_stmt)).all()
+            style_piece_total = len(pieces)
+        page_piece_ids = [row[0] for row in pieces]
 
-        # All events for this style's pieces in one query; group in Python.
-        events = (await self.db.execute(
-            select(ProductionEvent.piece_id, Operation.code, Operation.label,
-                   Operation.sequence, Employee.name, ProductionEvent.work_date,
-                   ProductionEvent.entered_by, ProductionEvent.created_at)
-            .select_from(ProductionEvent)
-            .join(Piece, Piece.id == ProductionEvent.piece_id)
-            .join(SKU, SKU.id == Piece.sku_id)
-            .join(Operation, Operation.id == ProductionEvent.operation_id)
-            .join(Employee, Employee.id == ProductionEvent.employee_id)
-            .where(SKU.style_id == style_id)
-            .order_by(ProductionEvent.piece_id, ProductionEvent.work_date,
-                      ProductionEvent.created_at)
-        )).all()
+        # Events for the pieces ON THIS PAGE, in one query; grouped in Python.
+        #
+        # Scoping to `page_piece_ids` rather than to the style is what makes the
+        # paging worth anything: the events are the bulk of this response — one
+        # row per piece per stage — so fetching all of them for a style and then
+        # using 50 pieces' worth would page the small half and leave the large
+        # half unbounded.
+        events = []
+        if page_piece_ids:
+            events = (await self.db.execute(
+                select(ProductionEvent.piece_id, Operation.code, Operation.label,
+                       Operation.sequence, Employee.name, ProductionEvent.work_date,
+                       ProductionEvent.entered_by, ProductionEvent.created_at)
+                .select_from(ProductionEvent)
+                .join(Piece, Piece.id == ProductionEvent.piece_id)
+                .join(Operation, Operation.id == ProductionEvent.operation_id)
+                .join(Employee, Employee.id == ProductionEvent.employee_id)
+                .where(ProductionEvent.piece_id.in_(page_piece_ids))
+                .order_by(ProductionEvent.piece_id, ProductionEvent.work_date,
+                          ProductionEvent.created_at)
+            )).all()
 
         stages_by_piece: dict[uuid.UUID, list[dict]] = {}
         seen_ops: dict[uuid.UUID, set] = {}
@@ -647,8 +707,15 @@ class AnalyticsService(BarcodeAnalyticsMixin):
             "totals": totals,
             "stages": stage_rows,
             "store": store,
-            "piece_count": len(piece_rows),
+            # The STYLE's piece count, not the page's — it is a fact about the
+            # style and a manager reads it as one.
+            "piece_count": style_piece_total,
             "pieces": piece_rows,
+            "limit": params.limit if params is not None else None,
+            "offset": params.offset if params is not None else None,
+            "count": len(piece_rows),
+            "has_more": ((params.offset + len(piece_rows)) < style_piece_total
+                         if params is not None else False),
         }
 
     # ================================================================ LEVEL 3
@@ -733,9 +800,17 @@ class AnalyticsService(BarcodeAnalyticsMixin):
         # `piece.needs_lining`, which is a copy taken at mint time. The piece page
         # is where somebody goes to find out why a garment has not moved, so it
         # must agree with the gate that is refusing to move it.
-        from app.modules.drawers.service import DrawerService
+        # StoreService, NOT DrawerService. This read used to call the PRIVATE
+        # `DrawerService._needs_lining`, which was the last thing in application
+        # code keeping the retired drawers module alive. The store owns this
+        # question now — physical drawers are not tracked (CLAUDE.md s8) — and
+        # the two resolvers were equivalent: both assemble the same kwargs for
+        # `lining_rules.lining_required`, and that function does
+        # `bool(stored_flag)`, so the one difference (None vs False) could not
+        # change an answer.
+        from app.modules.store.service import StoreService
         piece_obj = await self.db.get(Piece, pid)
-        needs_lining, lining_reason = await DrawerService(self.db)._needs_lining(
+        needs_lining, lining_reason = await StoreService(self.db).needs_lining(
             piece_obj)
 
         disp = display_stage(current_event_stage=event_stage,

@@ -56,7 +56,7 @@ from app.modules.barcode.repository import BarcodeRepository
 from app.modules.barcode.service import BarcodeService
 from app.modules.employees.models import Employee
 from app.modules.users.models import User
-from app.modules.users.schemas import UserCreate
+from app.modules.users.schemas import StaffUserCreate
 from app.modules.users.service import UserService
 
 # EVERY model module must be imported before the first ORM operation, not just
@@ -209,8 +209,8 @@ async def _ensure_person(db, *, name, designation, wage_type, salary,
         existing = await db.scalar(select(User).where(User.phone == ph))
         if existing is None:
             await UserService(db).provision_user(
-                UserCreate(name=emp.name, phone=ph, email=email, role=role,
-                        password=ph, employee_id=emp.id),
+                StaffUserCreate(name=emp.name, phone=ph, email=email, role=role,
+                                password=ph, employee_id=emp.id),
                 must_change_password=True,
             )
             out["login_new"] = True

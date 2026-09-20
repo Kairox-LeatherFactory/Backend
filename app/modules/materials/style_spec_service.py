@@ -47,6 +47,7 @@ from app.core.enums import (
 from app.modules.barcode.models import StyleMaterialSpec
 from app.modules.clients.models import SKU, Style, spec_editable
 from app.modules.materials.repository import MaterialRepository
+from app.modules.materials.service import display_stock
 from app.modules.materials.style_spec_repository import StyleSpecRepository
 
 # How a spec line resolved to a physical lot. The screen renders each
@@ -381,8 +382,8 @@ class StyleSpecService:
             reserved = await self.materials.active_reserved(lot.id)
             on_hand = Decimal(str(lot.on_hand or 0))
             used = Decimal(str(lot.used or 0))
-            received, displayed_reserved, available = (
-                self.materials._display_stock(on_hand, used, reserved))
+            received, displayed_reserved, available = display_stock(
+                on_hand, used, reserved)
             out["lot"] = {
                 "lot_id": str(lot.id), "article": lot.article,
                 "colour": lot.colour, "uom": lot.uom,

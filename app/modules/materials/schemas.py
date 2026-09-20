@@ -286,3 +286,74 @@ class LotHistory(BaseModel):
     received: float
     rejected: float
     receipts: list[ReceiptRow] = Field(default_factory=list)
+
+
+class MaterialSpecRead(BaseModel):
+    """Which boxes the Add-New form and the stock filters must render.
+
+    Drives the UI per (category, subtype) so the form matches the material class
+    exactly — see the STRICT per-category table in CLAUDE.md s5.
+    """
+    category: str | None = None
+    subtype: str | None = None
+    filters: list[str]
+    required_to_add: list[str]
+    quantity_field: str | None = None
+    uom: str | None = None
+
+
+class LeatherByStyleRow(BaseModel):
+    """Arrived / consumed / available for one style.
+
+    The consumed figure is SPLIT BY REWORK, so "this style cost X, of which Y
+    was defects" is answerable rather than inferred.
+    """
+    style_id: uuid.UUID
+    style_name: str | None = None
+    style_article: str | None = None
+    article: str | None = None
+    colour: str | None = None
+    uom: str | None = None
+    pieces: int = 0
+    arrived: float = 0.0
+    consumed: float = 0.0
+    consumed_rework: float = 0.0
+    consumed_original: float = 0.0
+    on_hand: float = 0.0
+    reserved: float = 0.0
+    available: float = 0.0
+
+
+class PieceSheetRow(BaseModel):
+    code: str
+    dcm: float = 0.0
+    status: str | None = None
+
+
+class PieceConsumption(BaseModel):
+    """What ONE garment took, hide by hide.
+
+    A piece cut through the grid lists its actual sheets. One cut the old way (a
+    typed dcm) lists none, which is the honest answer: nobody recorded which
+    hides those were.
+    """
+    piece_id: uuid.UUID
+    total: float = 0.0
+    rework: float = 0.0
+    original: float = 0.0
+    events: list[dict] = Field(default_factory=list)
+    sheets: list[PieceSheetRow] = Field(default_factory=list)
+
+
+class ManualIssueResult(BaseModel):
+    """A material recorded as issued to a garment OUTSIDE its spec."""
+    piece_code: str
+    article: str | None = None
+    colour: str | None = None
+    qty: float
+    uom: str | None = None
+    source: str
+    available_after: float | None = None
+    # Present when the issue spent more than the ledger held. Warn, never block.
+    stock_warning: dict | None = None
+    message: str

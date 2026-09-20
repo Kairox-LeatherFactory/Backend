@@ -441,7 +441,8 @@ class BarcodeService:
     async def reissue_employee_barcode(self, employee_id: uuid.UUID,
                                        actor_id: uuid.UUID | None) -> dict:
         """Retire the old card, mint a new one. History untouched."""
-        old = await self.repo.get_for_employee(employee_id, active_only=True)
+        old = await self.repo.get_for_employee(employee_id, active_only=True,
+                                               for_update=True)
         if old:
             await self.repo.retire_nocommit(old, reason="reissued")
         caption = old.caption if old else None
@@ -456,7 +457,8 @@ class BarcodeService:
                                           actor_id: uuid.UUID | None) -> dict:
         """Retire the card (worker left). Employee row + all events + closed wage
         lines are untouched — this ONLY flips the registry status."""
-        row = await self.repo.get_for_employee(employee_id, active_only=True)
+        row = await self.repo.get_for_employee(employee_id, active_only=True,
+                                               for_update=True)
         if not row:
             raise HTTPException(status.HTTP_404_NOT_FOUND,
                                 "No active barcode for this employee.")
@@ -517,8 +519,14 @@ class BarcodeService:
             stmt = stmt.where(BarcodeRegistry.status == BarcodeStatus.ACTIVE.value)
         if category:
             stmt = stmt.where(MaterialLot.category == category.strip().upper())
+        self._lot_barcodes_stmt = stmt      # reused by the paged form below
 
-        return [{
+        return [self._lot_barcode_row(r)
+                for r in (await self.db.execute(stmt)).all()]
+
+    @staticmethod
+    def _lot_barcode_row(r) -> dict:
+        return {
             "code": r[0], "type": r[1], "status": r[2], "caption": r[3],
             "lot_id": r[4], "category": r[5], "subtype": r[6],
             "article": r[7], "colour": r[8], "thickness": r[9], "size": r[10],
@@ -527,7 +535,25 @@ class BarcodeService:
             "label_line": " · ".join(str(v) for v in
                                      [r[7], r[8], r[9] or r[10],
                                       f"{float(r[12] or 0)} {r[11]}"] if v),
-        } for r in (await self.db.execute(stmt)).all()]
+        }
+
+    async def page_lot_barcodes(self, params, *, category: str | None = None,
+                                active_only: bool = True) -> tuple[list[dict], int]:
+        """One page of the material-lot label screen.
+
+        A print screen is a list a human scrolls, and the lot table grows with
+        every delivery for the life of the factory — so this is paged like the
+        other label screens rather than returning the whole registry. Filter by
+        `category` to narrow it instead of paging through it.
+        """
+        from app.core.pagination import paginate_rows
+
+        # Build the statement through the same method the unpaged form uses, so
+        # the two can never disagree about which rows they are describing.
+        await self.list_lot_barcodes(category=category, active_only=active_only)
+        stmt = self._lot_barcodes_stmt
+        rows, total = await paginate_rows(self.db, stmt, params)
+        return [self._lot_barcode_row(r) for r in rows], total
 
     async def _audit(self, actor_id, action, entity_id, after: dict) -> None:
         """The transition is audited in the SAME transaction as the retire/mint —
@@ -578,6 +604,9 @@ class BarcodeService:
         return {"labels": labels}
     
     # ── order picker ────────────────────────────────────────────────────────
+    async def page_orders(self, params) -> tuple[list[dict], int]:
+        return await self.repo.page_orders_with_barcodes(params)
+
     async def list_orders(self) -> list[dict]:
         """All orders that have barcodes. No client scoping (Hamthan #6)."""
         return await self.repo.list_orders_with_barcodes()

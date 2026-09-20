@@ -123,8 +123,23 @@ def require_roles(*allowed: UserRole):
 # duties IS the requirement. MANAGING_DIRECTOR still passes any gate that lists it,
 # because it is listed, not because it is a superuser.
 def require_exact_roles(*allowed: UserRole):
-    """Role gate with NO superuser bypass — only the listed roles pass."""
+    """Role gate with no DIRECT_MANAGER bypass — the listed roles, plus the MD.
+
+    UPDATED 2026-09-19 (Hamthan): THE MANAGING DIRECTOR PASSES EVERY GATE IN
+    THIS SYSTEM, WITHOUT EXCEPTION. They are the owner of the factory and the
+    superuser of the app; there is no action in it they are not entitled to
+    take, and an MD locked out of a screen has no one to escalate to.
+
+    That does NOT weaken what this gate was built for. Its purpose is the BOM
+    sign-off separation of duties — the DIRECT_MANAGER who prepares and edits a
+    BOM must not also be the one who approves it — and DIRECT_MANAGER is still
+    refused here, which is the whole point. Every current call site already
+    names MANAGING_DIRECTOR in `allowed` anyway (bom/router.py `_MD`), so this
+    changes no behaviour today; it guarantees the rule for gates added later.
+    """
     async def checker(user: User = Depends(get_current_user)) -> User:
+        if user.role is UserRole.MANAGING_DIRECTOR:
+            return user
         if user.role not in allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

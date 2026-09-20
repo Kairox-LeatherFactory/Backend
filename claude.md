@@ -182,17 +182,49 @@ Barcode door and manual door POST the same shape; the router resolves barcodes �
 service sees ids only.
 
 ### The pipeline
+
+**CONFIRMED BY HAMTHAN, 2026-09-20 — this is the factory flow. Do not ask again.**
+
 ```
-LEATHER_CUTTING ┐
-                ├─(parallel cut paths, per piece)
-LINING_CUTTING  ┘
-   → FUSING → PASTING → [MERGE GATE] → LINE_STITCHING → SHELL_STITCHING
-   → FINAL_FINISH → FINAL_INSPECTION → PACKAGE_EXPORT
+LEATHER_CUTTING → FUSING → PASTING ─┐
+                                     ├─► STORE (merge) ─► LINE_STITCHING
+LINING_CUTTING ──────────────────────┘                   → SHELL_STITCHING
+                                                          → FINAL_FINISH
+                                                          → FINAL_INSPECTION  (quality check)
+                                                          → PACKAGE_EXPORT
 ```
+
+- The two cut paths run **in parallel**: leather goes on through fusing and
+  pasting; lining goes straight to the store once it is cut.
+- **STORE is the merge point** for leather, lining and accessories. It is a
+  state on the PIECE (`piece.store_state`), not a place — see below.
+- Nothing reaches LINE_STITCHING until the store has merged and released it.
+- FINAL_INSPECTION is the quality check. PACKAGE_EXPORT is the last stage.
+
+This is exactly what `ProductionStage.predecessor()` already encodes: both cut
+entries and LINE_STITCHING return `None` (the merge gate governs the third), and
+the rest form the chain above.
+
+**PHYSICAL DRAWERS ARE NOT TRACKED** (Hamthan, 2026-09-20; see
+`docs/KAIROX_PRODUCTION-EVENT_SYSTEM_GUIDE.md` §14). A drawer or bucket is where
+leather, lining and accessories are physically merged, but the *drawer itself* is
+not a tracked entity: there is no drawer scan, no drawer pool and no drawer
+allocation. The store is seven states on the garment — `store_state`,
+`leather_in`, `lining_in`, `accessories_in` — and the scan is **employee, then
+piece**, two scans not three. `app/modules/drawers/` is retired: unrouted,
+commented out of `main.py`, and kept only because its tables hold historical
+rows for audit.
 
 ### The four gates (cheapest / most-likely-to-fail first)
 1. **ROLE** — may this manager's role log this stage? → **403 for the whole request** if not.
-2. **SKILL** — may this employee's designation work this stage? → **per-piece warning** (partial accept).
+2. **SKILL** — is this employee's designation an ORDINARY one for this stage?
+   → **per-piece warning, never a block** (`production/service.py` GATE 2 logs the
+   piece either way — there is deliberately no `continue`). It is an audit signal,
+   not permission.
+   **THE FLOOR IS CROSS-TRAINED** (Hamthan, 2026-09-20): a CUTTER also works
+   FUSING and the LINING cut; a TAILOR also pastes. `STAGE_DESIGNATIONS` in
+   `core/enums_barcode.py` reflects that. Widen it only when the floor genuinely
+   cross-trains a role — never to silence a warning.
 3. **SEQUENCE** — has the piece completed the previous chain stage? → **per-piece** (`sequence_blocked`).
 4. **MERGE (completeness)** — for LINE_STITCHING only: is the piece's drawer **SENDED**
    (leather + lining both stored and DM-released)? → **per-piece** (`merge_blocked`).

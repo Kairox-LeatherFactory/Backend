@@ -22,10 +22,26 @@ from app.modules.imports.parse_orders import parse_order_sheet, OrderLine
 # A client is identified by the prefix of its sheet names, e.g.
 # "KJ GARMENT ORDER" + "KJ PRODUCTION" -> client key "KJ".
 def _client_key(sheet_name: str) -> str:
+    """Strip the sheet-role suffix so a client's tabs collapse to ONE client.
+
+    DO NOT COMMENT THIS LOOP OUT. It was disabled in 87d7572 and the bare sheet
+    name was returned instead, which silently split every client in two: "GGZ"
+    became the separate clients "GGZ-GARMENT ORDER" and "GGZ-PRODUCTION", so the
+    order sheet and the production sheet for one client never reconciled against
+    each other and each client's totals were reported against half their rows.
+    The comment above this function has always described the stripping — it is
+    the behaviour the importer is built on, and three golden tests pin it.
+
+    Order matters only in that the space- and hyphen-separated forms are both
+    listed: real sheets use both ("KJ GARMENT ORDER", "RICANO-GARMENT ORDER"),
+    and a client name may itself contain a hyphen ("NIPAL-NEW PRODUCTION"), which
+    is why the suffix is matched with its separator attached rather than split on
+    "-" alone.
+    """
     name = sheet_name.upper()
-    # for marker in (" GARMENT ORDER", "-GARMENT ORDER", " PRODUCTION", "-PRODUCTION"):
-    #     if marker in name:
-    #         return name.split(marker)[0].strip(" -")
+    for marker in (" GARMENT ORDER", "-GARMENT ORDER", " PRODUCTION", "-PRODUCTION"):
+        if marker in name:
+            return name.split(marker)[0].strip(" -")
     return name.strip()
 
 

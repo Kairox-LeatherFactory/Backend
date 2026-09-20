@@ -382,9 +382,16 @@ async def test_a_skill_mismatch_warns_but_never_blocks(
                         screen=ScreenContext.LEATHER_CUT,
                         leather_lot_id=leather_lot.id, consumption_qty=12.0)
 
-    # next is FUSING; a CUTTER is not a FUSER
+    # Next is FUSING. A PASTER is not a fuser, so this is a genuine mismatch.
+    #
+    # It used to ask about the CUTTER, on the grounds that "a CUTTER is not a
+    # FUSER". That stopped being true: the floor is cross-trained and
+    # STAGE_DESIGNATIONS now lists CUTTER under FUSING and LINING_CUTTING, and
+    # TAILOR under PASTING (Hamthan, 2026-09-20 — CLAUDE.md s8). A cutter fusing
+    # a garment is ordinary work and must NOT warn. What this test is actually
+    # for is unchanged: a real mismatch warns and still does not block.
     st = await svc.piece_state(piece.id, user=stitching_mgr,
-                               employee_id=cutter[0].id)
+                               employee_id=paster[0].id)
     assert st["actor"]["skill_ok"] is False
     assert st["actor"]["skill_note"]
     assert "skill" not in {b["gate"] for b in st["blockers"]}

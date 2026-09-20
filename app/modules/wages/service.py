@@ -191,6 +191,42 @@ class WageService:
             )
         return out
 
+    async def page_styles(self, params, **filters):
+        """One page of the style picker, plus the true filtered total.
+
+        THE SLICE IS IN PYTHON, AND THAT IS THE RIGHT CALL HERE — not a
+        shortcut. Two reasons:
+
+        1. There is no N+1 under this. `list_style_options` is one GROUP BY
+           returning a row per style, and `rated_operation_counts` is one more
+           GROUP BY over those ids. The set is bounded by how many styles exist
+           (hundreds), and the work does not grow with pieces or events. Pushing
+           LIMIT into SQL would save a few hundred rows of transfer and cost the
+           correctness below.
+
+        2. `unpriced_only` filters AFTER the badge is computed, because "is this
+           style fully priced" is only known once the rate counts are in. Paging
+           the underlying query would hand back a short page and a `total` that
+           counted styles the filter then removed — a pager that lies.
+
+        A NOTE ON A CLAIM I GOT WRONG EARLIER: the audit document said these
+        pickers "compute their n-of-m priced badges over the full set, so paging
+        the underlying query would produce wrong badges". That is not so. The
+        badge is per style — `rated_operation_counts` is GROUP BY style_id over
+        exactly the ids it is given — so it would page perfectly well. The real
+        obstacle is `unpriced_only`, which is a smaller and more specific thing.
+        """
+        rows = await self.list_styles(**filters)
+        total = len(rows)
+        return rows[params.offset:params.offset + params.limit], total
+
+    async def page_orders(self, params, **filters):
+        """One page of the order cards. Same reasoning as page_styles — the
+        cards are assembled from the style list, so the bound is style count."""
+        rows = await self.list_orders(**filters)
+        total = len(rows)
+        return rows[params.offset:params.offset + params.limit], total
+
     # ── rates ───────────────────────────────────────────────────────────────
     async def rate_sheet(self, style_code: str, on: date) -> dict:
         """Every operation of a style with its rate in force on `on`.
@@ -249,6 +285,7 @@ class WageService:
         await self.repo.upsert_rate(
             style["style_id"], op.id, body.rate, body.effective_from
         )
+        await self.repo.commit()
         return {
             "style_code": style["style_code"],
             "operation_code": op.code,
@@ -271,6 +308,7 @@ class WageService:
         saved = await self.repo.bulk_upsert_rates(
             style["style_id"], body.effective_from, pairs
         )
+        await self.repo.commit()
         return {
             "style_code": style["style_code"],
             "effective_from": body.effective_from.isoformat(),
@@ -502,6 +540,7 @@ class WageService:
                 "on every reissued payslip for this period.")
 
         await self.repo.stamp_reopen(run, by=user_name, reason=reason)
+        await self.repo.commit()
         return {
             "id": run.id, "status": run.status,
             "period_start": run.period_start, "period_end": run.period_end,
@@ -527,6 +566,7 @@ class WageService:
                 f"Run {run.id} has no wage lines — freezing an empty run would "
                 f"lock a window in which nobody is paid. Recompute it first.")
         await self.repo.close_run(run)
+        await self.repo.commit()
         return await self.get_run_detail(run_id)
 
     async def recompute_run(self, run_id: uuid.UUID, *, user_name: str,
@@ -602,6 +642,7 @@ class WageService:
             raise
 
         await self.repo.stamp_recompute(run, by=user_name)
+        await self.repo.commit()
         payload["recomputed"] = True
         payload["recompute_count"] = run.recompute_count
         return payload
@@ -701,8 +742,16 @@ class WageService:
                 order_id=(None if is_monthly else order_id),
             )
         except Exception:
-            await self.repo.delete_run(run)
+            # ROLL BACK, DO NOT COMPENSATE. create_run used to commit before the
+            # run was populated, so a failure here left a real OPEN row in the
+            # database and the only way back was to delete it — a second write to
+            # undo the first, which itself could fail and strand the run. Nothing
+            # in this operation is committed until it has fully succeeded, so
+            # abandoning the transaction is enough and there is no half-run to
+            # clean up.
+            await self.db.rollback()
             raise
+        await self.repo.commit()
         payload["recomputed"] = False
         payload["recompute_count"] = 0
         return payload
@@ -751,6 +800,7 @@ class WageService:
             "lines_deleted": len(run.lines or []),
         }
         await self.repo.purge_run(run)
+        await self.repo.commit()
         snapshot["deleted"] = True
         snapshot["message"] = (
             f"Run {snapshot['id']} deleted. The window "

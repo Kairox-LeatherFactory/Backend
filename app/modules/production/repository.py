@@ -38,6 +38,10 @@ from app.modules.production.models import (
 class ProductionRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
+        # Per-REQUEST memo for the operation catalogue. A repository is
+        # constructed per request, so nothing here outlives one. See
+        # get_operation_by_code.
+        self._op_cache: dict[str, "Operation | None"] = {}
 
     # --- operations / access ---
     async def list_operations(self) -> list[Operation]:
@@ -52,11 +56,47 @@ class ProductionRepository:
     async def get_operation_by_code(self, code: str) -> Operation | None:
         # CASE-INSENSITIVE: ProductionStage values are UPPER; legacy op codes may
         # be mixed-case. Exact-match would miss the gate for those rows.
+        #
+        # MEMOISED FOR THE LIFE OF THE REQUEST. `func.upper(Operation.code)` puts
+        # a function on the column, so no index on `code` can serve it and every
+        # call scans the operations table. The sequence gate calls this ONCE PER
+        # PIECE for the predecessor stage, so a manager scanning a 100-piece
+        # batch paid 100 scans for what is, in that batch, one or two distinct
+        # lookups. Operations are a small fixed catalogue and a repository lives
+        # for one request, so caching here cannot serve a stale row across
+        # requests.
         norm = (code or "").strip().upper()
+        if norm in self._op_cache:
+            return self._op_cache[norm]
         res = await self.db.execute(
             select(Operation).where(func.upper(Operation.code) == norm)
         )
-        return res.scalar_one_or_none()
+        op = res.scalar_one_or_none()
+        self._op_cache[norm] = op
+        return op
+
+    async def events_at_ops(self, piece_ids: list[uuid.UUID],
+                            operation_ids: list[uuid.UUID]) -> set[tuple]:
+        """Which (piece, operation) pairs already have an event — in ONE query.
+
+        The batch form of `has_event_at_op`. The sequence gate asked that
+        question once per piece, so scanning N pieces cost N round-trips before a
+        single event was written; on a real 100-piece trolley that is 100 serial
+        waits on the database, each one holding the request's pooled connection
+        open for the duration.
+
+        Returns the pairs that EXIST. Absence is the interesting answer, and a
+        set membership test gives it for free.
+        """
+        if not piece_ids or not operation_ids:
+            return set()
+        res = await self.db.execute(
+            select(ProductionEvent.piece_id, ProductionEvent.operation_id)
+            .where(ProductionEvent.piece_id.in_(piece_ids),
+                   ProductionEvent.operation_id.in_(operation_ids))
+            .distinct()
+        )
+        return {(pid, oid) for pid, oid in res.all()}
 
     async def operations_for_role(self, role: str) -> set[uuid.UUID]:
         res = await self.db.execute(
@@ -194,10 +234,13 @@ class ProductionRepository:
         await self.db.refresh(ev)
         return ev
 
-    async def list_events(self, sku_id: uuid.UUID | None = None,
-                        employee_id: uuid.UUID | None = None,
-                        start: date | None = None,
-                        end: date | None = None) -> list[ProductionEvent]:
+    def _events_filtered(self, sku_id, employee_id, start, end):
+        """The WHERE clause shared by the page query and its COUNT.
+
+        Built once so the two cannot drift: a count computed over different
+        filters than the rows is a pager that lies about how many pages there
+        are, and it lies silently.
+        """
         stmt = select(ProductionEvent)
         if sku_id:
             stmt = stmt.where(ProductionEvent.sku_id == sku_id)
@@ -207,8 +250,42 @@ class ProductionRepository:
             stmt = stmt.where(ProductionEvent.work_date >= start)
         if end:
             stmt = stmt.where(ProductionEvent.work_date <= end)
-        res = await self.db.execute(stmt.order_by(ProductionEvent.work_date.desc()))
+        return stmt
+
+    async def list_events(self, sku_id: uuid.UUID | None = None,
+                        employee_id: uuid.UUID | None = None,
+                        start: date | None = None,
+                        end: date | None = None,
+                        limit: int | None = None,
+                        offset: int = 0) -> list[ProductionEvent]:
+        """A window of events. UNBOUNDED ONLY IF THE CALLER INSISTS.
+
+        production_event is the fastest-growing table in the schema — one row per
+        piece per stage, for every garment the factory has ever made. This used
+        to return every matching row with no ceiling, so `GET /production/events`
+        with no filters was "serialise the entire production history", holding a
+        pooled connection for all of it.
+
+        `limit=None` preserves the old behaviour for internal callers that
+        genuinely need the whole set (the wage aggregate reads its own query, not
+        this one); the HTTP surface always passes a limit.
+        """
+        stmt = self._events_filtered(sku_id, employee_id, start, end)
+        # ORDER BY work_date alone is not a total order — many events share a
+        # date, and paging over a non-deterministic order can show the same row
+        # on two pages and skip another entirely. id breaks the tie.
+        stmt = stmt.order_by(ProductionEvent.work_date.desc(), ProductionEvent.id)
+        if limit is not None:
+            stmt = stmt.limit(limit).offset(offset)
+        res = await self.db.execute(stmt)
         return list(res.scalars())
+
+    async def count_events(self, sku_id=None, employee_id=None,
+                           start=None, end=None) -> int:
+        """How many events match, ignoring paging — the pager's denominator."""
+        inner = self._events_filtered(sku_id, employee_id, start, end).subquery()
+        return int(await self.db.scalar(
+            select(func.count()).select_from(inner)) or 0)
 
     async def stage_totals_for_style(self, style_id: uuid.UUID,
                                       client_scope: uuid.UUID | None = None) -> dict[str, int]:
@@ -280,19 +357,50 @@ class ProductionRepository:
         res = await self.db.execute(stmt)
         return res.all()
 
-    async def list_pieces_for_sku(
-        self, sku_id: uuid.UUID
-    ) -> list[tuple[Piece, str | None, str | None, uuid.UUID]]:
-        """Every active piece of a SKU + stage and client order id."""
-        res = await self.db.execute(
+    def _pieces_for_sku_stmt(self, sku_id: uuid.UUID):
+        return (
             select(Piece, Operation.code, Operation.label, Style.client_order_id)
             .outerjoin(Operation, Operation.id == Piece.current_operation_id)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
             .where(Piece.sku_id == sku_id, Piece.is_active.is_(True))
-            .order_by(Piece.seq)
+            .order_by(Piece.seq, Piece.id)
         )
+
+    async def list_pieces_for_sku(
+        self, sku_id: uuid.UUID
+    ) -> list[tuple[Piece, str | None, str | None, uuid.UUID]]:
+        """Every active piece of a SKU + stage and client order id."""
+        res = await self.db.execute(self._pieces_for_sku_stmt(sku_id))
         return [(p, c, l, order_id) for p, c, l, order_id in res.all()]
+
+    async def page_pieces_for_sku(self, sku_id: uuid.UUID, params):
+        """One page of the SKU's pieces, plus how many there are in total."""
+        from app.core.pagination import paginate_rows
+        return await paginate_rows(self.db, self._pieces_for_sku_stmt(sku_id), params)
+
+    async def count_pieces_for_sku(self, sku_id: uuid.UUID) -> int:
+        return int(await self.db.scalar(
+            select(func.count()).select_from(Piece)
+            .where(Piece.sku_id == sku_id, Piece.is_active.is_(True))) or 0)
+
+    async def count_done_at_op_for_sku(self, sku_id: uuid.UUID,
+                                       operation_id: uuid.UUID) -> int:
+        """How many of the SKU's pieces have an event at this operation.
+
+        SKU-WIDE, NOT PAGE-WIDE. The checklist header reports done / pending /
+        blocked and, most importantly, `closed` — "every piece is logged here, so
+        stop offering this style for scanning". Those are facts about the SKU. If
+        they were recomputed from whichever 50 rows the caller happened to
+        request, a manager on page 1 of a 900-piece SKU would be told the style
+        was closed, and the scan screen would withdraw work that is not done.
+        """
+        return int(await self.db.scalar(
+            select(func.count(func.distinct(ProductionEvent.piece_id)))
+            .select_from(ProductionEvent)
+            .join(Piece, Piece.id == ProductionEvent.piece_id)
+            .where(Piece.sku_id == sku_id, Piece.is_active.is_(True),
+                   ProductionEvent.operation_id == operation_id)) or 0)
     
     async def drawer_states_for_pieces(
         self, piece_ids: list[uuid.UUID]

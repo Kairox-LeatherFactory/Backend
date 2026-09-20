@@ -100,14 +100,29 @@ class BarcodeRepository:
         return res.scalar_one_or_none()
 
     async def get_for_employee(self, employee_id: uuid.UUID,
-                               active_only: bool = True) -> BarcodeRegistry | None:
+                               active_only: bool = True,
+                               for_update: bool = False) -> BarcodeRegistry | None:
+        """This employee's card. Pass for_update=True if you are about to RETIRE
+        it.
+
+        Reissue and deactivate are read-then-retire: find the active card, flip
+        its status, mint a replacement. Two HR users reissuing the same worker at
+        the same moment both read the SAME active row, both retire it, and both
+        mint a new one — leaving the employee with two active cards. `resolve` is
+        then ambiguous for that worker, which is exactly what the one-row-per-code
+        registry exists to prevent. The lock serialises them: the second reads the
+        first's result, finds no active card, and mints one replacement.
+        """
         stmt = select(BarcodeRegistry).where(
             BarcodeRegistry.employee_id == employee_id,
             BarcodeRegistry.type == BarcodeType.EMPLOYEE.value,
         )
         if active_only:
             stmt = stmt.where(BarcodeRegistry.status == BarcodeStatus.ACTIVE.value)
-        return await self.db.scalar(stmt.order_by(BarcodeRegistry.created_at.desc()))
+        stmt = stmt.order_by(BarcodeRegistry.created_at.desc())
+        if for_update:
+            stmt = stmt.with_for_update()
+        return await self.db.scalar(stmt)
 
     async def codes_for_employees(
         self, employee_ids: list[uuid.UUID], active_only: bool = True
@@ -261,17 +276,49 @@ class BarcodeRepository:
         integer sequence column would be the fully clean long-term form.
         """
         like = f"{prefix}-%"
-        top = await self.db.scalar(
+        base = (
             select(BarcodeRegistry.code)
             .where(BarcodeRegistry.code.like(like))
             .order_by(BarcodeRegistry.code.desc())
-            .limit(1)
         )
+        head = len(prefix) + 1
+
+        def _tail(code: str | None) -> str:
+            return (code or "")[head:]
+
+        # FAST PATH — one row, which is what this costs in every normal case.
+        # F79/F99: this must not go back to SELECTing every barcode with the
+        # prefix and taking the max in Python; that was O(all barcodes)
+        # transferred per mint and quadratic across an import that mints
+        # hundreds. Numeric tails are zero-padded to a fixed width, so among
+        # them lexicographic order IS numeric order and the top row is the
+        # answer.
+        top = await self.db.scalar(base.limit(1))
         mx = 0
-        if top:
-            tail = top[len(prefix) + 1:]
-            if tail.isdigit():
-                mx = int(tail)
+        if top is not None and _tail(top).isdigit():
+            mx = int(_tail(top))
+        elif top is not None:
+            # SLOW PATH — only when the highest code is NOT numeric-tailed.
+            #
+            # This used to give up here and leave the counter at 0, which is a
+            # PERMANENT jam rather than a one-off bad number: the next mint
+            # returns PREFIX-000001, and so does the one after, which dies on the
+            # unique index. That is an unhandled IntegrityError (HTTP 500) on
+            # every employee create and every card reissue from then on, with no
+            # way out through the API. One row is enough to cause it,
+            # `register_nocommit` accepts any string, and the shared test fixture
+            # writes exactly such a row (EMP-<hex>).
+            #
+            # Walking further down is CORRECT, not a heuristic: removing
+            # non-numeric rows cannot reorder the numeric ones, so the first
+            # all-digit tail below them is still the highest numeric code. The
+            # window is bounded because non-numeric codes are rare — fixtures,
+            # seeds, hand-inserted rows — and if it is somehow all non-numeric,
+            # mx stays 0, which is the old behaviour and no worse.
+            for code in await self.db.scalars(base.limit(500)):
+                if _tail(code).isdigit():
+                    mx = int(_tail(code))
+                    break
         return f"{prefix}-{mx + 1:0{width}d}"
 
     # ── registration (all *_nocommit; the SERVICE owns the transaction) ──────
@@ -544,18 +591,50 @@ class BarcodeRepository:
             .order_by(func.max(BarcodeRegistry.created_at).desc())
         )
 
+        self._orders_with_barcodes_stmt = stmt      # reused by the paged form
         rows = (await self.db.execute(stmt)).all()
-        return [
-            {
-                "order_id": r.order_id,
-                "order_number": r.order_number,
-                "client_name": r.client_name,
-                "minted": int(r.minted),
-                "first_generated_at": r.first_generated_at,
-                "last_generated_at": r.last_generated_at,
-            }
-            for r in rows
-        ]
+        return [self._order_barcode_row(r) for r in rows]
+
+    @staticmethod
+    def _order_barcode_row(r) -> dict:
+        return {
+            "order_id": r.order_id,
+            "order_number": r.order_number,
+            "client_name": r.client_name,
+            "minted": int(r.minted),
+            "first_generated_at": r.first_generated_at,
+            "last_generated_at": r.last_generated_at,
+        }
+
+    async def page_orders_with_barcodes(self, params) -> tuple[list[dict], int]:
+        """One page of the barcode-orders screen, newest minting first.
+
+        GROUP BY means the count has to be taken over the grouped set, not over
+        barcode_registry — `paginate_rows` wraps the whole statement as a
+        subquery, which counts the groups rather than the rows inside them.
+        """
+        from app.core.pagination import paginate_rows
+        stmt = (
+            select(
+                ClientOrder.id.label("order_id"),
+                ClientOrder.order_number,
+                Client.name.label("client_name"),
+                func.count(BarcodeRegistry.id).label("minted"),
+                func.min(BarcodeRegistry.created_at).label("first_generated_at"),
+                func.max(BarcodeRegistry.created_at).label("last_generated_at"),
+            )
+            .join(Client, Client.id == ClientOrder.client_id)
+            .join(
+                BarcodeRegistry,
+                and_(BarcodeRegistry.order_id == ClientOrder.id,
+                     BarcodeRegistry.type == BarcodeType.PIECE.value,
+                     BarcodeRegistry.is_alias.is_(False)),
+            )
+            .group_by(ClientOrder.id, ClientOrder.order_number, Client.name)
+            .order_by(func.max(BarcodeRegistry.created_at).desc(), ClientOrder.id)
+        )
+        rows, total = await paginate_rows(self.db, stmt, params)
+        return [self._order_barcode_row(r) for r in rows], total
 
     # ── planned totals (SKU.qty_ordered) ────────────────────────────────────
     async def order_planned_total(self, order_id: uuid.UUID) -> int:

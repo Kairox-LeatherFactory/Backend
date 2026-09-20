@@ -13,7 +13,7 @@ a DM/MD decision. Everyone else can read where things are.
 ================================================================================
 """
 import uuid
-from datetime import date
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel, Field
@@ -68,7 +68,47 @@ class ReceiveIn(BaseModel):
     work_date: date | None = None
 
 
-@router.post("/vendors", status_code=status.HTTP_201_CREATED)
+# ── responses ────────────────────────────────────────────────────────────────
+# Declared so the OpenAPI schema carries a return type and the frontend can
+# generate one. NOTE FOR ANYONE EDITING THESE: `response_model` FILTERS the
+# response — a field the service returns and the model does not declare is
+# silently dropped on the way out, with no error anywhere. `JobWorkService.
+# payload` splices caller-supplied `**extra` into its dict, so every extra key
+# any caller passes has to be declared here too (`skipped`, from dispatch).
+class VendorOut(BaseModel):
+    vendor_id: uuid.UUID
+    name: str
+    contact: str | None = None
+    note: str | None = None
+    is_active: bool
+
+
+class JobWorkOut(BaseModel):
+    job_id: uuid.UUID
+    vendor_id: uuid.UUID | None = None
+    vendor: str | None = None
+    stage: str
+    status: str
+    dispatched_at: datetime | None = None
+    expected_back: date | None = None
+    returned_at: datetime | None = None
+    rate_per_piece: float | None = None
+    currency: str | None = None
+    pieces_out: int
+    pieces_back: int
+    pieces_rejected: int
+    pieces_short: int
+    # Derived, and only over what came back: a garment that never returned was
+    # never work delivered, so it is never paid for.
+    cost: float | None = None
+    overdue: bool
+    note: str | None = None
+    # dispatch only — pieces it declined to send (already out, or not found).
+    skipped: list[str] | None = None
+
+
+@router.post("/vendors", status_code=status.HTTP_201_CREATED,
+             response_model=VendorOut)
 async def create_vendor(
     body: VendorIn,
     db: AsyncSession = Depends(get_db),
@@ -80,7 +120,7 @@ async def create_vendor(
         name=body.name, contact=body.contact, note=body.note)
 
 
-@router.get("/vendors")
+@router.get("/vendors", response_model=list[VendorOut])
 async def list_vendors(
     active_only: bool = Query(default=True),
     db: AsyncSession = Depends(get_db),
@@ -89,7 +129,8 @@ async def list_vendors(
     return await JobWorkService(db).list_vendors(active_only=active_only)
 
 
-@router.post("/dispatch", status_code=status.HTTP_201_CREATED)
+@router.post("/dispatch", status_code=status.HTTP_201_CREATED,
+             response_model=JobWorkOut)
 async def dispatch(
     body: DispatchIn,
     db: AsyncSession = Depends(get_db),
@@ -108,7 +149,7 @@ async def dispatch(
         actor_user_id=user.id, actor_name=user.name)
 
 
-@router.post("/{job_id}/receive")
+@router.post("/{job_id}/receive", response_model=JobWorkOut)
 async def receive(
     job_id: uuid.UUID,
     body: ReceiveIn | None = None,
@@ -128,7 +169,7 @@ async def receive(
         actor_user_id=user.id, actor_name=user.name)
 
 
-@router.get("")
+@router.get("", response_model=list[JobWorkOut])
 async def list_jobs(
     status_filter: str | None = Query(default=None, alias="status"),
     vendor_id: uuid.UUID | None = Query(default=None),

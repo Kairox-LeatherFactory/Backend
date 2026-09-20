@@ -96,6 +96,12 @@ reportlab==4.2.5         # pure-Python PDF render — the FALLBACK that runs eve
 pytest==9.0.3
 pytest-asyncio==1.4.0
 httpx==0.28.1
+# Coverage. coverage.py's tracer is a C extension and costs roughly 20-30% on
+# this suite; the equivalent pure-Python line hook (stdlib sys.monitoring) was
+# still running after 10 minutes against a suite that finishes in two, which is
+# why this is a dependency rather than a script. Scoping and the CI floor live
+# in .coveragerc.
+pytest-cov==7.0.0
 
 # ── LLM extraction + AI chatbot (LangGraph agent) — verified set (2026-05) ───
 # Two distinct uses share the same providers:

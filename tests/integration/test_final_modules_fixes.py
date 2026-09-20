@@ -105,7 +105,19 @@ def test_f18_shared_retirement_lookup():
 
 # ── F79: counter fetches one row, not all (structural) ──────────────────────
 def test_f79_counter_single_row():
+    """F79/F99: the common case must transfer ONE row, not the whole prefix.
+
+    Also pins the fallback that sits behind it. Taking only LIMIT 1 and giving
+    up when that row's tail is not all digits left the counter at 0 for ever:
+    the next mint returns PREFIX-000001, and so does the one after, which dies
+    on the unique index — a 500 on every employee create and card reissue from
+    then on. Both halves matter, so both are asserted: an "optimisation" back to
+    a bare LIMIT 1 must fail here rather than in production.
+    """
     from app.modules.barcode import repository as b_repo
-    src = inspect.getsource(b_repo.BarcodeRepository._next_code)
-    assert "limit(1)" in src.lower()
-    assert "order_by" in src.lower()
+    src = inspect.getsource(b_repo.BarcodeRepository._next_code).lower()
+    assert "limit(1)" in src, "the fast path must still transfer a single row"
+    assert "order_by" in src
+    assert "limit(500)" in src, (
+        "the non-numeric fallback is gone — a single letter-tailed code in the "
+        "namespace will jam minting for that prefix permanently")

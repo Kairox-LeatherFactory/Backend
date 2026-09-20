@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.pagination import Page, PageParams
 from app.core.enums import UserRole
 from app.modules.users.deps import get_current_user, require_roles
 from app.modules.clients.service import ClientService
@@ -29,9 +30,10 @@ from app.modules.users.models import User
 router = APIRouter(prefix="/clients", tags=["Clients"])
 
 
-@router.get("", response_model=list[schemas.ClientRead])
+@router.get("", response_model=Page[schemas.ClientRead])
 async def list_clients(
     include_inactive: bool = False,
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -41,11 +43,18 @@ async def list_clients(
 
     Deactivated clients are hidden by default — that is what deactivation is
     for. Pass `include_inactive=true` to get them back (an admin screen listing
-    everyone, or a lookup by a client who has since been switched off)."""
-    rows = await ClientService(db).list_clients(include_inactive=include_inactive)
-    if user.role == UserRole.CLIENT:
-        return [c for c in rows if c.id == user.client_id]
-    return rows
+    everyone, or a lookup by a client who has since been switched off).
+
+    PAGED. The CLIENT-role narrowing is now part of the QUERY rather than a
+    filter applied to the result: paging a list and then filtering it would
+    return one row alongside a `total` that counted every other customer.
+    """
+    only = user.client_id if user.role == UserRole.CLIENT else None
+    rows, total = await ClientService(db).page_clients(
+        params, include_inactive=include_inactive, only_client_id=only)
+    return Page[schemas.ClientRead].of(
+        [schemas.ClientRead.model_validate(c) for c in rows],
+        total=total, params=params)
 
 
 @router.post("", response_model=schemas.CreatedClientRead, status_code=201)
@@ -64,16 +73,23 @@ async def create_client(
 
 
 
-@router.get("/{client_id}/orders", response_model=list[schemas.ClientOrderRead])
+@router.get("/{client_id}/orders", response_model=Page[schemas.ClientOrderRead])
 async def client_orders(
     client_id: uuid.UUID,
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """One client's orders. PAGED — each row eager-loads its styles and their
+    SKUs, so an unpaged call on a long-standing customer pulled their whole
+    catalogue three levels deep."""
     # Client-role users may only view their own orders.
     if user.role == UserRole.CLIENT and user.client_id != client_id:
         raise HTTPException(403, "Clients may only view their own orders")
-    return await ClientService(db).get_client_orders(client_id)
+    rows, total = await ClientService(db).page_client_orders(client_id, params)
+    return Page[schemas.ClientOrderRead].of(
+        [schemas.ClientOrderRead.model_validate(o) for o in rows],
+        total=total, params=params)
 
 @router.post("/{client_id}/orders", response_model=schemas.ClientOrderRead,
              status_code=201)
@@ -93,10 +109,11 @@ async def add_order(
         sea_cutoff_date=order.sea_cutoff_date, ship_mode=order.ship_mode,
         currency=order.currency, agent=order.agent, line=order.line, styles=[])
     
-@router.get("/styles", response_model=list[schemas.StyleOption])
+@router.get("/styles", response_model=Page[schemas.StyleOption])
 async def list_styles(
     order_number: str | None = None,
     client_id: uuid.UUID | None = None,
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -112,8 +129,11 @@ async def list_styles(
     # NOTE: the service/repo filter by order_number (string), not order_id — the
     # previous router param was order_id: uuid.UUID and would have raised
     # TypeError when passed through. Corrected to order_number.
-    return await ClientService(db).list_style_options(
-        order_number=order_number, client_id=client_id)
+    rows, total = await ClientService(db).page_style_options(
+        params, order_number=order_number, client_id=client_id)
+    return Page[schemas.StyleOption].of(
+        [schemas.StyleOption.model_validate(r) for r in rows],
+        total=total, params=params)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Single-client read / edit / delete
@@ -161,13 +181,15 @@ async def delete_client(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
 ):
-    """Delete a client that has NO orders — a mistyped or duplicate row.
+    """Delete a client that has produced NOTHING — a mistyped or duplicate row.
 
-    A client WITH orders is a 409, not a deletion: the cascade would take their
-    orders, styles, SKUs and every piece, production event and wage line hanging
-    off them. Deactivate that client instead (PATCH above). The error names the
-    exact call to make.
+    Creating a client also creates its first order (order_number is required on
+    POST /clients), so "has an order" was never a sign the client had traded and
+    is no longer what this refuses on. The test is whether any PIECE exists: no
+    pieces, and the cascade removes an empty order shell; one piece, and the
+    barcodes are printed, so it is a 409 and the client is deactivated instead
+    (PATCH above). The error names the exact call to make.
 
-    DM only, matching client creation."""
+    DM only, matching client creation. MD passes as superuser."""
     await ClientService(db).delete_client(client_id)
     return None

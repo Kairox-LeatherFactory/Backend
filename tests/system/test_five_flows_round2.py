@@ -197,8 +197,9 @@ async def test_flow7_a_new_clients_order_becomes_barcodes_on_the_floor(
         "name": "MAISON LEONE", "country": "IT", "order_number": "ML-2026-01"}))
     client_id = client["id"]
 
+    # GET /clients is paged (core/pagination.py) — rows live in `items`.
     listed = _ok(await api_client.get(f"{API}/clients"))
-    assert any(c["id"] == client_id for c in listed)
+    assert any(c["id"] == client_id for c in listed["items"])
 
     # ── a second order against the same buyer, with the dates freight risk reads.
     deadline = (datetime.date.today() + datetime.timedelta(days=40)).isoformat()
@@ -207,8 +208,10 @@ async def test_flow7_a_new_clients_order_becomes_barcodes_on_the_floor(
         "ship_mode": "sea", "currency": "EUR"}))
     assert order["order_number"] == "ML-2026-02"
 
+    # Paged (core/pagination.py) — rows under `items`, true count under `total`.
     orders = _ok(await api_client.get(f"{API}/clients/{client_id}/orders"))
-    assert {o["order_number"] for o in orders} == {"ML-2026-01", "ML-2026-02"}
+    assert {o["order_number"] for o in orders["items"]} == {"ML-2026-01", "ML-2026-02"}
+    assert orders["total"] == 2
 
     # ── the buyer's own details are editable; the read is not write-only.
     patched = _ok(await api_client.patch(f"{API}/clients/{client_id}",
@@ -620,7 +623,12 @@ async def test_flow10_the_mistake_day_every_correction_surface(
     as_role(UserRole.DIRECT_MANAGER)
     events = _ok(await api_client.get(f"{API}/production/events",
                                       params={"work_date": TODAY, "limit": 10}))
-    evs = events if isinstance(events, list) else events.get("rows", events.get("events", []))
+    # `Page` envelope (core/pagination.py): {items, total, limit, offset, ...}.
+    # The other shapes are kept because this feed used to return a bare list and
+    # older deployments may still.
+    evs = (events if isinstance(events, list)
+           else events.get("items") or events.get("rows")
+           or events.get("events") or [])
     assert evs, "the events the corrections screen lists must be readable"
     ev_id = evs[0].get("id") or evs[0].get("event_id")
     moved = _ok(await api_client.patch(

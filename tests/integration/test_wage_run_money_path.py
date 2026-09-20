@@ -9,10 +9,11 @@ Priority-1 coverage. Each test pins one invariant the business stated:
     · windows may not overlap                (the same pieces paid twice)
     · rates are date-effective               (mid-period change splits by day)
 
-Several of these currently sit behind AUDIT F139, which kills the piece-rate
-aggregate before any of them is reached. Those tests are xfail'd against the
-finding rather than worked around: the audit rule is that application code is
-never edited to make a test pass. Each one flips to XPASS when F139 lands.
+These were all xfail'd behind AUDIT F139, which killed the piece-rate aggregate
+before any of them was reached. That blocker is fixed — the aggregate groups by
+SKU.style_id (production/repository.py), not the Piece.style_id that never
+existed — so the markers are gone. A stale xfail on the money path is worse than
+no test: it reports XPASS, which is green, and hides the assertion entirely.
 """
 from datetime import date, timedelta
 
@@ -27,11 +28,6 @@ from app.modules.production import models as pm
 from app.modules.wages.models import Rate, WageLine, WageRun
 from app.modules.wages.service import WageService
 
-F139 = pytest.mark.xfail(
-    reason="AUDIT F139 (BLOCKER): production/repository.py:213,222 GROUP/ORDER BY "
-           "Piece.style_id, which does not exist — every piece-rate run raises "
-           "AttributeError before emitting SQL. Not fixed here by design.",
-    raises=AttributeError, strict=False)
 
 # The window must end on or before today (_validate_window, service.py:291-295).
 END = date.today() - timedelta(days=1)
@@ -159,7 +155,6 @@ async def test_the_same_employee_may_be_paid_in_two_different_runs(db):
 
 
 # ══════════════════════════════════════════════════ PIECE_RATE vs MONTHLY fork
-@F139
 @pytest.mark.asyncio
 async def test_a_piece_worker_is_never_paid_a_salary(db):
     w = await _world(db)
@@ -178,7 +173,6 @@ async def test_a_piece_worker_is_never_paid_a_salary(db):
                for l in payload["lines"])
 
 
-@F139
 @pytest.mark.asyncio
 async def test_a_monthly_worker_is_never_paid_per_piece(db):
     """Even with production logged against them, a MONTHLY worker is prorated.
@@ -198,7 +192,6 @@ async def test_a_monthly_worker_is_never_paid_per_piece(db):
     assert payload["total_pieces"] == 0
 
 
-@F139
 @pytest.mark.asyncio
 async def test_every_employee_gets_at_most_one_line(db):
     """One line per person — and, since the fork, across the PAIR of runs.
@@ -224,7 +217,6 @@ async def test_every_employee_gets_at_most_one_line(db):
 
 
 # ═══════════════════════════════════════════════════ date-effective rate rule
-@F139
 @pytest.mark.asyncio
 async def test_a_midperiod_rate_change_prices_each_day_at_its_own_rate(db):
     """The best-implemented rule in the module: the cache key includes work_date
@@ -332,7 +324,6 @@ async def test_an_abandoned_open_run_still_blocks_the_window(db):
     assert "open" in str(exc.value.detail).lower()
 
 
-@F139
 @pytest.mark.asyncio
 async def test_a_non_overlapping_earlier_window_is_allowed(db):
     """Adjacent fortnights are the normal case and must not be blocked."""

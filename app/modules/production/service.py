@@ -76,6 +76,10 @@ class ProductionService:
         self.repo = ProductionRepository(db)
         self.clients = ClientService(db)
         self.employees = EmployeeService(db)
+        # Set by _prefetch_sequence on the batch log path as
+        # (covered_piece_ids, covered_op_ids, pairs); None everywhere else, where
+        # _sequence_ok falls back to its original single lookup.
+        self._seq_prefetch: tuple[set, set, set] | None = None
 
     async def list_operations(self) -> list[Operation]:
         return await self.repo.list_operations()
@@ -226,10 +230,72 @@ class ProductionService:
         prev_op = await self.repo.get_operation_by_code(prev.value)
         if prev_op is None:
             return True, None
-        if await self.repo.has_event_at_op(piece.id, prev_op.id):
+        # ONE QUERY FOR THE WHOLE BATCH, not one per piece. `_seq_prefetch` holds
+        # the (piece, operation) pairs that already have an event, loaded once
+        # before the gate loop — see _prefetch_sequence.
+        #
+        # IT IS ONLY AUTHORITATIVE INSIDE THE DOMAIN IT WAS BUILT FOR, which is
+        # why it carries that domain with it. A prefetch covers the batch's
+        # pieces and the predecessors of the batch's stages, and ABSENCE from the
+        # set means "no event" only for a pair inside those two. The read path
+        # (piece_state) asks this same question about every stage of one piece,
+        # so a pair outside the domain would otherwise read as "not done" and
+        # every downstream stage would report falsely locked. Outside the domain,
+        # ask the database.
+        if await self._has_event(piece.id, prev_op.id):
             return True, None
         return False, (f"{piece.code} has not completed {prev.value} — "
                        f"log {prev.value} before {stage.value}.")
+
+    async def _prefetch_sequence(self, pieces, stage_by_piece, op_by_stage=None) -> None:
+        """Load every (piece, op) event the gate loop will ask about, in ONE
+        round-trip, and stash it for `_sequence_ok` and the rework check.
+
+        WHY: the gate loop ran `has_event_at_op` per piece, so a 100-piece scan
+        made 100 serial database round-trips just to decide what it was allowed
+        to write — each one holding the request's pooled connection open. With
+        the pool being the service's real concurrency ceiling, that time is the
+        expensive part, not the CPU.
+
+        TWO QUESTIONS, ONE QUERY. The loop asks about two different operations
+        per piece: the PREDECESSOR (has this piece completed the stage before —
+        gate 3) and the TARGET (does it already have an event here, which makes
+        this write rework). Both are "does (piece, op) have an event", so both
+        are answered by the same prefetch as long as the domain covers both sets
+        of operation ids.
+        """
+        op_ids = set()
+        prevs = {st.predecessor() for st in stage_by_piece.values()
+                 if st is not None and st.predecessor() is not None}
+        for prev in prevs:
+            op = await self.repo.get_operation_by_code(prev.value)   # memoised
+            if op is not None:
+                op_ids.add(op.id)
+        # the stages actually being written — for the rework flag
+        for op in (op_by_stage or {}).values():
+            if op is not None:
+                op_ids.add(op.id)
+        if not op_ids:
+            self._seq_prefetch = None
+            return
+        piece_ids = list(pieces.keys())
+        pairs = await self.repo.events_at_ops(piece_ids, list(op_ids))
+        # Carry the domain alongside the pairs: absence only means "no event"
+        # for a pair this query actually looked at.
+        self._seq_prefetch = (set(piece_ids), op_ids, pairs)
+
+    async def _has_event(self, piece_id, operation_id) -> bool:
+        """Does this (piece, op) already have an event? Prefetch-aware.
+
+        Reads the batch prefetch when the pair is inside its domain, and asks the
+        database otherwise. Same contract as repo.has_event_at_op — see
+        _prefetch_sequence for why absence is only meaningful inside the domain.
+        """
+        if self._seq_prefetch is not None:
+            pieces_covered, ops_covered, pairs = self._seq_prefetch
+            if piece_id in pieces_covered and operation_id in ops_covered:
+                return (piece_id, operation_id) in pairs
+        return await self.repo.has_event_at_op(piece_id, operation_id)
 
     # ═════════════════════════════════════════════════════════ GATE 4: merge
     async def _merge_ok(self, piece: Piece,
@@ -519,6 +585,10 @@ class ProductionService:
         # dict order reported a stage no piece was written at — see below.
         stage_by_code: dict[str, str] = {}
 
+        # Load the sequence gate's whole question set in one query before the
+        # loop, instead of asking the database once per piece inside it.
+        await self._prefetch_sequence(pieces, stage_by_piece, op_by_stage)
+
         # GATES 2-4 per piece + (write, IF NOT preview)
         for pid, piece in pieces.items():
             stage = stage_by_piece.get(pid)
@@ -652,8 +722,7 @@ class ProductionService:
                     # so is the pasting that has to be done again on top of it.
                     # Both are work performed a second time on one garment, and
                     # the cost split is only honest if it counts both.
-                    is_rework=is_redo or await self.repo.has_event_at_op(
-                        piece.id, op.id))
+                    is_rework=is_redo or await self._has_event(piece.id, op.id))
                 # advance the piece's current operation pointer
                 piece.current_operation_id = op.id
                 if is_redo:
@@ -682,7 +751,21 @@ class ProductionService:
                 if row is not None and stage.is_cut_entry:
                     from app.modules.cutting.service import CuttingService
                     await CuttingService(self.db).mark_logged_nocommit(row)
- 
+
+        # THE PREFETCH DIES WITH THE LOOP THAT OWNED IT.
+        #
+        # It is a snapshot of which (piece, op) pairs had an event BEFORE this
+        # batch ran, and the loop above has just written more. Anything that asks
+        # the same question afterwards on this service instance — the piece_state
+        # read path calls _sequence_ok for every stage of a piece — would be
+        # answered from a snapshot that is now one batch out of date, and would
+        # report a stage the loop just completed as still outstanding.
+        #
+        # Clearing it sends every later question back to the database, which is
+        # the correct answer and costs nothing: the saving was only ever inside
+        # the loop, where the question is asked once per piece.
+        self._seq_prefetch = None
+
         consumption_recorded = None
         stock_warning = None
         # NO MEASUREMENT → NO DECREMENT. An unmeasured lining cut (bug #10) writes
@@ -790,6 +873,15 @@ class ProductionService:
             return result
 
         await self.db.commit()
+        # THE DASHBOARDS ARE NOW STALE — say so immediately.
+        #
+        # Bust the read cache in the same breath as the commit, not on a timer.
+        # A cutting manager who logs a cut expects to see it on the dashboard at
+        # once; a minute of TTL reads on the floor as "the system lost my scan",
+        # and the operator scans again. One INCR, and every cached aggregate
+        # becomes unreachable. No-op when caching is off or Redis is away.
+        from app.core.cache import invalidate as _invalidate_read_cache
+        await _invalidate_read_cache()
         result["consumption_recorded"] = consumption_recorded
         result["stock_warning"] = stock_warning
 
@@ -1162,7 +1254,17 @@ class ProductionService:
     async def list_pieces_for_sku(self, *, sku_id: uuid.UUID | None = None,
                                   sku_code: str | None = None,
                                   operation_id: uuid.UUID | None = None,
-                                  client_scope: uuid.UUID | None = None) -> dict:
+                                  client_scope: uuid.UUID | None = None,
+                                  params=None) -> dict:
+        """The scan checklist for one SKU.
+
+        `params` (a PageParams) pages the `pieces` array. The HEADER COUNTS DO
+        NOT PAGE: total / done / pending / blocked / closed are computed over the
+        whole SKU in SQL, because they are facts about the SKU rather than about
+        the rows the caller asked for. `closed` in particular withdraws the style
+        from the scan screen, so computing it from one page would stop the floor
+        working on garments that are not finished.
+        """
         sku_id = await self._resolve_sku_id(sku_id, sku_code)
         if not sku_id:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Provide sku_id or sku_code.")
@@ -1181,7 +1283,11 @@ class ProductionService:
                 raise HTTPException(status.HTTP_404_NOT_FOUND, "Operation not found")
 
         # rows are 4-tuples: (piece, stage_code, stage_label, client_order_id).
-        rows = await self.repo.list_pieces_for_sku(sku_id)
+        if params is not None:
+            rows, sku_total = await self.repo.page_pieces_for_sku(sku_id, params)
+        else:
+            rows = await self.repo.list_pieces_for_sku(sku_id)
+            sku_total = len(rows)
         piece_ids = [p.id for p, _, _, _ in rows]
 
         done_ids: set[uuid.UUID] = set()
@@ -1269,24 +1375,51 @@ class ProductionService:
         # dropped it (the checklist screen reads total/done/pending/blocked from
         # here; without the return the endpoint answered `null`).
         done_count = sum(1 for x in pieces if x["done_at_op"])
+        # SKU-wide when paging; identical to the page when not (one page = all).
+        if params is not None and op is not None:
+            done_count = await self.repo.count_done_at_op_for_sku(sku_id, op.id)
+        page_blocked = sum(1 for x in pieces if not x["eligible"])
         return {
             "sku_id": sku_id, "sku_code": sku.code,
             "colour": sku.color_name or sku.color_code, "size": sku.size,
             "order_id": order_id,
             "operation_id": op.id if op else None,
             "operation_code": op.code if op else None,
-            "total": len(pieces), "done": done_count,
-            "pending": len(pieces) - done_count,
-            "blocked": sum(1 for x in pieces if not x["eligible"]),
+            "total": sku_total, "done": done_count,
+            "pending": sku_total - done_count,
+            # Blocked is counted over THIS PAGE and named so. Eligibility depends
+            # on the previous stage per piece, which cannot be summarised in one
+            # count without re-running the whole gate for the SKU; reporting a
+            # page figure honestly beats reporting a whole-SKU figure that is
+            # actually a page figure.
+            "blocked": page_blocked,
+            "blocked_scope": "page" if params is not None else "sku",
+            "limit": params.limit if params is not None else None,
+            "offset": params.offset if params is not None else None,
+            "count": len(pieces),
+            "has_more": ((params.offset + len(pieces)) < sku_total
+                         if params is not None else False),
             # BUG #8: every piece of this SKU is logged at the requested operation,
             # so the style must stop being offered for scanning here. False when no
             # operation was named — "closed" is meaningless without a stage.
-            "closed": bool(op) and done_count == len(pieces) and bool(pieces),
+            "closed": bool(op) and sku_total > 0 and done_count == sku_total,
             "pieces": pieces,
         }
 
     async def list_events(self, **filters) -> list[ProductionEvent]:
         return await self.repo.list_events(**filters)
+
+    async def list_events_page(self, *, params, **filters) -> dict:
+        """One page of events plus the total, for the HTTP surface.
+
+        The COUNT is a second query. That is the cost of telling a list screen
+        how many rows it is paging through, and it is trivial next to what the
+        unbounded version did.
+        """
+        rows = await self.repo.list_events(
+            limit=params.limit, offset=params.offset, **filters)
+        total = await self.repo.count_events(**filters)
+        return {"rows": rows, "total": total}
 
     async def style_progress(self, style_id: uuid.UUID,
                              client_scope: uuid.UUID | None = None) -> dict[str, int]:
@@ -1309,6 +1442,12 @@ class ProductionService:
                                client_scope: uuid.UUID | None = None) -> list[dict]:
         return await self.clients.list_sku_options(
             order_id=order_id, style_id=style_id, client_scope=client_scope)
+
+    async def page_sku_options(self, params, *, order_id=None, style_id=None,
+                               client_scope: uuid.UUID | None = None):
+        return await self.clients.page_sku_options(
+            params, order_id=order_id, style_id=style_id,
+            client_scope=client_scope)
 
     async def piece_counts(self, start: date, end: date, *,
                            style_ids=None, order_id=None):

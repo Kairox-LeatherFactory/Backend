@@ -83,9 +83,31 @@ class Base(DeclarativeBase):
 # Engine construction helpers
 # ──────────────────────────────────────────────────────────────────────────
 def _engine_kwargs(url: str) -> dict:
-    """Pooling args only make sense for Postgres; SQLite rejects them."""
+    """Pooling args only make sense for Postgres; SQLite rejects them.
+
+    EVERY VALUE COMES FROM SETTINGS. These were hardcoded pool_size=3 /
+    max_overflow=5, with no pool_timeout and no pool_recycle. Two consequences:
+
+      1. A request holds its connection for its whole lifetime, so the real
+         concurrency ceiling of the service is
+         `workers x (pool_size + max_overflow)` — 12 sustained / 32 burst at
+         WEB_CONCURRENCY=4. That is the first wall a 100-user floor hits, and
+         raising it needed a code change and a redeploy.
+      2. With no pool_timeout, SQLAlchemy's 30s default meant a saturated pool
+         made callers wait half a minute rather than failing fast, and with no
+         pool_recycle the app would eventually hand out a socket that RDS Proxy /
+         PgBouncer had already reaped.
+
+    See the sizing note on Settings.db_pool_size before changing these.
+    """
     if url.startswith("postgresql"):
-        return dict(pool_pre_ping=True, pool_size=3, max_overflow=5)
+        return dict(
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout,
+            pool_recycle=settings.db_pool_recycle,
+            pool_pre_ping=settings.db_pool_pre_ping,
+        )
     # SQLite (tests/local): a single shared connection, no pool sizing.
     return dict()
 

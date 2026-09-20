@@ -422,3 +422,17 @@ class LedgerRow(BaseModel):
 class LedgerPage(BaseModel):
     count: int
     items: list[LedgerRow] = Field(default_factory=list)
+
+class RateSetResult(BaseModel):
+    """Echo of a single-cell rate save."""
+    style_code: str
+    operation_code: str
+    rate: float
+    effective_from: str
+
+
+class RateBulkResult(BaseModel):
+    """Echo of a whole rate-sheet save. `saved` is rows written."""
+    style_code: str
+    effective_from: str
+    saved: int

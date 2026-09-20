@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.pagination import Page, PageParams
 from app.core.enums import UserRole
 from app.modules.materials import schemas
 from app.modules.materials import style_spec_schemas as spec_schemas
@@ -64,7 +65,7 @@ async def create_lot(
     return await MaterialService(db).create_lot(body)
 
 
-@router.get("/spec")
+@router.get("/spec", response_model=schemas.MaterialSpecRead)
 async def material_spec(
     category: str = Query(..., description="LEATHER | LINING | ACCESSORY"),
     subtype: str | None = Query(None, description="RIBS/KNIT ; BUTTON/ZIP/THREAD/OTHER"),
@@ -124,9 +125,11 @@ async def list_lots(
 # ══════════════════════════════════════════════════════════════════════════════
 # Declared BEFORE /lots/{lot_id} would matter if any static segment followed
 # /lots; it does not, so ordering here is only readability.
-@router.get("/leather-by-style")
+@router.get("/leather-by-style",
+            response_model=Page[schemas.LeatherByStyleRow])
 async def leather_by_style(
     style_id: uuid.UUID | None = Query(default=None),
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_STOCK_READERS),
 ):
@@ -136,10 +139,15 @@ async def leather_by_style(
     read and not a new ledger. The consumed figure is split by rework (#3), so
     "this style cost X, of which Y was defects" is answerable.
     """
-    return await MaterialService(db).leather_by_style(style_id=style_id)
+    rows, total = await MaterialService(db).page_leather_by_style(
+        params, style_id=style_id)
+    return Page[schemas.LeatherByStyleRow].of(
+        [schemas.LeatherByStyleRow.model_validate(r) for r in rows],
+        total=total, params=params)
 
 
-@router.get("/pieces/{piece_id}/consumption")
+@router.get("/pieces/{piece_id}/consumption",
+            response_model=schemas.PieceConsumption)
 async def piece_consumption(
     piece_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
@@ -440,7 +448,8 @@ async def material_spec_requirement(
     return await StyleSpecService(db).requirement(style_id)
 
 
-@router.post("/issues", status_code=201)
+@router.post("/issues", status_code=201,
+             response_model=schemas.ManualIssueResult)
 async def record_manual_issue(
     body: spec_schemas.ManualIssue,
     db: AsyncSession = Depends(get_db),

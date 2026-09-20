@@ -60,7 +60,29 @@ class StoreService:
 
     # ══════════════════════════════════════════════════════════ lookups
     async def get_piece(self, piece_id: uuid.UUID) -> Piece | None:
+        """Read a piece. For a READ. If you are about to change its store state,
+        use get_piece_for_update instead."""
         return await self.db.get(Piece, piece_id)
+
+    async def get_piece_for_update(self, piece_id: uuid.UUID) -> Piece | None:
+        """Read a piece with the row LOCKED for the rest of the transaction.
+
+        EVERY STORE TRANSITION IS A READ-MODIFY-WRITE: read store_state, decide
+        what the next state is, write it. Two store operators scanning the same
+        garment at the same instant — the leather into one terminal, the lining
+        into another — both read HOLDING_NONE, both compute their own single-part
+        state, and the second write wins. The garment ends up recorded as holding
+        one part when it physically holds both, and the merge gate then blocks
+        line-stitching on a piece that is actually complete.
+
+        SELECT ... FOR UPDATE serialises the two scans on the row, so the second
+        one reads the first one's result and correctly lands on HOLDING_BOTH.
+
+        SQLite ignores row locks, which is fine — the tests are single-writer.
+        This protects Postgres, where two terminals on a factory floor really are
+        concurrent.
+        """
+        return await self.db.get(Piece, piece_id, with_for_update=True)
 
     async def _context(self, piece):
         from app.modules.clients.models import SKU, Style
@@ -186,7 +208,7 @@ class StoreService:
         all land together or not at all — a half-issued kit is worse than an
         unissued one, because nothing downstream can tell them apart.
         """
-        piece = await self.get_piece(piece_id)
+        piece = await self.get_piece_for_update(piece_id)
         if piece is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Piece not found.")
         if piece.store_state == StoreState.SENDED.value:
@@ -288,6 +310,15 @@ class StoreService:
                 f"were not issued — the garment cannot be sent until they are.")
 
         await self.db.commit()
+        # THE DASHBOARDS ARE NOW STALE — say so immediately.
+        #
+        # Bust the read cache in the same breath as the commit, not on a timer.
+        # A cutting manager who logs a cut expects to see it on the dashboard at
+        # once; a minute of TTL reads on the floor as "the system lost my scan",
+        # and the operator scans again. One INCR, and every cached aggregate
+        # becomes unreachable. No-op when caching is off or Redis is away.
+        from app.core.cache import invalidate as _invalidate_read_cache
+        await _invalidate_read_cache()
         # WHAT IS STILL OWED, as a list the screen can render without recomputing
         # the completeness rule for itself. A second implementation of "what is
         # this garment waiting for" is a second implementation that can disagree.
@@ -359,7 +390,7 @@ class StoreService:
         now = datetime.now(timezone.utc)
 
         for pid in piece_ids or []:
-            piece = await self.get_piece(pid)
+            piece = await self.get_piece_for_update(pid)
             if piece is None:
                 not_found.append(str(pid))
                 continue
@@ -393,6 +424,15 @@ class StoreService:
                               piece.id, {"piece": piece.code, "by": actor_name})
 
         await self.db.commit()
+        # THE DASHBOARDS ARE NOW STALE — say so immediately.
+        #
+        # Bust the read cache in the same breath as the commit, not on a timer.
+        # A cutting manager who logs a cut expects to see it on the dashboard at
+        # once; a minute of TTL reads on the floor as "the system lost my scan",
+        # and the operator scans again. One INCR, and every cached aggregate
+        # becomes unreachable. No-op when caching is off or Redis is away.
+        from app.core.cache import invalidate as _invalidate_read_cache
+        await _invalidate_read_cache()
         parts = []
         if sent:
             parts.append(f"{len(sent)} garment(s) sent to line-stitching")
@@ -410,7 +450,7 @@ class StoreService:
         Called at PACKAGE_EXPORT. There is no pool to return to any more: a
         drawer recycled because the BOX was reused, but a garment ships once.
         """
-        piece = await self.get_piece(piece_id)
+        piece = await self.get_piece_for_update(piece_id)
         if piece is None:
             return
         piece.store_state = StoreState.WAITING.value

@@ -10,6 +10,7 @@ from fastapi import HTTPException
 import uuid
 
 from app.core.database import get_db
+from app.core.pagination import Page, PageParams
 from app.core.enums import UserRole
 from app.modules.users.deps import get_current_user, require_roles
 from app.modules.employees.service import EmployeeService
@@ -19,9 +20,11 @@ from app.modules.users.models import User
 router = APIRouter(prefix="/employees", tags=["Employees"])
 
 
-@router.get("", response_model=list[schemas.EmployeeReadWithPay|schemas.EmployeeRead])
+@router.get("",
+            response_model=Page[schemas.EmployeeReadWithPay | schemas.EmployeeRead])
 async def list_employees(
     active_only: bool = True,
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -35,9 +38,10 @@ async def list_employees(
             status.HTTP_403_FORBIDDEN,
             "The employee roster is internal.")
     svc = EmployeeService(db)
-    rows = await svc.list_all(active_only)
+    rows, total = await svc.page_all(params, active_only)
     # The card code every row is scanned/clicked through by. One extra query for
-    # the whole page, not one per employee.
+    # the whole page, not one per employee — and now genuinely for the PAGE,
+    # since `rows` is a page rather than the whole roster.
     codes = await svc.barcodes_for([r.id for r in rows])
     pay_roles = {UserRole.HR, UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR}
     model = (schemas.EmployeeReadWithPay if user.role in pay_roles
@@ -47,7 +51,8 @@ async def list_employees(
         row = model.model_validate(r)
         row.employee_barcode = codes.get(r.id)
         out.append(row)
-    return out
+    return Page[schemas.EmployeeReadWithPay | schemas.EmployeeRead].of(
+        out, total=total, params=params)
 
 
 @router.post("", response_model=schemas.EmployeeCreateRead, status_code=201)
@@ -123,7 +128,8 @@ async def update_employee(
     return out
  
  
-@router.delete("/{employee_id}", status_code=200)
+@router.delete("/{employee_id}", status_code=200,
+               response_model=schemas.EmployeeDeleteResult)
 async def delete_employee(
     employee_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),

@@ -23,6 +23,7 @@ from app.core.database import get_db
 from app.core.enums import UserRole
 from app.main import app
 from app.modules.clients.models import Client
+from app.modules.production.models import Piece
 from app.modules.users.deps import get_current_user
 
 API = "/api/v1"
@@ -73,7 +74,10 @@ async def test_the_styles_path_is_not_swallowed_by_the_uuid_route(client, db):
     _as(UserRole.DIRECT_MANAGER)
     r = await client.get(f"{API}/clients/styles")
     assert r.status_code == 200, r.text
-    assert isinstance(r.json(), list)
+    # Paged (core/pagination.py) — the rows are under `items`. The point of this
+    # guard is the ROUTE, not the shape: a 422 here means "styles" was parsed as
+    # a client_id.
+    assert isinstance(r.json()["items"], list)
 
 
 # ══════════════════════════════════════════════════════════════════ read/edit
@@ -137,14 +141,39 @@ async def test_deleting_a_client_with_no_orders_is_204(client, db):
 
 
 @pytest.mark.asyncio
-async def test_deleting_a_client_with_orders_is_409(client, db, order_tree):
+async def test_deleting_a_client_with_pieces_is_409(client, db, order_tree):
     """The refusal a DM will actually hit, with the deactivate call in the body
-    so the frontend can offer it as the next step."""
+    so the frontend can offer it as the next step.
+
+    It takes a MINTED PIECE to earn the refusal. An order on its own no longer
+    does, because `POST /clients` creates one every time — see the test below."""
+    db.add(Piece(code="JP-CLERMONT-PINE-M-001", seq=1,
+                 sku_id=order_tree["sku"].id))
+    await db.commit()
     _as(UserRole.DIRECT_MANAGER)
 
     r = await client.delete(f"{API}/clients/{order_tree['client'].id}")
     assert r.status_code == 409, r.text
     assert "is_active" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_a_client_can_be_deleted_right_after_being_created(client, db):
+    """END-TO-END REGRESSION. Create a client the only way the API allows, then
+    delete it. `POST /clients` requires an order_number and mints the order in
+    the same call, so under the old orders-based guard this exact sequence —
+    the mistyped-client cleanup the endpoint exists for — returned
+    "has 1 order(s) and cannot be deleted" every single time."""
+    _as(UserRole.DIRECT_MANAGER)
+
+    made = await client.post(f"{API}/clients", json={
+        "name": "TYPOO", "country": "IT", "order_number": "TYPO-PO-1"})
+    assert made.status_code == 201, made.text
+    client_id = made.json()["id"]
+
+    r = await client.delete(f"{API}/clients/{client_id}")
+    assert r.status_code == 204, r.text
+    assert (await client.get(f"{API}/clients/{client_id}")).status_code == 404
 
 
 @pytest.mark.asyncio
@@ -156,8 +185,9 @@ async def test_deactivating_removes_a_client_from_the_default_listing(client, db
     assert (await client.patch(f"{API}/clients/{c.id}",
                                json={"is_active": False})).status_code == 200
 
+    # GET /clients is paged (core/pagination.py), so the rows are in `items`.
     listed = await client.get(f"{API}/clients")
-    assert "RETIRING" not in {row["name"] for row in listed.json()}
+    assert "RETIRING" not in {row["name"] for row in listed.json()["items"]}
 
     everyone = await client.get(f"{API}/clients", params={"include_inactive": True})
-    assert "RETIRING" in {row["name"] for row in everyone.json()}
+    assert "RETIRING" in {row["name"] for row in everyone.json()["items"]}

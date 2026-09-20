@@ -12,6 +12,8 @@ import uuid
 
 from sqlalchemy import select ,func
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.pagination import paginate
 from sqlalchemy.orm import selectinload
 
 from app.modules.clients.models import (
@@ -24,16 +26,38 @@ class ClientRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    async def list_clients(self, *, include_inactive: bool = False) -> list[Client]:
-        stmt = select(Client).order_by(Client.name)
+    def _clients_stmt(self, *, include_inactive: bool = False,
+                      only_client_id=None):
+        """`only_client_id` narrows to one tenant IN SQL.
+
+        The CLIENT-role filter used to be a list comprehension in the router,
+        applied after the query. That is fine for a bare list and wrong the
+        moment the query is paged: page 1 of every client, filtered down to the
+        caller's own row, yields one item and a `total` counting everyone
+        else's. The scope has to be part of the query the count is taken from.
+        """
+        stmt = select(Client).order_by(Client.name, Client.id)
+        if only_client_id is not None:
+            stmt = stmt.where(Client.id == only_client_id)
         if not include_inactive:
             # `isnot(False)`, not `is_(True)`: identical today (the column is
             # NOT NULL — see the baseline migration) and it stays correct if the
             # column is ever relaxed, because a NULL there would mean "never
             # deactivated", i.e. active. `== True` would silently hide those.
             stmt = stmt.where(Client.is_active.isnot(False))
-        res = await self.db.execute(stmt)
+        return stmt
+
+    async def list_clients(self, *, include_inactive: bool = False,
+                           only_client_id=None) -> list[Client]:
+        res = await self.db.execute(self._clients_stmt(
+            include_inactive=include_inactive, only_client_id=only_client_id))
         return list(res.scalars())
+
+    async def page_clients(self, params, *, include_inactive: bool = False,
+                           only_client_id=None) -> tuple[list, int]:
+        return await paginate(self.db, self._clients_stmt(
+            include_inactive=include_inactive,
+            only_client_id=only_client_id), params)
 
     async def get_client(self, client_id: uuid.UUID) -> Client | None:
         return await self.db.get(Client, client_id)
@@ -54,18 +78,46 @@ class ClientRepository:
         return client
 
     async def count_orders_for_client(self, client_id: uuid.UUID) -> int:
-        """Orders on a client — the precondition for a hard delete."""
+        """Orders on a client. Reporting only — NOT the delete precondition any
+        more; see count_pieces_for_client."""
         return int((await self.db.execute(
             select(func.count(ClientOrder.id))
             .where(ClientOrder.client_id == client_id)
         )).scalar_one() or 0)
 
+    async def count_pieces_for_client(self, client_id: uuid.UUID) -> int:
+        """Minted garments under this client — THE precondition for a hard delete.
+
+        A piece is the tracked unit (CLAUDE.md §4): its code is a printed
+        barcode, and every production event, inspection and piece-rate wage line
+        hangs off it. Zero pieces means nothing physical was ever made for this
+        client, whatever paperwork exists above it.
+
+        `Piece` is imported inside the method on purpose — clients is imported
+        BY production, so a module-level import here would close the cycle
+        (CLAUDE.md §15, the lazy-import rule).
+        """
+        from app.modules.production.models import Piece
+
+        return int((await self.db.execute(
+            select(func.count(Piece.id))
+            .select_from(Piece)
+            .join(SKU, Piece.sku_id == SKU.id)
+            .join(Style, SKU.style_id == Style.id)
+            .join(ClientOrder, Style.client_order_id == ClientOrder.id)
+            .where(ClientOrder.client_id == client_id)
+        )).scalar_one() or 0)
+
     async def delete_client(self, client: Client) -> None:
-        """Hard delete. The service refuses this while the client has orders,
-        which is what keeps the `all, delete-orphan` cascade on `client_orders`
-        from reaching styles and SKUs that produced pieces (Piece.sku_id is a
-        plain FK — the database would refuse, mid-cascade, with a constraint
-        error rather than anything a user could act on)."""
+        """Hard delete, cascading the client's orders -> styles -> SKUs.
+
+        The service refuses this once any PIECE has been minted under the
+        client, which is what keeps the `all, delete-orphan` cascade away from
+        rows that production, inspections and wages point at with plain FKs.
+        That check cannot be exhaustive — wage_style_rate, supplier_po_line and
+        the cutting tables all reference `style.id` directly — so the caller
+        also traps IntegrityError and turns it into a 409.
+        """
         await self.db.delete(client)
         await self.db.commit()
 
@@ -76,15 +128,27 @@ class ClientRepository:
         await self.db.refresh(c)
         return c
 
-    async def get_orders_for_client(self, client_id: uuid.UUID) -> list[ClientOrder]:
-        stmt = (
+    def _orders_for_client_stmt(self, client_id: uuid.UUID):
+        return (
             select(ClientOrder)
             .where(ClientOrder.client_id == client_id)
             .options(selectinload(ClientOrder.styles).selectinload(Style.skus))
-            .order_by(ClientOrder.order_number)
+            .order_by(ClientOrder.order_number, ClientOrder.id)
         )
-        res = await self.db.execute(stmt)
+
+    async def get_orders_for_client(self, client_id: uuid.UUID) -> list[ClientOrder]:
+        res = await self.db.execute(self._orders_for_client_stmt(client_id))
         return list(res.scalars())
+
+    async def page_orders_for_client(self, client_id: uuid.UUID,
+                                     params) -> tuple[list, int]:
+        """One page of a client's orders.
+
+        Each row eager-loads its styles and their SKUs, so an unpaged call on a
+        long-standing customer pulls their whole catalogue into memory three
+        levels deep. Paging the orders bounds all three.
+        """
+        return await paginate(self.db, self._orders_for_client_stmt(client_id), params)
 
     async def get_style(self, style_id: uuid.UUID) -> Style | None:
         return await self.db.get(Style, style_id)
@@ -189,8 +253,7 @@ class ClientRepository:
             "color_name": color_name, "size": size, "qty_ordered": int(qty or 0),
         }
  
-    async def list_sku_options(self, *, order_id=None, style_id=None,
-                               client_scope: uuid.UUID | None = None) -> list[dict]:
+    def _sku_options_stmt(self, *, order_id=None, style_id=None, client_scope=None):
         stmt = (
             select(
                 SKU.id, SKU.code, ClientOrder.order_number, Style.name,
@@ -205,16 +268,36 @@ class ClientRepository:
             stmt = stmt.where(Style.client_order_id == order_id)
         if style_id:
             stmt = stmt.where(SKU.style_id == style_id)
-        stmt = stmt.order_by(ClientOrder.order_number, Style.name, SKU.code)
-        rows = (await self.db.execute(stmt)).all()
-        return [
-            {
-                "sku_id": r[0], "code": r[1], "order_number": r[2], "style_name": r[3],
-                "color_code": r[4], "color_name": r[5], "size": r[6],
-                "qty_ordered": int(r[7] or 0),
-            }
-            for r in rows
-        ]
+        return stmt.order_by(ClientOrder.order_number, Style.name, SKU.code, SKU.id)
+
+    @staticmethod
+    def _sku_option_row(r) -> dict:
+        return {
+            "sku_id": r[0], "code": r[1], "order_number": r[2], "style_name": r[3],
+            "color_code": r[4], "color_name": r[5], "size": r[6],
+            "qty_ordered": int(r[7] or 0),
+        }
+
+    async def list_sku_options(self, *, order_id=None, style_id=None,
+                               client_scope: uuid.UUID | None = None) -> list[dict]:
+        stmt = self._sku_options_stmt(order_id=order_id, style_id=style_id,
+                                      client_scope=client_scope)
+        return [self._sku_option_row(r) for r in (await self.db.execute(stmt)).all()]
+
+    async def page_sku_options(self, params, *, order_id=None, style_id=None,
+                               client_scope=None) -> tuple[list[dict], int]:
+        """One page of the SKU picker.
+
+        Unfiltered, this is every SKU in the factory — one row per colour/size of
+        every style of every order, which is the largest picker in the system.
+        """
+        from app.core.pagination import paginate_rows
+        rows, total = await paginate_rows(
+            self.db,
+            self._sku_options_stmt(order_id=order_id, style_id=style_id,
+                                   client_scope=client_scope),
+            params)
+        return [self._sku_option_row(r) for r in rows], total
         
     async def is_style_visible_to_client(self, style_id: uuid.UUID,
                                          client_id: uuid.UUID) -> bool:
@@ -304,6 +387,43 @@ class ClientRepository:
         )).all()
         return {r[0]: {"style_code": r[1], "style_name": r[2]} for r in rows}
 
+    def _style_options_stmt(self, *, order_number=None, client_id=None):
+        """The one statement behind the style picker and a page of it."""
+        stmt = (
+            select(
+                Style.id, Style.code, Style.name, Style.article,
+                ClientOrder.order_number,
+                func.count(SKU.id),
+                func.coalesce(func.sum(SKU.qty_ordered), 0),
+            )
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .outerjoin(SKU, SKU.style_id == Style.id)
+            .where(Style.code.is_not(None))
+            .where(style_in_production())
+            .group_by(Style.id, Style.code, Style.name, Style.article,
+                      ClientOrder.order_number)
+        )
+        if order_number:
+            stmt = stmt.where(ClientOrder.order_number == order_number)
+        if client_id:
+            stmt = stmt.where(ClientOrder.client_id == client_id)
+        return stmt.order_by(ClientOrder.order_number, Style.name, Style.id)
+
+    @staticmethod
+    def _style_option_row(r) -> dict:
+        return {"style_id": r[0], "style_code": r[1], "style_name": r[2],
+                "article": r[3], "order_number": r[4],
+                "sku_count": int(r[5]), "qty_ordered": int(r[6])}
+
+    async def page_style_options(self, params, *, order_number=None,
+                                 client_id=None) -> tuple[list[dict], int]:
+        from app.core.pagination import paginate_rows
+        rows, total = await paginate_rows(
+            self.db,
+            self._style_options_stmt(order_number=order_number, client_id=client_id),
+            params)
+        return [self._style_option_row(r) for r in rows], total
+
     async def list_style_options(
         self, *, order_number: str | None = None, client_id: uuid.UUID | None = None
     ) -> list[dict]:
@@ -316,35 +436,14 @@ class ClientRepository:
         outerjoin, not join — a style whose SKUs have not been imported yet must
         still appear, or its rates can never be set.
         """
-        stmt = (
-            select(
-                Style.id, Style.code, Style.name, Style.article,
-                ClientOrder.order_number,
-                func.count(SKU.id),
-                func.coalesce(func.sum(SKU.qty_ordered), 0),
-            )
-            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
-            .outerjoin(SKU, SKU.style_id == Style.id)
-            .where(Style.code.is_not(None))
-            # RELEASED ONLY. This picker feeds the payroll landing screen, and a
-            # style still sitting in a DRAFT breakdown sheet has no pieces, no
-            # scanned work and therefore nothing to pay — offering it a rate card
-            # invites a manager to price work that does not exist yet.
-            .where(style_in_production())
-            .group_by(Style.id, Style.code, Style.name, Style.article,
-                      ClientOrder.order_number)
-        )
-        if order_number:
-            stmt = stmt.where(ClientOrder.order_number == order_number)
-        if client_id:
-            stmt = stmt.where(ClientOrder.client_id == client_id)
-        stmt = stmt.order_by(ClientOrder.order_number, Style.name)
-        return [
-            {"style_id": r[0], "style_code": r[1], "style_name": r[2],
-             "article": r[3], "order_number": r[4],
-             "sku_count": int(r[5]), "qty_ordered": int(r[6])}
-            for r in (await self.db.execute(stmt)).all()
-        ]
+        # RELEASED ONLY (see _style_options_stmt): this picker feeds the payroll
+        # landing screen, and a style still in a DRAFT breakdown sheet has no
+        # pieces, no scanned work and therefore nothing to pay — offering it a
+        # rate card invites a manager to price work that does not exist yet.
+        stmt = self._style_options_stmt(order_number=order_number,
+                                        client_id=client_id)
+        return [self._style_option_row(r)
+                for r in (await self.db.execute(stmt)).all()]
     async def style_ids_for_order(self, order_id: uuid.UUID) -> list[uuid.UUID]:
         """Every style id belonging to one client order.
 

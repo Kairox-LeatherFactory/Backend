@@ -21,10 +21,17 @@ Endpoints (all mounted under /api/v1):
   POST   /attendance/proxy/check-out     Manual door: operator closes them
   POST   /attendance/daily-workers       Onboard a daily worker (DM/HR/MD)
   GET    /attendance/me                  Own attendance history (calendar view)
-  GET    /attendance/me/status           Live shift status (server-anchored countdown)
   GET    /attendance/today               Today's roster (manager/HR view)
-  GET    /attendance/config              Read shift policy
-  PATCH  /attendance/config              Manager/HR updates policy
+  GET    /attendance/history             One employee's history (operators/leads)
+
+REMOVED 2026-09-19 (Hamthan) — commented out in place, further down this file:
+  GET    /attendance/me/status           the live shift countdown
+  GET    /attendance/config              read shift policy
+  PATCH  /attendance/config              update shift policy
+Each keeps its rationale next to the code it replaced. The SERVICE methods
+behind them (my_status / get_config / update_config) are untouched: the shift
+policy row is still read internally on every punch to decide late / short /
+overtime. What is gone is the HTTP surface, not the policy.
 ================================================================================
 """
 import uuid
@@ -56,7 +63,7 @@ _ATTENDANCE_READERS = {
 }
 
 
-@router.post("/scan-check-in")
+@router.post("/scan-check-in", response_model=schemas.ScanResult)
 async def scan_check_in(
     body: ScanCheckIn,
     db: AsyncSession = Depends(get_db),
@@ -73,7 +80,7 @@ async def scan_check_in(
     employee_id = await BarcodeService(db).resolve_employee_id(body.employee_barcode)
     return await AttendanceService(db).barcode_scan(
         employee_id=employee_id, actor=user, direction=body.direction,
-        lat=body.lat, lon=body.lon, proxy=body.proxy, reason=body.reason)
+        lat=body.lat, lon=body.lon, proxy=body.proxy)
 
 
 @router.post("/check-in", response_model=schemas.AttendanceRead, status_code=201)
@@ -122,7 +129,8 @@ async def proxy_check_out(
     return await AttendanceService(db).proxy_check_out(user, body)
 
 
-@router.post("/daily-workers", status_code=201)
+@router.post("/daily-workers", status_code=201,
+             response_model=schemas.DailyWorkerCreated)
 async def add_daily_worker(body: schemas.AddDailyWorkerRequest,
                         db: AsyncSession = Depends(get_db),
                         user: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR))):
@@ -147,39 +155,69 @@ async def my_history(
     return await AttendanceService(db).history(user.employee_id, start, end)
 
 
-@router.get("/me/status", response_model=schemas.ShiftStatus)
-async def my_status(
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    """Server-anchored data for the live shift countdown. Frontend computes a
-    one-time (server_now - device_now) offset and ticks toward shift_end_at."""
-    return await AttendanceService(db).my_status(user)
+# ══════════════════════════════════════════════════════════════════════════════
+# REMOVED 2026-09-19 (Hamthan) — three endpoints, commented out rather than
+# deleted so the shape is on hand if any of them is ever wanted back.
+#
+# GET /attendance/me/status — the live shift countdown. It answered "how much
+# of my shift is left", for a login looking at its OWN row. Only an operator
+# (SECURITY / HR / MD / DM) holds a login at all, and an operator is at the
+# gate scanning other people's cards, not watching a timer for themselves. The
+# people the countdown would actually suit — the shop floor — have no login to
+# see it with (CLAUDE.md §3).
+#
+# GET /attendance/config — read the shift policy (start time, length, grace,
+# timezone). Nothing on the floor sets policy per-session; it is configured
+# once and the backend applies it on every punch.
+#
+# PATCH /attendance/config — write the shift policy. Removed BECAUSE the GET
+# is: an edit form that cannot load its own current values is a screen that
+# overwrites policy from whatever the frontend happened to hold. Leaving the
+# write door open without the read door is the worse half to keep. If policy
+# needs changing, both come back together, or it is a DB/seed change.
+#
+# THE POLICY ITSELF IS UNAFFECTED. AttendanceService still reads ShiftConfig on
+# every check-in/check-out to set is_late / is_short / is_overtime, and the
+# wage run still prices against it.
+# ══════════════════════════════════════════════════════════════════════════════
+# @router.get("/me/status", response_model=schemas.ShiftStatus)
+# async def my_status(
+#     db: AsyncSession = Depends(get_db),
+#     user: User = Depends(get_current_user),
+# ):
+#     """Server-anchored data for the live shift countdown. Frontend computes a
+#     one-time (server_now - device_now) offset and ticks toward shift_end_at."""
+#     return await AttendanceService(db).my_status(user)
+#
+#
+# # A UNION, because the shape depends on the caller's role. Declaring only
+# # ShiftConfigRead would FILTER the public variant; declaring only the public
+# # one would strip the manager fields. Both are named so neither is cut.
+# @router.get("/config",
+#             response_model=schemas.ShiftConfigRead | schemas.ShiftConfigPublicRead)
+# async def get_config(
+#     db: AsyncSession = Depends(get_db),
+#     user: User = Depends(get_current_user),
+# ):
+#     """Shift policy — start time, length, grace, timezone.
+#
+#     The privileged/public split (F44) existed to keep the fence coordinates away
+#     from non-managers. LOCATION IS REMOVED, so both shapes now return the same
+#     fields; the branch is kept so the split returns intact if the fence does."""
+#     cfg = await AttendanceService(db).get_config()
+#     if user.role in _ATTENDANCE_READERS:
+#         return schemas.ShiftConfigRead.model_validate(cfg)
+#     return schemas.ShiftConfigPublicRead.model_validate(cfg)
+#
+#
+# @router.patch("/config", response_model=schemas.ShiftConfigRead)
+# async def update_config(
+#     body: schemas.ShiftConfigUpdate,
+#     db: AsyncSession = Depends(get_db),
+#     _: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR)),
+# ):
+#     return await AttendanceService(db).update_config(body)
 
-
-@router.get("/config")
-async def get_config(
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    """Shift policy — start time, length, grace, timezone.
-
-    The privileged/public split (F44) existed to keep the fence coordinates away
-    from non-managers. LOCATION IS REMOVED, so both shapes now return the same
-    fields; the branch is kept so the split returns intact if the fence does."""
-    cfg = await AttendanceService(db).get_config()
-    if user.role in _ATTENDANCE_READERS:
-        return schemas.ShiftConfigRead.model_validate(cfg)
-    return schemas.ShiftConfigPublicRead.model_validate(cfg)
-
-
-@router.patch("/config", response_model=schemas.ShiftConfigRead)
-async def update_config(
-    body: schemas.ShiftConfigUpdate,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER,UserRole.HR,UserRole.MANAGING_DIRECTOR)),
-):
-    return await AttendanceService(db).update_config(body)
 
 @router.get("/history", response_model=list[schemas.AttendanceRead])
 async def history(

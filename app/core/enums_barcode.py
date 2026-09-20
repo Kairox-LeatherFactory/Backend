@@ -309,11 +309,26 @@ class Designation(str, enum.Enum):
 
 
 # Which designations may work which stage.
+#
+# THE FLOOR IS CROSS-TRAINED, and this matrix says so (Hamthan, 2026-09-20).
+# A CUTTER also works FUSING and the LINING cut; a TAILOR also pastes. Those
+# three pairs used to be absent, so every time a cutter fused a garment the log
+# carried a skill warning that was not an anomaly at all — and a warning that
+# fires on normal work is one nobody reads, which costs the gate its whole
+# value.
+#
+# THIS GATE WARNS, IT DOES NOT BLOCK (production/service.py, GATE 2: the piece
+# is logged either way, with no `continue`). So an entry here is not permission
+# to do the work — anyone can be recorded at any stage — it is a statement about
+# which pairings are ORDINARY. Add a designation when the floor genuinely
+# cross-trains it, not to silence a warning somebody found annoying.
 STAGE_DESIGNATIONS: dict[ProductionStage, set[str]] = {
     ProductionStage.LEATHER_CUTTING:  {"CUTTER"},
-    ProductionStage.LINING_CUTTING:   {"LINING_CUTTER"},
-    ProductionStage.FUSING:           {"FUSER"},
-    ProductionStage.PASTING:          {"PASTER"},
+    # A cutter cuts both sides: leather and lining are parallel entries to the
+    # pipeline, and the same person often does both.
+    ProductionStage.LINING_CUTTING:   {"LINING_CUTTER", "CUTTER"},
+    ProductionStage.FUSING:           {"FUSER", "CUTTER"},
+    ProductionStage.PASTING:          {"PASTER", "TAILOR"},
     ProductionStage.LINE_STITCHING:   {"LINE_TAILOR", "TAILOR"},
     ProductionStage.SHELL_STITCHING:  {"SHELL_TAILOR", "TAILOR"},
     ProductionStage.FINAL_FINISH:     {"FINISHER", "TAILOR"},

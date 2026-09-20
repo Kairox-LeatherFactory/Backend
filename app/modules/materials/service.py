@@ -52,6 +52,25 @@ _CAPTION_FIELDS = {
 }
 
 
+def display_stock(on_hand, used, active_reserved):
+    """Present received, consumed/reserved, and remaining stock together.
+
+    Pure — no DB, no self. It lives at module level because BOTH the service and
+    StyleSpecService need it, and StyleSpecService only holds a MaterialRepository.
+    It used to be a private staticmethod on MaterialService, and
+    style_spec_service.py called it as `self.materials._display_stock(...)` where
+    `self.materials` is a MaterialRepository — an AttributeError, i.e. a guaranteed
+    500 on every style material-spec read that resolved a lot. Import this function;
+    do not reach for a private attribute across the two objects again.
+    """
+    current = Decimal(str(on_hand or 0))
+    consumed = Decimal(str(used or 0))
+    committed = Decimal(str(active_reserved or 0))
+    received = current + consumed
+    reserved = consumed + committed
+    return received, reserved, received - reserved
+
+
 class MaterialService:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -73,15 +92,10 @@ class MaterialService:
         self.last_available_before: float | None = None
         self.decrement_warnings: list[dict] = []
 
-    @staticmethod
-    def _display_stock(on_hand, used, active_reserved):
-        """Present received, consumed/reserved, and remaining stock together."""
-        current = Decimal(str(on_hand or 0))
-        consumed = Decimal(str(used or 0))
-        committed = Decimal(str(active_reserved or 0))
-        received = current + consumed
-        reserved = consumed + committed
-        return received, reserved, received - reserved
+    # Kept as a staticmethod so the existing in-class call sites are unchanged.
+    # The real implementation is the module-level `display_stock` below, which
+    # collaborators outside this class import directly — see the note there.
+    _display_stock = staticmethod(display_stock)
 
     # ── create lot (+ child barcode + stock) ─────────────────────────────────
     async def create_lot(self, body) -> dict:
@@ -458,7 +472,28 @@ class MaterialService:
             } for r in rows],
         }
 
-    async def leather_by_style(self, *, style_id=None) -> list:
+    async def page_leather_by_style(self, params, *, style_id=None):
+        """One page of the arrived/consumed/available report, plus the total.
+
+        PAGED WHERE THE COST IS. The first query is a GROUP BY returning one row
+        per style — bounded by how many styles exist, not by pieces. What is
+        expensive is the loop UNDER it: every row does a `find_lots`, then a
+        `received_totals`, then an `active_reserved` per lot found. That is an
+        N+1 whose N is the number of styles, and slicing the rows before the
+        loop is what bounds it.
+
+        So the slice is in Python, deliberately, and it is not a half-measure
+        here: it removes the per-row queries, which are the actual work.
+        """
+        rows = await self.leather_by_style(style_id=style_id,
+                                           _limit=params.limit,
+                                           _offset=params.offset)
+        total = len(await self.repo.consumption_by_style(style_id=style_id))
+        return rows, total
+
+    async def leather_by_style(self, *, style_id=None,
+                               _limit: int | None = None,
+                               _offset: int = 0) -> list:
         """Arrived / consumed / available, per style — #19.
 
         REPORTED: "the system only shows the available quantity — arrived and
@@ -476,6 +511,13 @@ class MaterialService:
         """
         rows = await self.repo.consumption_by_style(style_id=style_id)
         rework = await self.repo.rework_consumption_by_style(style_id=style_id)
+
+        # `_limit` is the paged caller's window, applied BEFORE the per-row lot
+        # lookups below — see page_leather_by_style for why that is the point
+        # that matters. None means "every row", which is what the unpaged
+        # callers (and the tests) expect.
+        if _limit is not None:
+            rows = rows[_offset:_offset + _limit]
 
         out = []
         for row in rows:
@@ -995,7 +1037,10 @@ class MaterialService:
                                   verb: str, context: str, recorded: str,
                                   not_found: str) -> float:
         """The one place stock comes off a lot. See the two wrappers above."""
-        lot = await self.repo.get_lot(lot_id)
+        # LOCKED READ (not get_lot): everything below is a read-modify-write of
+        # on_hand/used, and this method is reached concurrently by every cutting
+        # and issuing scan on the floor. See get_lot_for_update for why.
+        lot = await self.repo.get_lot_for_update(lot_id)
         if not lot:
             raise HTTPException(status.HTTP_404_NOT_FOUND, not_found)
         d = Decimal(str(qty))
@@ -1048,7 +1093,26 @@ class MaterialService:
             # A kit decrements several lots on one service instance, so the
             # single "last" warning would report only the final line. Accumulate.
             self.decrement_warnings.append(self.last_decrement_warning)
-        return float(lot.on_hand - reserved)
+
+        # RELEASE THE RESERVATION THIS CONSUMPTION JUST SATISFIED.
+        #
+        # A reservation is a claim on stock that has NOT been spent yet. Once it
+        # IS spent, the claim must go, or the same quantity is subtracted twice:
+        # once because on_hand fell, and again because the reservation is still
+        # active in `available = on_hand - reserved`.
+        #
+        # Nothing called this before. add_reservation_nocommit was wired up at
+        # receiving; consume_reservations_nocommit existed but had no caller in
+        # the entire codebase, so every reservation ever created stayed "active"
+        # forever. `available` therefore fell monotonically and never recovered:
+        # given enough receipts every lot eventually reads as unavailable while
+        # physically full, and the DM can no longer issue material.
+        #
+        # Oldest-first, and capped at what was actually consumed. Same
+        # transaction as the stock move and the production event, so the three
+        # land together or not at all.
+        remaining_reserved = await self.repo.consume_reservations_nocommit(lot_id, d)
+        return float(lot.on_hand - remaining_reserved)
 
     # ── supplier orders ──────────────────────────────────────────────────────
     async def create_order(self, body, actor_id, actor_role=None) -> dict:

@@ -65,6 +65,35 @@ class Settings(BaseSettings):
     # This is NOT Supabase Auth — just a separate Postgres role connection string.
     ai_reader_database_url: str = ""
 
+    # ── Connection pool (THE concurrency ceiling — tune this, not the CPU) ────
+    # An in-flight request holds one pooled connection for its WHOLE lifetime, so
+    # the number of requests this process can genuinely serve at once is
+    # `db_pool_size + db_max_overflow`, no matter how many CPUs it has. Across the
+    # service that ceiling is:
+    #
+    #     gunicorn workers (or ECS tasks) x (db_pool_size + db_max_overflow)
+    #
+    # These were hardcoded at pool_size=3 / max_overflow=5 in database.py. With
+    # WEB_CONCURRENCY=4 that is 12 sustained and 32 burst connections for the
+    # entire API, which is the wall a 100-concurrent-user floor hits first — and
+    # it could not be changed without a code edit and a redeploy.
+    #
+    # Sizing: multiply out against your Postgres `max_connections` (or put RDS
+    # Proxy / PgBouncer in front and multiply against ITS client limit instead —
+    # that is what lets you scale tasks past the server's connection budget).
+    db_pool_size: int = 5
+    db_max_overflow: int = 5
+    # FAIL FAST INSTEAD OF HANGING. SQLAlchemy's default is 30s, so under
+    # saturation a request waits half a minute for a connection and the caller
+    # has usually given up long before. 10s surfaces exhaustion as a prompt,
+    # visible error that autoscaling can react to.
+    db_pool_timeout: int = 10
+    # Recycle below any upstream idle-connection reaper (RDS Proxy, PgBouncer and
+    # most managed Postgres cut idle connections; 30 min is comfortably under the
+    # common defaults) so the app never hands out a socket the server has closed.
+    db_pool_recycle: int = 1800
+    db_pool_pre_ping: bool = True
+
     # ── Auth (self-issued JWT) ───────────────────────────────────────────────
     # Chat model for the LangGraph agent. Blank => deterministic router (no model).
     # Examples: "ollama:qwen2.5:3b-instruct", "anthropic:claude-3-5-haiku", "openai:gpt-4o-mini"
@@ -234,6 +263,79 @@ class Settings(BaseSettings):
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
+
+    # ── Read cache (dashboard + analytics) ───────────────────────────────────
+    # OFF unless switched on, because a cache is only correct if the write paths
+    # that invalidate it are wired up (core/cache.invalidate). Turning this on in
+    # an environment where that is not true shows managers stale numbers.
+    #
+    # The strategy is BUST ON WRITE, not a plain TTL: a production event, a store
+    # scan or a material move bumps a version counter and every cached entry
+    # becomes unreachable at once. So a cut logged on the floor is visible on the
+    # dashboard on the very next read, and the TTL below is only a backstop for a
+    # bump that failed to land.
+    cache_enabled: bool = False
+    cache_ttl_seconds: int = 60
+
+    # ── Trusted hosts ────────────────────────────────────────────────────────
+    # Which Host headers this app will answer to. Blank = answer to anything,
+    # which is the right default for local dev and wrong behind a load balancer:
+    # a Host header the app echoes back into a link is a cache-poisoning and
+    # password-reset-link vector. Set it to your real domain(s) in production.
+    #   TRUSTED_HOSTS=api.kairox.example,kairox.example
+    trusted_hosts: str = ""
+
+    @property
+    def trusted_host_list(self) -> list[str]:
+        hosts = [h.strip() for h in (self.trusted_hosts or "").split(",") if h.strip()]
+        return hosts or ["*"]
+
+    # ── Login throttle (AUTH ONLY — see core/throttle.py) ────────────────────
+    # Deliberately narrow (Hamthan, 2026-09-20: "auth only"). The floor is NOT
+    # rate limited: a scanner doing 200 scans in a burst is a manager working
+    # through a trolley, and a throttle that fires mid-shift stops production to
+    # protect nothing. /auth/login is the one route an attacker can reach with no
+    # credentials, so it is the one route with a ceiling.
+    #
+    # 10 attempts a minute is generous for a person who has forgotten their
+    # password and useless to someone iterating a wordlist. Fails OPEN when
+    # Redis is away.
+    login_rate_limit_enabled: bool = True
+    login_rate_limit_attempts: int = 10
+    login_rate_limit_window_seconds: int = 60
+
+    # ── CORS ─────────────────────────────────────────────────────────────────
+    # WAS A HARDCODED LIST IN main.py. Adding a frontend domain — a new Vercel
+    # preview, a staging host, the production domain — meant editing source and
+    # redeploying the API. Comma-separated, e.g.
+    #   CORS_ORIGINS=https://app.example.com,https://staging.example.com
+    # Empty in local/dev falls back to the usual localhost dev servers.
+    cors_origins: str = ""
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        explicit = [o.strip() for o in (self.cors_origins or "").split(",")
+                    if o.strip()]
+        if explicit:
+            return explicit
+        if self.is_production:
+            # Fail CLOSED. An unconfigured production deployment should refuse
+            # browser origins outright rather than quietly trusting a developer's
+            # laptop hostnames.
+            return []
+        return ["http://localhost:3000", "http://localhost:8081",
+                "http://localhost:19006"]
+
+    @property
+    def is_production(self) -> bool:
+        """True for anything that is not a developer's machine.
+
+        Gates the interactive API docs and the CORS fallback. Deliberately
+        symmetrical with `_reject_default_secret_outside_local`: 'local' alone is
+        not a claim that this is a dev box — debug must also be on.
+        """
+        env = (self.environment or "").strip().lower()
+        return not (env == "local" and bool(self.debug))
 
     # ── F32 / H5: never sign production tokens with a well-known key ──────────
     # H5: the original guard keyed ONLY on `environment`, which defaults to

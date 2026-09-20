@@ -24,6 +24,7 @@ from pydantic import BaseModel, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.pagination import Page, PageParams
 from decimal import Decimal
 
 from app.core.enums import ScreenContext , UserRole
@@ -32,7 +33,8 @@ from app.modules.production.service import ProductionService
 from app.modules.users.deps import get_current_user, require_roles
 from app.modules.users.models import User
 from app.modules.production.schemas import (
-    Consumption, LogRequest, LogResult, PieceState,
+    Consumption, EventDeleteResult, EventReassignResult, LogRequest, LogResult,
+    OperationRead, PieceState, ProductionEventRead, SkuOption,
 )
 from app.core.enums import (ProductionStage, ScreenContext, SCREEN_TO_STAGE,
                             screen_for_role)
@@ -79,7 +81,7 @@ _LOGGERS = require_roles(
 # ══════════════════════════════════════════════════════════════════════════
 # READ endpoints (carried over from the pre-barcode router — unchanged behaviour)
 # ══════════════════════════════════════════════════════════════════════════
-@router.get("/operations")
+@router.get("/operations", response_model=list[OperationRead])
 async def list_operations(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_FLOOR_READERS),
@@ -88,36 +90,55 @@ async def list_operations(
     return await ProductionService(db).list_operations()
 
 
-@router.get("/skus")
+@router.get("/skus", response_model=Page[SkuOption])
 async def list_sku_options(
     order_id: uuid.UUID | None = Query(None),
     style_id: uuid.UUID | None = Query(None),
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     scope: uuid.UUID | None = Depends(client_scope),
 ):
-    """Friendly SKU picker for the log screens (code + style · colour · size)."""
-    return await ProductionService(db).list_sku_options(
-        order_id=order_id, style_id=style_id, client_scope=scope)
+    """Friendly SKU picker for the log screens (code + style · colour · size).
+
+    PAGED. Unfiltered this is every SKU in the factory — one row per colour and
+    size of every style of every order, which is the largest picker here. Pass
+    order_id or style_id to narrow it rather than paging through it."""
+    rows, total = await ProductionService(db).page_sku_options(
+        params, order_id=order_id, style_id=style_id, client_scope=scope)
+    return Page[SkuOption].of(
+        [SkuOption.model_validate(r) for r in rows], total=total, params=params)
 
 
-@router.get("/events")
+@router.get("/events", response_model=Page[ProductionEventRead])
 async def list_events(
     sku_id: uuid.UUID | None = None,
     employee_id: uuid.UUID | None = None,
     start: date | None = Query(None),
     end: date | None = Query(None),
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_FLOOR_READERS),
 ):
     """Raw production events, filterable by sku / employee / date window.
 
     B9: floor/office staff only. This feed names the employee who worked each
-    piece; a CLIENT or VIEWER token has no business in it."""
-    return await ProductionService(db).list_events(
-        sku_id=sku_id, employee_id=employee_id, start=start, end=end)
+    piece; a CLIENT or VIEWER token has no business in it.
+
+    PAGED. production_event grows by one row per piece per stage and never
+    shrinks, so this used to be "serialise the whole production history" when
+    called without filters. Newest first; `total` is the unpaged match count.
+    """
+    out = await ProductionService(db).list_events_page(
+        params=params, sku_id=sku_id, employee_id=employee_id,
+        start=start, end=end)
+    return Page[ProductionEventRead].of(
+        [ProductionEventRead.model_validate(r) for r in out["rows"]],
+        total=out["total"], params=params)
 
 
-@router.get("/styles/{style_id}/progress")
+# {operation_code: completed_qty} — a map, so a new stage needs no schema
+# change. dict[str, int] still gives the frontend a real generated type.
+@router.get("/styles/{style_id}/progress", response_model=dict[str, int])
 async def style_progress(
     style_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
@@ -131,12 +152,25 @@ async def style_progress(
 async def list_pieces(
     sku_id: uuid.UUID,
     operation_id: uuid.UUID | None = Query(None),
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     scope: uuid.UUID | None = Depends(client_scope),
 ):
-    """Every piece of one SKU with its current stage and eligibility."""
+    """The scan checklist for one SKU: every piece, its stage and eligibility.
+
+    PAGED. A SKU is one colour and size of one style, and a real order runs to
+    hundreds or thousands of garments in a single SKU — this used to serialise
+    all of them, with a per-piece store and lining lookup behind each one.
+
+    The header counts (total / done / pending / closed) remain SKU-WIDE, not
+    page-wide. `closed` withdraws the style from the scan screen, so deriving it
+    from one page would tell a manager on page 1 that a 900-piece SKU was
+    finished. `blocked` is the exception and says so: it is a page figure, tagged
+    `blocked_scope`.
+    """
     return await ProductionService(db).list_pieces_for_sku(
-        sku_id=sku_id, operation_id=operation_id, client_scope=scope)
+        sku_id=sku_id, operation_id=operation_id, client_scope=scope,
+        params=params)
 
 @router.get("/piece-state", response_model=PieceState)
 async def piece_state(
@@ -458,7 +492,8 @@ _REASSIGNERS = require_roles(
 _DELETERS = require_roles(UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER)
 
 
-@router.patch("/events/{event_id}/reassign")
+@router.patch("/events/{event_id}/reassign",
+              response_model=EventReassignResult)
 async def reassign_event(
     event_id: uuid.UUID,
     employee_id: uuid.UUID,
@@ -478,7 +513,7 @@ async def reassign_event(
         actor_user_id=user.id, actor_name=user.name)
 
 
-@router.delete("/events/{event_id}")
+@router.delete("/events/{event_id}", response_model=EventDeleteResult)
 async def delete_event(
     event_id: uuid.UUID,
     reason: str,

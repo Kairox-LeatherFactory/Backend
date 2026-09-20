@@ -32,6 +32,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.core.config import settings
 from app.core.database import Base, async_engine
@@ -117,36 +119,61 @@ _LOCKED = [Depends(block_employees)]   # employee role blocked; managers pass th
 # ──────────────────────────────────────────────────────────
 # Lifecycle (ONE lifespan — deps check + sweepers + dev table-create)
 # ──────────────────────────────────────────────────────────
-async def _notification_sweeper():
+# THESE SWEEPERS RUN IN THE API PROCESS, SO THEY RUN ONCE PER PROCESS.
+#
+# That is `gunicorn workers x replicas` times per cycle, and escalation SENDS
+# EMAIL — it is not idempotent from the recipient's side. At WEB_CONCURRENCY=4
+# one box already sends four copies of every escalation per cycle; behind a load
+# balancer with N tasks it is 4N. It was also the main thing stopping the API
+# from being scaled horizontally at all.
+#
+# `single_flight` puts a short Redis lock in front of each cycle so exactly one
+# process in the whole fleet does the work and the rest skip. See
+# core/single_flight.py for why this is not simply moved to Celery beat yet.
+async def _sweep_forever(job_name: str, interval: int, run):
+    """Run `run(db)` every `interval` seconds, once across the whole fleet."""
     from app.core.database import AsyncSessionLocal
-    from app.modules.bom.notification_service import NotificationService
+    from app.core.single_flight import single_flight
+
     while True:
         try:
-            await asyncio.sleep(settings.notification_sweep_seconds)
-            async with AsyncSessionLocal() as db:
-                sent = await NotificationService(db).run_escalations()
-                if sent:
-                    logger.info("escalated %s unseen BOM-review notification(s)", sent)
+            await asyncio.sleep(interval)
+            # TTL just under the interval: a process that dies mid-sweep frees
+            # the job by the next tick instead of wedging it.
+            async with single_flight(job_name,
+                                     ttl_seconds=max(5, interval - 5)) as mine:
+                if not mine:
+                    continue
+                async with AsyncSessionLocal() as db:
+                    await run(db)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.warning("notification sweeper error: %s", exc)
+            logger.warning("%s sweeper error: %s", job_name, exc)
+
+
+async def _notification_sweeper():
+    from app.modules.bom.notification_service import NotificationService
+
+    async def _run(db):
+        sent = await NotificationService(db).run_escalations()
+        if sent:
+            logger.info("escalated %s unseen BOM-review notification(s)", sent)
+
+    await _sweep_forever("notification-escalation",
+                         settings.notification_sweep_seconds, _run)
 
 
 async def _po_escalation_sweeper():
-    from app.core.database import AsyncSessionLocal
     from app.modules.supplier_po.po_service import PoService
-    while True:
-        try:
-            await asyncio.sleep(settings.notification_sweep_seconds)
-            async with AsyncSessionLocal() as db:
-                advanced = await PoService(db).sweep_escalations()
-                if advanced:
-                    logger.info("advanced %s supplier-PO escalation rung(s)", advanced)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.warning("PO escalation sweeper error: %s", exc)
+
+    async def _run(db):
+        advanced = await PoService(db).sweep_escalations()
+        if advanced:
+            logger.info("advanced %s supplier-PO escalation rung(s)", advanced)
+
+    await _sweep_forever("po-escalation",
+                         settings.notification_sweep_seconds, _run)
 
 
 @asynccontextmanager
@@ -198,24 +225,47 @@ async def lifespan(app: FastAPI):
 # ──────────────────────────────────────────────────────────
 # App
 # ──────────────────────────────────────────────────────────
+# THE INTERACTIVE DOCS ARE NOT PUBLIC IN PRODUCTION. /docs and /redoc were
+# served unconditionally, so the full route map, every request schema and every
+# role boundary was readable by anyone who could reach the host. The schema is
+# still generated (the frontend needs the OpenAPI JSON in CI); it is the
+# browsable UI that is switched off outside a developer's machine.
+_docs_url = None if settings.is_production else "/docs"
+_redoc_url = None if settings.is_production else "/redoc"
+
 app = FastAPI(
     title=settings.app_name,
     description="Real-time leather manufacturing intelligence & traceability backend",
     version="1.0.0",
     lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url=_docs_url,
+    redoc_url=_redoc_url,
 )
 
+# RESPONSES ARE COMPRESSED. The dashboard and analytics surfaces return large
+# JSON aggregates to tablets on factory wifi; gzip typically takes 70-90% off a
+# payload of that shape. 1000 bytes is the usual floor — below it the CPU and the
+# extra header cost more than the saving.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# WHICH HOST HEADERS THIS APP ANSWERS TO.
+#
+# Default "*" keeps local dev and the container health check working. In
+# production set TRUSTED_HOSTS to the real domains: an app that answers to any
+# Host and reflects it into a generated link is how cache poisoning and
+# forged password-reset links happen. Added here rather than left to the load
+# balancer so the guarantee travels with the app.
+app.add_middleware(TrustedHostMiddleware,
+                   allowed_hosts=settings.trusted_host_list)
+
+# ORIGINS COME FROM THE ENVIRONMENT (settings.cors_origin_list), not from this
+# file. They used to be a hardcoded list here, so adding a frontend domain meant
+# a code change and a redeploy of the API. Note this pairs `allow_credentials`
+# with an explicit origin list — never with "*", which browsers reject anyway and
+# which would make every site on the internet a trusted caller.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8081",
-        "http://localhost:19006",
-        "http://localhost:3000",
-        "https://frontend-rust-pi-23.vercel.app",
-        "https://stagingpte.vercel.app"
-    ],
+    allow_origins=settings.cors_origin_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -231,6 +281,8 @@ app.add_middleware(
 # and returns a generic body. The traceback is included ONLY in debug.
 import uuid as _uuid
 from fastapi import Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -248,6 +300,51 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     if settings.debug:
         body["error"] = repr(exc)
     return JSONResponse(status_code=500, content=body)
+
+
+# ONE ERROR SHAPE FOR EVERY FAILURE, NOT JUST THE 500s.
+#
+# The handler above gives an unhandled error a `request_id` the caller can quote
+# to support. Every DELIBERATE failure — the 403 on the payroll gate, the 409 on
+# a piece scanned into the wrong drawer, the 422 on a material lot missing its
+# category's fields — came back as a bare {"detail": ...} with nothing to quote.
+# Those are the errors the floor actually hits, and they were the ones support
+# could not trace.
+#
+# The two handlers below keep the status codes and the messages exactly as they
+# are and only ADD `request_id`, so nothing that reads `detail` today changes.
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    request_id = str(_uuid.uuid4())
+    # Logged at WARNING, not ERROR: a 403 is the system working. It is still
+    # worth a line, because a burst of them is how a misconfigured role shows up.
+    logger.warning("http error request_id=%s status=%s path=%s method=%s detail=%s",
+                   request_id, exc.status_code, request.url.path, request.method,
+                   exc.detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail, "request_id": request_id},
+        # 401 carries WWW-Authenticate; dropping it would break the auth flow.
+        headers=getattr(exc, "headers", None),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request,
+                                       exc: RequestValidationError):
+    """422s from request validation.
+
+    `errors` is preserved verbatim — it is what tells a form WHICH field is
+    wrong, and the import and material screens depend on it.
+    """
+    request_id = str(_uuid.uuid4())
+    logger.warning("validation error request_id=%s path=%s method=%s",
+                   request_id, request.url.path, request.method)
+    return JSONResponse(
+        status_code=422,
+        content={"detail": jsonable_encoder(exc.errors()),
+                 "request_id": request_id},
+    )
 
 # ──────────────────────────────────────────────────────────
 # Router registration (ALL under /api/v1)

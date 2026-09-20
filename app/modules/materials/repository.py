@@ -243,6 +243,22 @@ class MaterialRepository:
     async def get_lot(self, lot_id: uuid.UUID) -> MaterialLot | None:
         return await self.db.get(MaterialLot, lot_id)
 
+    async def get_lot_for_update(self, lot_id: uuid.UUID) -> MaterialLot | None:
+        """Fetch a lot with the row LOCKED for the rest of the transaction.
+
+        USE THIS BEFORE ANY READ-MODIFY-WRITE OF on_hand / used. Stock moves are
+        `on_hand = on_hand - d` in Python, so two cutting managers scanning
+        against the same lot concurrently both read the same `before` and the
+        second write silently overwrites the first: stock is lost with no error
+        and no warning. SELECT ... FOR UPDATE serialises them on the row, so the
+        second transaction reads the first one's result.
+
+        SQLite has no row locks and ignores `with_for_update`, which is fine —
+        the tests run single-writer. The lock is what protects Postgres, where
+        the concurrency is real.
+        """
+        return await self.db.get(MaterialLot, lot_id, with_for_update=True)
+
     async def active_reserved(self, lot_id: uuid.UUID) -> Decimal:
         val = await self.db.scalar(
             select(func.coalesce(func.sum(MaterialReservation.qty), 0))

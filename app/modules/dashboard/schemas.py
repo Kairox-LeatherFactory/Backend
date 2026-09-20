@@ -758,3 +758,41 @@ class StyleTracking(BaseModel):
     order_number: str | None
     total_quantity: int
     stages: list[StyleStageRow]
+
+
+# ── the alerts surface (GET /dashboard/alerts) ───────────────────────────────
+class StageSpreadAlert(BaseModel):
+    """A downstream stage lagging the leather cut by more than half.
+
+    The gap is true WIP in flight: cut, but not yet arrived at this stage.
+    """
+    style: str | None = None
+    stage: str
+    cut: int
+    reached_stage: int
+    gap: int
+    severity: str          # "high" | "medium"
+
+
+class FreightRiskAlert(BaseModel):
+    """An order approaching its sea cut-off.
+
+    Missing it means air freight, which is the single biggest margin event in
+    the business — so it is an alert, not a report line.
+    """
+    order_number: str
+    sea_cutoff: str
+    days_left: int
+    ordered: int
+    finished: int
+    pct_complete: float
+    risk: str              # "critical" | "high" | "watch"
+
+
+class FactoryAlerts(BaseModel):
+    """Three blocks, most-actionable first. Empty lists are a good day, not a
+    missing feature; `alert_count` is what a badge should render."""
+    bottleneck: Bottleneck | None = None
+    stage_spread: list[StageSpreadAlert] = Field(default_factory=list)
+    freight_risk: list[FreightRiskAlert] = Field(default_factory=list)
+    alert_count: int

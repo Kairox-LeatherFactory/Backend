@@ -126,7 +126,7 @@ class WageRepository:
     ) -> Rate:
         """Single-cell save. Commits."""
         r = await self._upsert_rate_nocommit(style_id, operation_id, rate, effective_from)
-        await self.db.commit()
+        await self.db.flush()
         await self.db.refresh(r)
         return r
 
@@ -147,7 +147,7 @@ class WageRepository:
         """
         for operation_id, rate in lines:
             await self._upsert_rate_nocommit(style_id, operation_id, rate, effective_from)
-        await self.db.commit()
+        await self.db.flush()
         return len(lines)
 
     async def _upsert_rate_nocommit(
@@ -233,7 +233,7 @@ class WageRepository:
             delete(WageLineDetailRow).where(WageLineDetailRow.wage_run_id == run_id))
         d2 = await self.db.execute(
             delete(WageLine).where(WageLine.wage_run_id == run_id))
-        await self.db.commit()
+        await self.db.flush()
         return int(d2.rowcount or 0) + int(d1.rowcount or 0)
     
     async def persist_breakdown(self, run_id: uuid.UUID, breakdown: dict) -> None:
@@ -249,13 +249,13 @@ class WageRepository:
         if not rows:
             return
         self.db.add_all(rows)
-        await self.db.commit()
+        await self.db.flush()
         
     async def stamp_recompute(self, run: WageRun, *, by: str) -> None:
         run.recompute_count = (run.recompute_count or 0) + 1
         run.last_recomputed_at = datetime.now(timezone.utc)
         run.last_recomputed_by = by
-        await self.db.commit()
+        await self.db.flush()
 
     async def stamp_reopen(self, run: WageRun, *, by: str, reason: str) -> None:
         """Unfreeze a CLOSED run, on the record.
@@ -270,7 +270,7 @@ class WageRepository:
         run.last_reopened_at = datetime.now(timezone.utc)
         run.last_reopened_by = by
         run.last_reopen_reason = reason
-        await self.db.commit()
+        await self.db.flush()
 
     async def create_run(self, period_start: date, period_end: date, *,
                          run_kind: str = WageRunKind.COMBINED.value,
@@ -291,7 +291,7 @@ class WageRepository:
                       scope_order_number=scope_order_number,
                       scope_style_code=scope_style_code)
         self.db.add(run)
-        await self.db.commit()
+        await self.db.flush()
         await self.db.refresh(run)
         return run
 
@@ -303,7 +303,7 @@ class WageRepository:
         nothing ever queries across it. A table would buy joins nobody makes and
         cost a migration every time the warning's shape grows a field."""
         run.unrated_snapshot = list(unrated or [])
-        await self.db.commit()
+        await self.db.flush()
 
     async def purge_run(self, run: WageRun) -> None:
         """Delete a run and everything hanging off it.
@@ -317,7 +317,7 @@ class WageRepository:
             delete(WageLineDetailRow).where(
                 WageLineDetailRow.wage_run_id == run.id))
         await self.db.delete(run)
-        await self.db.commit()
+        await self.db.flush()
 
     async def get_run(self, run_id: uuid.UUID) -> WageRun | None:
         stmt = (
@@ -329,17 +329,17 @@ class WageRepository:
 
     async def add_lines(self, lines: list[WageLine]) -> None:
         self.db.add_all(lines)
-        await self.db.commit()
+        await self.db.flush()
 
     async def close_run(self, run: WageRun) -> WageRun | None:
         run.status = RunStatus.CLOSED
-        await self.db.commit()
+        await self.db.flush()
         return await self.get_run(run.id)
 
     async def delete_run(self, run: WageRun) -> None:
         """Only ever used to clean up an OPEN run that failed mid-compute."""
         await self.db.delete(run)
-        await self.db.commit()
+        await self.db.flush()
 
     async def list_runs(self, *, limit: int = 50, offset: int = 0,
                         run_kind: str | None = None,

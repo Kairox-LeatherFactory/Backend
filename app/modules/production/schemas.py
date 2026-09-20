@@ -338,3 +338,26 @@ class PieceState(BaseModel):
     #   null  → no employee was supplied, so the question is unanswered (which is
     #           not the same as "blocked", and must not be rendered as one)
     ready_to_log: bool | None = None
+
+class EventReassignResult(BaseModel):
+    """An event moved to the worker who actually did it.
+
+    The stage and what it consumed are echoed back BECAUSE they must not change:
+    reassigning is a correction to WHO, never to what happened or what it cost.
+    """
+    event_id: uuid.UUID
+    piece_code: str | None = None
+    operation: str | None = None
+    employee_id: uuid.UUID | None = None
+    work_date: date | None = None
+    is_rework: bool
+    consumption_qty: float | None = None
+    note: str | None = None
+
+
+class EventDeleteResult(BaseModel):
+    """A record that should never have existed, and the stock it gave back."""
+    event_id: uuid.UUID
+    deleted: bool
+    stock_returned: float | None = None
+    message: str

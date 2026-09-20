@@ -34,9 +34,14 @@ class ScanCheckIn(BaseModel):
     lat: float | None = None      # ignored (location removed)
     lon: float | None = None      # ignored (location removed)
     proxy: bool = False
-    # `reason` used to be MANDATORY for a scan with no GPS fix. With no fence
-    # there is nothing to excuse, so it is now free-text context only.
-    reason: str | None = Field(None, max_length=200)
+    # REMOVED 2026-09-19 (Hamthan): `reason`. It existed to excuse a scan taken
+    # with no GPS fix, back when the geofence could refuse one. Location
+    # tracking is gone, so no scan is ever refused for a missing fix and there
+    # is nothing left to excuse — the service has been ignoring the value for
+    # some time already. A field the API accepts and discards is worse than no
+    # field: the gate operator is asked to type something that changes nothing.
+    # The correction trail (attendance/corrections.py) is where an attendance
+    # mistake is explained, and that reason IS recorded.
 
 
 class CheckInRequest(GpsPoint):
@@ -86,6 +91,14 @@ class AttendanceRead(BaseModel):
     check_in_at: datetime
     check_out_at: datetime | None
     source: AttendanceSource
+    # WHO RECORDED THIS ROW. A shop-floor worker has no login, so every
+    # attendance row is written FOR them by an operator (SECURITY / HR / MD / DM).
+    # The column has always been on the model and has always been populated —
+    # it just was not on this schema, so the API never told anyone who marked a
+    # worker present. That made the operator trail real in the database and
+    # invisible through the API, which is the half that matters in a dispute.
+    # None only for the legacy rows written before the operator model landed.
+    recorded_by_user_id: uuid.UUID | None = None
     is_late: bool
     is_short: bool
     is_overtime: bool
@@ -195,3 +208,29 @@ class AttendanceDeleteResult(BaseModel):
     attendance_id: uuid.UUID
     deleted: bool
     message: str
+
+
+class DailyWorkerCreated(BaseModel):
+    """A casual worker added at the gate: identity + how they are paid."""
+    id: str
+    name: str
+    wage_type: str
+
+
+class ScanResult(BaseModel):
+    """What the gate terminal shows after a card is scanned.
+
+    Times are ISO strings rather than datetimes: the terminal renders them
+    straight back and this payload has always been strings.
+    """
+    employee_id: str
+    employee_name: str
+    work_date: str
+    check_in_at: str | None = None
+    check_out_at: str | None = None
+    is_late: bool
+    present_today: bool
+    # GEOFENCE DISABLED. Always True, kept so a frontend still reading this key
+    # does not crash. It no longer means "we could not verify the position":
+    # nothing is verified.
+    location_unverified: bool = True

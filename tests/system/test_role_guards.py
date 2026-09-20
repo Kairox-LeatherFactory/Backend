@@ -173,7 +173,8 @@ async def test_salary_is_returned_only_to_hr_dm_md(client, role, expect_pay):
     _as(role)
     r = await client.get(f"{API}/employees")
     assert r.status_code == 200
-    rows = r.json()
+    # The roster is paged (core/pagination.py) — rows live in `items`.
+    rows = r.json()["items"]
     if rows:
         assert ("monthly_salary" in rows[0]) is expect_pay
 
@@ -211,18 +212,25 @@ async def test_hr_may_write_to_inventory(client):
 
 
 @pytest.mark.asyncio
-async def test_the_lining_manager_cannot_create_lining_lots(client):
-    """AUDIT (pass-04-role-permissions.md): `_LOT_WRITERS` is DM/MD/CUTTING_MANAGER
-    (materials/router.py:30-31). LINING_MANAGER must supply a `lining_lot_id` at
-    LINING_CUTTING (production/service.py:279-290) but cannot create one.
+async def test_the_lining_manager_may_create_lining_lots(client):
+    """THE FIX THIS TEST USED TO PIN HAS LANDED.
 
-    Pins the current behaviour so the fix is a visible change.
+    It previously asserted 403, with a docstring saying it pinned the broken
+    behaviour "so the fix is a visible change": LINING_MANAGER must supply a
+    `lining_lot_id` at LINING_CUTTING (production/service.py) but could not create
+    one, so the lining path was unworkable. `_LOT_WRITERS`
+    (materials/router.py:37-39) now includes LINING_MANAGER, which is that fix.
+
+    It also sent subtype "PLAIN", which is not in the vocabulary — the real
+    subtype is PLAIN_LINING (materials/service.py:45). So once the role gate
+    opened, the route answered 422 on the payload and the assertion read that as
+    the role still being refused. Assert the capability, with a valid payload.
     """
     _as(UserRole.LINING_MANAGER)
     r = await client.post(f"{API}/materials/lots", json={
-        "category": "LINING", "subtype": "PLAIN", "article": "A",
+        "category": "LINING", "subtype": "PLAIN_LINING", "article": "A",
         "colour": "BLACK", "attributes": {"thickness": "0.5mm", "mtrs": 50}})
-    assert r.status_code == 403
+    assert r.status_code == 201, r.text
 
 
 @pytest.mark.asyncio
