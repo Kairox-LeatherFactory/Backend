@@ -99,6 +99,21 @@ SERVICES: list[tuple[str, list[str], str]] = [
     ("inspection", ["inspections"],
      "Reject and rework, recorded against the stage RESPONSIBLE for the defect "
      "rather than the stage it was found at. The DM approves the re-walk."),
+    ("procurement", ["Procurement — Stage 1 intake",
+                     "Procurement — Stage 2/3 BOM",
+                     "Procurement — Stage 4 inventory",
+                     "Procurement — Stage 5 supplier PO"],
+     "PHASE 2 — the auto-generation pipeline, in the five stages it actually "
+     "runs in: a client submission comes in, a BOM is generated and approved, "
+     "stock is checked against it, and the shortfall becomes supplier POs. "
+     "Folders are ordered by stage, not alphabetically, because the stages only "
+     "work in order — you cannot check inventory against a BOM you have not "
+     "generated."),
+    ("system", ["Health", "Root", "Chatbot"],
+     "Liveness, readiness and the chatbot. `/health` answers without touching "
+     "the database and `/ready` does not — that difference is the point of "
+     "having both, so a load balancer can tell a slow database from a dead "
+     "process. Neither is under /api/v1, and neither needs a token."),
 ]
 
 # Endpoints that belong to a service's SCREEN but carry another module's tag.
@@ -110,6 +125,7 @@ EXTRAS: dict[str, set[str]] = {
     "store": {"/api/v1/materials/issues"},
     "cutting": {"/api/v1/materials/lots", "/api/v1/materials/receive"},
 }
+
 
 # `drawer` is not a tag, because the module is withdrawn. It still gets a file —
 # see _drawer_collection() for why.
@@ -141,15 +157,41 @@ def _shell(name: str, description: str) -> dict:
 
 _SETUP = (
     "\n\nSETUP\n"
-    "  1. Set `base_url` (default http://127.0.0.1:8000).\n"
-    "  2. Import `user.postman_collection.json` and run Login.\n"
-    "  3. Paste `access_token` from that response into this collection's\n"
-    "     `token` variable. Every request here inherits bearer auth.\n\n"
+    "  1. Import the whole folder and SELECT the KairoX environment\n"
+    "     (top-right). That is what shares one token across every\n"
+    "     collection — a collection variable is visible only to the\n"
+    "     collection that set it.\n"
+    "  2. Run `user` → Login. Its test script stores `access_token` for\n"
+    "     you; there is nothing to copy and paste.\n"
+    "  3. Every request here inherits bearer auth from that token.\n\n"
+    "`base_url` defaults to http://127.0.0.1:8000.\n\n"
     "Optional query params are present but DISABLED, so each request runs\n"
-    "as-is. Generated from the app's own OpenAPI schema by\n"
+    "as-is. File uploads are real form-data rows — click Select Files on\n"
+    "the `file` row. Generated from the app's own OpenAPI schema by\n"
     "`python scripts/make_postman_per_service.py` — re-run it after changing\n"
     "routes rather than editing requests by hand."
 )
+
+
+def _environment() -> dict:
+    """One environment, shared by every collection in the folder.
+
+    WHY THIS EXISTS. Login's test script can only write a collection variable
+    into the collection that ran it, so logging in under `user` left the other
+    seventeen collections on an empty token and every request in them 401'd —
+    which reads as a broken auth guard rather than a missing paste. Selecting
+    this environment gives them one shared `token` to write into, so one login
+    covers the whole folder.
+    """
+    return {
+        "name": "KairoX · local",
+        "values": [
+            {"key": "base_url", "value": "http://127.0.0.1:8000",
+             "type": "default", "enabled": True},
+            {"key": "token", "value": "", "type": "secret", "enabled": True},
+        ],
+        "_postman_variable_scope": "environment",
+    }
 
 
 def _drawer_collection(spec: dict) -> dict:
@@ -248,5 +290,9 @@ if __name__ == "__main__":
         path.write_text(json.dumps(coll, indent=2), encoding="utf-8")
         total += n
         print(f"  {path.name:48s} {n:3d} requests")
-    print(f"\nwrote {len(list(OUT_DIR.glob('*.json')))} collections, "
+    env_path = OUT_DIR / "KairoX.postman_environment.json"
+    env_path.write_text(json.dumps(_environment(), indent=2), encoding="utf-8")
+    print(f"  {env_path.name:48s}     environment")
+    n_coll = len(list(OUT_DIR.glob('*.postman_collection.json')))
+    print(f"\nwrote {n_coll} collections + 1 environment, "
           f"{total} requests total, into {OUT_DIR.relative_to(ROOT)}/")

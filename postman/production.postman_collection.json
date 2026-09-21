@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "KairoX \u00b7 Production",
-    "description": "POST /production/log is the whole floor's logging surface \u2014 the caller sends an ACTOR and TARGETS and never a stage. Also the two correction endpoints for a record that named the wrong worker.\n\nSETUP\n  1. Set `base_url` (default http://127.0.0.1:8000).\n  2. Import `user.postman_collection.json` and run Login.\n  3. Paste `access_token` from that response into this collection's\n     `token` variable. Every request here inherits bearer auth.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "description": "POST /production/log is the whole floor's logging surface \u2014 the caller sends an ACTOR and TARGETS and never a stage. Also the two correction endpoints for a record that named the wrong worker.\n\nSETUP\n  1. Import the whole folder and SELECT the KairoX environment\n     (top-right). That is what shares one token across every\n     collection \u2014 a collection variable is visible only to the\n     collection that set it.\n  2. Run `user` \u2192 Login. Its test script stores `access_token` for\n     you; there is nothing to copy and paste.\n  3. Every request here inherits bearer auth from that token.\n\n`base_url` defaults to http://127.0.0.1:8000.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. File uploads are real form-data rows \u2014 click Select Files on\nthe `file` row. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -124,10 +124,22 @@
               "value": "2026-08-01",
               "description": "",
               "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "Rows to return (1-200).",
+              "disabled": true
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
+              "disabled": true
             }
           ]
         },
-        "description": "Raw production events, filterable by sku / employee / date window.\n\nB9: floor/office staff only. This feed names the employee who worked each\npiece; a CLIENT or VIEWER token has no business in it."
+        "description": "Raw production events, filterable by sku / employee / date window.\n\nB9: floor/office staff only. This feed names the employee who worked each\npiece; a CLIENT or VIEWER token has no business in it.\n\nPAGED. production_event grows by one row per piece per stage and never\nshrinks, so this used to be \"serialise the whole production history\" when\ncalled without filters. Newest first; `total` is the unpaged match count."
       },
       "response": []
     },
@@ -176,6 +188,18 @@
               "value": "00000000-0000-0000-0000-000000000000",
               "description": "",
               "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "Rows to return (1-200).",
+              "disabled": true
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
+              "disabled": true
             }
           ],
           "variable": [
@@ -185,7 +209,7 @@
             }
           ]
         },
-        "description": "Every piece of one SKU with its current stage and eligibility."
+        "description": "The scan checklist for one SKU: every piece, its stage and eligibility.\n\nPAGED. A SKU is one colour and size of one style, and a real order runs to\nhundreds or thousands of garments in a single SKU \u2014 this used to serialise\nall of them, with a per-piece store and lining lookup behind each one.\n\nThe header counts (total / done / pending / closed) remain SKU-WIDE, not\npage-wide. `closed` withdraws the style from the scan screen, so deriving it\nfrom one page would tell a manager on page 1 that a 900-piece SKU was\nfinished. `blocked` is the exception and says so: it is a page figure, tagged\n`blocked_scope`."
       },
       "response": []
     },
@@ -217,10 +241,22 @@
               "value": "00000000-0000-0000-0000-000000000000",
               "description": "",
               "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "Rows to return (1-200).",
+              "disabled": true
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
+              "disabled": true
             }
           ]
         },
-        "description": "Friendly SKU picker for the log screens (code + style \u00b7 colour \u00b7 size)."
+        "description": "Friendly SKU picker for the log screens (code + style \u00b7 colour \u00b7 size).\n\nPAGED. Unfiltered this is every SKU in the factory \u2014 one row per colour and\nsize of every style of every order, which is the largest picker here. Pass\norder_id or style_id to narrow it rather than paging through it."
       },
       "response": []
     },

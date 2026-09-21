@@ -1356,6 +1356,25 @@ Every blocking call goes through `run_in_threadpool`: openpyxl, pypdf, libmagic,
 
 IDs are `uuid4()` generated in the app, not `gen_random_uuid()`. No `JSONB` operators, no `ON CONFLICT`. Status columns are `VARCHAR` storing a `str`-Enum's `.value` — **never a native Postgres enum** in these modules (unlike Phase 1's `app_user.role`). Keep it that way; a future Oracle migration depends on it.
 
+### 18.6 Paging — these modules have NOT adopted `core/pagination.py`
+
+Phase 1 moved its twenty list reads onto one envelope: `PageParams` (`limit` defaulting to **50**, hard-capped at **200**), `Page[T]` (`items`, `total`, `limit`, `offset`, `count`, `has_more`) and `paginate()`, which derives the count from the same statement as the page so the two cannot disagree. **Phase 2 is not on it yet.**
+
+Two reads here take paging arguments, and both roll their own:
+
+| Endpoint | Declares | Returns |
+|---|---|---|
+| `GET /suppliers` | `limit: int = 100, offset: int = 0` | `{ suppliers, count }` — **no `total`**, so there is nothing to render *"of 1,240"* from |
+| `GET /inventory/items` | `limit: int = 100, offset: int = 0` | the service's own list shape |
+
+**Two consequences worth knowing before you build against them.**
+
+**There is no cap.** `?limit=999999` is accepted here — it is a plain default, not a validated bound — so a caller can still ask for the whole table and hold a pooled connection open across it. That is exactly the failure `MAX_LIMIT` exists to prevent in Phase 1, and the supplier directory is the table most likely to grow into it.
+
+**Every other list read in these modules is unpaged.** `GET /pos`, `GET /boms/{id}/items`, `GET /notifications`, `GET /production-tracking` and `GET /patterns` return their whole result set. That is survivable today because a BOM has tens of lines and a factory has tens of open POs — the row counts are bounded by the business, not by time, which is what made Phase 1's `production_event` dangerous and these are not.
+
+**Migrate when a surface stops being bounded, not on principle.** The one to watch is `GET /notifications`: it grows per event and never shrinks, so it is the first of these that will need `Page`. When any of them moves, it moves onto `core/pagination.py` rather than inventing a third shape — a frontend already special-cases two.
+
 ---
 
 ## 19. Module map — every file and what it is for
@@ -1791,6 +1810,7 @@ All seeding is **idempotent**. Several config sets are additionally hot-editable
 | Hoisting a lazy cross-module import | Import cycle |
 | A repository read that commits | Breaks the single-transaction guarantee in BOM generation |
 | Adding a model without importing it in `main.py` | Alembic tries to drop the table |
+| Inventing a third paging shape | A frontend already special-cases two (§18.6). A list read that needs paging adopts `core/pagination.py`; it does not grow its own `limit`/`offset` pair |
 
 ---
 

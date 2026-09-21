@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "KairoX \u00b7 User",
-    "description": "Login and the logins themselves. START HERE: run login, paste access_token into the collection's `token` variable, and every other collection is authorised.\n\nSETUP\n  1. Set `base_url` (default http://127.0.0.1:8000).\n  2. Import `user.postman_collection.json` and run Login.\n  3. Paste `access_token` from that response into this collection's\n     `token` variable. Every request here inherits bearer auth.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "description": "Login and the logins themselves. START HERE: run login, paste access_token into the collection's `token` variable, and every other collection is authorised.\n\nSETUP\n  1. Import the whole folder and SELECT the KairoX environment\n     (top-right). That is what shares one token across every\n     collection \u2014 a collection variable is visible only to the\n     collection that set it.\n  2. Run `user` \u2192 Login. Its test script stores `access_token` for\n     you; there is nothing to copy and paste.\n  3. Every request here inherits bearer auth from that token.\n\n`base_url` defaults to http://127.0.0.1:8000.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. File uploads are real form-data rows \u2014 click Select Files on\nthe `file` row. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -87,7 +87,7 @@
                 "login"
               ]
             },
-            "description": "",
+            "description": "Sign in. THROTTLED PER IP (core/throttle.py) \u2014 this is the only route an\nattacker can reach without credentials, and bcrypt at cost 12 makes a\nsustained guessing run a denial of service as well as a security problem.",
             "body": {
               "mode": "raw",
               "raw": "{\n  \"username\": \"\",\n  \"password\": \"\"\n}",
@@ -98,7 +98,43 @@
               }
             }
           },
-          "response": []
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Stores access_token so you never paste it by hand.",
+                  "//",
+                  "// It goes into the ENVIRONMENT when one is selected, because a",
+                  "// collection variable is only visible to the collection that",
+                  "// set it -- log in once in `user` and the other 17 collections",
+                  "// would still 401. Select the KairoX environment and one login",
+                  "// authorises all of them. The collection variable is written",
+                  "// too, so this still works with no environment selected.",
+                  "if (pm.response.code === 200) {",
+                  "    const body = pm.response.json();",
+                  "    if (body.access_token) {",
+                  "        pm.collectionVariables.set('token', body.access_token);",
+                  "        if (pm.environment.name) {",
+                  "            pm.environment.set('token', body.access_token);",
+                  "        }",
+                  "        console.log('token stored'",
+                  "            + (pm.environment.name",
+                  "               ? ' in environment ' + pm.environment.name",
+                  "               : ' in this collection only -- select the KairoX'",
+                  "                 + ' environment to share it'));",
+                  "    }",
+                  "}",
+                  "pm.test('login returns 200 + access_token', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.have.property('access_token');",
+                  "});"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Me",
@@ -127,41 +163,6 @@
       "name": "Users",
       "item": [
         {
-          "name": "Create Client User",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/api/v1/users/clients",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "users",
-                "clients"
-              ]
-            },
-            "description": "Direct manager provisions a client's login so they can track their orders.\n\nB8: HR removed. Binding a login to a client_id grants cross-tenant read\naccess to that client's orders \u2014 that is a commercial decision, not an\nemployee-admin one.",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"name\": \"\",\n  \"phone\": \"\",\n  \"email\": \"\",\n  \"client_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"password\": \"\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
           "name": "Create User",
           "request": {
             "method": "POST",
@@ -185,7 +186,7 @@
             "description": "B8: the role gate admits DM/HR/MD, but WHICH role may be granted is\ndecided in the service against the caller's own authority.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"\",\n  \"phone\": \"\",\n  \"email\": \"\",\n  \"role\": \"managing_director\",\n  \"password\": \"\",\n  \"employee_id\": \"00000000-0000-0000-0000-000000000000\"\n}",
+              "raw": "{\n  \"name\": \"\",\n  \"phone\": \"\",\n  \"email\": \"\",\n  \"role\": \"managing_director\",\n  \"password\": \"\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -216,10 +217,22 @@
                   "value": "True",
                   "description": "",
                   "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Rows to return (1-200).",
+                  "disabled": true
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
+                  "disabled": true
                 }
               ]
             },
-            "description": ""
+            "description": "The login roster. PAGED \u2014 see core/pagination.py."
           },
           "response": []
         }

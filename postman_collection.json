@@ -134,10 +134,16 @@
                   "value": "True",
                   "description": "",
                   "disabled": true
+                },
+                {
+                  "key": "pieces_per_style",
+                  "value": "100",
+                  "description": "Cap on piece leaves per style. The style's true piece_count is always reported; pieces_truncated says when leaves were cut.",
+                  "disabled": true
                 }
               ]
             },
-            "description": "Left-panel nav tree: Client -> Order -> Style -> Piece, scoped to the\nsigned-in user. CLIENT-role users see only their own client."
+            "description": "Left-panel nav tree: Client -> Order -> Style -> Piece, scoped to the\nsigned-in user. CLIENT-role users see only their own client.\n\nTHE LEAVES ARE CAPPED. `include_pieces` defaults to True and there was no\nbound, so the ordinary call built a tree of every garment the factory has\never made \u2014 a single live style runs to 1,425 pieces. Each style now carries\nat most `pieces_per_style` leaves, its real `piece_count`, and a\n`pieces_truncated` flag. Pass include_pieces=false for the skeleton alone."
           },
           "response": []
         },
@@ -324,6 +330,20 @@
                 "{{style_id}}",
                 "detail"
               ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Rows to return (1-200).",
+                  "disabled": true
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
+                  "disabled": true
+                }
+              ],
               "variable": [
                 {
                   "key": "style_id",
@@ -331,7 +351,7 @@
                 }
               ]
             },
-            "description": "One style: every piece with its full stage history (employee + date/time)."
+            "description": "One style: its pieces, each with its full stage history.\n\nPAGED. This was the heaviest read here \u2014 every piece of the style AND every\nproduction event belonging to them, nested in Python. A real order is 1,425\npieces and ~11,400 events in one response. The events are now fetched only\nfor the pieces on the page; `totals`, `stages` and `store` stay whole-style."
           },
           "response": []
         }
@@ -397,7 +417,7 @@
                 "check-in"
               ]
             },
-            "description": "An OPERATOR records their own arrival (their login is linked to an\nemployee row). Workers never reach this \u2014 they have no login.",
+            "description": "An OPERATOR records their own arrival (their login is linked to an\nemployee row). Workers never reach this \u2014 they have no login.\n\nThe body is OPTIONAL: with the geofence removed there is nothing to send.\n`{}`, `{\"lat\": .., \"lon\": ..}` (ignored) and no body at all all work.",
             "body": {
               "mode": "raw",
               "raw": "{\n  \"lat\": 0,\n  \"lon\": 0\n}",
@@ -432,7 +452,7 @@
                 "check-out"
               ]
             },
-            "description": "An OPERATOR records their own departure. See check_in.",
+            "description": "An OPERATOR records their own departure. Body optional \u2014 see check_in.",
             "body": {
               "mode": "raw",
               "raw": "{\n  \"lat\": 0,\n  \"lon\": 0\n}",
@@ -446,12 +466,17 @@
           "response": []
         },
         {
-          "name": "Get Config",
+          "name": "Correct Attendance",
           "request": {
-            "method": "GET",
-            "header": [],
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "url": {
-              "raw": "{{base_url}}/api/v1/attendance/config",
+              "raw": "{{base_url}}/api/v1/attendance/{{attendance_id}}",
               "host": [
                 "{{base_url}}"
               ],
@@ -459,10 +484,60 @@
                 "api",
                 "v1",
                 "attendance",
-                "config"
+                "{{attendance_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "attendance_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
               ]
             },
-            "description": "F44: the geofence geometry (factory_lat/lon/radius) is returned ONLY to\nHR/managers/superusers. Everyone else gets shift times without the fence, so\na client/employee login cannot read the coordinates needed to forge an\nin-fence check-in."
+            "description": "Fix a punch, or re-allocate it to the worker who was actually here.\n\nSending a different `employee_id` moves that day's production events too, in\nthe same transaction \u2014 otherwise attendance would say one name while the\ncutting log paid another, and wages are computed from the events.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"check_in_at\": \"2026-08-01T09:00:00Z\",\n  \"check_out_at\": \"2026-08-01T09:00:00Z\",\n  \"reason\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Attendance",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/attendance/{{attendance_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "attendance",
+                "{{attendance_id}}"
+              ],
+              "query": [
+                {
+                  "key": "reason",
+                  "value": "",
+                  "description": "",
+                  "disabled": false
+                }
+              ],
+              "variable": [
+                {
+                  "key": "attendance_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Remove a punch that should never have been made. `reason` is required.\n\nRefused (409) when the worker has production events that day: the work was\nreally done, so the cause is almost certainly a swapped card and the right\nfix is to re-allocate rather than delete."
           },
           "response": []
         },
@@ -543,28 +618,6 @@
           "response": []
         },
         {
-          "name": "My Status",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/attendance/me/status",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "attendance",
-                "me",
-                "status"
-              ]
-            },
-            "description": "Server-anchored data for the live shift countdown. Frontend computes a\none-time (server_now - device_now) offset and ticks toward shift_end_at."
-          },
-          "response": []
-        },
-        {
           "name": "Proxy Check In",
           "request": {
             "method": "POST",
@@ -587,7 +640,7 @@
                 "check-in"
               ]
             },
-            "description": "Manual check-in fallback for one or more employees (card failed / forgotten).\nSECURITY / HR / MD / DM. Works for ANY wage type.",
+            "description": "Manual check-in fallback for one or more employees (card failed / forgotten).\nSECURITY / HR / MD / DM. Works for ANY wage type. Only `employee_ids` is\nrequired \u2014 the operator's position is no longer asked for.",
             "body": {
               "mode": "raw",
               "raw": "{\n  \"employee_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"lat\": 0,\n  \"lon\": 0\n}",
@@ -658,10 +711,10 @@
                 "scan-check-in"
               ]
             },
-            "description": "Check in/out by scanning an employee barcode (direction = \"in\" | \"out\").\n\nTHE primary attendance door. Every employee has a card and no employee has a\nlogin, so the operator standing at the gate \u2014 SECURITY / HR / MD / DM \u2014 scans\nevery card, monthly or daily, including their own colleagues'.\n`proxy=True` marks the MANUAL fallback (card won't scan / forgotten).",
+            "description": "Check in/out by scanning an employee barcode (direction = \"in\" | \"out\").\n\nNo position is requested or stored \u2014 `lat`/`lon` are accepted and ignored.\n\nTHE primary attendance door. Every employee has a card and no employee has a\nlogin, so the operator standing at the gate \u2014 SECURITY / HR / MD / DM \u2014 scans\nevery card, monthly or daily, including their own colleagues'.\n`proxy=True` marks the MANUAL fallback (card won't scan / forgotten).",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"employee_barcode\": \"\",\n  \"direction\": \"\",\n  \"lat\": 0,\n  \"lon\": 0,\n  \"proxy\": false,\n  \"reason\": \"\"\n}",
+              "raw": "{\n  \"employee_barcode\": \"\",\n  \"direction\": \"\",\n  \"lat\": 0,\n  \"lon\": 0,\n  \"proxy\": false\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -689,41 +742,6 @@
               ]
             },
             "description": "Whole-floor roster. Operators + floor leads only."
-          },
-          "response": []
-        },
-        {
-          "name": "Update Config",
-          "request": {
-            "method": "PATCH",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/api/v1/attendance/config",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "attendance",
-                "config"
-              ]
-            },
-            "description": "",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"shift_start\": \"\",\n  \"shift_length_hours\": 0,\n  \"late_grace_minutes\": 0,\n  \"timezone\": \"\",\n  \"factory_lat\": 0,\n  \"factory_lon\": 0,\n  \"radius_m\": 0\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
           },
           "response": []
         }
@@ -789,7 +807,7 @@
                 "login"
               ]
             },
-            "description": "",
+            "description": "Sign in. THROTTLED PER IP (core/throttle.py) \u2014 this is the only route an\nattacker can reach without credentials, and bcrypt at cost 12 makes a\nsustained guessing run a denial of service as well as a security problem.",
             "body": {
               "mode": "raw",
               "raw": "{\n  \"username\": \"\",\n  \"password\": \"\"\n}",
@@ -800,7 +818,43 @@
               }
             }
           },
-          "response": []
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Stores access_token so you never paste it by hand.",
+                  "//",
+                  "// It goes into the ENVIRONMENT when one is selected, because a",
+                  "// collection variable is only visible to the collection that",
+                  "// set it -- log in once in `user` and the other 17 collections",
+                  "// would still 401. Select the KairoX environment and one login",
+                  "// authorises all of them. The collection variable is written",
+                  "// too, so this still works with no environment selected.",
+                  "if (pm.response.code === 200) {",
+                  "    const body = pm.response.json();",
+                  "    if (body.access_token) {",
+                  "        pm.collectionVariables.set('token', body.access_token);",
+                  "        if (pm.environment.name) {",
+                  "            pm.environment.set('token', body.access_token);",
+                  "        }",
+                  "        console.log('token stored'",
+                  "            + (pm.environment.name",
+                  "               ? ' in environment ' + pm.environment.name",
+                  "               : ' in this collection only -- select the KairoX'",
+                  "                 + ' environment to share it'));",
+                  "    }",
+                  "}",
+                  "pm.test('login returns 200 + access_token', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.have.property('access_token');",
+                  "});"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Me",
@@ -914,9 +968,23 @@
                 "v1",
                 "barcode",
                 "orders"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Rows to return (1-200).",
+                  "disabled": true
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
+                  "disabled": true
+                }
               ]
             },
-            "description": "Orders that have generated barcodes \u2014 the picker. Unique per order_number.\nShows minted count + generated date range so the user picks the right order."
+            "description": "Orders that have generated barcodes \u2014 the picker. Unique per order_number.\nShows minted count + generated date range so the user picks the right order.\n\nPAGED, newest minting first: this grows by one row per order for the life of\nthe factory."
           },
           "response": []
         },
@@ -976,6 +1044,18 @@
                   "key": "active_only",
                   "value": "True",
                   "description": "Hide retired lot labels.",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Rows to return (1-200).",
+                  "disabled": true
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
                   "disabled": true
                 }
               ]
@@ -1323,6 +1403,20 @@
                 "{{client_id}}",
                 "orders"
               ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Rows to return (1-200).",
+                  "disabled": true
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
+                  "disabled": true
+                }
+              ],
               "variable": [
                 {
                   "key": "client_id",
@@ -1330,7 +1424,7 @@
                 }
               ]
             },
-            "description": ""
+            "description": "One client's orders. PAGED \u2014 each row eager-loads its styles and their\nSKUs, so an unpaged call on a long-standing customer pulled their whole\ncatalogue three levels deep."
           },
           "response": []
         },
@@ -1369,6 +1463,60 @@
           "response": []
         },
         {
+          "name": "Delete Client",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clients/{{client_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clients",
+                "{{client_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "client_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Delete a client that has produced NOTHING \u2014 a mistyped or duplicate row.\n\nCreating a client also creates its first order (order_number is required on\nPOST /clients), so \"has an order\" was never a sign the client had traded and\nis no longer what this refuses on. The test is whether any PIECE exists: no\npieces, and the cascade removes an empty order shell; one piece, and the\nbarcodes are printed, so it is a 409 and the client is deactivated instead\n(PATCH above). The error names the exact call to make.\n\nDM only, matching client creation. MD passes as superuser."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Client",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clients/{{client_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clients",
+                "{{client_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "client_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "One client \u2014 what an edit form loads before it saves.\n\nA CLIENT login may read only itself, matching /{client_id}/orders."
+          },
+          "response": []
+        },
+        {
           "name": "List Clients",
           "request": {
             "method": "GET",
@@ -1382,9 +1530,29 @@
                 "api",
                 "v1",
                 "clients"
+              ],
+              "query": [
+                {
+                  "key": "include_inactive",
+                  "value": "False",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Rows to return (1-200).",
+                  "disabled": true
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
+                  "disabled": true
+                }
               ]
             },
-            "description": "H1: a CLIENT login sees only its own row. The sibling endpoints in this\nfile already pin the caller (see :57-58 and :91-94); this one did not, so a\ncustomer could read the whole customer list."
+            "description": "H1: a CLIENT login sees only its own row. The sibling endpoints in this\nfile already pin the caller; this one did not, so a customer could read the\nwhole customer list.\n\nDeactivated clients are hidden by default \u2014 that is what deactivation is\nfor. Pass `include_inactive=true` to get them back (an admin screen listing\neveryone, or a lookup by a client who has since been switched off).\n\nPAGED. The CLIENT-role narrowing is now part of the QUERY rather than a\nfilter applied to the result: paging a list and then filtering it would\nreturn one row alongside a `total` that counted every other customer."
           },
           "response": []
         },
@@ -1416,10 +1584,63 @@
                   "value": "00000000-0000-0000-0000-000000000000",
                   "description": "",
                   "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Rows to return (1-200).",
+                  "disabled": true
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
+                  "disabled": true
                 }
               ]
             },
             "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Update Client",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clients/{{client_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clients",
+                "{{client_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "client_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Edit a client. PARTIAL \u2014 only the fields present in the request body are\nwritten, so a form that posts one field cannot blank the rest.\n\nThis is also the DEACTIVATE door: `{\"is_active\": false}` retires a client\nthat has traded, which is what you want instead of DELETE once they have\norders. `code` is unique across clients; a collision is a 409.\n\nDM only, matching client creation.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"\",\n  \"country\": \"\",\n  \"code\": \"\",\n  \"currency\": \"\",\n  \"default_size_system\": \"\",\n  \"brand\": \"\",\n  \"label\": \"\",\n  \"contact_email\": \"\",\n  \"contact_phone\": \"\",\n  \"address\": \"\",\n  \"is_active\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": []
         }
@@ -1513,7 +1734,7 @@
                 }
               ]
             },
-            "description": "The complete Cutting Manager Dashboard in one call (~11 grouped queries)."
+            "description": "The complete Cutting Manager Dashboard in one call (~11 grouped queries).\n\nCACHED, AND BUSTED ON WRITE. Eleven grouped queries recomputed for every\nmanager with the screen open is the single heaviest read in the app. The\ncache is invalidated the instant anyone logs a production event or a store\nscan (core/cache.invalidate), so a cut shows up here immediately rather than\nafter a TTL \u2014 see core/cache.py for why that distinction matters on a floor."
           },
           "response": []
         },
@@ -2148,331 +2369,6 @@
       ]
     },
     {
-      "name": "Drawers",
-      "item": [
-        {
-          "name": "Allocate Waiting",
-          "request": {
-            "method": "POST",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/drawers/allocate-waiting",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "drawers",
-                "allocate-waiting"
-              ]
-            },
-            "description": "Merge drawer-less pieces into whatever drawers are currently free.\n\nThe waiting list drains itself as garments ship (PACKAGE_EXPORT recycles a\ndrawer to WAITING), but nothing merges the next waiting piece into it\nautomatically. This is that step \u2014 safe to call repeatedly and a no-op when\nthere is nothing to place."
-          },
-          "response": []
-        },
-        {
-          "name": "Drawer By Code",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/drawers/by-code/{{code}}",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "drawers",
-                "by-code",
-                "{{code}}"
-              ],
-              "variable": [
-                {
-                  "key": "code",
-                  "value": ""
-                }
-              ]
-            },
-            "description": "One drawer by its printed/scanned code \u2014 the store search box's target.\n\nSame body as GET /drawers/{drawer_id}, so the row the search returns opens\nexactly like a row clicked in the list (change-list item 6: the Send button\nlives inside the drawer as well as outside it)."
-          },
-          "response": []
-        },
-        {
-          "name": "Drawer Detail",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/drawers/{{drawer_id}}",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "drawers",
-                "{{drawer_id}}"
-              ],
-              "variable": [
-                {
-                  "key": "drawer_id",
-                  "value": "00000000-0000-0000-0000-000000000000"
-                }
-              ]
-            },
-            "description": "Open one drawer from the list (bug #13): what it holds, which garment is\ninside, what it is still waiting for, and whether it can be sent."
-          },
-          "response": []
-        },
-        {
-          "name": "Drawer Pool",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/drawers/pool",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "drawers",
-                "pool"
-              ]
-            },
-            "description": "Pool size, free drawers, and how many minted pieces have NO drawer.\n\nThe pool is FIXED at 200 and only grows when a DM/MD says so. A release that\noutruns it mints the pieces anyway \u2014 they keep their barcodes \u2014 but leaves\nthem unmerged. Those are `pieces_waiting_for_drawer`, and until they get a\ndrawer they cannot be stored and therefore cannot pass the merge gate.\n\n`shortfall` is what a DM would have to add right now to clear the list."
-          },
-          "response": []
-        },
-        {
-          "name": "Grow Pool",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/api/v1/drawers/pool",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "drawers",
-                "pool"
-              ]
-            },
-            "description": "Add N NEW PERMANENT barcoded drawers, then drain the waiting list into them.\n\nDM/MD ONLY, and it is one-way: the pool never shrinks. Each new drawer is\npermanent from this moment and recycles like any other once its piece ships.\n\nPrint the returned codes \u2014 a drawer with no printed label cannot be scanned,\nso it is a drawer that does not exist as far as the floor is concerned.",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"add\": 0\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "List Drawers",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/drawers",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "drawers"
-              ],
-              "query": [
-                {
-                  "key": "state",
-                  "value": "",
-                  "description": "Filter by DrawerState, e.g. waiting",
-                  "disabled": true
-                },
-                {
-                  "key": "code",
-                  "value": "",
-                  "description": "Search by drawer code \u2014 case-insensitive CONTAINS, so '42' and 'drw-004' both work.",
-                  "disabled": true
-                },
-                {
-                  "key": "seq_from",
-                  "value": "0",
-                  "description": "Print a range: first seq.",
-                  "disabled": true
-                },
-                {
-                  "key": "seq_to",
-                  "value": "0",
-                  "description": "Print a range: last seq.",
-                  "disabled": true
-                },
-                {
-                  "key": "has_piece",
-                  "value": "False",
-                  "description": "Only drawers holding a garment.",
-                  "disabled": true
-                },
-                {
-                  "key": "sendable",
-                  "value": "False",
-                  "description": "Only drawers ready to send \u2014 the send queue.",
-                  "disabled": true
-                },
-                {
-                  "key": "sort",
-                  "value": "seq",
-                  "description": "seq = drawer order, for printing labels and finding a drawer in the rack (default). recent = most recently acted-on first, for the store screen's latest-drawers view.",
-                  "disabled": true
-                },
-                {
-                  "key": "limit",
-                  "value": "500",
-                  "description": "",
-                  "disabled": true
-                },
-                {
-                  "key": "offset",
-                  "value": "0",
-                  "description": "",
-                  "disabled": true
-                }
-              ]
-            },
-            "description": "The Drawers List (bug #13): every drawer, its scannable barcode, what it\nis holding and which garment is inside it.\n\nOrdered by `seq`, so DRW-0001\u2026DRW-0200 come out in drawer order. `limit`\ndefaults to 500 (a 200-drawer pool lists in one call); page with `offset`\nbeyond that. `total` counts the filter, not the page.\n\n`sendable=true` is the send queue: drawers that hold everything their garment\nneeds, waiting for someone to tick and send them.\n\n`code=` is the store screen's search box (change-list item 6): the production\nview shows the 10 most recent drawers (`?sort=recent&limit=10`) and\neverything else is reached by typing a code, rather than paging 430 rows.\n`sort=recent` orders by the newest of sended_at / received_at / created_at \u2014\n\"latest\" has to mean most recently WORKED ON, because a bootstrapped pool\nshares one creation timestamp and would otherwise return the same arbitrary\nten rows forever.\n\n`needs_lining` on every row is the EFFECTIVE requirement, resolved from the\nstyle/SKU/cut history \u2014 NOT the stored `piece.needs_lining` flag, which is\nwritten once at upload and is wrong for most of a live order. `can_send`\napplies the same rule POST /drawers/send enforces, so the queue can never\noffer a row the server refuses.\n\nEncode `barcode` on a label. A row with `barcode: null` is a drawer with no\nregistry code \u2014 it cannot be scanned, so print nothing for it and re-run\n`python -m scripts.gen_drawer_barcodes` to mint the missing code."
-          },
-          "response": []
-        },
-        {
-          "name": "Send Drawers",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/api/v1/drawers/send",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "drawers",
-                "send"
-              ]
-            },
-            "description": "Send one or many drawers \u2014 and the pieces in them \u2014 onward.\n\nSets each drawer to SENDED, which is exactly what the production merge gate\nreads: the whole selected bunch of pieces becomes eligible for LINE_STITCHING\nin one action, and then follows the chain on to shell stitching and final\nfinish.\n\nTHERE IS NO DESTINATION TO PICK. Lining is upstream of the store \u2014 the lining\npart is cut and then scanned INTO the drawer \u2014 so a merged drawer has exactly\none way forward. Send the ids and nothing else.\n\nPARTIAL ACCEPT: a drawer that is not yet RECEIVED comes back in `not_ready`\nwith the reason; the rest are still sent. Check `count_sent`, not the HTTP\nstatus, to know how many moved.\n\nNOTE the route is declared before `/{drawer_id}` on purpose \u2014 otherwise\n\"send\" would be parsed as a drawer id and 422 on the UUID conversion.",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"drawer_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ]\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Store Scan",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/api/v1/drawers/store-scan",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "drawers",
-                "store-scan"
-              ]
-            },
-            "description": "Record a leather or lining part arriving in its drawer.\n\nTHE ORDER IS EMPLOYEE \u2192 DRAWER \u2192 PIECE. The employee scan is mandatory (bug\n#2) and enforced here, not just in the UI. The drawer comes before the piece\nbecause the merge map is the authority \u2014 a piece scanned into the wrong\ndrawer is a 409, not a re-assignment.\n\n`part` is optional (bug #18): the system decides LEATHER vs LINING from the\npiece's own cut history and what the drawer is still missing. Send it only to\noverride that.\n\nH2: floor staff only. This write feeds the merge gate that releases a piece\ninto line-stitching \u2014 CLIENT and VIEWER tokens must not reach it.",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"employee_barcode\": \"\",\n  \"employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"drawer_barcode\": \"\",\n  \"drawer_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"piece_barcode\": \"\",\n  \"piece_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"part\": \"\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Transition",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/api/v1/drawers/{{drawer_id}}/receive",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "api",
-                "v1",
-                "drawers",
-                "{{drawer_id}}",
-                "receive"
-              ],
-              "variable": [
-                {
-                  "key": "drawer_id",
-                  "value": "00000000-0000-0000-0000-000000000000"
-                }
-              ]
-            },
-            "description": "DEPRECATED \u2014 kept working for one release so a frontend mid-deploy does not\nbreak (the same courtesy /production/cutting was given).\n\nRECEIVED is now reached automatically the moment a drawer holds everything its\ngarment needs, and SENDED is done in bulk through `POST /drawers/send`. Move\nto those two; this single-drawer route will be removed.",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"transition\": \"\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        }
-      ]
-    },
-    {
       "name": "Employees",
       "item": [
         {
@@ -2537,6 +2433,33 @@
           "response": []
         },
         {
+          "name": "Get Employee",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/employees/{{employee_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "employees",
+                "{{employee_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "employee_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "ONE employee. The read the CRUD set was missing.\n\nEvery other operation on an employee existed \u2014 list, create, update,\ndelete \u2014 but opening one required fetching the whole roster and filtering\nclient-side, which is wrong on a factory with several hundred workers and\nimpossible once the list is paged.\n\nSALARY IS STILL HR/DM/MD ONLY, the same rule the list follows: the response\nmodel widens to EmployeeReadWithPay for those roles and stays EmployeeRead\nfor everyone else, so this route cannot become a side door to pay data."
+          },
+          "response": []
+        },
+        {
           "name": "List Employees",
           "request": {
             "method": "GET",
@@ -2556,6 +2479,18 @@
                   "key": "active_only",
                   "value": "True",
                   "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Rows to return (1-200).",
+                  "disabled": true
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
                   "disabled": true
                 }
               ]
@@ -2739,7 +2674,24 @@
                 "commit"
               ]
             },
-            "description": "Validate order number, parse, and write SKUs INTO that order (idempotent).\n\nNOTHING IS MINTED HERE ANY MORE (change-list item 9). The sheet lands as\nDRAFT styles you can correct; per-piece barcodes and drawer merges are\ncreated only when the DM releases a style. The response carries\n`release_required: true` and `pieces_minted: 0` to say so.\n\nNext call: GET /imports/breakdown/{order_number}."
+            "description": "Validate order number, parse, and write SKUs INTO that order (idempotent).\n\nNOTHING IS MINTED HERE ANY MORE (change-list item 9). The sheet lands as\nDRAFT styles you can correct; per-piece barcodes and drawer merges are\ncreated only when the DM releases a style. The response carries\n`release_required: true` and `pieces_minted: 0` to say so.\n\nNext call: GET /imports/breakdown/{order_number}.\n\nTHE ORDER NUMBER IN THIS RESPONSE IS A RECEIPT, NOT THE ONLY COPY. The order\nis a permanent row (this endpoint 404s rather than create one), and every\norder is listed at GET /imports/orders with its breakdown status and a\n`breakdown_url`. Losing this response loses nothing \u2014 re-open the order from\nthat index.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "order_number",
+                  "type": "text",
+                  "value": "",
+                  "disabled": false
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a file."
+                }
+              ]
+            }
           },
           "response": []
         },
@@ -2769,6 +2721,65 @@
               ]
             },
             "description": "Drop a line the sheet should not have had. DRAFT + zero minted pieces only."
+          },
+          "response": []
+        },
+        {
+          "name": "List Orders",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/imports/orders",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "imports",
+                "orders"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "",
+                  "description": "Search order number OR client name \u2014 case-insensitive CONTAINS, so '1579' and 'jack' both work.",
+                  "disabled": true
+                },
+                {
+                  "key": "client_id",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "description": "One client's orders.",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "",
+                  "description": "NOT_UPLOADED | DRAFT | PARTIALLY_RELEASED | RELEASED | CANCELLED \u2014 the breakdown rollup, not the order's own state.",
+                  "disabled": true
+                },
+                {
+                  "key": "has_breakdown",
+                  "value": "False",
+                  "description": "true = orders whose breakdown sheet is committed; false = orders still waiting for one.",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "QUERY. EVERY ORDER, PERMANENTLY \u2014 the index the breakdown screen opens from.\n\nPOST /imports/commit answers with the order number, and that response used to\nbe the only place it appeared: close the tab and\nGET /imports/breakdown/{order_number} was unreachable unless somebody had\nwritten the number down. Nothing was ever actually lost \u2014 `client_order` is a\npermanent table, and commit REQUIRES the order to already exist so it never\ncreates one \u2014 but there was no way to LIST orders:\nGET /clients/{client_id}/orders needs a client id you may not have, and the\nanalytics explorer returns a nested tree rather than a clickable index.\n\nClick a row, call the `breakdown_url` it carries, and you are on the\nbreakdown table for that order.\n\n`breakdown_status` is rolled up from the order's styles, so the list says\nwhat still needs doing without opening anything:\n\n  NOT_UPLOADED        the order exists; no breakdown sheet committed yet\n  DRAFT               sheet uploaded, nothing released, nothing minted\n  PARTIALLY_RELEASED  some styles in production, some still editable\n  RELEASED            every live style released and minting pieces\n  CANCELLED           every style on the order was cancelled\n\nORDERED MOST-RECENTLY-WORKED-ON FIRST \u2014 the newest of the order's creation\nand its last-written style \u2014 so an order whose sheet landed this morning\noutranks one raised months ago and never touched. `order_date` is the\nclient's date and says nothing about what the factory is handling now.\n\n`pieces_minted` is the count of real barcoded garments behind the order, so a\nRELEASED row can be told apart from one that released and produced nothing."
           },
           "response": []
         },
@@ -2875,7 +2886,24 @@
                 "preview"
               ]
             },
-            "description": "Dry-run. Validates the order number first, then parses (no writes)."
+            "description": "Dry-run. Validates the order number first, then parses (no writes).",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "order_number",
+                  "type": "text",
+                  "value": "",
+                  "disabled": false
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a file."
+                }
+              ]
+            }
           },
           "response": []
         },
@@ -2909,10 +2937,10 @@
                 }
               ]
             },
-            "description": "RELEASE STYLES INTO PRODUCTION. This is the mint.\n\nCreates, atomically and only now: the Piece rows, their per-piece barcodes\n(compact PC-XXXXXX + the long alias), and the drawer merge for each. Stamps\neach style RELEASED with the actor and the time, and writes an audit_log row.\n\nEVERY STYLE MUST DECLARE ITS LINING:\n\n    {\"styles\": [{\"style_id\": \"\u2026\", \"needs_lining\": true},\n                {\"style_id\": \"\u2026\", \"needs_lining\": false}]}\n\nThat answer is stamped on the style, copied onto every piece it mints, and\nfrom then on decides two things: whether the garment has a LINING_CUTTING\nstage at all, and whether its drawer must hold BOTH parts before the piece\nmay enter line-stitching. A style declared `false` skips the lining cut and\nclears the store on its leather alone.\n\nIT OUTRANKS THE SYSTEM'S OWN GUESS, IN BOTH DIRECTIONS \u2014 including declaring\na style named \"\u2026KNIT\" as leather-only. That is the point of asking: inference\noff a style name cannot know that a particular wool shell has no lining, and\nthe DM holding the spec sheet can. The declaration is audited with the actor\nand the time, which is what makes switching a lining requirement OFF a\ntraceable decision rather than a silent one.\n\nIT CANNOT BE CHANGED AFTER RELEASE. Pieces are minted against it and their\nbarcodes are printed. Fix it before releasing (PATCH the style), not after.\n\nPARTIAL ACCEPT: an already-released style comes back in `rejected` with its\nreason; the rest still release. Read `minted`, not the HTTP status.\n\nWATCH `minted.pieces_waiting_for_drawer`. The drawer pool is finite. Pieces\nbeyond the free drawers are minted with no drawer \u2014 they have barcodes but\nnowhere to be stored, so they cannot pass the merge gate until a drawer frees\nup or the pool is grown. Send `grow_drawer_pool: true`, or call\nPOST /drawers/pool, to clear it.",
+            "description": "RELEASE STYLES INTO PRODUCTION. This is the mint.\n\nCreates, atomically and only now: the Piece rows, their per-piece barcodes\n(compact PC-XXXXXX + the long alias), and the drawer merge for each. Stamps\neach style RELEASED with the actor and the time, and writes an audit_log row.\n\nEVERY STYLE MUST DECLARE ITS LINING:\n\n    {\"styles\": [{\"style_id\": \"\u2026\", \"needs_lining\": true},\n                {\"style_id\": \"\u2026\", \"needs_lining\": false}]}\n\nWhen ONE answer covers the whole batch, send it once at the top level:\n\n    {\"style_ids\": [\"\u2026\", \"\u2026\"], \"needs_lining\": true}\n\nThat is a declaration, not a guess \u2014 `lining_declared` comes back true. A\nper-style answer in `styles` overrides the top-level one, so the common case\ncan be broadcast and the exceptions named. `style_ids` WITHOUT a top-level\nanswer is the deprecated inference path and still warns.\n\nThat answer is stamped on the style, copied onto every piece it mints, and\nfrom then on decides two things: whether the garment has a LINING_CUTTING\nstage at all, and whether its drawer must hold BOTH parts before the piece\nmay enter line-stitching. A style declared `false` skips the lining cut and\nclears the store on its leather alone.\n\nIT OUTRANKS THE SYSTEM'S OWN GUESS, IN BOTH DIRECTIONS \u2014 including declaring\na style named \"\u2026KNIT\" as leather-only. That is the point of asking: inference\noff a style name cannot know that a particular wool shell has no lining, and\nthe DM holding the spec sheet can. The declaration is audited with the actor\nand the time, which is what makes switching a lining requirement OFF a\ntraceable decision rather than a silent one.\n\nIT CANNOT BE CHANGED AFTER RELEASE. Pieces are minted against it and their\nbarcodes are printed. Fix it before releasing (PATCH the style), not after.\n\nPARTIAL ACCEPT: an already-released style comes back in `rejected` with its\nreason; the rest still release. Read `minted`, not the HTTP status.\n\nWATCH `minted.pieces_waiting_for_drawer`. The drawer pool is finite. Pieces\nbeyond the free drawers are minted with no drawer \u2014 they have barcodes but\nnowhere to be stored, so they cannot pass the merge gate until a drawer frees\nup or the pool is grown. Send `grow_drawer_pool: true`, or call\nPOST /drawers/pool, to clear it.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"styles\": [\n    {\n      \"style_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"needs_lining\": false\n    }\n  ],\n  \"style_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"grow_drawer_pool\": false\n}",
+              "raw": "{\n  \"styles\": [\n    {\n      \"style_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"needs_lining\": false\n    }\n  ],\n  \"style_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"needs_lining\": false,\n  \"grow_drawer_pool\": false\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -3120,7 +3148,7 @@
             "description": "Create a material lot. Registers a child barcode and adds the quantity to\nstock in one transaction.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"category\": \"\",\n  \"subtype\": \"\",\n  \"article\": \"\",\n  \"colour\": \"\",\n  \"attributes\": {},\n  \"supplier_id\": \"00000000-0000-0000-0000-000000000000\"\n}",
+              "raw": "{\n  \"category\": \"\",\n  \"subtype\": \"\",\n  \"article\": \"\",\n  \"colour\": \"\",\n  \"attributes\": {},\n  \"supplier_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"sheets\": [\n    {\n      \"dcm\": 0,\n      \"note\": \"\"\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -3155,6 +3183,47 @@
               ]
             },
             "description": "One lot: identity, its three stock numbers, its barcode, and which of its\nfields the edit form may show."
+          },
+          "response": []
+        },
+        {
+          "name": "Leather By Style",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/leather-by-style",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "leather-by-style"
+              ],
+              "query": [
+                {
+                  "key": "style_id",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Rows to return (1-200).",
+                  "disabled": true
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Arrived / consumed / available per style \u2014 #19.\n\nAll three come from places that already record them, which is why this is a\nread and not a new ledger. The consumed figure is split by rework (#3), so\n\"this style cost X, of which Y was defects\" is answerable."
           },
           "response": []
         },
@@ -3230,6 +3299,35 @@
           "response": []
         },
         {
+          "name": "Lot History",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/lots/{{lot_id}}/history",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "lots",
+                "{{lot_id}}",
+                "history"
+              ],
+              "variable": [
+                {
+                  "key": "lot_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Every delivery of this lot, newest first \u2014 the purchase history (#16).\n\nDeclared BEFORE /lots/{lot_id} so the literal path segment wins: FastAPI\nmatches in declaration order, and the bare route would otherwise swallow\n\"history\" as a lot id and 422 on the UUID parse."
+          },
+          "response": []
+        },
+        {
           "name": "Material Spec",
           "request": {
             "method": "GET",
@@ -3265,6 +3363,35 @@
           "response": []
         },
         {
+          "name": "Piece Consumption",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/pieces/{{piece_id}}/consumption",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "pieces",
+                "{{piece_id}}",
+                "consumption"
+              ],
+              "variable": [
+                {
+                  "key": "piece_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "What ONE garment took, hide by hide \u2014 #17 / #28.\n\nA piece cut through the new grid lists its actual sheets. One cut the old way\n(a typed dcm) lists none, which is the honest answer: nobody recorded which\nhides those were."
+          },
+          "response": []
+        },
+        {
           "name": "Receive",
           "request": {
             "method": "POST",
@@ -3289,7 +3416,42 @@
             "description": "approved adds to stock; a PO-mismatch is rejected (409) unless a DM/MD\nsends approve_mismatch=true, which receives it into a new substitute lot.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"supplier_order_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"approved_qty\": 0,\n  \"rejected_qty\": 0,\n  \"reserve_for_required\": 0,\n  \"approve_mismatch\": false\n}",
+              "raw": "{\n  \"lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"supplier_order_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"approved_qty\": 0,\n  \"rejected_qty\": 0,\n  \"reserve_for_required\": 0,\n  \"approve_mismatch\": false,\n  \"sheets\": [\n    {\n      \"dcm\": 0,\n      \"note\": \"\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Record Manual Issue",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/issues",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "issues"
+              ]
+            },
+            "description": "Record a material issued to one garment OUTSIDE its spec. Spends stock.\n\nTHE ESCAPE HATCH THAT MAKES THE FROZEN RECIPE ACCEPTABLE. A released style's\nspec cannot be edited \u2014 its garments are already being issued against it \u2014 so\na wrong article is corrected by recording what was ACTUALLY handed over, not\nby rewriting the recipe underneath live pieces.\n\nRepeatable on purpose: three corrections on one garment are three real\nevents, and none of them makes the kit checklist think a spec line was\nsatisfied.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"piece_barcode\": \"\",\n  \"piece_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"lot_barcode\": \"\",\n  \"employee_barcode\": \"\",\n  \"employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"qty\": 0,\n  \"note\": \"\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -3569,7 +3731,18 @@
                 }
               ]
             },
-            "description": ""
+            "description": "",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a file."
+                }
+              ]
+            }
           },
           "response": []
         },
@@ -3599,7 +3772,18 @@
                 }
               ]
             },
-            "description": "Upload an order sheet WITHOUT a pre-existing submission. A new submission is\nauto-created only when the file passes validation; the returned `submission_id`\nmust be used for the paired spec-sheet upload (and vice-versa). A rejected file\nreturns 4xx diagnostics \u2014 no submission is visible to the caller."
+            "description": "Upload an order sheet WITHOUT a pre-existing submission. A new submission is\nauto-created only when the file passes validation; the returned `submission_id`\nmust be used for the paired spec-sheet upload (and vice-versa). A rejected file\nreturns 4xx diagnostics \u2014 no submission is visible to the caller.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a file."
+                }
+              ]
+            }
           },
           "response": []
         },
@@ -3636,7 +3820,18 @@
                 }
               ]
             },
-            "description": ""
+            "description": "",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a file."
+                }
+              ]
+            }
           },
           "response": []
         },
@@ -3666,7 +3861,18 @@
                 }
               ]
             },
-            "description": "Upload a spec sheet WITHOUT a pre-existing submission. A new submission is\nauto-created only when the file passes validation; the returned `submission_id`\nmust be used for the paired order-sheet upload (and vice-versa). A rejected file\nreturns 4xx diagnostics \u2014 no submission is visible to the caller."
+            "description": "Upload a spec sheet WITHOUT a pre-existing submission. A new submission is\nauto-created only when the file passes validation; the returned `submission_id`\nmust be used for the paired order-sheet upload (and vice-versa). A rejected file\nreturns 4xx diagnostics \u2014 no submission is visible to the caller.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a file."
+                }
+              ]
+            }
           },
           "response": []
         }
@@ -3942,6 +4148,35 @@
           "response": []
         },
         {
+          "name": "Get Bom Items",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/items",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "boms",
+                "{{bom_id}}",
+                "items"
+              ],
+              "variable": [
+                {
+                  "key": "bom_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
           "name": "Get Checks",
           "request": {
             "method": "GET",
@@ -4015,6 +4250,35 @@
           "response": []
         },
         {
+          "name": "Get Style Bom",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/order-styles/{{order_style_id}}/bom",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "order-styles",
+                "{{order_style_id}}",
+                "bom"
+              ],
+              "variable": [
+                {
+                  "key": "order_style_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Poll target for POST .../generate-bom. status: not_started (nothing\nyet) | ready (bom present)."
+          },
+          "response": []
+        },
+        {
           "name": "List Notifications",
           "request": {
             "method": "GET",
@@ -4034,6 +4298,41 @@
                 {
                   "key": "unread_only",
                   "value": "False",
+                  "description": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "List Patterns",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/patterns",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "patterns"
+              ],
+              "query": [
+                {
+                  "key": "style_signature",
+                  "value": "",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "client_id",
+                  "value": "00000000-0000-0000-0000-000000000000",
                   "description": "",
                   "disabled": true
                 }
@@ -4418,10 +4717,27 @@
                   "value": "",
                   "description": "",
                   "disabled": true
+                },
+                {
+                  "key": "client_id",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "description": "",
+                  "disabled": true
                 }
               ]
             },
-            "description": ""
+            "description": "",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a file."
+                }
+              ]
+            }
           },
           "response": []
         }
@@ -4476,7 +4792,18 @@
                 "commit"
               ]
             },
-            "description": ""
+            "description": "",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a file."
+                }
+              ]
+            }
           },
           "response": []
         },
@@ -4575,7 +4902,18 @@
                 "preview"
               ]
             },
-            "description": ""
+            "description": "",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a file."
+                }
+              ]
+            }
           },
           "response": []
         },
@@ -5297,7 +5635,18 @@
                 "commit"
               ]
             },
-            "description": ""
+            "description": "",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a file."
+                }
+              ]
+            }
           },
           "response": []
         },
@@ -5320,7 +5669,18 @@
                 "preview"
               ]
             },
-            "description": ""
+            "description": "",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a file."
+                }
+              ]
+            }
           },
           "response": []
         },
@@ -5539,6 +5899,42 @@
           "response": []
         },
         {
+          "name": "Delete Event",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/production/events/{{event_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "production",
+                "events",
+                "{{event_id}}"
+              ],
+              "query": [
+                {
+                  "key": "reason",
+                  "value": "",
+                  "description": "",
+                  "disabled": false
+                }
+              ],
+              "variable": [
+                {
+                  "key": "event_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Remove a record that should never have existed, and return its stock.\n\n`reason` is REQUIRED: this is the operation that erases evidence, and why it\nhappened is the only thing that makes it reviewable. The route it replaces \u2014\na DELETE in the database \u2014 had nowhere to put one."
+          },
+          "response": []
+        },
+        {
           "name": "List Events",
           "request": {
             "method": "GET",
@@ -5578,10 +5974,22 @@
                   "value": "2026-08-01",
                   "description": "",
                   "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Rows to return (1-200).",
+                  "disabled": true
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
+                  "disabled": true
                 }
               ]
             },
-            "description": "Raw production events, filterable by sku / employee / date window.\n\nB9: floor/office staff only. This feed names the employee who worked each\npiece; a CLIENT or VIEWER token has no business in it."
+            "description": "Raw production events, filterable by sku / employee / date window.\n\nB9: floor/office staff only. This feed names the employee who worked each\npiece; a CLIENT or VIEWER token has no business in it.\n\nPAGED. production_event grows by one row per piece per stage and never\nshrinks, so this used to be \"serialise the whole production history\" when\ncalled without filters. Newest first; `total` is the unpaged match count."
           },
           "response": []
         },
@@ -5630,6 +6038,18 @@
                   "value": "00000000-0000-0000-0000-000000000000",
                   "description": "",
                   "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Rows to return (1-200).",
+                  "disabled": true
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
+                  "disabled": true
                 }
               ],
               "variable": [
@@ -5639,7 +6059,7 @@
                 }
               ]
             },
-            "description": "Every piece of one SKU with its current stage and eligibility."
+            "description": "The scan checklist for one SKU: every piece, its stage and eligibility.\n\nPAGED. A SKU is one colour and size of one style, and a real order runs to\nhundreds or thousands of garments in a single SKU \u2014 this used to serialise\nall of them, with a per-piece store and lining lookup behind each one.\n\nThe header counts (total / done / pending / closed) remain SKU-WIDE, not\npage-wide. `closed` withdraws the style from the scan screen, so deriving it\nfrom one page would tell a manager on page 1 that a 900-piece SKU was\nfinished. `blocked` is the exception and says so: it is a page figure, tagged\n`blocked_scope`."
           },
           "response": []
         },
@@ -5671,10 +6091,22 @@
                   "value": "00000000-0000-0000-0000-000000000000",
                   "description": "",
                   "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Rows to return (1-200).",
+                  "disabled": true
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
+                  "disabled": true
                 }
               ]
             },
-            "description": "Friendly SKU picker for the log screens (code + style \u00b7 colour \u00b7 size)."
+            "description": "Friendly SKU picker for the log screens (code + style \u00b7 colour \u00b7 size).\n\nPAGED. Unfiltered this is every SKU in the factory \u2014 one row per colour and\nsize of every style of every order, which is the largest picker here. Pass\norder_id or style_id to narrow it rather than paging through it."
           },
           "response": []
         },
@@ -5703,7 +6135,7 @@
             "description": "Log one stage for a batch of pieces. Stage is inferred (never sent):\na cut screen fixes it; PIPELINE infers it from each piece's history.\n\nResolves BOTH doors to ids here, then hands the service ids only:\n  \u2022 barcode door: employee_barcode + piece_barcodes\n  \u2022 manual door:  employee_id + (sku_id + piece_seqs)",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"screen_context\": \"\",\n  \"actor\": {\n    \"employee_barcode\": \"\",\n    \"employee_id\": \"00000000-0000-0000-0000-000000000000\"\n  },\n  \"targets\": {\n    \"piece_barcodes\": [\n      \"\"\n    ],\n    \"sku_id\": \"00000000-0000-0000-0000-000000000000\",\n    \"piece_seqs\": [\n      0\n    ]\n  },\n  \"work_date\": \"2026-08-01\",\n  \"consumption\": {\n    \"leather_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n    \"lining_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n    \"dcm\": 0,\n    \"article\": \"\",\n    \"colour\": \"\",\n    \"thickness\": \"\"\n  },\n  \"preview\": false\n}",
+              "raw": "{\n  \"screen_context\": \"\",\n  \"actor\": {\n    \"employee_barcode\": \"\",\n    \"employee_id\": \"00000000-0000-0000-0000-000000000000\"\n  },\n  \"targets\": {\n    \"piece_barcodes\": [\n      \"\"\n    ],\n    \"sku_id\": \"00000000-0000-0000-0000-000000000000\",\n    \"piece_seqs\": [\n      0\n    ]\n  },\n  \"work_date\": \"2026-08-01\",\n  \"consumption\": {\n    \"leather_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n    \"lining_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n    \"dcm\": 0,\n    \"article\": \"\",\n    \"colour\": \"\",\n    \"thickness\": \"\",\n    \"use_style_spec\": false\n  },\n  \"preview\": false\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -5757,6 +6189,49 @@
               ]
             },
             "description": "What is true about THIS PIECE, the instant it is scanned \u2014 and, if you send\nthe worker's card too, whether it can be logged without asking anyone.\n\nONE PIECE, NOT A SKU. A scan screen holds one garment: it needs that\ngarment's identity, the stage it is in, the stage it is going to, and a yes/no\non logging it. A SKU-wide read answers a different question \u2014 \"what is the\nstate of this whole style\" \u2014 and cannot say anything about the piece in the\noperator's hand, which is why the verify step must call this instead.\n\nTHE READ THE SCAN SCREEN NEVER HAD. Stage inference, the sequence gate and\nthe merge gate all ran only at WRITE time, so the UI had to guess: it made\nthe operator pick a stage by hand (bug #4) and it left later stage cards\nscannable before their predecessor was done (bug #6). This answers both from\nthe server, using the very same predicates POST /log enforces \u2014 so a card the\nUI opens is a card the log will accept.\n\nFOR A FULLY AUTOMATIC SCAN, send `code` + `employee_barcode` and read:\n    current_stage   where the piece is now\n    next_stage      what this scan would log \u2014 never chosen by hand\n    ready_to_log    true  -> POST /production/log immediately\n                    false -> show `blockers`; each names its gate and reason\n                    null  -> no employee sent, so the question is unanswered\n\nAlso carries the piece's drawer (bug #12) and how many pieces of its SKU are\nstill outstanding at the next stage (bug #8)."
+          },
+          "response": []
+        },
+        {
+          "name": "Reassign Event",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/production/events/{{event_id}}/reassign",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "production",
+                "events",
+                "{{event_id}}",
+                "reassign"
+              ],
+              "query": [
+                {
+                  "key": "employee_id",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "description": "",
+                  "disabled": false
+                },
+                {
+                  "key": "reason",
+                  "value": "",
+                  "description": "",
+                  "disabled": true
+                }
+              ],
+              "variable": [
+                {
+                  "key": "event_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Put the right worker's name on work that really happened.\n\nThe stage and the stock are untouched \u2014 the garment WAS cut. Only who did it\nwas recorded wrongly, and the wage follows because it is derived from this\nrow rather than stored against it."
           },
           "response": []
         },
@@ -5834,10 +6309,10 @@
       ]
     },
     {
-      "name": "Users",
+      "name": "Style material spec",
       "item": [
         {
-          "name": "Create Client User",
+          "name": "Add Material Spec Line",
           "request": {
             "method": "POST",
             "header": [
@@ -5847,21 +6322,29 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/api/v1/users/clients",
+              "raw": "{{base_url}}/api/v1/styles/{{style_id}}/material-spec/lines",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "api",
                 "v1",
-                "users",
-                "clients"
+                "styles",
+                "{{style_id}}",
+                "material-spec",
+                "lines"
+              ],
+              "variable": [
+                {
+                  "key": "style_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
               ]
             },
-            "description": "Direct manager provisions a client's login so they can track their orders.\n\nB8: HR removed. Binding a login to a client_id grants cross-tenant read\naccess to that client's orders \u2014 that is a commercial decision, not an\nemployee-admin one.",
+            "description": "Add one line. 409 if this style already has that material.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"\",\n  \"phone\": \"\",\n  \"email\": \"\",\n  \"client_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"password\": \"\"\n}",
+              "raw": "{\n  \"sku_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"category\": \"\",\n  \"subtype\": \"\",\n  \"article\": \"\",\n  \"colour\": \"\",\n  \"thickness\": \"\",\n  \"size\": \"\",\n  \"garment_size\": \"\",\n  \"qty_per_piece\": 0,\n  \"uom\": \"\",\n  \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"note\": \"\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -5871,6 +6354,278 @@
           },
           "response": []
         },
+        {
+          "name": "Confirm Material Spec",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/styles/{{style_id}}/material-spec/confirm",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "styles",
+                "{{style_id}}",
+                "material-spec",
+                "confirm"
+              ],
+              "variable": [
+                {
+                  "key": "style_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Sign the recipe off. THIS IS WHAT UNLOCKS RELEASE.\n\nSeparate from the release call on purpose: the DM can finish the recipe days\nearlier, and the release screen can render `release_blockers` BEFORE the\nbutton is pressed rather than explaining a rejection afterwards.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"no_accessories\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Copy Material Spec",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/styles/{{style_id}}/material-spec/copy-from",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "styles",
+                "{{style_id}}",
+                "material-spec",
+                "copy-from"
+              ],
+              "variable": [
+                {
+                  "key": "style_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Seed this recipe from another style's. Does NOT confirm it.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"source_style_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"include_sku_overrides\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Material Spec Line",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/styles/{{style_id}}/material-spec/lines/{{line_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "styles",
+                "{{style_id}}",
+                "material-spec",
+                "lines",
+                "{{line_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "style_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                },
+                {
+                  "key": "line_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Remove a line. SOFT \u2014 the ledger still points at it, so it deactivates."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Material Spec",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/styles/{{style_id}}/material-spec",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "styles",
+                "{{style_id}}",
+                "material-spec"
+              ],
+              "variable": [
+                {
+                  "key": "style_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "The recipe grid: every line, how it resolves to stock, what blocks release.\n\nREADABLE BY THE WHOLE FLOOR (_STOCK_READERS), because the cutting manager\nneeds the dcm and the store manager needs the accessory list. Writing is\nDM/MD only."
+          },
+          "response": []
+        },
+        {
+          "name": "Material Spec Requirement",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/styles/{{style_id}}/material-spec/requirement",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "styles",
+                "{{style_id}}",
+                "material-spec",
+                "requirement"
+              ],
+              "variable": [
+                {
+                  "key": "style_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "qty_ordered x per-piece vs what is on the shelf, per line.\n\nTHE SCREEN THAT SHOULD STOP AN ORDER, and the moment to read it is BEFORE\nrelease \u2014 afterwards the garments exist and a shortfall is a stoppage rather\nthan a purchase order. `short_by` and `suggested_supplier` feed straight into\nPOST /suppliers/orders."
+          },
+          "response": []
+        },
+        {
+          "name": "Patch Material Spec Line",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/styles/{{style_id}}/material-spec/lines/{{line_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "styles",
+                "{{style_id}}",
+                "material-spec",
+                "lines",
+                "{{line_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "style_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                },
+                {
+                  "key": "line_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Edit one line. Omitted fields keep their current value.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"category\": \"\",\n  \"subtype\": \"\",\n  \"article\": \"\",\n  \"colour\": \"\",\n  \"thickness\": \"\",\n  \"size\": \"\",\n  \"qty_per_piece\": 0,\n  \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"note\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Replace Material Spec",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/styles/{{style_id}}/material-spec",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "styles",
+                "{{style_id}}",
+                "material-spec"
+              ],
+              "variable": [
+                {
+                  "key": "style_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Save the whole grid in one call. Idempotent \u2014 posting it twice is a no-op.\n\n409 once the style is RELEASED: its pieces carry printed barcodes and the\nrecipe is already being spent against them. Correct a released style on the\nfloor with POST /materials/issues instead.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"lines\": [\n    {\n      \"sku_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"category\": \"\",\n      \"subtype\": \"\",\n      \"article\": \"\",\n      \"colour\": \"\",\n      \"thickness\": \"\",\n      \"size\": \"\",\n      \"garment_size\": \"\",\n      \"qty_per_piece\": 0,\n      \"uom\": \"\",\n      \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"note\": \"\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Users",
+      "item": [
         {
           "name": "Create User",
           "request": {
@@ -5895,7 +6650,7 @@
             "description": "B8: the role gate admits DM/HR/MD, but WHICH role may be granted is\ndecided in the service against the caller's own authority.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"\",\n  \"phone\": \"\",\n  \"email\": \"\",\n  \"role\": \"managing_director\",\n  \"password\": \"\",\n  \"employee_id\": \"00000000-0000-0000-0000-000000000000\"\n}",
+              "raw": "{\n  \"name\": \"\",\n  \"phone\": \"\",\n  \"email\": \"\",\n  \"role\": \"managing_director\",\n  \"password\": \"\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -5926,10 +6681,22 @@
                   "value": "True",
                   "description": "",
                   "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Rows to return (1-200).",
+                  "disabled": true
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
+                  "disabled": true
                 }
               ]
             },
-            "description": ""
+            "description": "The login roster. PAGED \u2014 see core/pagination.py."
           },
           "response": []
         }
@@ -5989,10 +6756,52 @@
                 "runs"
               ]
             },
-            "description": "COMMAND. Computes payroll for the window the manager typed.\n\nTHE RUN ENGINE. Two things it now accepts that it did not before:\n\n  \u2022 `freeze` (default true). Send `false` to compute a DRAFT \u2014 an OPEN run you\n    can recompute as often as you like, then freeze with\n    POST /runs/{id}/close once the numbers are agreed. Recomputing a FROZEN\n    run needs an explicit reopen; see POST /runs/{id}/reopen.\n  \u2022 `order_number` / `style_code`. Narrow the run to one order or one style.\n    A SCOPED RUN PAYS PIECE-RATE WORK ONLY (`piece_rate_only: true` on the\n    response) \u2014 a monthly salary belongs to a person, not to a style, and\n    emitting it on a one-style run would pay it again on the next one.\n\nSide-effecting and non-idempotent. Two runs over the same window for the same\nscope is a 409, because the same pieces would be paid twice. Check\n`unrated_operations` and `gap_days` before paying anyone.",
+            "description": "COMMAND. Computes ONE payroll for the window the manager typed.\n\n`run_kind` IS THE FIRST FIELD, and it is not a filter \u2014 it selects which of\ntwo incompatible pricing rules applies:\n\n  \u2022 **piece** (default) \u2014 pays PIECE_RATE workers. **`style_code` or\n    `order_number` is REQUIRED**; a request with only dates is a 422. A piece\n    wage is earned on a specific garment, so the style IS the run. This is\n    the restriction that stops a manager typing two dates, pressing compute,\n    and paying every garment in the factory for that window.\n\n  \u2022 **monthly** \u2014 pays salaried staff, priced from the calendar alone. No\n    scope required. It MAY carry `order_number` / `style_code` as a **label**\n    for the payroll screen; the response echoes it with\n    `scope_is_label: true` to say it did not narrow anything. Two monthly\n    runs over one window still collide however they are labelled.\n\nA PIECE RUN AND A MONTHLY RUN OVER THE SAME WINDOW DO NOT CONFLICT. Their\nemployee populations are disjoint, so the pair is one complete payroll for\nthat fortnight \u2014 compute both.\n\n`freeze` (default true): send `false` for a DRAFT (OPEN) you can recompute\nfreely, then POST /runs/{id}/close. Recomputing a FROZEN run needs an\nexplicit reopen; see POST /runs/{id}/reopen.\n\nSide-effecting and non-idempotent. Two runs that would pay the same money\ntwice is a 409 naming the run that blocks you and what to do about it. Check\n`unrated_operations` and `gap_days` before paying anyone.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"period_start\": \"2026-08-01\",\n  \"period_end\": \"2026-08-01\",\n  \"freeze\": true,\n  \"order_number\": \"\",\n  \"style_code\": \"\"\n}",
+              "raw": "{\n  \"period_start\": \"2026-08-01\",\n  \"period_end\": \"2026-08-01\",\n  \"freeze\": true,\n  \"run_kind\": \"piece\",\n  \"order_number\": \"\",\n  \"style_code\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Run",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/wages/runs/{{run_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "wages",
+                "runs",
+                "{{run_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "run_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "COMMAND. Delete a run and its lines outright.\n\nTHE ESCAPE HATCH THE 409 HAS ALWAYS NAMED. The overlap guard tells a blocked\nmanager to \"delete that run if it is wreckage from a failed compute\" \u2014 and\nuntil now no route could. `create_run` commits an OPEN run BEFORE any line is\nwritten, so a compute that died halfway left a committed, empty run\npermanently occupying that window, blocking every later run over those dates,\nwith no way to clear it.\n\nREFUSES A CLOSED RUN unless `confirm_closed: true`. A frozen run is the\ndocument the cash was counted against; deleting it destroys the record of a\npayment that actually happened. To CHANGE a frozen run, reopen and recompute\ninstead \u2014 that keeps the audit trail. Deleting is for runs that should never\nhave existed.\n\nDM/MD only, like recompute and reopen: HR reads payroll, DM/MD authorise\nchanges to it.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"confirm_closed\": false\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -6123,10 +6932,22 @@
                   "value": "False",
                   "description": "Only orders with unpriced styles.",
                   "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Rows to return (1-200).",
+                  "disabled": true
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
+                  "disabled": true
                 }
               ]
             },
-            "description": "ORDER CARDS \u2014 the payroll landing screen (change-list item 3).\n\nThe screen is order \u2192 style \u2192 rate sheet. It used to open straight onto\nhundreds of style cards from every order at once, with nothing on the card\nsaying which order it belonged to. Click an order here, then call\nGET /wages/styles?order_number=... for its style cards.\n\n`styles_priced / styles` is the card's badge, the same \"n of m priced\" idea as\nthe style card one level up."
+            "description": "ORDER CARDS \u2014 the payroll landing screen (change-list item 3).\nThe screen is order \u2192 style \u2192 rate sheet. It used to open straight onto\nhundreds of style cards from every order at once, with nothing on the card\nsaying which order it belonged to. Click an order here, then call\nGET /wages/styles?order_number=... for its style cards.\n\n`styles_priced / styles` is the card's badge, the same \"n of m priced\" idea as\nthe style card one level up."
           },
           "response": []
         },
@@ -6148,6 +6969,42 @@
               ],
               "query": [
                 {
+                  "key": "run_kind",
+                  "value": "",
+                  "description": "piece | monthly | combined (legacy).",
+                  "disabled": true
+                },
+                {
+                  "key": "order_number",
+                  "value": "",
+                  "description": "Runs whose scope names this order.",
+                  "disabled": true
+                },
+                {
+                  "key": "style_code",
+                  "value": "",
+                  "description": "Runs whose scope names this style.",
+                  "disabled": true
+                },
+                {
+                  "key": "date_from",
+                  "value": "2026-08-01",
+                  "description": "Runs whose window ends on/after this date.",
+                  "disabled": true
+                },
+                {
+                  "key": "date_to",
+                  "value": "2026-08-01",
+                  "description": "Runs whose window starts on/before this date.",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "",
+                  "description": "open | closed",
+                  "disabled": true
+                },
+                {
                   "key": "limit",
                   "value": "50",
                   "description": "",
@@ -6161,7 +7018,7 @@
                 }
               ]
             },
-            "description": "Run history, newest first. Without this a run_id is unreachable once the tab\nthat created it is closed."
+            "description": "QUERY. RUN HISTORY \u2014 newest COMPUTED first, and the route back to a run_id.\n\nEVERY ROW NOW CARRIES WHAT THE RUN PAID FOR: `run_kind`, `scope_order_number`,\n`scope_style_code`, `scope_is_label`, `computed_at`, `recompute_count`,\n`reopen_count` and the frozen `unrated_operations`. The query used not to\nselect the scope columns at all, so every row came back with both nulls \u2014\nincluding runs that were scoped \u2014 which made the list a wall of\nindistinguishable rows and the run_id effectively unreachable.\n\nTHE RECOMPUTE WORKFLOW this exists for: filter by `style_code` (or\n`order_number`) plus `date_from`/`date_to`, read the id off the matching row,\nthen POST /wages/runs/{id}/recompute. The filters overlap-match on dates, so\na fortnight that straddles the month boundary still comes back.\n\n`scope_is_label: true` means the order/style on that row is DECORATION \u2014 the\nrow is a MONTHLY run that was tagged for readability and paid every salaried\nperson in the window, not just that style's people. Render it differently\nfrom a genuine narrowing."
           },
           "response": []
         },
@@ -6204,6 +7061,18 @@
                   "key": "on",
                   "value": "2026-08-01",
                   "description": "Coverage as of this date. Default today.",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Rows to return (1-200).",
+                  "disabled": true
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
                   "disabled": true
                 }
               ]
@@ -6508,6 +7377,865 @@
             "body": {
               "mode": "raw",
               "raw": "{\n  \"style_code\": \"\",\n  \"effective_from\": \"2026-08-01\",\n  \"lines\": [\n    {\n      \"operation_code\": \"\",\n      \"rate\": 0\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "cutting",
+      "item": [
+        {
+          "name": "Add Sheet",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cutting/rows/{{row_id}}/sheets",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cutting",
+                "rows",
+                "{{row_id}}",
+                "sheets"
+              ],
+              "variable": [
+                {
+                  "key": "row_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "The cutter needed one more skin. Scan it, pick it, or create it.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sheet_code\": \"\",\n  \"sheet_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"dcm\": 0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Approve",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cutting/rows/{{row_id}}/approve",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cutting",
+                "rows",
+                "{{row_id}}",
+                "approve"
+              ],
+              "variable": [
+                {
+                  "key": "row_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Freeze the row: these hides, this total, this cutter.\n\n`user.id` is an app_user id \u2014 the LOGIN \u2014 which is what AuditLog.actor_user_id\nrequires. The WORKER is the row's cutter_employee_id and is a different\nperson in a different table."
+          },
+          "response": []
+        },
+        {
+          "name": "Generate",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cutting/rows/generate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cutting",
+                "rows",
+                "generate"
+              ]
+            },
+            "description": "One DRAFT row per un-cut garment, with hides already allocated to it.\n\nSafe to press twice: rows are only created for pieces that have none.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"style_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"colour\": \"\",\n  \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"limit\": 0,\n  \"work_date\": \"2026-08-01\",\n  \"cutter_employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"allocate\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Grid",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cutting/grid",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cutting",
+                "grid"
+              ],
+              "query": [
+                {
+                  "key": "style_id",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "description": "",
+                  "disabled": false
+                },
+                {
+                  "key": "colour",
+                  "value": "",
+                  "description": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "The cutting sheet for one style + colour, as the Excel laid it out.\n\nAlso returns who is checked in today, because production refuses to log an\nabsent worker \u2014 a grid that let one be assigned would collect the work and\nthen fail at the scan, after the leather was already handed out."
+          },
+          "response": []
+        },
+        {
+          "name": "Patch Row",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cutting/rows/{{row_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cutting",
+                "rows",
+                "{{row_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "row_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cutter_employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"size\": \"\",\n  \"rc_no\": \"\",\n  \"article\": \"\",\n  \"colour\": \"\",\n  \"work_date\": \"2026-08-01\",\n  \"note\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Patch Sheet",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cutting/rows/{{row_id}}/sheets/{{sheet_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cutting",
+                "rows",
+                "{{row_id}}",
+                "sheets",
+                "{{sheet_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "row_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                },
+                {
+                  "key": "sheet_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Correct what a hide measures. It follows the skin, not the row.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"dcm\": 0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Remove Sheet",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cutting/rows/{{row_id}}/sheets/{{sheet_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cutting",
+                "rows",
+                "{{row_id}}",
+                "sheets",
+                "{{sheet_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "row_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                },
+                {
+                  "key": "sheet_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "He handed one back. It returns to the shelf, available to the next row."
+          },
+          "response": []
+        },
+        {
+          "name": "Reopen",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cutting/rows/{{row_id}}/reopen",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cutting",
+                "rows",
+                "{{row_id}}",
+                "reopen"
+              ],
+              "query": [
+                {
+                  "key": "reason",
+                  "value": "",
+                  "description": "",
+                  "disabled": true
+                }
+              ],
+              "variable": [
+                {
+                  "key": "row_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Un-freeze an approved row. Recorded, because it un-signs a signature."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "inspections",
+      "item": [
+        {
+          "name": "Approve",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/inspections/{{inspection_id}}/approve",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "inspections",
+                "{{inspection_id}}",
+                "approve"
+              ],
+              "variable": [
+                {
+                  "key": "inspection_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "The DM agrees: the garment goes back (or is fixed where it stands).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"note\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Decline",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/inspections/{{inspection_id}}/decline",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "inspections",
+                "{{inspection_id}}",
+                "decline"
+              ],
+              "variable": [
+                {
+                  "key": "inspection_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "The DM disagrees: the garment stays where it is and carries on.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"note\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "For Piece",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/inspections/pieces/{{piece_code}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "inspections",
+                "pieces",
+                "{{piece_code}}"
+              ],
+              "variable": [
+                {
+                  "key": "piece_code",
+                  "value": ""
+                }
+              ]
+            },
+            "description": "One garment's inspection history, oldest first."
+          },
+          "response": []
+        },
+        {
+          "name": "List Inspections",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/inspections",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "inspections"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "200",
+                  "description": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Open rejections by default \u2014 the DM's queue."
+          },
+          "response": []
+        },
+        {
+          "name": "Raise Inspection",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/inspections",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "inspections"
+              ]
+            },
+            "description": "Record a PASS, or raise a REJECT for the DM.\n\nA PASS closes immediately \u2014 there is nothing to approve about a garment that\nis fine, and making somebody sign one off means nobody records passes at all.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"piece_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"piece_barcode\": \"\",\n  \"found_at_stage\": \"\",\n  \"verdict\": \"\",\n  \"action\": \"\",\n  \"return_to_stage\": \"\",\n  \"defect_type\": \"\",\n  \"responsible_employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"responsible_stage\": \"\",\n  \"reason\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Responsibility",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/inspections/responsibility",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "inspections",
+                "responsibility"
+              ],
+              "query": [
+                {
+                  "key": "employee_id",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "description": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Defects by the worker answerable for them.\n\nWORKMANSHIP ONLY. Product damage names nobody, so counting it here would put\na supplier's bad hide onto a person's record.\n\nDeclared BEFORE /pieces/{code} so the literal segment wins the match \u2014 FastAPI\nresolves in declaration order, and the other route would otherwise swallow\n\"responsibility\" as a piece code."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "job work",
+      "item": [
+        {
+          "name": "Create Vendor",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/jobwork/vendors",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "jobwork",
+                "vendors"
+              ]
+            },
+            "description": "Register an outside factory. Registering the same name twice returns the\noriginal rather than a 409 \u2014 a duplicate is not a mistake worth blocking.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"\",\n  \"contact\": \"\",\n  \"note\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Dispatch",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/jobwork/dispatch",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "jobwork",
+                "dispatch"
+              ]
+            },
+            "description": "Send garments out. They stop being scannable in-house until they return.\n\nA garment already out at another vendor is skipped and reported rather than\nsilently double-booked: two open records claiming one piece would each look\nsatisfied by the other's return.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"vendor_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"stage\": \"\",\n  \"piece_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"expected_back\": \"2026-08-01\",\n  \"rate_per_piece\": 0,\n  \"currency\": \"\",\n  \"note\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List Jobs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/jobwork",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "jobwork"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "vendor_id",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "overdue",
+                  "value": "False",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "200",
+                  "description": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "What is out, what it will cost, and what is late back."
+          },
+          "response": []
+        },
+        {
+          "name": "List Vendors",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/jobwork/vendors",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "jobwork",
+                "vendors"
+              ],
+              "query": [
+                {
+                  "key": "active_only",
+                  "value": "True",
+                  "description": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Receive",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/jobwork/{{job_id}}/receive",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "jobwork",
+                "{{job_id}}",
+                "receive"
+              ],
+              "variable": [
+                {
+                  "key": "job_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Book garments back in, and LOG the stage the vendor performed.\n\nThe work really happened, so the garment advances and the progress counts\ninclude it \u2014 but it is logged against the VENDOR, not an employee, so no\nwage line is generated for work nobody on our payroll did.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"piece_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"rejected_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"short_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"work_date\": \"2026-08-01\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "store",
+      "item": [
+        {
+          "name": "Find Piece",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/store/pieces/{{piece_code}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "store",
+                "pieces",
+                "{{piece_code}}"
+              ],
+              "variable": [
+                {
+                  "key": "piece_code",
+                  "value": ""
+                }
+              ]
+            },
+            "description": "WHERE IS THIS GARMENT \u2014 bug #15, and now a one-line answer.\n\nUnder the drawer flow this meant looking up which numbered box held it. There\nis no box: the garment's own record says what it is holding and what it is\nwaiting for."
+          },
+          "response": []
+        },
+        {
+          "name": "List Pieces",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/store/pieces",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "store",
+                "pieces"
+              ],
+              "query": [
+                {
+                  "key": "state",
+                  "value": "",
+                  "description": "waiting|merged|holding_leather|holding_lining|holding_both|received|sended",
+                  "disabled": true
+                },
+                {
+                  "key": "style_id",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "200",
+                  "description": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Send",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/store/send",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "store",
+                "send"
+              ]
+            },
+            "description": "Release complete garments. One incomplete never loses the complete ones.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"piece_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"piece_barcodes\": [\n    \"\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Store Scan",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/store/scan",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "store",
+                "scan"
+              ]
+            },
+            "description": "Scan the worker, scan the garment. The drawer scan is gone.\n\nBarcodes are resolved to ids HERE so the service sees ids only\n(CLAUDE.md \u00a715) \u2014 the same split the production log uses.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"employee_barcode\": \"\",\n  \"employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"piece_barcode\": \"\",\n  \"piece_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"part\": \"\",\n  \"lines\": [\n    {\n      \"spec_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"qty\": 0,\n      \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\"\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"

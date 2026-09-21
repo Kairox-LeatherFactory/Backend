@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "KairoX \u00b7 Import",
-    "description": "Breakdown upload: preview, commit, edit, then RELEASE. Release is the mint \u2014 it creates the pieces and their barcodes and cannot be undone.\n\nSETUP\n  1. Set `base_url` (default http://127.0.0.1:8000).\n  2. Import `user.postman_collection.json` and run Login.\n  3. Paste `access_token` from that response into this collection's\n     `token` variable. Every request here inherits bearer auth.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "description": "Breakdown upload: preview, commit, edit, then RELEASE. Release is the mint \u2014 it creates the pieces and their barcodes and cannot be undone.\n\nSETUP\n  1. Import the whole folder and SELECT the KairoX environment\n     (top-right). That is what shares one token across every\n     collection \u2014 a collection variable is visible only to the\n     collection that set it.\n  2. Run `user` \u2192 Login. Its test script stores `access_token` for\n     you; there is nothing to copy and paste.\n  3. Every request here inherits bearer auth from that token.\n\n`base_url` defaults to http://127.0.0.1:8000.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. File uploads are real form-data rows \u2014 click Select Files on\nthe `file` row. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -115,7 +115,24 @@
             "commit"
           ]
         },
-        "description": "Validate order number, parse, and write SKUs INTO that order (idempotent).\n\nNOTHING IS MINTED HERE ANY MORE (change-list item 9). The sheet lands as\nDRAFT styles you can correct; per-piece barcodes and drawer merges are\ncreated only when the DM releases a style. The response carries\n`release_required: true` and `pieces_minted: 0` to say so.\n\nNext call: GET /imports/breakdown/{order_number}.\n\nTHE ORDER NUMBER IN THIS RESPONSE IS A RECEIPT, NOT THE ONLY COPY. The order\nis a permanent row (this endpoint 404s rather than create one), and every\norder is listed at GET /imports/orders with its breakdown status and a\n`breakdown_url`. Losing this response loses nothing \u2014 re-open the order from\nthat index."
+        "description": "Validate order number, parse, and write SKUs INTO that order (idempotent).\n\nNOTHING IS MINTED HERE ANY MORE (change-list item 9). The sheet lands as\nDRAFT styles you can correct; per-piece barcodes and drawer merges are\ncreated only when the DM releases a style. The response carries\n`release_required: true` and `pieces_minted: 0` to say so.\n\nNext call: GET /imports/breakdown/{order_number}.\n\nTHE ORDER NUMBER IN THIS RESPONSE IS A RECEIPT, NOT THE ONLY COPY. The order\nis a permanent row (this endpoint 404s rather than create one), and every\norder is listed at GET /imports/orders with its breakdown status and a\n`breakdown_url`. Losing this response loses nothing \u2014 re-open the order from\nthat index.",
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "order_number",
+              "type": "text",
+              "value": "",
+              "disabled": false
+            },
+            {
+              "key": "file",
+              "type": "file",
+              "src": [],
+              "description": "Pick a file."
+            }
+          ]
+        }
       },
       "response": []
     },
@@ -310,7 +327,24 @@
             "preview"
           ]
         },
-        "description": "Dry-run. Validates the order number first, then parses (no writes)."
+        "description": "Dry-run. Validates the order number first, then parses (no writes).",
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "order_number",
+              "type": "text",
+              "value": "",
+              "disabled": false
+            },
+            {
+              "key": "file",
+              "type": "file",
+              "src": [],
+              "description": "Pick a file."
+            }
+          ]
+        }
       },
       "response": []
     },

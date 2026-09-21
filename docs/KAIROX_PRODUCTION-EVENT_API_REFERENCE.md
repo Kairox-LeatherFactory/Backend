@@ -5,9 +5,17 @@
 
 **Covers:** Auth & Users · Employees · Clients · Imports · Barcode · Materials · **Cutting** · Production · **Store** *(replaces Drawers)* · **Inspections** · **Job Work** · Attendance · Wages · Analytics · Dashboard
 
-> **Updated for the Cutting V2 / Store / Reject-Rework / Job-Work release.**
+> **Updated 2026-09-21, for the paging release** and, before it, the Cutting V2
+> / Store / Reject-Rework / Job-Work release.
 > **Start at §0** — it lists everything new, everything that changed shape, and
-> the two things that will break a screen if you do nothing.
+> the things that will break a screen if you do nothing. The two current ones:
+> **twenty list endpoints now return 50 rows instead of all of them**, and
+> **four routes were removed** (§0.0).
+>
+> **Checked against the running app.** The 154 `/api/v1` endpoints indexed in §6
+> are the routes the app actually serves, verified against `/openapi.json`;
+> `postman/` is generated from that same schema, so a path in one and not the
+> other is a bug in this document.
 
 **Companion document:** *KairoX Production-Event System Guide* — the business logic, module architecture and screen design behind these endpoints.
 
@@ -25,11 +33,57 @@
 
 # 0. WHAT CHANGED — read this first
 
-*Added in the Cutting V2 / Store / Reject-Rework / Job-Work release.*
-
 This section is written for the **frontend developer**. It lists everything that
-is new, everything that changed shape, and the two things that will break a
-screen if you do nothing. Everything else in this document is still accurate.
+is new, everything that changed shape, and the things that will break a screen if
+you do nothing. Everything else in this document is still accurate.
+
+**Newest release first.** §0.0 is the current one; §0.1 onward is the Cutting V2
+/ Store / Reject-Rework / Job-Work release before it, still accurate and still
+worth reading if you have not migrated off drawers.
+
+---
+
+## 0.0 BREAKING — the paging release (2026-09-19)
+
+### 1. Twenty list endpoints now return 50 rows, not all of them
+
+**A screen that assumed an unbounded array is now silently showing the first
+page.** Nothing errors. Nothing warns. The list is just short.
+
+`GET /production/events` with no filter used to mean *"serialise the whole
+production history"*, and `production_event` gains a row per piece per stage and
+never shrinks. That is survivable after a few weeks of running and fatal after a
+year — a request that times out while holding a pooled database connection, which
+is this service's real concurrency ceiling.
+
+**What to do:** read `has_more` and page. `limit` defaults to `50`, caps at
+`200`, and `?limit=999999` is a `422` rather than a way back to the old
+behaviour. **§3.1 lists all twenty endpoints, the `Page` envelope, the three that
+page with an older shape, and the counts that are deliberately not page-scoped.**
+
+> **The trap worth knowing before you build the pager:** on
+> `GET /production/skus/{id}/pieces` the `total` / `done` / `pending` / `closed`
+> counts are **SKU-wide**, not page-wide — `closed` withdraws a style from the
+> scan screen, and deriving it from one page would tell a manager on page 1 that
+> a 900-piece SKU was finished. `blocked` is the exception, and it is tagged
+> `blocked_scope` so you can label it honestly. Do not sum header counts across
+> pages.
+
+### 2. Four routes were removed
+
+They are unrouted and **404**. Each is struck out in the endpoint index (§6) and
+its own section says why:
+
+| Gone | What replaces it |
+|---|---|
+| `POST /users/clients` (§8.3) | Nothing. It was the only way to mint a `CLIENT` login, and Phase 1 gives a buyer nothing to do inside the app. `POST /clients` creates the client **record** and is unaffected. |
+| `GET /attendance/me/status` (§18.8) | Nothing. The shift countdown suited the shop floor, and the shop floor has no login. `GET /attendance/me` still returns a staff login's own history. |
+| `GET /attendance/config` (§18.9) | Nothing. Shift policy is configured once, server-side. |
+| `PATCH /attendance/config` (§18.9) | Nothing. It went with the read: an edit form that cannot load its current values overwrites policy with whatever the frontend held. |
+
+**The shift policy itself is unaffected** — `is_late` / `is_short` /
+`is_overtime` are still set on every punch and the wage run still prices against
+it. What is gone is the API that read and wrote the row.
 
 ---
 
@@ -691,10 +745,13 @@ Steps 1–3 are net deletions. Only 4–6 add screens.
 **START HERE**
 0. **What changed in this release** — breaking changes, new modules, build order
 
+**WHAT CHANGED**
+0.0 The paging release *(current)* · 0.1–0.14 Cutting V2 / Store / Reject-Rework / Job-Work
+
 **FOUNDATION**
 1. Base URL and versioning
 2. Authentication
-3. Conventions
+3. Conventions · **3.1 Pagination** *(new)*
 4. The error contract
 5. The role matrix
 6. Endpoint index
@@ -836,7 +893,7 @@ Authorization: Bearer <access_token>
 | **Quantities** | JSON `number`, three decimals |
 | **Enums** | Production stages, designations and material categories are **UPPERCASE**. Roles, drawer states, run statuses and wage types are **lowercase** |
 | **Uploads** | `multipart/form-data`. Imports use field `file` **plus a `order_number` form field** |
-| **Pagination** | `limit` + `offset`. Paged responses carry **both** `total` (matching the filter) and `count` (rows in this page) |
+| **Pagination** | `limit` + `offset`. Paged responses carry **both** `total` (matching the filter) and `count` (rows in this page) — see **§3.1** |
 | **Empty collections** | `[]`, never `null` |
 | **Synchronous** | **Every write is synchronous.** No 202, no polling, no SSE |
 
@@ -845,6 +902,121 @@ Authorization: Bearer <access_token>
 1. **Never send a production stage.** No endpoint accepts one. It is derived from the screen (fixed by the role) or inferred from the piece's history.
 2. **Derived values are server-computed** — `available`, `total_cost`, `amount`, every count. Send inputs; render what comes back.
 3. **Batch writes partially accept.** Read the per-item buckets, not the HTTP status.
+
+### 3.1 Pagination
+
+**Twenty list endpoints are paged, and they no longer return the whole table.**
+If your screen assumed an unbounded array, it is now showing you the first 50
+rows and nothing is telling it so except `has_more`.
+
+**Why they had to be.** `production_event` grows by one row per piece per stage
+and never shrinks. `GET /production/events` with no filter was *"serialise the
+whole production history"* — survivable after a few weeks of running, fatal
+after a year: a request that times out, a worker holding hundreds of megabytes,
+and a pooled database connection held for the whole of it. The pool is this
+service's real concurrency ceiling, so one unbounded list read degrades
+everything else on the box.
+
+**The ask.** Two query parameters, the same two everywhere:
+
+| Param | Default | Bounds |
+|---|--:|---|
+| `limit` | `50` | `1`–`200` |
+| `offset` | `0` | `≥ 0` |
+
+The **200 cap is enforced**, not advisory: `?limit=999999` is a `422`, because
+letting it through would reintroduce exactly the problem paging solves.
+
+**The envelope.** New and newly-paged endpoints return `Page`:
+
+```json
+{
+  "items": [ /* … */ ],
+  "total": 3184,
+  "limit": 50,
+  "offset": 100,
+  "count": 50,
+  "has_more": true
+}
+```
+
+- **`total` is the whole result set, not this page.** It is what a list screen
+  renders as *"101–150 of 3,184"*, and it costs a second `COUNT` query — the
+  price of a pager, and far cheaper than shipping every row.
+- **`has_more` is server-derived.** `offset + len(items) < total` is exactly the
+  off-by-one every client gets to reimplement otherwise; do not recompute it.
+- **`count` is `len(items)`.** On the last page it is smaller than `limit`.
+
+**Offset, not cursor** — deliberate. Offset paging is what a jump-to-page list
+screen needs, and that is what every one of these surfaces renders. It degrades
+on very deep offsets because the database still walks the skipped rows; none of
+these surfaces page tens of thousands deep, and a cursor API that nothing needs
+is a contract to maintain for nothing.
+
+#### The twenty paged endpoints
+
+| Module | Endpoints |
+|---|---|
+| Identity | `GET /users` · `GET /employees` |
+| Clients | `GET /clients` · `GET /clients/styles` · `GET /clients/{id}/orders` |
+| Imports | `GET /imports/orders` |
+| Barcode | `GET /barcode/orders` · `GET /barcode/materials` |
+| Materials | `GET /materials/leather-by-style` |
+| Production | `GET /production/events` · `GET /production/skus` · `GET /production/skus/{id}/pieces` |
+| Wages | `GET /wages/orders` · `GET /wages/styles` · `GET /wages/runs` · `GET /wages/runs/{id}/pieces` · `GET /wages/ledger` |
+| Analytics | `GET /analytics/styles/{id}/detail` |
+
+Two Phase-2 routes also take `limit`/`offset` and are **not** covered by any of
+the above: `GET /procurement/suppliers` and `GET /procurement/inventory/items`.
+They predate `PageParams` and declare their own `limit: int = 100, offset: int =
+0` — **default 100, and no upper cap**, so `?limit=999999` is not rejected there.
+`/procurement/suppliers` returns `{ suppliers, count }` with no `total`. See the
+Procurement reference; do not assume the rules on this page apply to them.
+
+#### The trap: some header counts are deliberately NOT page-scoped
+
+**`GET /production/skus/{id}/pieces` returns SKU-wide `total` / `done` /
+`pending` / `closed` alongside a 50-row page.** That is not an inconsistency.
+
+A SKU is one colour and one size of one style, and a real order runs to hundreds
+or thousands of garments in a single SKU. `closed` withdraws the style from the
+scan screen — deriving it from one page would tell a manager sitting on page 1
+that a 900-piece SKU was finished. So those four counts describe the SKU.
+
+**`blocked` is the exception and says so.** It is a page figure, and it is tagged
+`blocked_scope` in the response so you can label it honestly.
+
+**Do not sum header counts across pages**, and do not render `count` where the
+screen means `total`.
+
+#### Three endpoints take `limit`/`offset` but do NOT return `Page`
+
+They predate the envelope and keep the shape a frontend is reading today.
+Quietly changing a response shape breaks a screen without breaking a test, so
+they migrate when their consumer is ready. **Check which one you are calling
+before you write the pager:**
+
+| Endpoint | Returns | What you do not get |
+|---|---|---|
+| `GET /wages/runs` | a **bare JSON array** | no envelope at all — no `total`, no `has_more`. You cannot tell a full last page from a page with more behind it except by asking for the next one. |
+| `GET /wages/ledger` | `{ count, items }` | no `total` — `count` is this page only, so there is no *"of 3,184"* to render. |
+| `GET /wages/runs/{id}/pieces` | `{ run_id, status, total, count, items }` | has `total`, but no `has_more` and no echo of `limit`/`offset`. |
+
+`GET /imports/orders` returns `{ total, count, items }` — `total` is the filter
+match, `count` is this page.
+
+**Two reads carry paging fields flat, next to domain fields, rather than wrapping
+rows in an envelope.** `GET /production/skus/{id}/pieces` (rows under `pieces`)
+and `GET /analytics/styles/{id}/detail` (rows under `pieces`, beside `totals`,
+`stages` and `store`) both return `limit`, `offset`, `count` and `has_more` at
+the top level. **Called with no paging params, `limit` and `offset` come back
+`null` and `has_more` is `false`** — and on the SKU read `blocked_scope` is then
+`"sku"` rather than `"page"`. Branch on `limit === null`, not on the presence of
+the key.
+
+Everything else in the table above returns the `Page` envelope exactly as shown —
+including `GET /barcode/orders` and `GET /barcode/materials`, which have now
+migrated off the old `{page, page_size, total, pages, items}` shape.
 
 ## 4. The error contract
 
@@ -963,13 +1135,23 @@ A `500` carries a correlation id — **show it to the user**:
 
 ## 6. Endpoint index
 
-**158 endpoints** under `/api/v1`, excluding the Procurement module (Phase 2 —
-it has its own reference) and `/chat`. New in this release: **Cutting (8)**,
-**Store (4)**, **Inspections (6)**, **Job work (5)**, plus 3 new material reads,
-2 production corrections, 2 attendance corrections and the single-employee read.
-**Drawers (9) are withdrawn.**
+**154 endpoints** under `/api/v1`, excluding the Procurement module (Phase 2 —
+65 endpoints, its own reference) and `/chat` (2). The app serves **224 routes**
+in total: those 154, plus Procurement's 65, plus `/chat` and `/chat/stream`, plus
+`/`, `/health` and `/ready` outside `/api/v1`.
 
-### Identity (11)
+New in this release: **Cutting (8)**, **Store (4)**, **Inspections (6)**,
+**Job work (5)**, plus 3 new material reads, 2 production corrections, 2
+attendance corrections and the single-employee read. **Drawers (9) are
+withdrawn.** **Four routes were removed on 2026-09-19** — `POST /users/clients`
+(§8.3), `GET /attendance/me/status` (§18.8), `GET`/`PATCH` `/attendance/config`
+(§18.9). They are struck out below and each section says why.
+
+> **This index is checked against the running app.** `python
+> scripts/make_postman_per_service.py` regenerates `postman/` from
+> `/openapi.json`; if a path here is not in that folder, one of the two is wrong.
+
+### Identity (10)
 | Method | Path | Roles |
 |---|---|:--|
 | `POST` | `/auth/login` | public |
@@ -977,7 +1159,7 @@ it has its own reference) and `/chat`. New in this release: **Cutting (8)**,
 | `POST` | `/auth/change-password` | any |
 | `GET` | `/users` | DM HR MD |
 | `POST` | `/users` | DM HR MD |
-| `POST` | `/users/clients` | DM MD |
+| ~~`POST`~~ | ~~`/users/clients`~~ | **REMOVED — §8.3** |
 | `GET` | `/employees` | internal |
 | `POST` | `/employees` | DM HR MD |
 | `GET` | `/employees/{id}` | internal |
@@ -993,7 +1175,7 @@ it has its own reference) and `/chat`. New in this release: **Cutting (8)**,
 ### Barcode (10)
 `GET` `/barcode/resolve` · `POST` `/barcode/print` · `PATCH` `/employees/{id}/barcode` · `GET` `/barcode/materials` · `GET` `/barcode/orders` · `GET` `/barcode/orders/by-number/{n}` · `GET` `/barcode/orders/{id}/skus` · `GET` `/barcode/orders/{id}/analytics` · `GET` `/barcode/orders/{id}/barcodes` · `GET` `/barcode/detail`
 
-### Materials (21)
+### Materials (24)
 **Lots (7):** `POST`/`GET` `/materials/lots` · `GET`/`PATCH`/`DELETE` `/materials/lots/{id}` · `PATCH` `/materials/lots/{id}/adjust` · `GET` `/materials/spec`
 **Stock & receiving (2):** `GET` `/materials/stock` · `POST` `/materials/receive` *(both now take an optional `sheets[]` for LEATHER — §0.8)*
 **Consumption reads (3, new):** `GET` `/materials/lots/{id}/history` · `GET` `/materials/leather-by-style` · `GET` `/materials/pieces/{id}/consumption`
@@ -1024,8 +1206,9 @@ it has its own reference) and `/chat`. New in this release: **Cutting (8)**,
 Replaced by **Store** above. Old DRAWER barcodes still resolve (a printed sticker
 must not 404) but return `next_expected_scan: null` and frozen history.
 
-### Attendance (12)
-`POST` `/attendance/scan-check-in` · `POST` `/attendance/check-in` · `POST` `/attendance/check-out` · `POST` `/attendance/proxy/check-in` · `POST` `/attendance/proxy/check-out` · `POST` `/attendance/daily-workers` · `GET` `/attendance/me` · `GET` `/attendance/me/status` · `GET`/`PATCH` `/attendance/config` · `GET` `/attendance/history` · `GET` `/attendance/today` · `PATCH` `/attendance/{id}` · `DELETE` `/attendance/{id}`
+### Attendance (11)
+`POST` `/attendance/scan-check-in` · `POST` `/attendance/check-in` · `POST` `/attendance/check-out` · `POST` `/attendance/proxy/check-in` · `POST` `/attendance/proxy/check-out` · `POST` `/attendance/daily-workers` · `GET` `/attendance/me` · `GET` `/attendance/history` · `GET` `/attendance/today` · `PATCH` `/attendance/{id}` · `DELETE` `/attendance/{id}`
+*Removed 2026-09-19:* ~~`GET /attendance/me/status`~~ (§18.8) · ~~`GET`/`PATCH` `/attendance/config`~~ (§18.9). The shift policy they exposed still applies on every punch — only the API for it is gone.
 
 ### Wages (16)
 `GET` `/wages/orders` · `GET` `/wages/styles` · `GET` `/wages/rate-sheet` · `GET` `/wages/rate-history` · `POST` `/wages/rates` · `POST` `/wages/rates/bulk` · `GET`/`POST` `/wages/runs` · `GET` `/wages/runs/{id}` · `DELETE` `/wages/runs/{id}` · `POST` `/wages/runs/{id}/recompute` · `POST` `/wages/runs/{id}/reopen` · `POST` `/wages/runs/{id}/close` · `GET` `/wages/runs/{id}/breakdown` · `GET` `/wages/runs/{id}/pieces` · `GET` `/wages/ledger`
@@ -1109,24 +1292,35 @@ The router admits all three; **which role may be granted is decided in the servi
 
 ---
 
-### 8.3 `POST /users/clients`
+### 8.3 ~~`POST /users/clients`~~ — **REMOVED 2026-09-19**
 
-**Provision a client login bound to a client.** **Roles:** DM · MD only
+**The route is unrouted. It 404s.** Do not build against it.
 
-> **HR is deliberately excluded.** Binding a login to a `client_id` grants cross-tenant read access to that client's orders — a commercial decision, not an employee-admin one.
+It provisioned a CLIENT-role login bound to a `client_id`, so a buyer could log
+in and watch their own orders.
 
-**Request**
-```json
-{
-  "name": "BOGGI Purchasing",
-  "phone": "390212345678",
-  "email": "purchasing@boggi.example",
-  "client_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
-  "password": "••••••••"
-}
-```
+**Why it went.** Phase 1 is the factory floor's system of record — order sheet
+in, breakdown, barcode, cut, stitch, wages. The buyer is not a user of it: they
+send an order sheet and they receive a BOM, both by hand, and the one thing they
+approve (the costing) is approved off-system before production starts. A client
+login had nothing to do inside the app that a person was not already doing for
+them outside it.
 
-**Response `201`** — a `UserRead` with `role: "client"` and `client_id` set.
+**Why removing it was worth doing rather than leaving it unused.** It was the
+*only* way a `CLIENT` login could ever be created. Every
+`if user.role == UserRole.CLIENT` branch in `clients/`, `analytics/`,
+`dashboard/`, `production/` and `bom/` is a cross-tenant scoping check, and each
+one is a place a buyer could be shown another buyer's styles, prices or order
+book if the scoping were ever got wrong. With no door to mint the role, that
+surface cannot be reached at all.
+
+> **`POST /clients` is a different thing and still exists** (§10). It creates the
+> client *record* — the buyer the orders hang off. It mints no login.
+
+**Putting it back** is meant to be uncommenting a route, not rewriting a feature:
+`UserService.create_client_user()` and `schemas.ClientUserCreate` are left in
+place, and the CLIENT-role branches stay where they are against a Phase-2 client
+portal.
 
 ---
 
@@ -3777,46 +3971,45 @@ Kept working for one release so a frontend mid-deploy does not break.
 
 ---
 
-### 18.8 `GET /attendance/me/status`
+### 18.8 ~~`GET /attendance/me/status`~~ — **REMOVED 2026-09-19**
 
-**Server-anchored data for a live shift countdown.**
+**The route is unrouted. It 404s.** There is no replacement, and no screen should
+be built for it.
 
-**Response `200`**
-```json
-{
-  "employee_id": "c3d4e5f6-…",
-  "checked_in": true,
-  "check_in_at": "2026-09-09T03:32:10.000000+00:00",
-  "check_out_at": null,
-  "shift_start_at": "2026-09-09T03:30:00.000000+00:00",
-  "shift_end_at": "2026-09-09T11:30:00.000000+00:00",
-  "server_now": "2026-09-09T08:14:33.221000+00:00",
-  "is_late": false,
-  "timezone": "Asia/Kolkata"
-}
-```
+It served a live shift countdown — *how much of my shift is left* — for a login
+looking at its own row.
 
-> **Compute a one-time `server_now − device_now` offset and tick toward `shift_end_at`.** Never trust the device clock.
+**Why it went.** Only an operator (SECURITY · HR · MD · DM) holds a login at all,
+and an operator is at the gate scanning other people's cards, not watching a
+timer for themselves. The people a countdown would actually suit — the shop floor
+— have no login to see it with.
+
+> **`GET /attendance/me` (§18.7) still serves a staff login's own record.** It is
+> a history, not a countdown.
 
 ---
 
-### 18.9 `GET /attendance/config` · `PATCH /attendance/config`
+### 18.9 ~~`GET /attendance/config` · `PATCH /attendance/config`~~ — **REMOVED 2026-09-19**
 
-**Read:** any authenticated. **Write:** DM · HR · MD.
+**Both routes are unrouted. They 404s.** Shift policy is configured once,
+server-side, and there is no API for it.
 
-**Response `200`**
-```json
-{
-  "shift_start": "09:00",
-  "shift_length_hours": 8.0,
-  "late_grace_minutes": 15,
-  "timezone": "Asia/Kolkata"
-}
-```
+**Why the read went.** Nothing on the floor sets policy per session. It is
+configured once and the backend applies it on every punch.
 
-**PATCH** accepts any subset. Shift policy is a **database row**, not config — HR changes it without a redeploy.
+**Why the write went with it.** An edit form that cannot load its own current
+values is a screen that overwrites policy with whatever the frontend happened to
+hold. Leaving the write door open without the read door was the worse half to
+keep. If policy needs changing, both come back together, or it is a DB/seed
+change.
 
-> The geofence fields (`factory_lat`, `factory_lon`, `radius_m`) still exist on the model but are **unused**. The privileged/public response split is retained in case the fence returns.
+> **THE POLICY ITSELF IS UNAFFECTED.** `AttendanceService` still reads
+> `ShiftConfig` on every check-in and check-out to set `is_late` / `is_short` /
+> `is_overtime`, and the wage run still prices against it. What is gone is the
+> API that read and wrote the row, not the row.
+
+The geofence fields (`factory_lat`, `factory_lon`, `radius_m`) still exist on the
+model and remain **unused**.
 
 ### 18.10 `PATCH /attendance/{attendance_id}`
 

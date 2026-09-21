@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "KairoX \u00b7 Attendance",
-    "description": "Two doors \u2014 the card scan at the gate and the manual fallback \u2014 plus the corrections. PATCH with a new employee_id RE-ALLOCATES the day and moves that day's production events with it.\n\nSETUP\n  1. Set `base_url` (default http://127.0.0.1:8000).\n  2. Import `user.postman_collection.json` and run Login.\n  3. Paste `access_token` from that response into this collection's\n     `token` variable. Every request here inherits bearer auth.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "description": "Two doors \u2014 the card scan at the gate and the manual fallback \u2014 plus the corrections. PATCH with a new employee_id RE-ALLOCATES the day and moves that day's production events with it.\n\nSETUP\n  1. Import the whole folder and SELECT the KairoX environment\n     (top-right). That is what shares one token across every\n     collection \u2014 a collection variable is visible only to the\n     collection that set it.\n  2. Run `user` \u2192 Login. Its test script stores `access_token` for\n     you; there is nothing to copy and paste.\n  3. Every request here inherits bearer auth from that token.\n\n`base_url` defaults to http://127.0.0.1:8000.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. File uploads are real form-data rows \u2014 click Select Files on\nthe `file` row. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -209,27 +209,6 @@
       "response": []
     },
     {
-      "name": "Get Config",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{base_url}}/api/v1/attendance/config",
-          "host": [
-            "{{base_url}}"
-          ],
-          "path": [
-            "api",
-            "v1",
-            "attendance",
-            "config"
-          ]
-        },
-        "description": "Shift policy \u2014 start time, length, grace, timezone.\n\nThe privileged/public split (F44) existed to keep the fence coordinates away\nfrom non-managers. LOCATION IS REMOVED, so both shapes now return the same\nfields; the branch is kept so the split returns intact if the fence does."
-      },
-      "response": []
-    },
-    {
       "name": "History",
       "request": {
         "method": "GET",
@@ -302,28 +281,6 @@
           ]
         },
         "description": ""
-      },
-      "response": []
-    },
-    {
-      "name": "My Status",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{base_url}}/api/v1/attendance/me/status",
-          "host": [
-            "{{base_url}}"
-          ],
-          "path": [
-            "api",
-            "v1",
-            "attendance",
-            "me",
-            "status"
-          ]
-        },
-        "description": "Server-anchored data for the live shift countdown. Frontend computes a\none-time (server_now - device_now) offset and ticks toward shift_end_at."
       },
       "response": []
     },
@@ -424,7 +381,7 @@
         "description": "Check in/out by scanning an employee barcode (direction = \"in\" | \"out\").\n\nNo position is requested or stored \u2014 `lat`/`lon` are accepted and ignored.\n\nTHE primary attendance door. Every employee has a card and no employee has a\nlogin, so the operator standing at the gate \u2014 SECURITY / HR / MD / DM \u2014 scans\nevery card, monthly or daily, including their own colleagues'.\n`proxy=True` marks the MANUAL fallback (card won't scan / forgotten).",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"employee_barcode\": \"\",\n  \"direction\": \"\",\n  \"lat\": 0,\n  \"lon\": 0,\n  \"proxy\": false,\n  \"reason\": \"\"\n}",
+          "raw": "{\n  \"employee_barcode\": \"\",\n  \"direction\": \"\",\n  \"lat\": 0,\n  \"lon\": 0,\n  \"proxy\": false\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -452,41 +409,6 @@
           ]
         },
         "description": "Whole-floor roster. Operators + floor leads only."
-      },
-      "response": []
-    },
-    {
-      "name": "Update Config",
-      "request": {
-        "method": "PATCH",
-        "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          }
-        ],
-        "url": {
-          "raw": "{{base_url}}/api/v1/attendance/config",
-          "host": [
-            "{{base_url}}"
-          ],
-          "path": [
-            "api",
-            "v1",
-            "attendance",
-            "config"
-          ]
-        },
-        "description": "",
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"shift_start\": \"\",\n  \"shift_length_hours\": 0,\n  \"late_grace_minutes\": 0,\n  \"timezone\": \"\"\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        }
       },
       "response": []
     }

@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "KairoX \u00b7 Client",
-    "description": "Buyers, their orders, and the styles under them.\n\nSETUP\n  1. Set `base_url` (default http://127.0.0.1:8000).\n  2. Import `user.postman_collection.json` and run Login.\n  3. Paste `access_token` from that response into this collection's\n     `token` variable. Every request here inherits bearer auth.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "description": "Buyers, their orders, and the styles under them.\n\nSETUP\n  1. Import the whole folder and SELECT the KairoX environment\n     (top-right). That is what shares one token across every\n     collection \u2014 a collection variable is visible only to the\n     collection that set it.\n  2. Run `user` \u2192 Login. Its test script stores `access_token` for\n     you; there is nothing to copy and paste.\n  3. Every request here inherits bearer auth from that token.\n\n`base_url` defaults to http://127.0.0.1:8000.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. File uploads are real form-data rows \u2014 click Select Files on\nthe `file` row. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -86,6 +86,20 @@
             "{{client_id}}",
             "orders"
           ],
+          "query": [
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "Rows to return (1-200).",
+              "disabled": true
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
+              "disabled": true
+            }
+          ],
           "variable": [
             {
               "key": "client_id",
@@ -93,7 +107,7 @@
             }
           ]
         },
-        "description": ""
+        "description": "One client's orders. PAGED \u2014 each row eager-loads its styles and their\nSKUs, so an unpaged call on a long-standing customer pulled their whole\ncatalogue three levels deep."
       },
       "response": []
     },
@@ -154,7 +168,7 @@
             }
           ]
         },
-        "description": "Delete a client that has NO orders \u2014 a mistyped or duplicate row.\n\nA client WITH orders is a 409, not a deletion: the cascade would take their\norders, styles, SKUs and every piece, production event and wage line hanging\noff them. Deactivate that client instead (PATCH above). The error names the\nexact call to make.\n\nDM only, matching client creation."
+        "description": "Delete a client that has produced NOTHING \u2014 a mistyped or duplicate row.\n\nCreating a client also creates its first order (order_number is required on\nPOST /clients), so \"has an order\" was never a sign the client had traded and\nis no longer what this refuses on. The test is whether any PIECE exists: no\npieces, and the cascade removes an empty order shell; one piece, and the\nbarcodes are printed, so it is a 409 and the client is deactivated instead\n(PATCH above). The error names the exact call to make.\n\nDM only, matching client creation. MD passes as superuser."
       },
       "response": []
     },
@@ -206,10 +220,22 @@
               "value": "False",
               "description": "",
               "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "Rows to return (1-200).",
+              "disabled": true
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
+              "disabled": true
             }
           ]
         },
-        "description": "H1: a CLIENT login sees only its own row. The sibling endpoints in this\nfile already pin the caller; this one did not, so a customer could read the\nwhole customer list.\n\nDeactivated clients are hidden by default \u2014 that is what deactivation is\nfor. Pass `include_inactive=true` to get them back (an admin screen listing\neveryone, or a lookup by a client who has since been switched off)."
+        "description": "H1: a CLIENT login sees only its own row. The sibling endpoints in this\nfile already pin the caller; this one did not, so a customer could read the\nwhole customer list.\n\nDeactivated clients are hidden by default \u2014 that is what deactivation is\nfor. Pass `include_inactive=true` to get them back (an admin screen listing\neveryone, or a lookup by a client who has since been switched off).\n\nPAGED. The CLIENT-role narrowing is now part of the QUERY rather than a\nfilter applied to the result: paging a list and then filtering it would\nreturn one row alongside a `total` that counted every other customer."
       },
       "response": []
     },
@@ -240,6 +266,18 @@
               "key": "client_id",
               "value": "00000000-0000-0000-0000-000000000000",
               "description": "",
+              "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "Rows to return (1-200).",
+              "disabled": true
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
               "disabled": true
             }
           ]

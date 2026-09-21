@@ -15,6 +15,11 @@
 
 **Scope note.** This document covers **Phase 1** — the system of record and the tracking layer, from the order sheet landing to the garment leaving the building. The Phase-2 procurement engine (BOM, procurement, inventory, supplier PO, intelligence) is documented separately in **KAIROX_PROCUREMENT_SYSTEM_GUIDE** and **KAIROX_PROCUREMENT_API_REFERENCE**.
 
+> **Updated 2026-09-21.** Two things changed since the last revision, and both are written up where they belong rather than only here:
+>
+> - **List reads are paged.** Twenty endpoints now return 50 rows by default instead of the whole table, behind one `Page` envelope. Why, and the counting rule that is easy to get wrong, are in **§25.6**; the per-endpoint contract is in the API Reference **§3.1**.
+> - **Four routes were removed** on 2026-09-19: `POST /users/clients` (§6.3), `GET /attendance/me/status`, and `GET`/`PATCH` `/attendance/config` (§30.1). All four are commented out in their routers with the reason, not deleted. Nothing they governed stopped working — shift policy still applies on every punch — only the API for it is gone.
+
 ---
 
 # Table of Contents
@@ -320,6 +325,8 @@ app_user
 
 The two optional links are what let one table serve very different kinds of user without extra login tables. A manager who is also on the payroll has `employee_id` set. A client login has `client_id` set, and every read they perform is scoped to it.
 
+> **`client_id` is currently unreachable.** The column, the scoping and the `CLIENT` role all still exist, but the only route that could mint a CLIENT login was removed on 2026-09-19 (§6.3). No live row can carry the role, so nothing exercises the scoping today. It is kept, not deleted, because Phase 2 may want a client portal.
+
 ### 6.2 The two gates
 
 **`require_roles(...)`** — the per-route gate. MD and DM are **superusers** and bypass every one of them.
@@ -333,7 +340,11 @@ Three router groups stay **unlocked**: auth, users, and attendance — plus `/ba
 ### 6.3 Who may create whom
 
 - **`POST /users`** admits DM, HR and MD at the door — but *which* role may be granted is decided in the service against the caller's own authority.
-- **`POST /users/clients`** provisions a client login bound to a `client_id`. **DM and MD only — HR is deliberately excluded.** Binding a login to a client grants cross-tenant read access to that client's orders; that is a commercial decision, not an employee-admin one.
+- **`POST /users/clients` was removed on 2026-09-19.** It provisioned a client login bound to a `client_id`, so a buyer could log in and watch their own orders. Phase 1 is the factory floor's system of record, and the buyer is not a user of it: they send an order sheet and they receive a BOM, both by hand, and the costing they approve is approved off-system before production starts. A client login had nothing to do inside the app that a person was not already doing for them outside it.
+
+> **Why removing it was worth doing rather than leaving it unused.** It was the *only* door that could mint a `CLIENT` login. Every `if user.role == UserRole.CLIENT` branch in `clients/`, `analytics/`, `dashboard/`, `production/` and `bom/` is a cross-tenant scoping check, and each one is a place a buyer could be shown another buyer's styles, prices or order book if the scoping were ever got wrong. With no door to mint the role, that surface cannot be reached at all. The branches stay where they are — they cost nothing, and Phase 2 may well want a client portal — but nothing can hold the role until the route is deliberately put back. `UserService.create_client_user()` and `schemas.ClientUserCreate` are left in place so that is an uncomment, not a rewrite.
+>
+> **`POST /clients` is a different thing and still exists.** It creates the client *record* — the buyer the orders hang off. It mints no login.
 
 ---
 
@@ -434,6 +445,8 @@ Each style carries its own release lifecycle:
 ### 8.4 Tenancy
 
 A CLIENT login is pinned to its own `client_id` on **every** client-facing read — the client list, the styles list, orders, analytics, production reads. A cross-tenant id resolves to 404 rather than 403, because **existence itself is information**.
+
+> **Dormant since 2026-09-19.** These checks are correct and they stay in the code, but no login can hold the `CLIENT` role any more — the one route that minted it is gone (§6.3). Treat this section as the contract Phase 2 re-enables, not as a live surface. If the route comes back, every branch described here comes back with it and must be re-tested; that is the point of leaving them in place rather than deleting them.
 
 ### 8.5 Delete vs deactivate
 
@@ -2025,6 +2038,26 @@ Every blocking call goes through `run_in_threadpool` — openpyxl parsing and th
 
 The import path deliberately keeps the **proven sync loader** and runs it in a worker thread rather than rewriting it as async.
 
+### 25.6 One page envelope, one way to ask for a page
+
+**Module:** `app/core/pagination.py`
+
+**The problem it fixed.** Five routers — production, clients, cutting, dashboard, users — declared no `limit`, `offset` or `page` parameter at all. Those endpoints returned the whole table. `production_event` gains a row per piece per stage and never shrinks, so `GET /production/events` with no filter meant *"serialise the whole production history"*: survivable after a few weeks of running, fatal after a year. The cost is not the response size. It is the request that times out, the worker holding hundreds of megabytes, and **the pooled database connection held open for the whole of it** — and the pool, not CPU, is this service's real concurrency ceiling. One unbounded list read degrades every other request on the box.
+
+The routers that *did* paginate had each invented their own shape — `{total, count, items}` in wages, `{page, page_size, total, pages, items}` in barcode — so a frontend special-cased each one and there was nowhere to fix a paging bug once.
+
+**The three pieces.**
+
+- **`PageParams`** — a FastAPI dependency (`params: PageParams = Depends()`), not two loose `Query` arguments, so every paginated route declares the same two parameters with the same bounds and the same documentation, and a later change lands in one place. `limit` defaults to **50** and is capped at **200**; the cap is what stops a caller asking for the whole table with `?limit=999999` and reintroducing exactly the problem paging solves.
+- **`Page[T]`** — `items`, `total`, `limit`, `offset`, `count`, `has_more`. `total` is the whole result set, because that is what a list screen renders as *"101–150 of 3,184"*; it costs a second `COUNT`, which is the price of a pager and far cheaper than shipping every row. `has_more` is derived server-side rather than left to the caller, because `offset + len(items) < total` is the off-by-one every client otherwise reimplements.
+- **`paginate(db, stmt, params)`** — runs the page and counts the match **from the same statement**, wrapped as a subquery. Hand-writing a separate `COUNT` is how a pager ends up claiming 40 rows over 3 pages while the filters actually match 12 — silently, because both queries succeed. The `ORDER BY` is stripped from the count (it cannot change how many rows match, and sorting a set you will only count is wasted work), and **the slice happens in SQL**: fetching everything and slicing in Python would shrink the response but not the query, leaving the expensive part exactly where it was.
+
+**Offset, not cursor — for now.** Offset paging is what a jump-to-page list screen needs, and that is what every one of these surfaces renders. It degrades on very deep offsets because the database still walks the skipped rows. None of these surfaces page tens of thousands deep; a cursor API that nothing needs is a contract to maintain for nothing.
+
+**What it deliberately did *not* do.** It did not retrofit the older shapes. `RunPiecePage`, `LedgerPage` and the rest are published contracts a frontend is reading today, and quietly changing a response shape breaks a screen without breaking a test. New and newly-paginated endpoints use `Page`; the older ones migrate when their consumer is ready. The API Reference §3.1 lists which is which.
+
+> **The rule that is easy to get wrong.** A count that describes the *collection* must not be recomputed per page. `GET /production/skus/{id}/pieces` returns SKU-wide `total` / `done` / `pending` / `closed` beside a 50-row page, because `closed` withdraws a style from the scan screen — deriving it from one page would tell a manager sitting on page 1 that a 900-piece SKU was finished. `blocked` genuinely *is* a page figure, because eligibility depends on the previous stage per piece and cannot be summarised without re-running the whole gate for the SKU; so it is reported as a page figure and **named** one, via `blocked_scope`. Reporting a page figure honestly beats reporting a whole-SKU figure that is actually a page figure.
+
 ---
 
 ## 26. Module map — every file and what it is for
@@ -2207,6 +2240,26 @@ wrong worker.
 | `dashboard/router.py` | 493 | 22 endpoints |
 
 Neither module owns a table.
+
+### 26.16 `core/` — the shared floor every module stands on
+
+`core` owns no tables and no routes. **It must not import a module** — the rule is enforced by import-linter, and it is why `deps.py` lives in `users/` (it needs the concrete `User` model) while `core/security.py` keeps only the model-agnostic primitives.
+
+| File | Purpose |
+|---|---|
+| `enums.py` | `UserRole`, wage types, attendance sources. **`app_user.role` is a native PG enum** — adding a member here is not enough (§30.2) |
+| `enums_barcode.py` | Stage order, the two cut paths, role → stage, designation → stage. **Business law as code** (§25.3) |
+| `pagination.py` | `PageParams`, `Page[T]`, `paginate()` — one page envelope and one way to ask for a page (**§25.6**) |
+| `security.py` | JWT issue/verify, bcrypt. Model-agnostic on purpose |
+| `database.py` | Async engine, session factory, `GUID` and `JSON_VARIANT` portability shims |
+| `config.py` | Settings. What is *not* here matters: shift policy and page size are not settings (§30.1) |
+| `leather_norms.py` | How much hide one garment takes, by size. A default table exists so the cutting sheet **opens** with sheets already allocated — otherwise the manager is back to picking ten hides by hand per garment, which is the Excel work the grid replaced |
+| `kit_rules.py` | The four accessory-kit predicates, as **pure functions**. They are asked from five places — the release gate, the store scan, the store list, the scan payloads and the production log — three of them hot paths that must not import a service |
+| `store_display.py` | STORE as a **derived display stage**, not an enum value. The overlay the user-facing pipeline shows, computed in one place so two screens cannot caption the same garment differently |
+| `throttle.py` | A rate limit on **login and nowhere else**. Rate-limiting the floor would be actively harmful — a barcode terminal doing two scans a second is the system working |
+| `cache.py` | A read cache for the 32 dashboard and analytics routes that recompute large aggregates |
+| `single_flight.py` | Runs a periodic job **once across every replica**. The sweepers start as asyncio tasks inside the API process, so without this each replica would run them |
+| `celery.py` | The worker wiring for the Phase-2 background jobs |
 
 ---
 
@@ -2471,8 +2524,11 @@ The garment is physically cut. Refusing to record it would lose the traceability
 |---|---|
 | `max_upload_mb` | Import cap; streamed, aborts mid-upload |
 | `debug` | Enables `create_all` at startup — **development only** |
-| Shift policy | **Not config** — it is a database row, editable by HR |
-| Drawer pool size | **Not config** — a real table, grown by DM/MD |
+| Shift policy | **Not config** — a database row (`ShiftConfig`). **No longer editable over the API**: `GET`/`PATCH /attendance/config` were removed on 2026-09-19. Change it by migration or seed. |
+| Page size | `DEFAULT_LIMIT = 50`, `MAX_LIMIT = 200` in `core/pagination.py`. Constants, not settings — raising the cap is a code change, deliberately, because it is the thing that keeps one list read from holding a pooled connection open over the whole table. |
+| ~~Drawer pool size~~ | **Gone.** There is no drawer pool and no allocation. The store is a state on the garment, so it has no capacity to size. |
+
+> **Why the shift-policy write went.** The read went first — nothing on the floor sets policy per session. Keeping the write without the read would have left an edit form that cannot load its own current values, which is a screen that overwrites policy with whatever the frontend happened to hold. If policy needs changing from the UI, both come back together. The policy itself is unaffected: `AttendanceService` still reads `ShiftConfig` on every punch to set `is_late` / `is_short` / `is_overtime`, and the wage run still prices against it.
 
 ### 30.2 The native-enum trap
 

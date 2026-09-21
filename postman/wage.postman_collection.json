@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "KairoX \u00b7 Wage",
-    "description": "Rates, runs and the ledger. A CLOSED run is a frozen snapshot and is never recomputed. Visible to HR, DM and MD only.\n\nSETUP\n  1. Set `base_url` (default http://127.0.0.1:8000).\n  2. Import `user.postman_collection.json` and run Login.\n  3. Paste `access_token` from that response into this collection's\n     `token` variable. Every request here inherits bearer auth.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "description": "Rates, runs and the ledger. A CLOSED run is a frozen snapshot and is never recomputed. Visible to HR, DM and MD only.\n\nSETUP\n  1. Import the whole folder and SELECT the KairoX environment\n     (top-right). That is what shares one token across every\n     collection \u2014 a collection variable is visible only to the\n     collection that set it.\n  2. Run `user` \u2192 Login. Its test script stores `access_token` for\n     you; there is nothing to copy and paste.\n  3. Every request here inherits bearer auth from that token.\n\n`base_url` defaults to http://127.0.0.1:8000.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. File uploads are real form-data rows \u2014 click Select Files on\nthe `file` row. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -254,6 +254,18 @@
               "value": "False",
               "description": "Only orders with unpriced styles.",
               "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "Rows to return (1-200).",
+              "disabled": true
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
+              "disabled": true
             }
           ]
         },
@@ -371,6 +383,18 @@
               "key": "on",
               "value": "2026-08-01",
               "description": "Coverage as of this date. Default today.",
+              "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "Rows to return (1-200).",
+              "disabled": true
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
               "disabled": true
             }
           ]

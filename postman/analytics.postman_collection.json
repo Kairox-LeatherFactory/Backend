@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "KairoX \u00b7 Analytics",
-    "description": "Factory overview, the order/style explorer, stage spread, freight-risk alerts and one garment's whole life story. READ-ONLY \u2014 analytics owns no tables and never writes.\n\nSETUP\n  1. Set `base_url` (default http://127.0.0.1:8000).\n  2. Import `user.postman_collection.json` and run Login.\n  3. Paste `access_token` from that response into this collection's\n     `token` variable. Every request here inherits bearer auth.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "description": "Factory overview, the order/style explorer, stage spread, freight-risk alerts and one garment's whole life story. READ-ONLY \u2014 analytics owns no tables and never writes.\n\nSETUP\n  1. Import the whole folder and SELECT the KairoX environment\n     (top-right). That is what shares one token across every\n     collection \u2014 a collection variable is visible only to the\n     collection that set it.\n  2. Run `user` \u2192 Login. Its test script stores `access_token` for\n     you; there is nothing to copy and paste.\n  3. Every request here inherits bearer auth from that token.\n\n`base_url` defaults to http://127.0.0.1:8000.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. File uploads are real form-data rows \u2014 click Select Files on\nthe `file` row. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -131,10 +131,16 @@
               "value": "True",
               "description": "",
               "disabled": true
+            },
+            {
+              "key": "pieces_per_style",
+              "value": "100",
+              "description": "Cap on piece leaves per style. The style's true piece_count is always reported; pieces_truncated says when leaves were cut.",
+              "disabled": true
             }
           ]
         },
-        "description": "Left-panel nav tree: Client -> Order -> Style -> Piece, scoped to the\nsigned-in user. CLIENT-role users see only their own client."
+        "description": "Left-panel nav tree: Client -> Order -> Style -> Piece, scoped to the\nsigned-in user. CLIENT-role users see only their own client.\n\nTHE LEAVES ARE CAPPED. `include_pieces` defaults to True and there was no\nbound, so the ordinary call built a tree of every garment the factory has\never made \u2014 a single live style runs to 1,425 pieces. Each style now carries\nat most `pieces_per_style` leaves, its real `piece_count`, and a\n`pieces_truncated` flag. Pass include_pieces=false for the skeleton alone."
       },
       "response": []
     },
@@ -321,6 +327,20 @@
             "{{style_id}}",
             "detail"
           ],
+          "query": [
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "Rows to return (1-200).",
+              "disabled": true
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
+              "disabled": true
+            }
+          ],
           "variable": [
             {
               "key": "style_id",
@@ -328,7 +348,7 @@
             }
           ]
         },
-        "description": "One style: every piece with its full stage history (employee + date/time)."
+        "description": "One style: its pieces, each with its full stage history.\n\nPAGED. This was the heaviest read here \u2014 every piece of the style AND every\nproduction event belonging to them, nested in Python. A real order is 1,425\npieces and ~11,400 events in one response. The events are now fetched only\nfor the pieces on the page; `totals`, `stages` and `store` stay whole-style."
       },
       "response": []
     }
