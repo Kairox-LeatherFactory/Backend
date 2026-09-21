@@ -802,7 +802,67 @@ Cheapest and most-likely-to-fail first.
 
 **Gate 1 is whole-request** because the role is wrong for the whole batch — there is nothing per-piece about it. **Gates 2–4 are per-piece** so that one bad piece never loses the thirty-nine good ones a manager scanned with it.
 
-MD and DM bypass the role gate. HR does too.
+MD and DM bypass the role gate. HR does too (`_STAGE_BYPASS_ROLES` in `production/service.py`).
+
+#### Gate 1 in full — which role logs which stage
+
+`STAGE_ROLE_ACCESS` in `core/enums_barcode.py`. This is the whole map:
+
+| Stage | Role that may log it |
+|---|---|
+| `LEATHER_CUTTING` | `cutting_manager` |
+| `LINING_CUTTING` | `lining_manager` |
+| `FUSING` | `stitching_manager` |
+| `PASTING` | `stitching_manager` |
+| `LINE_STITCHING` | `stitching_manager` |
+| `SHELL_STITCHING` | `stitching_manager` |
+| `FINAL_FINISH` | `stitching_manager` |
+| **`FINAL_INSPECTION`** | **— none —** |
+| **`PACKAGE_EXPORT`** | **— none —** |
+
+> **THE LAST TWO STAGES HAVE NO MANAGER ROLE, AND THAT IS DELIBERATE.** Only
+> MD, DM and HR can log final inspection and package-and-export, because those
+> are the two stages that decide a garment is *finished* and *gone*. The
+> stitching manager's authority stops at `FINAL_FINISH`.
+>
+> **This is the 403 that looks like a bug and is not.** A stitching manager
+> scanning a garment at final inspection gets *"The final inspection stage is
+> logged by its own manager (direct_manager, managing_director)"* — the message
+> falls back to naming DM/MD precisely because the allow-list is empty. Do not
+> "fix" it by adding `stitching_manager` to the map.
+>
+> **The escape hatch is per-operation, not per-stage.** `operation_access` is a
+> real table: an MD can grant one role one operation without a deploy, and Gate
+> 1 checks it (`repo.operations_for_role`) after the enum map says no. That is
+> how a factory that genuinely wants its stitching manager to close out
+> garments does it — as an audited grant, not by rewriting business law.
+
+#### Gate 2 in full — which designation is ordinary for which stage
+
+`STAGE_DESIGNATIONS`. A designation **outside** its stage's set produces a
+warning in `skill_warnings[]` and **still logs the piece**.
+
+| Stage | Ordinary designations |
+|---|---|
+| `LEATHER_CUTTING` | `CUTTER` |
+| `LINING_CUTTING` | `CUTTER` · `LINING_CUTTER` |
+| `FUSING` | `CUTTER` · `FUSER` |
+| `PASTING` | `PASTER` · `TAILOR` |
+| `LINE_STITCHING` | `LINE_TAILOR` · `TAILOR` |
+| `SHELL_STITCHING` | `SHELL_TAILOR` · `TAILOR` |
+| `FINAL_FINISH` | `FINISHER` · `TAILOR` |
+| `FINAL_INSPECTION` | `FINISHER` · `INSPECTOR` |
+| `PACKAGE_EXPORT` | `FINISHER` · `PACKER` |
+
+**The floor is cross-trained, and the map says so.** `CUTTER` appears at the
+lining cut and at fusing; `TAILOR` appears at four stages. That is the factory,
+not a loose gate — widen it only when the floor genuinely cross-trains a role,
+never to silence a warning.
+
+`MULTI_STAGE_DESIGNATIONS` — **`HELPER` and `SUPERVISOR`** — are exempt
+everywhere: they never raise a skill warning at any stage, because covering any
+stage is what they are for. An **unknown** designation fails open the same way,
+so an HR backfill gap never blocks the floor.
 
 **Gate 2 is a warning, not a block.** A cutter logged on a pasting job still records the work; the anomaly comes back in `skill_warnings` with the employee, their designation, the stage and a note. Blocking it would mean a helper covering a shift cannot be recorded at all.
 
@@ -1995,7 +2055,9 @@ Every `500` carries a `request_id`. **Show it** — support traces the failure b
 
 ### 25.1 A modular monolith
 
-One deployable FastAPI app, twelve internal modules (plus five Phase-2 ones). Cross-module calls go **through services**, never repositories or models.
+One deployable FastAPI app and **twenty** module packages under `app/modules/`: **fifteen** Phase-1 (`analytics`, `attendance`, `barcode`, `clients`, `cutting`, `dashboard`, `drawers`, `employees`, `imports`, `jobwork`, `materials`, `production`, `store`, `users`, `wages`) plus **five** Phase-2 (`bom`, `intelligence`, `inventory`, `procurement`, `supplier_po`). Cross-module calls go **through services**, never repositories or models.
+
+> **Fifteen packages, fourteen live surfaces.** `drawers/` is a package with no router — it is commented out in `main.py` (§26.8). It counts here because its tables still hold audit rows and its code still compiles; it does not count as a thing you can call. Inspections have no package of their own: they live inside `production/` (§26.12).
 
 ### 25.2 The three layers
 
@@ -2670,13 +2732,49 @@ Style codes are **query** parameters, not path segments, for a related reason: a
 **`Designation`** `CUTTER` · `LINING_CUTTER` · `FUSER` · `PASTER` · `LINE_TAILOR` · `SHELL_TAILOR` · `FINISHER` · `INSPECTOR` · `PACKER` · `TAILOR` · `HELPER` · `SUPERVISOR` · `TRIMMER` · `CHEMICAL_TECHNICIAN` · `SECURITY` · `MERCHANDISER` · `STITCHING_INSTRUCTOR` · `QC_INSPECTOR`
 *Multi-stage (no skill gate):* `HELPER` · `SUPERVISOR`
 
-**`BarcodeType`** `PIECE` · `LEATHER_LOT` · `LINING_LOT` · `ACCESSORY_LOT` · `EMPLOYEE` · `DRAWER`
+**`STAGE_ROLE_ACCESS`** (Gate 1) and **`STAGE_DESIGNATIONS`** (Gate 2) are
+tabulated in full in §12.3. **`MULTI_STAGE_DESIGNATIONS`** `HELPER` · `SUPERVISOR`
+— exempt from Gate 2 at every stage.
+
+**`_STAGE_BYPASS_ROLES`** `managing_director` · `direct_manager` · `hr` — the three logins that log any stage.
+
+**`BarcodeType`** `PIECE` · `LEATHER_LOT` · `LINING_LOT` · `ACCESSORY_LOT` · **`LEATHER_SHEET`** · `EMPLOYEE` · `DRAWER`
+*`LEATHER_SHEET` is the per-hide barcode minted by Cutting V2 (§13). `DRAWER` is retained so printed drawer stickers still resolve rather than 404 — nothing mints a new one.*
 
 **`BarcodeStatus`** `active` · `retired`
 
-**`DrawerState`** `waiting` · `merged` · `holding_leather` · `holding_lining` · `holding_both` · `received` · `sended`
+### The store — use these, not the drawer pair
 
-**`DrawerPart`** `LEATHER` · `LINING` · `ACCESSORY` *(never inferred)*
+**`StoreState`** `waiting` · `merged` · `holding_leather` · `holding_lining` · `holding_both` · `received` · `sended`
+*Lives on **`piece.store_state`**. This is the live enum.*
+
+**`StorePart`** `LEATHER` · `LINING` · `ACCESSORY` *(ACCESSORY is never inferred — safety rule, §14)*
+
+**`STORE_HOLDING_STATES`** `holding_leather` · `holding_lining` · `holding_both` · `received` · `sended` — the states in which the store is holding something.
+
+> **`DrawerState` and `DrawerPart` still exist in `enums_barcode.py` with identical members, and they are NOT the ones to code against.** They belong to the withdrawn `drawers/` module and survive only so its historical rows still deserialise for audit. New code reads `piece.store_state` and `StoreState`. If you find yourself importing `DrawerState`, you are in the wrong module.
+
+### Cutting V2
+
+**`CuttingRowStatus`** `DRAFT` · `APPROVED` · `LOGGED` · `CANCELLED`
+**`CUTTING_ROW_HOLDS_SHEETS`** `DRAFT` · `APPROVED` — the two states in which a row still owns its allocated hides.
+
+**`SheetStatus`** `IN_STOCK` · `ALLOCATED` · `ISSUED` · `CONSUMED` · `RETURNED` · `SCRAPPED`
+**`SHEET_ALLOCATABLE`** / **`SHEET_IN_STORE`** both `IN_STOCK` · `RETURNED` — a returned hide goes back on the shelf and can be allocated again.
+
+### Inspections
+
+**`InspectionVerdict`** `PASS` · `REJECT`
+**`InspectionStatus`** `PENDING` · `APPROVED` · `DECLINED` · `RESOLVED`
+**`ReworkAction`** `FIX` · `REDO`
+**`DefectType`** `PRODUCT_DAMAGE` · `WORKMANSHIP`
+**`INSPECTION_RAISER_ROLES`** every floor manager + `store_manager` + `supervisor` + `hr` + DM/MD · **`INSPECTION_APPROVER_ROLES`** `direct_manager` · `managing_director` only.
+
+### Job work
+
+**`JobWorkStatus`** `OUT` · `PARTIAL` · `RETURNED` · `CANCELLED`
+**`JobWorkPieceStatus`** `OUT` · `BACK` · `SHORT` · `REJECTED`
+**`JOBWORK_PIECE_AWAY`** `OUT` — the one status in which a piece is off-site and cannot be scanned in-house.
 
 **`MaterialCategory`** `LEATHER` · `LINING` · `ACCESSORY`
 
@@ -2704,15 +2802,84 @@ Style codes are **query** parameters, not path segments, for a related reason: a
 
 ## Appendix C — Audit log actions
 
+**Twenty-nine actions are written by Phase-1 code.** All of them are below,
+grouped by the module that writes them. Some are `BarcodeAuditAction` members;
+some are plain strings written at the call site — **the column that matters is
+what lands in `audit_log.action`, which is what a query filters on.**
+
+### Intake — `imports/`
 | Action | Written when |
 |---|---|
-| `DRAWER_RECEIVED` | A garment reaches completeness in the store *(name kept from the drawer era)* |
-| `DRAWER_SENDED` | A batch is released to line-stitching |
+| `BREAKDOWN_STYLE_RELEASED` | **The mint.** A style is released and its pieces and barcodes come into existence |
+| `BREAKDOWN_STYLE_UPDATED` | A style row is edited while still DRAFT |
+| `BREAKDOWN_STYLE_CANCELLED` | A breakdown style is cancelled before release |
+| `BREAKDOWN_SKU_UPDATED` | A SKU's colour / size / quantity is edited while DRAFT |
+| `BREAKDOWN_SKU_DELETED` | A SKU is removed from an unreleased breakdown |
+
+### The spine — `barcode/`
+| Action | Written when |
+|---|---|
+| `EMPLOYEE_BARCODE_REISSUE` | A lost or damaged card is replaced. **The old code is retired; history is untouched** |
+| `EMPLOYEE_BARCODE_DEACTIVATE` | A worker leaves. The code returns 410 Gone; the person, their events and their wage lines stay |
+
+### Materials — `materials/`
+| Action | Written when |
+|---|---|
+| `MATERIAL_RECEIVED` | A delivery is booked in — approved and rejected quantities recorded separately |
+| `MATERIAL_RECEIVED_SUBSTITUTE` | The same, where what arrived is **not** what was ordered. Written as a raw string and **not a `BarcodeAuditAction` member** — filter on the literal |
+| `MATERIAL_STOCK_ADJUSTED` | A manual correction to `on_hand` |
+| `MATERIAL_LOT_RETIRED` | A lot is withdrawn from stock |
+| `MATERIAL_ISSUED_MANUAL` | Material issued outside the kit flow |
+| `SUPPLIER_ORDER_SPEC_EDIT` | A supplier order's spec is amended |
+| `STYLE_MATERIAL_SPEC_CONFIRMED` | A style's recipe is frozen |
+| `STYLE_MATERIAL_SPEC_AMENDED` | A confirmed recipe is changed afterwards |
+
+### Cutting — `cutting/`
+| Action | Written when |
+|---|---|
 | `CUTTING_ROW_APPROVED` | A cut sheet is frozen — these hides, this total, this cutter |
 | `CUTTING_ROW_REOPENED` | An approved cut sheet is un-frozen |
+
+### The store — `store/`
+| Action | Written when |
+|---|---|
+| `DRAWER_RECEIVED` | A garment reaches completeness in the store *(name kept from the drawer era — it is written by `store/service.py`)* |
+| `DRAWER_SENDED` | A batch is released to line-stitching |
+
+### Production and inspections — `production/`
+| Action | Written when |
+|---|---|
+| `PIECE_REJECTED` | A garment fails inspection, recorded against the **responsible** stage |
+| `PIECE_REWORK_APPROVED` | The DM approves the re-walk |
+| `PIECE_REWORK_DECLINED` | The DM refuses it |
+| `PRODUCTION_EVENT_REASSIGNED` | Work was filed against the wrong worker |
+| `PRODUCTION_EVENT_DELETED` | A production event is removed |
+
+### Job work — `jobwork/`
+| Action | Written when |
+|---|---|
+| `JOB_WORK_DISPATCHED` | Garments leave for an outside factory. While `OUT` they cannot be scanned in-house |
+| `JOB_WORK_RETURNED` | They come back; the stage logs against the **vendor**, advancing the garment without generating a wage |
+
+### Attendance — `attendance/`
+| Action | Written when |
+|---|---|
 | `ATTENDANCE_CORRECTED` | A punch is edited, or **re-allocated** — the `after` payload carries `reallocated_from` and `production_events_moved` |
 | `ATTENDANCE_DELETED` | A punch is removed. `reason` is mandatory |
-| `PRODUCTION_EVENT_REASSIGNED` | Work was filed against the wrong worker |
+
+### Two that are defined but never written
+
+`BarcodeAuditAction` also declares **`MATERIAL_KIT_ISSUED`** and
+**`CUTTING_SHEET_RETURNED`**. Neither reaches `audit_log` today:
+`MATERIAL_KIT_ISSUED` is written only by `drawers/service.py`, which is
+unrouted, and `CUTTING_SHEET_RETURNED` has no call site at all. **Do not build a
+report that expects either.** They are left in the enum because the kit-issue
+path returns with the store, not because they fire now.
+
+> **Phase 2 writes its own actions** — `BOM_*`, `PO_*`, `SUPPLIER_*`,
+> `INVENTORY_CHECK_RUN`, `PRODUCTION_TRACKING_UPDATE`, `VIRUS_DETECTED`,
+> `DOCUMENT_MANUAL_OVERRIDE` — into the same `audit_log` table. A query that
+> does not filter by action will see both phases.
 | `PRODUCTION_EVENT_DELETED` | A record that should not exist is removed, and its stock returned |
 | `EMPLOYEE_BARCODE_REISSUE` | A card is replaced |
 | `EMPLOYEE_BARCODE_DEACTIVATE` | A worker leaves |

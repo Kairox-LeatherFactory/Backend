@@ -74,12 +74,12 @@ page with an older shape, and the counts that are deliberately not page-scoped.*
 They are unrouted and **404**. Each is struck out in the endpoint index (§6) and
 its own section says why:
 
-| Gone | What replaces it |
+| Gone — 404 | What replaces it |
 |---|---|
-| `POST /users/clients` (§8.3) | Nothing. It was the only way to mint a `CLIENT` login, and Phase 1 gives a buyer nothing to do inside the app. `POST /clients` creates the client **record** and is unaffected. |
-| `GET /attendance/me/status` (§18.8) | Nothing. The shift countdown suited the shop floor, and the shop floor has no login. `GET /attendance/me` still returns a staff login's own history. |
-| `GET /attendance/config` (§18.9) | Nothing. Shift policy is configured once, server-side. |
-| `PATCH /attendance/config` (§18.9) | Nothing. It went with the read: an edit form that cannot load its current values overwrites policy with whatever the frontend held. |
+| ~~`POST /users/clients`~~ (§8.3) | Nothing. It was the only way to mint a `CLIENT` login, and Phase 1 gives a buyer nothing to do inside the app. `POST /clients` creates the client **record** and is unaffected. |
+| ~~`GET /attendance/me/status`~~ (§18.8) | Nothing. The shift countdown suited the shop floor, and the shop floor has no login. `GET /attendance/me` still returns a staff login's own history. |
+| ~~`GET /attendance/config`~~ (§18.9) | Nothing. Shift policy is configured once, server-side. |
+| ~~`PATCH /attendance/config`~~ (§18.9) | Nothing. It went with the read: an edit form that cannot load its current values overwrites policy with whatever the frontend held. |
 
 **The shift policy itself is unaffected** — `is_late` / `is_short` /
 `is_overtime` are still set on every punch and the wage run still prices against
@@ -1090,48 +1090,108 @@ A `500` carries a correlation id — **show it to the user**:
 
 `MD` Managing Director · `DM` Direct Manager · `CM` Cutting · `LM` Lining · `SM` Stitching · `ST` Store · `SV` Supervisor · `HR` · `SEC` Security · `CL` Client · `VW` Viewer
 
-**MD and DM are superusers** and bypass every `require_roles` gate.
+**MD and DM are superusers** and bypass every `require_roles` gate
+(`SUPERUSER_ROLES` in `users/deps.py`), which is why their columns are ticked
+throughout. *(Phase 2 adds `require_exact_roles`, which the DM does **not**
+bypass — it guards BOM approval. No Phase-1 route uses it.)*
+
+> **`MERCHANDISER` and the legacy `employee` are not columns here.** Both are
+> live `UserRole` members, and **`MERCHANDISER` appears in no role gate
+> anywhere** — a merchandiser token gets only what is ungated. `employee` is
+> blocked at the router level everywhere except auth, users, attendance and the
+> barcode router.
+
+**✅ granted · ✕ explicitly refused · blank = 403 from the role gate · `open` = no role gate at all (see the warning below) · `own` = scoped to the caller's own `client_id`**
+
+### Identity and people
 
 | Surface | MD | DM | CM | LM | SM | ST | SV | HR | SEC | CL | VW |
 |---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| Login, own password | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Login, `/auth/me`, own password | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | List / create users | ✅ | ✅ | | | | | | ✅ | | | |
-| Create client logins | ✅ | ✅ | | | | | | | | | |
 | Employee roster | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✕ | ✕ |
-| Employee **salary** | ✅ | ✅ | | | | | | ✅ | | | |
+| Employee **salary fields** | ✅ | ✅ | | | | | | ✅ | | | |
 | Create / edit employee | ✅ | ✅ | | | | | | ✅ | | | |
 | Delete employee | ✅ | ✅ | | | | | | | | | |
-| Client list / orders | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | own | ✅ |
-| Create / edit / delete client | ✅ | ✅ | | | | | | | | | |
-| Imports & release | ✅ | ✅ | | | | | | | | | |
-| `/barcode/resolve` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Barcode screens | ✅ | ✅ | ✅ | ✅ | ✅ | | ✅ | ✅ | | | |
-| Barcode print | ✅ | ✅ | ✅ | | ✅ | | | ✅ | | | |
 | Employee card reissue | ✅ | ✅ | | | | | | ✅ | | | |
-| Create / edit lots | ✅ | ✅ | ✅ | ✅ | | | | | | | |
-| Read stock / spec / recipe | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | ✅ | ✅ | | |
-| Adjust / retire lot, receive | ✅ | ✅ | | | | | | | | | |
-| Supplier orders | ✅ | ✅ | | | | | | | | | |
-| Write the recipe | ✅ | ✅ | | | | | | | | | |
-| Manual material issue | ✅ | ✅ | | | | ✅ | | | | | |
-| Production reads | ✅ | ✅ | ✅ | ✅ | ✅ | | ✅ | ✅ | | | |
-| **`POST /production/log`** | ✅ | ✅ | ✅ | ✅ | ✅ | **✕** | ✅ | ✅ | | | |
-| Drawers list / scan | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | | | |
-| **Send drawers** | ✅ | ✅ | | | ✅ | ✅ | | | | | |
-| Grow the pool | ✅ | ✅ | | | | | | | | | |
-| **Write attendance** | ✅ | ✅ | | | | | | ✅ | ✅ | | |
-| Read the roster | ✅ | ✅ | ✅ | ✅ | ✅ | | ✅ | ✅ | ✅ | | |
-| Add a daily worker | ✅ | ✅ | | | | | | ✅ | | | |
-| **Wages — all** | ✅ | ✅ | | | | | | ✅ | | | |
-| Recompute / reopen / close / delete | ✅ | ✅ | | | | | | | | | |
-| Analytics | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | own | ✅ |
-| `/analytics/employee-rates` | ✅ | ✅ | | | | | | ✅ | | | |
-| Dashboards | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | ✕ | ✕ |
 
-**Three notes.**
-- **Production stage access is a second, per-stage gate** behind the door gate — see §16.4.
-- **STORE_MANAGER cannot log production.** Store functions only.
-- The legacy `employee` role is blocked at the router level everywhere except auth, users, attendance and `/barcode/resolve`.
+### Commercial and intake
+
+| Surface | MD | DM | CM | LM | SM | ST | SV | HR | SEC | CL | VW |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| Client list / detail / orders | open | open | open | open | open | open | open | open | open | own | open |
+| Create / edit / delete client, create order | ✅ | ✅ | | | | | | | | | |
+| Imports, breakdown edit & release | ✅ | ✅ | | | | | | | | | |
+
+### The spine and materials
+
+| Surface | MD | DM | CM | LM | SM | ST | SV | HR | SEC | CL | VW |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| `/barcode/resolve`, `/barcode/orders/{id}/barcodes` | open | open | open | open | open | open | open | open | open | open | open |
+| Barcode screens (detail, materials, orders, skus) | ✅ | ✅ | ✅ | ✅ | ✅ | | ✅ | ✅ | | | |
+| Barcode print | ✅ | ✅ | ✅ | | ✅ | | | ✅ | | | |
+| Read stock / spec / lots / recipe | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | ✅ | ✅ | | |
+| Create / edit lots | ✅ | ✅ | ✅ | ✅ | | | | ✅ | | | |
+| Adjust / retire lot, receive | ✅ | ✅ | | | | | | ✅ | | | |
+| Write the recipe, supplier orders | ✅ | ✅ | | | | | | | | | |
+| Manual material issue | ✅ | ✅ | | | | ✅ | | | | | |
+
+### The floor
+
+| Surface | MD | DM | CM | LM | SM | ST | SV | HR | SEC | CL | VW |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| **Cutting grid — read and write** | ✅ | ✅ | ✅ | | | | | | | | |
+| Production reads (events, operations, piece-state) | ✅ | ✅ | ✅ | ✅ | ✅ | | ✅ | ✅ | | | |
+| Production reads (skus, sku pieces, style progress) | open | open | open | open | open | open | open | open | open | own | open |
+| **`POST /production/log`** | ✅ | ✅ | ✅ | ✅ | ✅ | **✕** | ✅ | ✅ | | | |
+| Reassign a production event | ✅ | ✅ | ✅ | ✅ | ✅ | | | ✅ | | | |
+| Delete a production event | ✅ | ✅ | | | | | | | | | |
+| **Store reads** (`/store/pieces`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | | |
+| **Store scan / send** | ✅ | ✅ | | | ✅ | ✅ | | | | | |
+| **Inspections — raise and read** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | | |
+| **Inspections — approve / decline / responsibility** | ✅ | ✅ | | | | | | | | | |
+| **Job work — read** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | | |
+| **Job work — vendors, dispatch, receive** | ✅ | ✅ | | | | | | | | | |
+
+### People, money and reads
+
+| Surface | MD | DM | CM | LM | SM | ST | SV | HR | SEC | CL | VW |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| **Write attendance** (scan, manual, proxy) | ✅ | ✅ | | | | | | ✅ | ✅ | | |
+| Read the roster (`/attendance/today`) | ✅ | ✅ | ✅ | ✅ | ✅ | | ✅ | ✅ | ✅ | | |
+| Read one worker's history | ✅ | ✅ | ✅ | ✅ | ✅ | | ✅ | ✅ | ✅ | | |
+| Add a daily worker | ✅ | ✅ | | | | | | ✅ | | | |
+| Correct a punch (`PATCH`) | ✅ | ✅ | | | | | | ✅ | ✅ | | |
+| Delete a punch (`DELETE`) | ✅ | ✅ | | | | | | ✅ | | | |
+| **Wages — READ** (sheets, runs, ledger, breakdown) | ✅ | ✅ | | | | | | ✅ | | | |
+| **Wages — WRITE** (rates, create/recompute/reopen/close/delete a run) | ✅ | ✅ | | | | | | **✕** | | | |
+| Analytics | open | open | open | open | open | open | open | open | open | own | open |
+| `/analytics/employee-rates` | ✅ | ✅ | | | | | | ✅ | | | |
+| Dashboards | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | | |
+
+### Four notes, and one warning
+
+- **HR reads payroll; HR does not write it.** Every rate write and every run
+  operation is DM/MD. This is a deliberate separation of duties — visibility is
+  not authority — and it was a real defect before it was fixed: a dependency
+  named `_PAYROLL_READERS` was guarding five mutating routes.
+- **HR is a materials role, not only an admin one.** HR can create and edit
+  lots, adjust and retire them, and record receiving. That is easy to miss
+  because HR holds no other floor permission.
+- **Production stage access is a second, per-stage gate** behind the door gate —
+  see §16.4. Passing the role gate here does not mean the stage will log.
+- **STORE_MANAGER cannot log production**, cannot read the cutting grid, and
+  does not appear on the barcode screens or the attendance roster. Store
+  functions, dashboards, inspections, job work and materials reads only.
+
+> **⚠️ `open` means no role gate — including CLIENT and VIEWER.** Rows marked
+> `open` are guarded by `get_current_user` alone: any authenticated token
+> reaches them. A `CLIENT` token is narrowed to its own `client_id` by
+> `client_scope` on the client, analytics and production reads, so it sees only
+> its own orders — **but a `VIEWER` token is not narrowed at all** and reads the
+> whole factory on those routes. Two reads that look open are not: `/employees`
+> and `/employees/{id}` refuse CLIENT and VIEWER inside the handler, and
+> `/attendance/history` refuses anyone outside `_ATTENDANCE_READERS`.
 
 ## 6. Endpoint index
 
@@ -1144,7 +1204,7 @@ New in this release: **Cutting (8)**, **Store (4)**, **Inspections (6)**,
 **Job work (5)**, plus 3 new material reads, 2 production corrections, 2
 attendance corrections and the single-employee read. **Drawers (9) are
 withdrawn.** **Four routes were removed on 2026-09-19** — `POST /users/clients`
-(§8.3), `GET /attendance/me/status` (§18.8), `GET`/`PATCH` `/attendance/config`
+(§8.3), ~~`GET /attendance/me/status`~~ (§18.8), ~~`GET`/`PATCH` `/attendance/config`~~
 (§18.9). They are struck out below and each section says why.
 
 > **This index is checked against the running app.** `python
@@ -1214,10 +1274,30 @@ must not 404) but return `next_expected_scan: null` and frozen history.
 `GET` `/wages/orders` · `GET` `/wages/styles` · `GET` `/wages/rate-sheet` · `GET` `/wages/rate-history` · `POST` `/wages/rates` · `POST` `/wages/rates/bulk` · `GET`/`POST` `/wages/runs` · `GET` `/wages/runs/{id}` · `DELETE` `/wages/runs/{id}` · `POST` `/wages/runs/{id}/recompute` · `POST` `/wages/runs/{id}/reopen` · `POST` `/wages/runs/{id}/close` · `GET` `/wages/runs/{id}/breakdown` · `GET` `/wages/runs/{id}/pieces` · `GET` `/wages/ledger`
 
 ### Analytics (10)
-`GET` `/analytics/explorer` · `/orders/{id}/tree` · `/styles/{id}/detail` · `/pieces/detail` · `/pieces/{code}/story` · `/consumption` · `/employee-rates` · **410:** `/overview` · `/alerts/stage-spread` · `/alerts/freight-risk`
+All `GET`, all under `/analytics`:
+`/explorer` · `/orders/{order_id}/tree` · `/styles/{style_id}/detail` · `/pieces/detail` · `/pieces/{piece_code}/story` · `/consumption` · `/employee-rates`
+**410 Gone (deliberate, not deleted):** `/overview` · `/alerts/stage-spread` · `/alerts/freight-risk` — use the role dashboards and `GET /dashboard/alerts`.
 
 ### Dashboard (22)
-**Cutting (3)** · **Lining (3)** · **Stitching (2)** · **Piece trace (5 aliases)** · **Store (4)** · **DM (4)** · **Alerts (1)**
+All `GET`, all under `/dashboard`. Every one is a read; the module owns no table.
+
+| Screen | Paths |
+|---|---|
+| Cutting (4) | `/cutting` · `/cutting/consumption` · `/cutting/employees/{employee_id}` · `/cutting/pieces/{piece_code}` |
+| Lining (4) | `/lining` · `/lining/consumption` · `/lining/employees/{employee_id}` · `/lining/pieces/{piece_code}` |
+| Stitching (3) | `/stitching` · `/stitching/employees/{employee_id}` · `/stitching/pieces/{piece_code}` |
+| Store (5) | `/store` · `/store/traceability` · `/store/pieces/{piece_code}` · `/store/drawers/{drawer_id}` · `/store/drawers/{drawer_id}/movement` |
+| Direct Manager (4) | `/direct-manager` · `/direct-manager/orders/{order_id}` · `/direct-manager/styles/{style_id}` · `/direct-manager/pieces/{piece_code}` |
+| Generic piece trace (1) | `/pieces/{piece_code}` |
+| Alerts (1) | `/alerts` |
+
+> **The five `pieces/{piece_code}` paths are aliases of one trace**, one per
+> screen, so each dashboard can link to a garment without leaving its own
+> namespace. They differ in framing, not in the underlying piece.
+>
+> **The two `store/drawers/*` paths are the only drawer-shaped routes left.**
+> They read **frozen history** for audit. They are not live state, and there is
+> no drawer pool behind them — see §17.
 
 ---
 ---
@@ -3222,7 +3302,54 @@ What one garment of this style needs.
 **Roles (door gate):** MD · DM · HR · Supervisor · Cutting · Lining · Stitching
 **STORE_MANAGER is deliberately excluded** — store functions only.
 
-Behind the door gate sits the per-stage **Gate 1**.
+Behind the door gate sits the per-stage **Gate 1**, and passing the door does
+**not** mean the stage will log.
+
+#### Gate 1 — the complete role → stage map
+
+| Stage | Role that may log it |
+|---|---|
+| `LEATHER_CUTTING` | `cutting_manager` |
+| `LINING_CUTTING` | `lining_manager` |
+| `FUSING` · `PASTING` · `LINE_STITCHING` · `SHELL_STITCHING` · `FINAL_FINISH` | `stitching_manager` |
+| **`FINAL_INSPECTION`** | **— no manager role —** |
+| **`PACKAGE_EXPORT`** | **— no manager role —** |
+
+**MD, DM and HR bypass Gate 1 entirely** and log any stage.
+
+> **⚠️ The last two stages have no manager role, and this is the 403 that looks
+> like a bug.** A `stitching_manager` who scans a garment at final inspection
+> gets a 403 reading *"The final inspection stage is logged by its own manager
+> (direct_manager, managing_director)"* — the message falls back to naming DM/MD
+> precisely **because the allow-list is empty**. The stitching manager's
+> authority ends at `FINAL_FINISH`. Build the screen so a non-DM/MD/HR login
+> does not offer those two stages, rather than letting the operator scan into a
+> refusal.
+>
+> **There is a per-operation escape hatch.** `operation_access` is a real table
+> and Gate 1 consults it after the static map says no, so an MD can grant one
+> role one operation without a deploy. A 403 is therefore not provably
+> permanent — but it is what you get by default.
+
+#### Gate 2 — the complete designation → stage map
+
+A designation outside its stage's set returns a `skill_warnings[]` entry and
+**still logs the piece**. Never render these as errors.
+
+| Stage | Ordinary designations |
+|---|---|
+| `LEATHER_CUTTING` | `CUTTER` |
+| `LINING_CUTTING` | `CUTTER` · `LINING_CUTTER` |
+| `FUSING` | `CUTTER` · `FUSER` |
+| `PASTING` | `PASTER` · `TAILOR` |
+| `LINE_STITCHING` | `LINE_TAILOR` · `TAILOR` |
+| `SHELL_STITCHING` | `SHELL_TAILOR` · `TAILOR` |
+| `FINAL_FINISH` | `FINISHER` · `TAILOR` |
+| `FINAL_INSPECTION` | `FINISHER` · `INSPECTOR` |
+| `PACKAGE_EXPORT` | `FINISHER` · `PACKER` |
+
+**`HELPER` and `SUPERVISOR` never warn** at any stage, and an **unknown
+designation fails open** — so an HR backfill gap never blocks the floor.
 
 **Request — the barcode door (cut screen)**
 ```json
