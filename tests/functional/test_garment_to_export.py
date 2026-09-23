@@ -3,7 +3,7 @@ FUNCTIONAL · one garment, breakdown to export, through the real services.
 
 This is the capability the whole Phase-1 system exists to deliver: a single
 jacket carries one barcode from upload to the shipping box, every stage is
-logged against it, and the drawer that held it is returned to the pool for the
+logged against it, and it leaves the store for the
 next garment.
 
 The layer above (`tests/functional/test_uat_scenarios.py`) covers the seven
@@ -67,18 +67,20 @@ async def lining_lot(db):
 
 
 @pytest.mark.asyncio
-async def test_one_lined_jacket_walks_the_whole_chain_and_recycles_its_drawer(
+async def test_one_lined_jacket_walks_the_whole_chain_and_leaves_the_store(
         db, operations, pieces, leather_lot, lining_lot,
         cutter, lining_cutter, paster, tailor, finisher,
         cutting_mgr, lining_mgr, stitching_mgr, dm):
-    piece, drawer = pieces[0]
-    piece_code, drawer_code, drawer_id = piece.code, drawer.code, drawer.id
+    piece = pieces[0]
+    piece_code = piece.code
     svc = ProductionService(db)
     store = StoreService(db)
 
     # ── 0 · the state breakdown upload left behind ───────────────────────────
     assert piece.needs_lining is True
-    assert drawer.state == StoreState.MERGED.value
+    # WAITING, not MERGED: a freshly minted garment is not in the store, and
+    # nothing pre-assigns it a place there. It enters when a part is scanned in.
+    assert piece.store_state == StoreState.WAITING.value
     resolved = await BarcodeService(db).resolve(piece_code)
     assert resolved["type"] == "PIECE"
     assert resolved["piece"]["current_stage"] is None, "a piece is uncut at upload"
@@ -181,22 +183,14 @@ async def test_one_lined_jacket_walks_the_whole_chain_and_recycles_its_drawer(
         "the garment did not leave the store after PACKAGE_EXPORT")
     assert piece.leather_in is False and piece.lining_in is False
     assert piece.accessories_in is False
-    # `piece.drawer_id` is NOT cleared, and that is deliberate. The drawer tables
-    # are retained unwritten so the historical link stays auditable; nothing
-    # reads it any more. Clearing it would erase where a garment used to sit
-    # without gaining anything.
 
-    # ── 9 · the codes still resolve — shipping does not retire a garment ────
+    # ── 9 · the code still resolves — shipping does not retire a garment ────
     after = await BarcodeService(db).resolve(piece_code)
     assert after["piece"]["current_stage"] == "PACKAGE_EXPORT"
     assert after["piece"]["leather_consumption_dcm"] == pytest.approx(14.0)
-
-    # The legacy DRAWER label still RESOLVES — the registry rows are kept so an
-    # already-printed sticker never 404s — but its state is frozen history now.
-    # Nothing writes it, so asserting it recycled would be asserting a fiction.
-    drawer_now = await BarcodeService(db).resolve(drawer_code)
-    assert drawer_now["type"] == "DRAWER"
-    assert drawer_now["next_expected_scan"] is None
+    # …and it reports that it has left the store, on the payload every screen
+    # already reads.
+    assert after["piece"]["store_state"] == StoreState.WAITING.value
 
 
 @pytest.mark.asyncio
@@ -210,7 +204,7 @@ async def test_a_leather_only_garment_never_waits_for_a_lining(
     H9's regression made every piece need a lining, which stranded exactly this
     garment forever — the drawer waited for a lining nobody would ever cut.
     """
-    piece, drawer = pieces[1]
+    piece = pieces[1]
     piece.needs_lining = False
     await db.commit()
 
@@ -256,7 +250,7 @@ async def test_a_piece_cannot_skip_from_cutting_straight_to_inspection(
     structurally impossible, not merely refused. That is the stronger property
     and it is what this asserts.
     """
-    piece, _ = pieces[2]
+    piece = pieces[2]
     svc = ProductionService(db)
     await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
                         piece_ids=[piece.id], work_date=TODAY,

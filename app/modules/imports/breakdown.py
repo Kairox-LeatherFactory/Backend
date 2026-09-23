@@ -8,8 +8,7 @@ THE TWO-PHASE COMMIT (change-list item 9)
 
     BEFORE
         POST /imports/commit parsed the sheet AND minted a per-piece barcode and
-        a drawer for every ordered unit, in one irreversible step. A barcode is a
-        permanent garment identity and the drawer pool is finite, so a sheet
+        in one irreversible step. A barcode is a permanent garment identity, so a sheet
         uploaded for review consumed both for styles nobody had agreed to cut.
 
     NOW
@@ -18,7 +17,7 @@ THE TWO-PHASE COMMIT (change-list item 9)
         2. GET/PATCH/DELETE /imports/breakdown/...   the DM corrects the table.
         3. POST /imports/breakdown/release           the DM names the styles that
                                         go to production. ONLY THEN are pieces,
-                                        barcodes and drawer merges created.
+                                        barcodes created.
 
     RELEASE IS A HARD, AUDITED TRANSITION — a `production_status` enum plus an
     audit_log row, never a boolean `is_released` (CLAUDE.md §15). It records who
@@ -589,14 +588,13 @@ class BreakdownService:
     # ── THE RELEASE ──────────────────────────────────────────────────────────
     async def release_styles(self, order_number: str, style_ids: list[uuid.UUID],
                              *, user_name: str,
-                             allow_pool_growth: bool = False,
                              lining_by_style: dict[uuid.UUID, bool] | None = None,
-                             ) -> dict:
-        """Release named styles into production: mint pieces, barcodes, drawers.
+                             **_legacy) -> dict:
+        """Release named styles into production: mint pieces and their barcodes.
 
         THE LINING QUESTION IS ASKED HERE, AND THIS IS THE ONLY PLACE IT CAN BE
         ASKED. Release is the moment a style stops being a spreadsheet row and
-        becomes barcoded garments in drawers, so it is the last moment anyone can
+        becomes barcoded garments on the floor, so it is the last moment anyone can
         answer "does this take a lining?" before the answer starts governing what
         may move. `lining_by_style` carries the DM's per-style answer; it is
         stamped on Style.needs_lining, copied down to every minted piece, and
@@ -611,13 +609,15 @@ class BreakdownService:
         already-released style must not lose the four the DM ticked with it, so
         each style lands in `released` or `rejected` with its reason.
 
-        THE DRAWER POOL IS FINITE AND THIS IS WHERE THAT BITES. If the released
-        pieces outrun the free drawers, the remainder are minted WITHOUT a drawer
-        and reported as `pieces_waiting_for_drawer`. They have barcodes and
-        identities; they simply cannot be stored, and therefore cannot pass the
-        merge gate, until a drawer frees up or DM/MD grows the pool through
-        POST /drawers/pool. That is a deliberate, visible stall rather than a
-        silent unbounded pool.
+        NOTHING STALLS FOR WANT OF SPACE ANY MORE. A release used to be capped by
+        a pool of 200 physical boxes: a style of 100+ garments ran it dry
+        partway down the list and the remainder were minted with nowhere to be
+        stored, so they could not pass the merge gate until a DM re-allocated
+        boxes by hand — which was involved enough that it did not happen. The
+        store is a STATE on the garment now, and a state has no capacity.
+
+        `allow_pool_growth` is swallowed by `**_legacy`: a caller that has not
+        been updated keeps releasing styles instead of dying on a TypeError.
         """
         order = await self._order(order_number)
         wanted = list(dict.fromkeys(style_ids))
@@ -630,7 +630,7 @@ class BreakdownService:
 
         # ── THE MATERIAL-SPEC GATE ───────────────────────────────────────────
         # Release is the last moment anyone can be asked what one of these
-        # garments takes. After it the style has barcoded pieces in drawers and
+        # garments takes. After it the style has barcoded pieces on the floor and
         # its recipe is frozen and being spent; before it the sheet is still a
         # spreadsheet row. So "12.5 dcm, 4 buttons, 1 zip" is asked HERE, exactly
         # where "does this take a lining?" already is.
@@ -694,8 +694,7 @@ class BreakdownService:
         declared = {sid: bool(v) for sid, v in (lining_by_style or {}).items()
                     if v is not None}
         stats = await run_in_threadpool(
-            _release_sync, order.id, releasable, user_name, allow_pool_growth,
-            declared)
+            _release_sync, order.id, releasable, user_name, declared)
 
         released = []
         for sid in releasable:
@@ -721,12 +720,11 @@ class BreakdownService:
                 "lining_declared": sid in declared})
         await self.db.commit()
 
-        waiting = int(stats.get("pieces_waiting_for_drawer", 0))
         message = (f"Released {len(released)} style(s); "
                    f"{stats.get('pieces_minted', 0)} piece barcode(s) minted.")
         lined = [r["style_code"] for r in released if r["needs_lining"]]
         if lined:
-            message += (f" {len(lined)} style(s) take a lining — their drawers "
+            message += (f" {len(lined)} style(s) take a lining — the store "
                         f"must hold BOTH parts before line-stitching.")
         # The deprecated style_ids path releases without a human answer. Say so
         # out loud: a garment whose lining requirement was guessed is exactly the
@@ -739,10 +737,6 @@ class BreakdownService:
                         f"{'…' if len(guessed) > 5 else ''}) — their lining "
                         f"requirement was INFERRED from the style name. Release "
                         f"through `styles: [{{style_id, needs_lining}}]` instead.")
-        if waiting:
-            message += (f" {waiting} piece(s) have NO DRAWER — the pool is full. "
-                        f"They cannot be stored until a drawer frees up or DM/MD "
-                        f"adds drawers (POST /drawers/pool).")
         return {"order_number": order.order_number, "released": released,
                 "rejected": rejected, "minted": stats,
                 "styles_released_without_lining_answer": guessed,
@@ -788,7 +782,6 @@ class BreakdownService:
 
 
 def _release_sync(order_id, style_ids, user_name: str,
-                  allow_pool_growth: bool,
                   lining_by_style: dict | None = None) -> dict:
     """The mint itself, on a synchronous Session, in one transaction.
 
@@ -831,8 +824,7 @@ def _release_sync(order_id, style_ids, user_name: str,
         # this same transaction rather than the pre-write values.
         db.flush()
 
-        stats = premint_order(db, order, style_ids=style_ids,
-                              allow_pool_growth=allow_pool_growth)
+        stats = premint_order(db, order, style_ids=style_ids)
         for sid in style_ids:
             style = db.get(Style, sid)
             style.production_status = ProductionReleaseStatus.RELEASED.value

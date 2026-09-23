@@ -98,7 +98,8 @@ def test_f18_shared_retirement_lookup():
     from app.modules.barcode import service as b_service
     src = inspect.getsource(b_service)
     assert "_get_active_or_410" in src
-    for resolver in ("resolve_piece_id", "resolve_lot_id", "resolve_drawer_id"):
+    # `resolve_drawer_id` was the third here and is deleted with the drawer.
+    for resolver in ("resolve_piece_id", "resolve_lot_id", "resolve_employee_id"):
         rsrc = inspect.getsource(getattr(b_service.BarcodeService, resolver))
         assert "_get_active_or_410" in rsrc, f"F18: {resolver} not retirement-aware"
 

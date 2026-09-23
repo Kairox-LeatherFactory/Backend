@@ -60,23 +60,29 @@ class InspectionService:
         self.db = db
 
     # ══════════════════════════════════════════════════════════ raising
-    async def raise_inspection(self, *, piece_id, found_at_stage, verdict,
+    async def raise_inspection(self, *, piece_id, found_at_stage, verdict=None,
                                action=None, return_to_stage=None,
                                defect_type=None, responsible_employee_id=None,
                                responsible_stage=None, reason=None,
                                actor_user_id=None, actor_name=None) -> dict:
-        """Record a PASS, or raise a REJECT for the DM to decide on.
+        """Raise a REJECT for the DM to decide on. A PASS may still be recorded.
 
-        A PASS is written and closed immediately — there is nothing to approve
-        about a garment that is fine, and making somebody sign one off would mean
-        nobody records passes at all.
+        VERDICT DEFAULTS TO REJECT, because this endpoint is only ever opened
+        when somebody has found a defect. A manager who is happy with a garment
+        logs the next stage and carries on; nobody walks to a screen to type
+        "this one is fine". Requiring `verdict: PASS` therefore made every real
+        call carry a field with only one useful value in it.
+
+        A PASS is still accepted and is written and closed immediately — there is
+        nothing to approve about a garment that is fine.
         """
         piece = await self.db.get(Piece, piece_id)
         if piece is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Piece not found.")
 
         found = self._stage(found_at_stage, "found_at_stage")
-        v = self._enum(InspectionVerdict, verdict, "verdict")
+        v = (self._enum(InspectionVerdict, verdict, "verdict") if verdict
+             else InspectionVerdict.REJECT)
 
         if v is InspectionVerdict.PASS:
             row = PieceInspection(
@@ -89,13 +95,15 @@ class InspectionService:
             await self.db.commit()
             return await self.payload(row)
 
-        # ── a REJECT has to say what it wants done ───────────────────────────
-        act = self._enum(ReworkAction, action, "action") if action else None
-        if act is None:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                "A rejection must say what it needs: FIX (repair it where it is) "
-                "or REDO (send it back so an earlier stage is done again).")
+        # ── what the rejection wants done ────────────────────────────────────
+        # DEFAULTS TO FIX. "Repair it where it stands" is the conservative
+        # reading of a bare rejection: nothing moves, no completed stage
+        # re-opens, and the DM still has to approve before anything happens. A
+        # REDO is the opposite — it sends the garment backwards and re-orders the
+        # line's work — so it is never inferred and still has to name
+        # `return_to_stage` below.
+        act = (self._enum(ReworkAction, action, "action") if action
+               else ReworkAction.FIX)
 
         target = None
         if act is ReworkAction.REDO:

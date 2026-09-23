@@ -38,6 +38,259 @@ class SheetReconciliation(BaseModel):
     reconciled: bool
 
 
+class SheetDetail(SheetRead):
+    """One hide, opened from the stock screen or a scan.
+
+    `editable` is the answer to "may this screen show an Edit button" —
+    computed from the same rule the write path enforces, so the button and the
+    endpoint cannot disagree.
+    """
+    material_lot_id: uuid.UUID | None = None
+    note: str | None = None
+    received_at: str | None = None
+    article: str | None = None
+    colour: str | None = None
+    thickness: str | None = None
+    lot_barcode: str | None = None
+    editable: bool = True
+
+
+class SheetPatch(BaseModel):
+    """Correct ONE hide. Send what changes.
+
+    Only the two fields that are genuinely this hide's: its measurement and the
+    note about it. `status` and `cutting_row_id` are absent on purpose — they
+    are moved by allocating, issuing and cutting, which are events, not edits.
+    """
+    dcm: float | None = Field(default=None, gt=0)
+    note: str | None = None
+
+
+class SheetAdd(BaseModel):
+    """Hides missed when the delivery was first sheeted."""
+    sheets: list[SheetIn] = Field(min_length=1)
+
+
+class SheetListResult(BaseModel):
+    lot_id: uuid.UUID
+    article: str | None = None
+    colour: str | None = None
+    uom: str | None = None
+    count: int = 0
+    sheets: list[SheetDetail] = Field(default_factory=list)
+    sheets_by_status: dict = Field(default_factory=dict)
+    reconciliation: SheetReconciliation | None = None
+
+
+class SheetAddResult(BaseModel):
+    lot_id: uuid.UUID
+    added: list[SheetDetail] = Field(default_factory=list)
+    reconciliation: SheetReconciliation | None = None
+    message: str | None = None
+
+
+class SheetDeleteResult(BaseModel):
+    """A hide removed as a data-entry error.
+
+    `barcode_retired` rather than deleted: a label may already be stuck on
+    something, and a scan of it must say "this was removed" (410 Gone) instead
+    of "unknown code".
+    """
+    sheet_id: uuid.UUID
+    code: str
+    deleted: bool = True
+    barcode_retired: bool = False
+    lot_id: uuid.UUID | None = None
+    reconciliation: SheetReconciliation | None = None
+    message: str | None = None
+
+
+class ArrivalPatch(BaseModel):
+    """Correct a PENDING gate entry.
+
+    `declared_qty` MOVES STOCK — it is the quantity this arrival put on the
+    floor — and it is applied as a delta, so a cut made in between is not
+    silently undone.
+    """
+    declared_qty: float | None = Field(default=None, gt=0)
+    declared_sheet_count: int | None = Field(default=None, gt=0)
+    note: str | None = None
+
+
+class ArrivalVoidResult(BaseModel):
+    receipt_id: uuid.UUID
+    voided: bool = True
+    lot_id: uuid.UUID | None = None
+    qty_removed: float = 0.0
+    # The lot is NEVER deleted with its arrival: a barcode may be printed and a
+    # recipe may point at it. A lot at zero is an empty shelf, which is true.
+    lot_retained: bool = True
+    arrived: float = 0.0
+    used: float = 0.0
+    balance: float = 0.0
+    reserved: float = 0.0
+    available: float = 0.0
+    on_hand: float = 0.0
+    message: str | None = None
+
+
+
+class StockFigures(BaseModel):
+    """THE SIX NUMBERS EVERY MATERIAL READ CARRIES, with one meaning each.
+
+        arrived    everything that ever came in           = balance + used
+        used       cut into garments or issued as a kit
+        balance    what is on the shelf right now
+        reserved   committed to a requirement, NOT yet spent
+        available  balance − reserved: what may still be promised
+        on_hand    the legacy name for `balance`, kept so existing clients work
+
+    `arrived − used == balance`, always, because arrived is derived from the
+    other two. That identity is why these six replaced four figures that did not
+    reconcile: `on_hand` meant "arrived" on /materials/stock and "balance" on a
+    lot's own page, `reserved` silently included everything already consumed, and
+    `used` was declared here but never set by the read — so it rendered 0.0 for
+    every lot in the building however much of it had been cut.
+
+    SHEET-WISE IS THE SAME QUESTION IN HIDES, and it is a different answer: a
+    cutter is handed skins, and "how many are on the shelf" cannot be worked out
+    from a sum of decimetres. Empty for anything that is not leather, which is
+    honest — lining is metres and a button is a button.
+    """
+    arrived: float = 0.0
+    used: float = 0.0
+    balance: float = 0.0
+    reserved: float = 0.0
+    available: float = 0.0
+    on_hand: float = 0.0
+
+    # hides, bucketed by where they are in their life
+    sheets_arrived: int = 0
+    sheets_arrived_dcm: float = 0.0
+    sheets_balance: int = 0            # IN_STOCK + RETURNED — on the shelf
+    sheets_balance_dcm: float = 0.0
+    sheets_allocated: int = 0          # ALLOCATED + ISSUED — out, not yet cut
+    sheets_allocated_dcm: float = 0.0
+    sheets_used: int = 0               # CONSUMED
+    sheets_used_dcm: float = 0.0
+    sheets_scrapped: int = 0
+    sheets_scrapped_dcm: float = 0.0
+    sheets_by_status: dict = Field(default_factory=dict)
+
+    # Deliveries recorded at the gate that nobody has finished entering. Their
+    # quantity is already inside `arrived` and is cuttable — it is PROVISIONAL
+    # until the approved/rejected split is entered, and a stock figure that
+    # cannot say which part of itself is provisional is one people stop trusting.
+    pending_arrivals: int = 0
+    pending_arrival_qty: float = 0.0
+
+
+# ── arrivals: the delivery entered in two sittings ──────────────────────────
+class ArrivalCreate(BaseModel):
+    """What the person signing for the van actually knows.
+
+    Article, colour, how much. Everything else — the approved/rejected split, the
+    thickness off the packing note, the measurement on each hide — is entered at
+    POST /materials/arrivals/{receipt_id}/complete whenever there is time.
+
+    The quantity goes into stock immediately and is CUTTABLE, because the leather
+    is physically in the building and the floor is not going to wait for QC. It
+    is marked provisional everywhere it is read until the arrival is completed.
+    """
+    article: str
+    colour: str
+    # In the category's own unit: dcm for leather, mtrs/kg/pcs otherwise.
+    total_qty: float = Field(gt=0)
+    # OPTIONAL. "Twelve bundles came in" is often known at the gate even when
+    # nobody has measured one. It is what the completion's hide count is checked
+    # against — reported on a mismatch, never enforced.
+    sheet_count: int | None = Field(default=None, gt=0)
+    category: str = "LEATHER"
+    subtype: str | None = None
+    # Not required at the gate. Supplying it picks out the right lot when one
+    # article/colour comes in more than one thickness; omitting it means the
+    # arrival lands on the lot that has no thickness recorded, and `complete`
+    # can fill it in.
+    thickness: str | None = None
+    size: str | None = None
+    supplier_id: uuid.UUID | None = None
+    supplier_order_id: uuid.UUID | None = None
+    note: str | None = None
+
+
+class ArrivalResult(StockFigures):
+    receipt_id: uuid.UUID
+    lot_id: uuid.UUID
+    lot_barcode: str | None = None
+    lot_created: bool = False
+    category: str | None = None
+    subtype: str | None = None
+    article: str | None = None
+    colour: str | None = None
+    thickness: str | None = None
+    uom: str | None = None
+    declared_qty: float = 0.0
+    declared_sheet_count: int | None = None
+    status: str = "PENDING"
+    # The field names the completion form still has to collect, in order.
+    outstanding: list[str] = Field(default_factory=list)
+    message: str | None = None
+
+
+class ArrivalComplete(BaseModel):
+    """The second sitting. What was approved, what went back, and the hides."""
+    approved_qty: float = Field(ge=0)
+    rejected_qty: float = Field(ge=0, default=0)
+    # LEATHER: one entry per physical hide, each with the number written on it.
+    sheets: list[SheetIn] | None = None
+    # Fill in the one identity field a gate entry usually cannot supply, rather
+    # than needing a separate PATCH that nobody makes.
+    thickness: str | None = None
+    note: str | None = None
+
+
+class ArrivalRow(BaseModel):
+    """One line of the come-back-to-it queue."""
+    receipt_id: uuid.UUID
+    lot_id: uuid.UUID
+    status: str
+    article: str | None = None
+    colour: str | None = None
+    thickness: str | None = None
+    category: str | None = None
+    uom: str | None = None
+    declared_qty: float = 0.0
+    declared_sheet_count: int | None = None
+    approved_qty: float = 0.0
+    rejected_qty: float = 0.0
+    supplier_order_id: uuid.UUID | None = None
+    note: str | None = None
+    arrived_at: str | None = None
+    completed_at: str | None = None
+    outstanding: list[str] = Field(default_factory=list)
+
+
+class ArrivalList(BaseModel):
+    count: int
+    total: int
+    status: str | None = None
+    arrivals: list[ArrivalRow] = Field(default_factory=list)
+
+
+class ArrivalCompleteResult(StockFigures):
+    receipt_id: uuid.UUID
+    lot_id: uuid.UUID
+    status: str
+    declared_qty: float = 0.0
+    approved_qty: float = 0.0
+    rejected_logged: float = 0.0
+    # approved − declared: how much the QC split moved the provisional figure.
+    on_hand_delta: float = 0.0
+    sheets: list[SheetRead] = Field(default_factory=list)
+    sheet_reconciliation: SheetReconciliation | None = None
+    warnings: list[dict] = Field(default_factory=list)
+
+
 class LotCreate(BaseModel):
     category: str                       # LEATHER | LINING | ACCESSORY
     subtype: str | None = None          # LINING: PLAIN_LINING/RIBS/KNIT
@@ -63,8 +316,13 @@ class LotCreate(BaseModel):
     sheets: list[SheetIn] | None = None
 
 
-class LotRead(BaseModel):
-    """One row of the lot picker — everything a cut screen needs to choose."""
+class LotRead(StockFigures):
+    """One row of the lot picker — everything a cut screen needs to choose.
+
+    Carries the full arrived/used/balance block (see StockFigures) in dcm and in
+    hides, so the picker can grey out a lot that cannot cover the cut without a
+    second call per row.
+    """
     lot_id: uuid.UUID
     barcode: str | None          # the printed label; None = never registered
     category: str
@@ -74,10 +332,6 @@ class LotRead(BaseModel):
     thickness: str | None
     size: str | None
     uom: str
-    on_hand: float
-    used: float = 0.0
-    reserved: float
-    available: float             # on_hand − reserved
     last_used_for_sku: bool = False   # pre-select this one, but SHOW that you did
     covers_required: bool | None = None   # null unless `required` was passed
     received: float = 0.0             # BUG #26 — everything that ever arrived
@@ -102,7 +356,7 @@ class LotListResult(BaseModel):
     required: float | None = None
 
 
-class LotCreateResult(BaseModel):
+class LotCreateResult(StockFigures):
     lot_id: uuid.UUID
     lot_barcode: str
     # The hide labels to print, in the order they were created. Returned on the
@@ -113,15 +367,18 @@ class LotCreateResult(BaseModel):
     subtype: str | None
     article: str
     colour: str | None
-    on_hand: float
-    reserved: float
-    available: float
     uom: str
 
 
 # ── lot CRUD (change-list item 7) ───────────────────────────────────────────
-class LotDetail(BaseModel):
-    """One lot, opened from the stock screen."""
+class LotDetail(StockFigures):
+    """One lot, opened from the stock screen.
+
+    `used` USED TO BE A LIE ON THIS SHAPE: it was declared with a default of 0.0
+    and the read never set it, so every lot reported nothing used however much of
+    it had been cut. It now comes from lot.used, the same column every cut and
+    every kit issue moves.
+    """
     lot_id: uuid.UUID
     barcode: str | None = None
     category: str
@@ -131,19 +388,15 @@ class LotDetail(BaseModel):
     thickness: str | None = None
     size: str | None = None
     uom: str
-    on_hand: float
-    used: float = 0.0
-    reserved: float
-    available: float          # DERIVED, never stored — on_hand − reserved
-    # BUG #26 — what has ever ARRIVED, which is a different question from what is
-    # left. A lot that took 500 dcm and spent 400 reads on_hand 100 / received
-    # 500. This used to render 0 because no read path summed the receipts.
+    # WHAT WAS BOUGHT, beside what arrived. `received` sums the delivery rows and
+    # answers "how much of this have we ever paid for"; `arrived` is the ledger's
+    # own balance + used. They agree unless a lot was hand-adjusted — and seeing
+    # them diverge is exactly how an adjustment gets noticed.
     received: float = 0.0
     rejected: float = 0.0     # supplier quality history
     deliveries: int = 0       # how many times this lot has been received into
     # #18 — hides in this lot, for the lot directory.
     sheets_total: int = 0
-    sheets_by_status: dict = Field(default_factory=dict)
     attributes: dict = Field(default_factory=dict)
     supplier_id: uuid.UUID | None = None
     is_active: bool = True
@@ -183,7 +436,13 @@ class LotRetireResult(BaseModel):
     message: str = ""
 
 
-class StockRead(BaseModel):
+class StockRead(StockFigures):
+    """The DM's stock check, summed over every lot the filter matched.
+
+    `on_hand` here used to mean ARRIVED while `on_hand` on a lot's own page meant
+    BALANCE, so the two screens could not both be read as the same quantity. It
+    means balance everywhere now — read `arrived` / `used` / `balance`.
+    """
     category: str | None
     subtype: str | None
     article: str | None
@@ -191,10 +450,6 @@ class StockRead(BaseModel):
     thickness: str | None
     size: str | None
     uom: str
-    on_hand: float
-    used: float = 0.0
-    reserved: float
-    available: float
     lot_count: int
     required: float | None = None
     short_by: float | None = None
@@ -212,12 +467,8 @@ class ReceiveRequest(BaseModel):
     sheets: list[SheetIn] | None = None
 
 
-class ReceiveResult(BaseModel):
+class ReceiveResult(StockFigures):
     lot_id: uuid.UUID
-    on_hand: float
-    used: float = 0.0
-    reserved: float
-    available: float
     rejected_logged: float
     supplier_order_status: str | None
     substituted: bool = False               # NEW: received into a NEW lot

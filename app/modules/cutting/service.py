@@ -53,6 +53,25 @@ from app.core.leather_norms import expected_sheet_count, leather_target_dcm
 from app.modules.cutting.repository import CuttingRepository
 
 
+# HOW FAR OFF A HIDE MAY BE AND STILL BE "the one he means".
+#
+# The cutter reads the number written on the skin and types it. It is a hand
+# measurement copied by hand, so an exact string match finds nothing more often
+# than it finds the right hide — 223.5 gets typed for a 223 or a 224. Demanding
+# exactness would push the operator straight back to picking from a list, which
+# is what this whole path exists to remove.
+#
+# So: exact first, then the NEAREST hide within this band, and outside it a 422
+# that names the hides that ARE on the shelf. The band is proportional because a
+# 40-dcm offcut and a 400-dcm skin do not deserve the same slack, with a floor so
+# small hides are not held to an unreachable tolerance.
+_DCM_TOLERANCE_FRACTION = Decimal("0.02")      # 2 %
+_DCM_TOLERANCE_FLOOR = Decimal("1")            # …but never tighter than 1 dcm
+# How many hides a "nothing matched" error lists back. Enough to pick from,
+# short enough to read on a scanner screen.
+_NEAR_MISS_LIMIT = 8
+
+
 class CuttingService:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -408,29 +427,38 @@ class CuttingService:
         """Put one more hide on the row — the cutter needed another skin.
 
         THREE DOORS, because the floor has three situations: he scanned the hide
-        (sheet_code), the manager picked it off the lot list (sheet_id), or the
-        delivery was never sheeted and the hide has to be created now (dcm).
+        (sheet_code), the manager picked it off the lot list (sheet_id), or he
+        read the measurement off the skin and typed it (dcm).
+
+        THE dcm DOOR NOW *FINDS* A HIDE INSTEAD OF INVENTING ONE. It used to mint
+        a brand-new sheet against the lot, which meant the commonest entry on the
+        screen — type the number written on the skin — silently added stock that
+        nobody had received: the hide was already on the shelf as an LS- row, and
+        now it was on the shelf twice. So a bare dcm is a LOOKUP: it resolves to
+        the hide of this row's article and colour that measures that, and
+        allocating it takes it off the shelf, which is the whole point.
+
+        Creating one is still reachable, for the delivery nobody sheeted at
+        receiving — but it has to be asked for (`create_if_missing=true`), so
+        adding stock is a decision rather than a side effect of a typo.
         """
         row = await self._require_row(row_id)
         await self._editable(row)
         mats = self._materials()
+        note = None
 
-        if body.dcm is not None:
-            lot_id = body.material_lot_id or await self._row_lot_id(row)
-            if lot_id is None:
-                raise HTTPException(
-                    status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    "This row has no sheets yet, so there is no lot to create "
-                    "one against. Send material_lot_id with the dcm.")
-            lot = await mats.repo.get_lot(lot_id)
-            if lot is None:
-                raise HTTPException(status.HTTP_404_NOT_FOUND, "Lot not found.")
-            minted = await mats.mint_sheets_nocommit(lot, [{"dcm": body.dcm}])
-            sheet = minted[0]
-            # It was created FOR this row, so it never passes through IN_STOCK —
-            # a hide that is already in a cutter's hands must not be offerable to
-            # another row for even one transaction.
-            sheet.material_lot_id = lot.id
+        if body.dcm is not None and not (body.sheet_code or body.sheet_id):
+            sheet, note = await self._match_sheet_by_dcm(row, body)
+            if sheet is None:
+                # Only reachable with create_if_missing — _match_sheet_by_dcm
+                # raises rather than returning None otherwise.
+                lot = await self._creation_lot(row, body)
+                minted = await mats.mint_sheets_nocommit(lot, [{"dcm": body.dcm}])
+                sheet = minted[0]
+                # It was created FOR this row, so it never passes through
+                # IN_STOCK — a hide already in a cutter's hands must not be
+                # offerable to another row for even one transaction.
+                sheet.material_lot_id = lot.id
         else:
             sheet = await self._find_sheet(body)
             if sheet.status not in SHEET_ALLOCATABLE:
@@ -444,7 +472,177 @@ class CuttingService:
         sheet.cutting_row_id = row.id
         sheet.status = SheetStatus.ALLOCATED.value
         await self.db.commit()
-        return await self.get_row_payload(row_id)
+        payload = await self.get_row_payload(row_id)
+        if note:
+            payload["warnings"] = [note] + list(payload.get("warnings") or [])
+        # WHICH HIDE THE TYPED NUMBER RESOLVED TO. The operator typed a
+        # measurement and never chose a code, so the response has to say which
+        # skin left the shelf — otherwise the one thing they cannot verify is the
+        # thing they are accountable for.
+        payload["matched_sheet"] = {
+            "sheet_id": sheet.id, "code": sheet.code,
+            "dcm": float(sheet.dcm or 0),
+            "material_lot_id": sheet.material_lot_id,
+        }
+        return payload
+
+    # ══════════════════════════════════════════════ the dcm lookup
+    async def _candidate_lots(self, row, body) -> list:
+        """The leather this row may draw from, most specific source first.
+
+        An explicit `material_lot_id` wins. Otherwise the hides already on the
+        row say which lot the cutter is working out of — the most reliable
+        signal there is, because somebody already spent one from it. Failing
+        both, the row's own article + colour snapshot is what the grid was
+        generated against.
+        """
+        mats = self._materials()
+        if body is not None and getattr(body, "material_lot_id", None):
+            lot = await mats.repo.get_lot(body.material_lot_id)
+            if lot is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Lot not found.")
+            return [lot]
+
+        existing = await mats.repo.sheets_for_row(row.id)
+        if existing:
+            lot = await mats.repo.get_lot(existing[0].material_lot_id)
+            if lot is not None:
+                return [lot]
+
+        lots = await mats.repo.find_lots(
+            category=MaterialCategory.LEATHER.value,
+            article=row.article, colour=row.colour)
+        return [l for l in lots if l.is_active]
+
+    def _spec_label(self, row) -> str:
+        return " · ".join(str(v) for v in (row.article, row.colour) if v) \
+            or "this row's leather"
+
+    async def sheet_options(self, row_id: uuid.UUID, *, dcm: float | None = None,
+                            limit: int = 50) -> dict:
+        """What is actually on the shelf for this row — the lookup behind the box.
+
+        The screen types a dcm and expects a code back, so it needs to be able to
+        show WHAT it can type before the operator guesses. `dcm` ranks the list
+        by distance from the number typed so far; without it the list is the
+        shelf in its natural order (smallest first).
+        """
+        row = await self._require_row(row_id)
+        mats = self._materials()
+        lots = await self._candidate_lots(row, None)
+        sheets = await mats.repo.allocatable_sheets_for_lots([l.id for l in lots])
+        want = Decimal(str(dcm)) if dcm is not None else None
+        if want is not None:
+            sheets = sorted(sheets, key=lambda s: (abs(Decimal(str(s.dcm or 0)) - want),
+                                                   s.code))
+        rows = [{"sheet_id": s.id, "code": s.code, "dcm": float(s.dcm or 0),
+                 "status": s.status, "material_lot_id": s.material_lot_id,
+                 "difference": (None if want is None
+                                else float(Decimal(str(s.dcm or 0)) - want))}
+                for s in sheets[:limit]]
+        return {
+            "row_id": row.id, "article": row.article, "colour": row.colour,
+            "requested_dcm": dcm,
+            "available_count": len(sheets),
+            "sheets": rows,
+            "lots": [{"lot_id": l.id, "article": l.article, "colour": l.colour,
+                      "thickness": l.thickness} for l in lots],
+        }
+
+    async def _match_sheet_by_dcm(self, row, body):
+        """Resolve a typed measurement to ONE hide on the shelf. (sheet, note).
+
+        Returns `(None, None)` ONLY when nothing matched and the caller asked for
+        a hide to be created instead. Every other failure is an exception that
+        says, in the operator's own terms, why there is no skin to give them.
+        """
+        mats = self._materials()
+        want = Decimal(str(body.dcm))
+        label = self._spec_label(row)
+
+        lots = await self._candidate_lots(row, body)
+        if not lots:
+            # THE CLEAREST FAILURE THERE IS, and it is not a 404: the request was
+            # well formed, the factory simply has none of this leather.
+            if getattr(body, "create_if_missing", False):
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    f"There is no leather lot for {label}, so there is nothing "
+                    f"to create a hide against. Receive the leather first, or "
+                    f"send material_lot_id.")
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"No leather is in stock for {label} — there is no sheet "
+                f"available to cut this row from. Receive that article and "
+                f"colour first, or send material_lot_id to cut from a different "
+                f"lot.")
+
+        sheets = await mats.repo.allocatable_sheets_for_lots([l.id for l in lots])
+        if not sheets:
+            if getattr(body, "create_if_missing", False):
+                return None, None
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"{label} has a lot but not one free hide left — every sheet is "
+                f"already allocated, issued or cut. Nothing is available to put "
+                f"on this row.")
+
+        # EXACT FIRST. Two hides can measure the same; the smallest code wins so
+        # the same typed number always resolves to the same skin.
+        exact = [s for s in sheets if Decimal(str(s.dcm or 0)) == want]
+        if exact:
+            return exact[0], None
+
+        tolerance = self._tolerance(want, body)
+        nearest = min(sheets, key=lambda s: (abs(Decimal(str(s.dcm or 0)) - want),
+                                             s.code))
+        gap = Decimal(str(nearest.dcm or 0)) - want
+        if abs(gap) <= tolerance:
+            return nearest, (
+                f"{want:g} dcm was typed; the nearest hide on the shelf is "
+                f"{nearest.code} at {float(nearest.dcm):g} dcm "
+                f"({'+' if gap > 0 else ''}{float(gap):g}). The row is charged "
+                f"the hide's own measurement, not the number typed.")
+
+        if getattr(body, "create_if_missing", False):
+            return None, None
+
+        near = sorted(sheets,
+                      key=lambda s: (abs(Decimal(str(s.dcm or 0)) - want), s.code)
+                      )[:_NEAR_MISS_LIMIT]
+        listed = ", ".join(f"{s.code} ({float(s.dcm):g})" for s in near)
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"No hide of {label} measures {want:g} dcm (within "
+            f"{float(tolerance):g}). {len(sheets)} are on the shelf — nearest: "
+            f"{listed}. Type one of those measurements, send its sheet_code, or "
+            f"send create_if_missing=true if this skin genuinely was never "
+            f"received.")
+
+    @staticmethod
+    def _tolerance(want: Decimal, body) -> Decimal:
+        override = getattr(body, "dcm_tolerance", None)
+        if override is not None:
+            return Decimal(str(override))
+        return max(_DCM_TOLERANCE_FLOOR, want * _DCM_TOLERANCE_FRACTION)
+
+    async def _creation_lot(self, row, body):
+        """The lot a `create_if_missing` hide is minted against."""
+        mats = self._materials()
+        lot_id = getattr(body, "material_lot_id", None) or await self._row_lot_id(row)
+        if lot_id is not None:
+            lot = await mats.repo.get_lot(lot_id)
+            if lot is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Lot not found.")
+            return lot
+        lots = await self._candidate_lots(row, body)
+        if len(lots) == 1:
+            return lots[0]
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"{len(lots)} leather lots match {self._spec_label(row)}. Send "
+            f"material_lot_id to say which one this hide belongs to — minting it "
+            f"against the wrong lot puts stock on the wrong article.")
 
     async def _row_lot_id(self, row):
         mats = self._materials()
@@ -467,8 +665,8 @@ class CuttingService:
             return sheet
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "Name the hide to add: sheet_code (scanned), sheet_id (picked), or "
-            "dcm (create a new one against the lot).")
+            "Name the hide to add: dcm (the measurement written on the skin — "
+            "this looks it up), sheet_code (scanned), or sheet_id (picked).")
 
     async def remove_sheet(self, row_id: uuid.UUID, sheet_id: uuid.UUID) -> dict:
         """The cutter handed a hide back. It returns to the shelf, not to nowhere.

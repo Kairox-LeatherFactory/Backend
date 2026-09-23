@@ -302,6 +302,18 @@ class WageRunSummary(BaseModel):
     total_pieces: int
     employee_count: int
     unrated_operations: list[UnratedOperation] = Field(default_factory=list)
+    # WHY THE TOTAL IS WHAT IT IS — see WageService._diagnostics.
+    #
+    # A run that pays nothing has three possible causes and they used to be
+    # indistinguishable from the response: an empty window, a population on the
+    # wrong wage type, and a full rate sheet dated after the work all rendered as
+    # `total_amount: 0.0` with an empty `lines`. This accounts for every piece
+    # the window contained — paid, skipped, unrated or backdated — and `notes`
+    # turns whichever bucket is non-zero into a sentence naming the fix.
+    #
+    # Present on EVERY run, not just empty ones: "why is this smaller than I
+    # expected" is the same question asked more quietly.
+    diagnostics: dict = Field(default_factory=dict)
     lines: list[WageLineDetail] = Field(default_factory=list)
     gap_days: int = 0
     recomputed: bool = False

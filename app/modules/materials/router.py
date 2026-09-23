@@ -2,8 +2,14 @@
 ================================================================================
 modules/materials/router.py — Materials, inventory & supplier HTTP API (async)
 ================================================================================
-POST /materials/lots           create a lot (+ child barcode + stock)
-GET  /materials/stock          on-hand / reserved / available + shortfall
+POST /materials/arrivals       THE VAN CAME IN — article, colour, total. That
+                               is allowed to be all of it; the barcode prints and
+                               the stock is cuttable immediately.
+GET  /materials/arrivals       the come-back-to-it queue (PENDING by default)
+POST /materials/arrivals/{id}/complete
+                               the approved/rejected split + every hide's dcm
+POST /materials/lots           create a lot in full (+ child barcode + stock)
+GET  /materials/stock          arrived / used / balance (+ the same in HIDES)
 POST /materials/receive        approved / rejected receiving
 POST /suppliers/orders         raise an order on a shortfall (ORDERED)
 PATCH /suppliers/orders/{id}   ORDERED → ARRIVED
@@ -246,6 +252,111 @@ async def retire_lot(
     return await MaterialService(db).retire_lot(lot_id, actor_id=user.id)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# HIDE CRUD  —  the correction path for per-sheet data entry
+# ══════════════════════════════════════════════════════════════════════════════
+# A leather delivery is typed hide by hide, by somebody reading a number written
+# on a skin, and none of it could be corrected: a hide entered as 45 when the
+# skin says 4.5 stayed wrong forever and a fifth hide typed by accident stayed
+# in the count forever. The lot had update/adjust/retire; its hides had nothing.
+#
+# THE STATE IS THE PERMISSION. A hide still IN_STOCK on no cutting row has not
+# been acted on, so changing it is data entry. Once it is ALLOCATED, ISSUED or
+# CONSUMED it is part of a cutting decision and every write here answers 409.
+@router.get("/lots/{lot_id}/sheets", response_model=schemas.SheetListResult)
+async def list_sheets(
+    lot_id: uuid.UUID,
+    status_filter: str | None = Query(
+        default=None, alias="status",
+        description="Comma list: IN_STOCK,ALLOCATED,ISSUED,CONSUMED,RETURNED,"
+                    "SCRAPPED. Omit for all."),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_STOCK_READERS),
+):
+    """Every hide in one lot, smallest first, with the stock roll-up.
+
+    Smallest first is not cosmetic: the allocator spends offcuts before it
+    breaks into a big skin, so this is the order a cutter is offered them in.
+    """
+    return await MaterialService(db).list_sheets(
+        lot_id, status_filter=status_filter)
+
+
+@router.post("/lots/{lot_id}/sheets", response_model=schemas.SheetAddResult,
+             status_code=201)
+async def add_sheets(
+    lot_id: uuid.UUID,
+    body: schemas.SheetAdd,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_LOT_WRITERS),
+):
+    """Add hides to a lot that already exists — the missed-one path.
+
+    A bundle is sheeted at the gate under time pressure and the skin at the
+    bottom gets missed. Without this the only way to record it was a second lot
+    for the same material, which one-lot-per-spec refuses — so it was not
+    recorded at all.
+
+    STOCK IS NOT TOUCHED. `on_hand` is what the delivery note said arrived; the
+    hides are the detail beneath it, and typing the one that was forgotten does
+    not mean more leather walked in. The reconciliation block reports the gap.
+    """
+    return await MaterialService(db).add_sheets(
+        lot_id, body.sheets, actor_id=user.id)
+
+
+@router.get("/sheets/{sheet_id}", response_model=schemas.SheetDetail)
+async def get_sheet(
+    sheet_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_STOCK_READERS),
+):
+    """One hide: its measurement, where it is in its life, and its lot.
+
+    `editable` is computed from the same rule the writes enforce, so an Edit
+    button and the endpoint behind it cannot disagree."""
+    return await MaterialService(db).get_sheet(sheet_id)
+
+
+@router.patch("/sheets/{sheet_id}", response_model=schemas.SheetDetail)
+async def update_sheet(
+    sheet_id: uuid.UUID,
+    body: schemas.SheetPatch,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_LOT_WRITERS),
+):
+    """Correct ONE hide's measurement or note. Audited.
+
+    409 once the hide is ALLOCATED / ISSUED / CONSUMED or sits on a cutting row:
+    its dcm is then part of what a garment was cut from, and the honest
+    correction is PATCH /materials/lots/{id}/adjust, which records a movement
+    with a reason instead of rewriting a measurement."""
+    return await MaterialService(db).update_sheet(
+        sheet_id, body.model_dump(exclude_unset=True), actor_id=user.id)
+
+
+@router.delete("/sheets/{sheet_id}", response_model=schemas.SheetDeleteResult)
+async def delete_sheet(
+    sheet_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_LOT_WRITERS),
+):
+    """Remove a hide entered by mistake. A real delete, and only while untouched.
+
+    THE ONE PLACE THIS MODULE DELETES A ROW. An employee who leaves worked
+    shifts, a retired lot has cut events, a deactivated spec line has issues —
+    all three RETIRE because history hangs off them. A hide still IN_STOCK on no
+    cutting row has none: nothing was allocated, issued or cut from it. It is a
+    typed line that should not have been typed, and keeping it would leave a
+    skin that does not exist in every hide count on the stock screen.
+
+    Its BARCODE is retired, not deleted — a label may already be stuck on
+    something, and that scan must read 410 Gone, never "unknown code".
+
+    409 the moment a cutter has been given it."""
+    return await MaterialService(db).delete_sheet(sheet_id, actor_id=user.id)
+
+
 @router.get("/stock", response_model=schemas.StockRead)
 async def stock(
     category: str | None = Query(None),
@@ -263,6 +374,138 @@ async def stock(
     return await MaterialService(db).stock(
         category=category, subtype=subtype, article=article, colour=colour,
         thickness=thickness, size=size, required=required)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ARRIVALS — the delivery entered in two sittings
+# ══════════════════════════════════════════════════════════════════════════
+# WHO. The same people who create lots: cutting manager, DM, MD (and HR, who is
+# a lot writer everywhere else here). Signing for a van is a floor job, and the
+# entry has to be possible by whoever is standing there when it pulls in — a
+# gate form only a DM can fill in is a gate form nobody fills in.
+
+
+@router.post("/arrivals", response_model=schemas.ArrivalResult, status_code=201)
+async def record_arrival(
+    body: schemas.ArrivalCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_LOT_WRITERS),
+):
+    """THE VAN JUST CAME IN. Article, colour, total — and that is allowed to be all.
+
+    Mints or tops up the lot, prints the lot barcode, and puts the quantity into
+    stock so the floor can cut from it straight away. The approved/rejected split
+    and the per-hide measurements are entered later, at
+    POST /materials/arrivals/{receipt_id}/complete — the response carries that id
+    and names, in `outstanding`, exactly which fields are still owed.
+
+    `sheet_count` is optional and is what the completion's hide count is checked
+    against. A mismatch is reported, never enforced: a bundle count taken at the
+    gate is a glance.
+
+    THE STOCK IS PROVISIONAL UNTIL THE ARRIVAL IS COMPLETED, and every read says
+    so — `pending_arrivals` / `pending_arrival_qty` ride along on the lot page,
+    the lot directory and the stock check.
+    """
+    return await MaterialService(db).arrive(body, actor_id=user.id)
+
+
+@router.get("/arrivals", response_model=schemas.ArrivalList)
+async def list_arrivals(
+    status_filter: str | None = Query(
+        default="PENDING", alias="status",
+        description="PENDING (the default) | COMPLETED | omit for both."),
+    lot_id: uuid.UUID | None = Query(default=None),
+    limit: int = Query(default=200, le=1000),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_STOCK_READERS),
+):
+    """THE COME-BACK-TO-IT QUEUE, oldest first. This is what makes the two-sitting
+    intake safe: an unfinished arrival that nobody can find is provisional stock
+    quietly becoming permanent stock that was never checked.
+
+    Oldest first rather than newest, because the arrival nobody has returned to
+    for three days is the one that matters and newest-first buries it.
+    """
+    return await MaterialService(db).list_arrivals(
+        status_filter=(status_filter or None), lot_id=lot_id,
+        limit=limit, offset=offset)
+
+
+@router.get("/arrivals/{receipt_id}", response_model=schemas.ArrivalRow)
+async def get_arrival(
+    receipt_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_STOCK_READERS),
+):
+    """One arrival, in the same shape the queue lists it — the click-through."""
+    return await MaterialService(db).get_arrival(receipt_id)
+
+
+@router.patch("/arrivals/{receipt_id}", response_model=schemas.ArrivalRow)
+async def update_arrival(
+    receipt_id: uuid.UUID,
+    body: schemas.ArrivalPatch,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_LOT_WRITERS),
+):
+    """Correct a PENDING gate entry: its quantity, bundle count or note.
+
+    `declared_qty` MOVES STOCK, because that quantity is what this arrival put
+    on the floor — correcting 3400 to 340 has to take 3060 back out, or the
+    correction is cosmetic and the shelf still claims material that never
+    arrived. It is applied as a DELTA, so a cut made in between is not silently
+    undone.
+
+    409 once the arrival is COMPLETED (that is the QC record of a delivery), and
+    409 if the correction would drive the lot negative — an entry wrong by more
+    than what is left is a different delivery, not a typo, so void it and enter
+    the real one."""
+    return await MaterialService(db).update_arrival(
+        receipt_id, body.model_dump(exclude_unset=True), actor_id=user.id)
+
+
+@router.delete("/arrivals/{receipt_id}",
+               response_model=schemas.ArrivalVoidResult)
+async def delete_arrival(
+    receipt_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_RECEIVERS),
+):
+    """Void a PENDING arrival — the van that got entered twice.
+
+    The receipt goes and the stock it put on the floor comes back out. Same rule
+    as a hide: a PENDING arrival nobody has QC'd is a typed line, not history.
+    Once COMPLETED it is the record of what a supplier delivered and what went
+    back on the van, and this answers 409.
+
+    THE LOT SURVIVES even when this was its only delivery — its barcode may be
+    printed and a material spec may already point at it. A lot at zero is an
+    empty shelf, which is a true statement; retire it separately if it should
+    never have existed.
+
+    409 if some of the arrival has already been cut: the material was real."""
+    return await MaterialService(db).delete_arrival(receipt_id, actor_id=user.id)
+
+
+@router.post("/arrivals/{receipt_id}/complete",
+             response_model=schemas.ArrivalCompleteResult)
+async def complete_arrival(
+    receipt_id: uuid.UUID,
+    body: schemas.ArrivalComplete,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_LOT_WRITERS),
+):
+    """The second sitting: what was approved, what went back, and every hide.
+
+    Stock is corrected by (approved − declared), NOT set to approved — the floor
+    may have cut some of this delivery in between, and assigning would silently
+    undo that. The rejected quantity is logged against the supplier's quality
+    history; it was never in stock, because it went back on the van.
+    """
+    return await MaterialService(db).complete_arrival(
+        receipt_id, body, actor_id=user.id)
 
 
 # create_order + receive: pass the actor's ROLE so receive can gate the

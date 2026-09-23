@@ -80,8 +80,7 @@ async def test_a_jacket_with_a_recipe_walks_the_chain_and_spends_its_kit_once(
         db, operations, pieces, leather_lot, lining_lot, kitted_style,
         cutter, lining_cutter, paster, tailor,
         cutting_mgr, lining_mgr, stitching_mgr, dm):
-    piece, drawer = pieces[0]
-    drawer_id = drawer.id
+    piece = pieces[0]
     button, zipper = kitted_style["button"], kitted_style["zip"]
     btn_before, zip_before = await _on_hand(db, button.id), await _on_hand(db, zipper.id)
     svc, drawers = ProductionService(db), StoreService(db)
@@ -157,7 +156,7 @@ async def test_a_jacket_with_a_recipe_walks_the_chain_and_spends_its_kit_once(
         assert r["stage"] == stage.value, r["message"]
         assert r["count_logged"] == 1, r["message"]
 
-    # ── 8 · the drawer recycles with ALL THREE buckets empty ────────────────
+    # ── 8 · the garment leaves the store with ALL THREE buckets empty ───────
     await db.refresh(piece)
     assert piece.store_state == StoreState.WAITING.value
     assert (piece.leather_in, piece.lining_in, piece.accessories_in) == (

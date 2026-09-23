@@ -563,6 +563,29 @@ class ReceiptStatus(str, enum.Enum):
     REJECTED = "rejected"
 
 
+class IntakeStatus(str, enum.Enum):
+    """How far a DELIVERY has been entered. Not what the verdict was.
+
+    A different question from ReceiptStatus above, which is about the material
+    (approved or rejected). This is about the PAPERWORK, and it exists because
+    the two halves of a delivery are entered at two different moments:
+
+        PENDING     the van came, somebody typed article + colour + total, and
+                    the material is in the building and cuttable. The approved /
+                    rejected split and the per-hide measurements are not in yet.
+        COMPLETED   the QC split is entered and, for leather, the hides are
+                    measured. on_hand has been corrected to the approved figure.
+
+    UPPERCASE VALUES, unlike ReceiptStatus. Both are plain String columns rather
+    than native PG enums, but this one is written by the arrival flow and read
+    back by a query filter, so the value and the member name are kept identical —
+    the mismatch between the two is exactly what CLAUDE.md §13 documents going
+    wrong on the native enums.
+    """
+    PENDING = "PENDING"
+    COMPLETED = "COMPLETED"
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # SUPPLIER ORDERS  (manual, two-state)
 # ══════════════════════════════════════════════════════════════════════════
@@ -760,7 +783,7 @@ class DrawerPart(str, enum.Enum):
     """What is being scanned into a drawer.
 
     ACCESSORY IS NEVER INFERRED, AND THAT IS A SAFETY RULE, NOT A CONVENIENCE ONE.
-        `DrawerService.infer_part` reads a piece's history to decide whether a
+        `StoreService.infer_part` reads a piece's history to decide whether a
         scan is the leather or the lining arriving. The worst a wrong guess can
         do there is set the wrong boolean, which a human can undo. An inferred
         ACCESSORY would *spend stock* — it decrements every accessory lot on the

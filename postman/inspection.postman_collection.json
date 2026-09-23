@@ -200,7 +200,7 @@
             "inspections"
           ]
         },
-        "description": "Record a PASS, or raise a REJECT for the DM.\n\nA PASS closes immediately \u2014 there is nothing to approve about a garment that\nis fine, and making somebody sign one off means nobody records passes at all.",
+        "description": "Raise a REJECT for the DM. A PASS may still be recorded deliberately.\n\n`verdict` IS OPTIONAL AND DEFAULTS TO REJECT \u2014 this screen is opened when a\ndefect has been found, so the smallest useful call is the piece and the stage\nit was seen at. `action` defaults to FIX (repair it where it stands); a REDO\nstill has to be asked for by name, with the stage to go back to.\n\nA PASS closes immediately \u2014 there is nothing to approve about a garment that\nis fine.",
         "body": {
           "mode": "raw",
           "raw": "{\n  \"piece_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"piece_barcode\": \"\",\n  \"found_at_stage\": \"\",\n  \"verdict\": \"\",\n  \"action\": \"\",\n  \"return_to_stage\": \"\",\n  \"defect_type\": \"\",\n  \"responsible_employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"responsible_stage\": \"\",\n  \"reason\": \"\"\n}",

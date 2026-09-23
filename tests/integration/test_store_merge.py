@@ -57,7 +57,7 @@ async def _pasted(db, operations, piece, cutter_id, paster_id):
 async def test_leather_then_lining_completes_the_garment(
         db, operations, pieces, cutter, lining_cutter, paster):
     """The happy path, and the flow is now TWO scans: the worker and the garment."""
-    piece = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
+    piece = pieces[0]
     svc = StoreService(db)
     await _pasted(db, operations, piece, cutter[0].id, paster[0].id)
 
@@ -79,7 +79,7 @@ async def test_leather_then_lining_completes_the_garment(
 async def test_lining_first_then_leather_reaches_the_same_place(
         db, operations, pieces, cutter, lining_cutter, paster):
     """Order of arrival is not a rule. The lining is often cut first."""
-    piece = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
+    piece = pieces[0]
     svc = StoreService(db)
     await _log(db, operations, piece, lining_cutter[0].id, "LINING_CUTTING")
     r1 = await svc.store_scan(piece_id=piece.id, employee_id=lining_cutter[0].id)
@@ -100,7 +100,7 @@ async def test_a_part_cannot_enter_the_store_before_its_side_is_finished(
     reached LINE_STITCHING having never been pasted.
     """
     from fastapi import HTTPException
-    piece = pieces[1][0] if isinstance(pieces[1], tuple) else pieces[1]
+    piece = pieces[1]
     await _log(db, operations, piece, cutter[0].id, "LEATHER_CUTTING")
     with pytest.raises(HTTPException) as exc:
         await StoreService(db).store_scan(
@@ -114,7 +114,7 @@ async def test_scanning_the_same_part_twice_is_refused_not_doubled(
         db, operations, pieces, cutter, lining_cutter, paster):
     """Both sides already in — there is nothing left to put anywhere."""
     from fastapi import HTTPException
-    piece = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
+    piece = pieces[0]
     svc = StoreService(db)
     await _pasted(db, operations, piece, cutter[0].id, paster[0].id)
     await _log(db, operations, piece, lining_cutter[0].id, "LINING_CUTTING")
@@ -128,7 +128,7 @@ async def test_scanning_the_same_part_twice_is_refused_not_doubled(
 async def test_a_leather_only_garment_is_complete_on_leather_alone(
         db, operations, pieces, cutter, paster):
     """A jacket that takes no lining must not wait for one forever."""
-    piece = pieces[2][0] if isinstance(pieces[2], tuple) else pieces[2]
+    piece = pieces[2]
     piece.needs_lining = False
     await db.commit()
     await _pasted(db, operations, piece, cutter[0].id, paster[0].id)
@@ -145,8 +145,8 @@ async def test_a_leather_only_garment_is_complete_on_leather_alone(
 async def test_send_releases_only_the_complete_ones(
         db, operations, pieces, cutter, lining_cutter, paster, dm):
     """One incomplete garment must never lose the complete ones beside it."""
-    ready = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
-    unready = pieces[1][0] if isinstance(pieces[1], tuple) else pieces[1]
+    ready = pieces[0]
+    unready = pieces[1]
     svc = StoreService(db)
     await _pasted(db, operations, ready, cutter[0].id, paster[0].id)
     await _log(db, operations, ready, lining_cutter[0].id, "LINING_CUTTING")
@@ -162,7 +162,7 @@ async def test_send_releases_only_the_complete_ones(
 
 async def test_sending_twice_is_a_no_op(db, operations, pieces, cutter,
                                         lining_cutter, paster, dm):
-    piece = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
+    piece = pieces[0]
     svc = StoreService(db)
     await _pasted(db, operations, piece, cutter[0].id, paster[0].id)
     await _log(db, operations, piece, lining_cutter[0].id, "LINING_CUTTING")
@@ -177,7 +177,7 @@ async def test_sending_twice_is_a_no_op(db, operations, pieces, cutter,
 async def test_a_sent_garment_accepts_nothing_more(
         db, operations, pieces, cutter, lining_cutter, paster, dm):
     from fastapi import HTTPException
-    piece = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
+    piece = pieces[0]
     svc = StoreService(db)
     await _pasted(db, operations, piece, cutter[0].id, paster[0].id)
     await _log(db, operations, piece, lining_cutter[0].id, "LINING_CUTTING")
@@ -199,7 +199,7 @@ async def test_line_stitching_is_still_shut_without_a_send(
     goes green for the wrong reason, a garment can be line-stitched having never
     been cut, and nothing else in the system would notice.
     """
-    piece = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
+    piece = pieces[0]
     await _pasted(db, operations, piece, cutter[0].id, paster[0].id)
     res = await ProductionService(db).log_batch(
         user=stitching_mgr, employee_id=tailor[0].id, piece_ids=[piece.id],
@@ -212,7 +212,7 @@ async def test_line_stitching_opens_once_the_garment_is_sent(
         db, operations, pieces, cutter, lining_cutter, paster, tailor,
         stitching_mgr, dm):
     """The other half: the gate must actually OPEN, or nothing ships."""
-    piece = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
+    piece = pieces[0]
     svc = StoreService(db)
     await _pasted(db, operations, piece, cutter[0].id, paster[0].id)
     await _log(db, operations, piece, lining_cutter[0].id, "LINING_CUTTING")
@@ -235,7 +235,7 @@ async def test_a_complete_but_unsent_garment_is_told_to_send(
     Collapsing them into one message sends the floor looking for a missing part
     that is already there.
     """
-    piece = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
+    piece = pieces[0]
     svc = StoreService(db)
     await _pasted(db, operations, piece, cutter[0].id, paster[0].id)
     await _log(db, operations, piece, lining_cutter[0].id, "LINING_CUTTING")
@@ -260,8 +260,8 @@ async def test_there_is_no_such_thing_as_the_wrong_drawer(
     test exists so that its absence is a decision on the record rather than an
     oversight somebody re-adds later.
     """
-    first = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
-    second = pieces[1][0] if isinstance(pieces[1], tuple) else pieces[1]
+    first = pieces[0]
+    second = pieces[1]
     svc = StoreService(db)
     for p in (first, second):
         await _pasted(db, operations, p, cutter[0].id, paster[0].id)
@@ -278,7 +278,7 @@ async def test_anyone_on_the_floor_can_find_where_a_garment_is(
     to find the DM. Reading where a garment is tells nobody anything they should
     not know.
     """
-    piece = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
+    piece = pieces[0]
     svc = StoreService(db)
     await _pasted(db, operations, piece, cutter[0].id, paster[0].id)
     await svc.store_scan(piece_id=piece.id, employee_id=paster[0].id)
@@ -295,7 +295,7 @@ async def test_anyone_on_the_floor_can_find_where_a_garment_is(
 async def test_package_export_takes_the_garment_out_of_the_store(
         db, operations, pieces, cutter, paster):
     """A drawer recycled because the BOX was reused. A garment ships once."""
-    piece = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
+    piece = pieces[0]
     svc = StoreService(db)
     await _pasted(db, operations, piece, cutter[0].id, paster[0].id)
     await svc.store_scan(piece_id=piece.id, employee_id=paster[0].id)
@@ -322,7 +322,7 @@ async def test_package_export_takes_the_garment_out_of_the_store(
 
 async def _knit_piece(db, pieces, name="SHINOBI KNIT"):
     from app.modules.clients.models import SKU, Style
-    piece = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
+    piece = pieces[0]
     sku = await db.get(SKU, piece.sku_id)
     style = await db.get(Style, sku.style_id)
     style.name = name
@@ -369,7 +369,7 @@ async def test_a_genuinely_leather_only_garment_still_sends_on_leather_alone(
     leather-only, and it has to stay sendable or the fix would stall the floor.
     """
     from app.modules.clients.models import SKU, Style
-    piece = pieces[3][0] if isinstance(pieces[3], tuple) else pieces[3]
+    piece = pieces[3]
     sku = await db.get(SKU, piece.sku_id)
     style = await db.get(Style, sku.style_id)
     style.name = "CLERMONT"
@@ -390,7 +390,7 @@ async def test_a_lining_cut_outranks_a_declared_no(
         db, operations, pieces, cutter, lining_cutter, paster):
     """Somebody physically cut a lining. The paperwork does not get to disagree."""
     from app.modules.clients.models import SKU, Style
-    piece = pieces[4][0] if isinstance(pieces[4], tuple) else pieces[4]
+    piece = pieces[4]
     sku = await db.get(SKU, piece.sku_id)
     style = await db.get(Style, sku.style_id)
     style.name = "CLERMONT"
@@ -415,7 +415,7 @@ async def test_the_store_lookup_names_every_accessory_line(
     """Four buttons and one zip come back as two lines, each with what is owed."""
     from app.modules.barcode.models import MaterialLot, StyleMaterialSpec
     from app.modules.clients.models import SKU
-    piece = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
+    piece = pieces[0]
     sku = await db.get(SKU, piece.sku_id)
     for kw in (dict(subtype="BUTTON", article="BTN-4H", size="18L",
                     qty=4, on_hand=1000),
@@ -451,7 +451,7 @@ async def test_a_style_with_no_accessories_hides_the_checklist(
     rendering them an empty panel they can never satisfy is how the store learns
     to ignore the column.
     """
-    piece = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
+    piece = pieces[0]
     detail = await StoreService(db).piece_detail(piece)
     assert detail["kit_required"] is False
     assert detail["kit_status"] == "NOT_REQUIRED"
@@ -470,7 +470,7 @@ async def test_a_no_accessory_style_is_not_permanently_owed_a_kit(
     always read kit_rules.kit_satisfied; this is the read path saying the same.
     """
     from app.modules.materials.style_spec_service import StyleSpecService
-    piece = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
+    piece = pieces[0]
     view = await StyleSpecService(db).kit_view(piece.id)
     assert view["status"] == "NOT_REQUIRED"
     assert view["complete"] is True

@@ -51,7 +51,7 @@ async def _walk(db, piece, *, cutter, tailor, cutting_mgr, dm, leather_lot,
 async def test_the_overview_returns_every_block(
     db, operations, pieces, cutter, tailor, cutting_mgr, dm, leather_lot
 ):
-    await _walk(db, pieces[0][0], cutter=cutter, tailor=tailor,
+    await _walk(db, pieces[0], cutter=cutter, tailor=tailor,
                 cutting_mgr=cutting_mgr, dm=dm, leather_lot=leather_lot, stages=3)
 
     d = await DashboardService(db).direct_manager_overview(client_scope=None)
@@ -85,12 +85,12 @@ async def test_the_pipeline_is_a_funnel_and_the_bottleneck_is_its_deepest_queue(
 ):
     """Three pieces cut, one of them carried two stages further. The queue in
     front of FUSING is therefore the largest gap after the cut."""
-    for piece, _ in pieces[:3]:
+    for piece in pieces[:3]:
         await _walk(db, piece, cutter=cutter, tailor=tailor,
                     cutting_mgr=cutting_mgr, dm=dm, leather_lot=leather_lot,
                     stages=1)
     await ProductionService(db).log_batch(
-        user=dm, employee_id=tailor[0].id, piece_ids=[pieces[0][0].id],
+        user=dm, employee_id=tailor[0].id, piece_ids=[pieces[0].id],
         work_date=TODAY, screen=ScreenContext.PIPELINE)      # FUSING on one
 
     d = await DashboardService(db).direct_manager_overview(client_scope=None)
@@ -126,7 +126,7 @@ async def test_a_department_counts_a_garment_once_however_many_of_its_stages_it_
     through all three is ONE garment stitched, not three — which is why the
     department count is a distinct-on-piece per department label, not a sum of
     per-stage counts."""
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     await _walk(db, piece, cutter=cutter, tailor=tailor, cutting_mgr=cutting_mgr,
                 dm=dm, leather_lot=leather_lot, stages=3)      # cut, fusing, pasting
 
@@ -157,7 +157,7 @@ async def test_the_dm_and_the_stage_dashboards_agree(
 ):
     """THE COMPOSITION TEST. If these ever diverge, both screens are worthless —
     and the MD's is the one people act on."""
-    for piece, _ in pieces[:2]:
+    for piece in pieces[:2]:
         await _walk(db, piece, cutter=cutter, tailor=tailor,
                     cutting_mgr=cutting_mgr, dm=dm, leather_lot=leather_lot)
 
@@ -169,8 +169,8 @@ async def test_the_dm_and_the_stage_dashboards_agree(
     assert dm_view.overall.total_target == cutting.production_kpis.total_order_pieces
     assert dm_view.overall.total_produced == cutting.production_kpis.overall_completed
     assert dm_view.quality.rework_pieces == cutting.production_kpis.rework_pieces
-    assert dm_view.store.drawers_in_store == store.kpis.drawers_in_store
-    assert dm_view.store.drawers_sent == store.kpis.drawers_sent
+    assert dm_view.store.garments_in_store == store.kpis.garments_in_store
+    assert dm_view.store.garments_sent == store.kpis.garments_sent
 
 
 # ══════════════════════════════════════════════ honesty about missing data
@@ -206,7 +206,7 @@ async def test_an_empty_factory_reports_zeroes_without_dividing_by_zero(db):
 async def test_order_tracking_walks_the_whole_chain(
     db, operations, pieces, order_tree, cutter, tailor, cutting_mgr, dm, leather_lot
 ):
-    await _walk(db, pieces[0][0], cutter=cutter, tailor=tailor,
+    await _walk(db, pieces[0], cutter=cutter, tailor=tailor,
                 cutting_mgr=cutting_mgr, dm=dm, leather_lot=leather_lot, stages=2)
 
     t = await DashboardService(db).dm_order_tracking(
@@ -232,7 +232,7 @@ async def test_order_tracking_reports_the_lining_cut_and_the_store(
     nothing on screen to say why. Both nodes must be present, in their real
     pipeline positions, each carrying its own denominator.
     """
-    await _walk(db, pieces[0][0], cutter=cutter, tailor=tailor,
+    await _walk(db, pieces[0], cutter=cutter, tailor=tailor,
                 cutting_mgr=cutting_mgr, dm=dm, leather_lot=leather_lot, stages=2)
 
     t = await DashboardService(db).dm_order_tracking(
@@ -280,23 +280,23 @@ async def test_a_piece_held_in_the_store_is_counted_as_pending_there(
     db, operations, pieces, order_tree, cutter, cutting_mgr, dm, leather_lot,
     ready_for_store
 ):
-    """The number the DM actually wants: garments sitting in a drawer.
+    """The number the DM actually wants: garments sitting in the store.
 
     A piece whose leather has been stored is IN the store — not released — so it
     must land on the store node's `pending`, which is precisely the signal that
     used to be absent from this screen."""
-    from app.core.enums import DrawerPart
-    from app.modules.drawers.service import DrawerService
+    from app.core.enums import StorePart
+    from app.modules.store.service import StoreService
 
-    piece, sku = pieces[0]
+    piece = pieces[0]
     await _walk(db, piece, cutter=cutter, tailor=None, cutting_mgr=cutting_mgr,
                 dm=dm, leather_lot=leather_lot, stages=1)
     # …and on to PASTING, which is where the leather side hands off to the store.
     # `_walk` cannot take it further here (it has no tailor to log with).
     await ready_for_store(piece, lining=False)
-    await DrawerService(db).store_scan(
-        drawer_id=piece.drawer_id, piece_id=piece.id,
-        part=DrawerPart.LEATHER, actor_id=dm.id)
+    # TWO SCANS, NOT THREE: the worker and the garment. There is no box to name.
+    await StoreService(db).store_scan(
+        piece_id=piece.id, employee_id=cutter[0].id, part=StorePart.LEATHER)
 
     t = await DashboardService(db).dm_order_tracking(
         order_id=order_tree["order"].id)
@@ -326,7 +326,7 @@ async def test_an_order_with_no_styles_still_answers(db, order_tree):
 async def test_style_tracking_reports_per_stage_quantities(
     db, operations, pieces, order_tree, cutter, tailor, cutting_mgr, dm, leather_lot
 ):
-    for piece, _ in pieces[:2]:
+    for piece in pieces[:2]:
         await _walk(db, piece, cutter=cutter, tailor=tailor,
                     cutting_mgr=cutting_mgr, dm=dm, leather_lot=leather_lot)
 

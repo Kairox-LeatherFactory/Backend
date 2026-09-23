@@ -14,10 +14,10 @@ INTEGRITY, NOT GUESSING.
     than "invalid"). A guess is never returned.
 
 NO SQL LIVES HERE. EVERY READ IS A REPOSITORY CALL.
-    For a PIECE code we need the piece's SKU/style/order + current stage + drawer
+    For a PIECE code we need the piece's SKU/style/order + current stage + store
     + consumption. That is one column-scoped join in BarcodeRepository.piece_card;
     this service only shapes the row into the response dict. The repository selects
-    the ~12 scalars the payload prints rather than hydrating Piece/SKU/Style/Drawer
+    the ~12 scalars the payload prints rather than hydrating Piece/SKU/Style
     entities — a scan reads columns, it does not need mapped objects.
 ================================================================================
 """
@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import (
     StoreState,
-    MERGE_GATE_ENTRY, BarcodeStatus, BarcodeType, DrawerState, next_chain_stage,
+    MERGE_GATE_ENTRY, BarcodeStatus, BarcodeType, next_chain_stage,
 )
 from app.core.store_display import holding_label
 from app.modules.barcode.repository import BarcodeRepository
@@ -43,7 +43,7 @@ class BarcodeService:
     async def _get_active_or_410(self, code: str):
         """Shared lookup: 404 if unknown, 410 if the barcode is retired — for ANY
         barcode type, not just employee (F18). Retirement is a lifecycle state on
-        the registry; a retired piece/lot/drawer label must not silently resolve.
+        the registry; a retired piece or lot label must not silently resolve.
         Returns the row on success."""
         row = await self.repo.get_by_code(code)
         if not row:
@@ -79,8 +79,6 @@ class BarcodeService:
             out["piece"] = await self._piece_payload(row.piece_id)
         elif row.type == BarcodeType.EMPLOYEE.value and row.employee_id:
             out["employee"] = await self._employee_payload(row.employee_id)
-        elif row.type == BarcodeType.DRAWER.value and row.drawer_id:
-            out["drawer"] = await self._drawer_payload(row.drawer_id)
         elif row.type == BarcodeType.LEATHER_SHEET.value and row.material_sheet_id:
             # BEFORE the generic lot branch, which would otherwise swallow it:
             # a LEATHER_SHEET row carries material_lot_id too, so the `elif
@@ -113,12 +111,11 @@ class BarcodeService:
             SHEET     → PIECE    a hide was named; scan what it is cut for
             PIECE     → None     there is no second code to pair with it
 
-        PIECE NO LONGER ASKS FOR A DRAWER, and that is the whole point of the
-        store change. The old flow was employee → DRAWER → piece, so a piece scan
-        answered "now find the box". There is no box: the store scan is two
-        codes, the worker and the garment, and after the garment there is nothing
-        left to present. What the piece is waiting for is a STAGE, and
-        `next_stage` below is what carries that.
+        THE STORE SCAN IS TWO CODES, not three. The old flow was employee →
+        DRAWER → piece, so a piece scan answered "now find the box". There is no
+        box: the worker and the garment are the whole scan, and after the garment
+        there is nothing left to present. What the piece is waiting for is a
+        STAGE, and `next_stage` below is what carries that.
 
         GUIDANCE ONLY. The authority on whether a scan is legal is
         StoreService.store_scan. This says what to reach for, not what is
@@ -132,12 +129,6 @@ class BarcodeService:
         if payload.get("sheet") is not None:
             return "PIECE"
 
-        # A legacy DRAWER label still resolves (the registry rows are kept for
-        # audit), but it can no longer ask for a pairing scan — there is nothing
-        # to pair it with.
-        if payload.get("drawer") is not None:
-            return None
-
         # A PIECE is the END of the store scan, not the middle of it.
         return None
 
@@ -146,14 +137,14 @@ class BarcodeService:
 
         The scan screen needs two different answers and used to get only half of
         one: WHICH CODE to scan next (above) and WHICH STAGE the piece is due at.
-        A piece whose drawer already holds both parts has no next code — but it
+        A piece that already holds both parts has no next code — but it
         very much has a next stage, and returning nothing for it read as "the
         system doesn't know".
 
         COST: exactly ONE extra query, and only for a PIECE code. The stage is
         derived by `next_chain_stage` — the same pure helper the write path uses,
         so this can never advertise a stage the log would refuse — and the merge
-        check reuses the drawer columns `piece_card` already loaded rather than
+        check reuses the store columns `piece_card` already loaded rather than
         re-reading them.
 
         Deliberately NOT a call into ProductionService.piece_state: that builds
@@ -176,7 +167,7 @@ class BarcodeService:
 
         blocked = None
         # THE STORE IS ON THE GARMENT NOW, so the advisory reads the piece rather
-        # than a drawer. This is the SOFT half of the merge gate — it tells the
+        # rather than a box. This is the SOFT half of the merge gate — it tells the
         # scan screen what is coming — and it has to agree with the hard gate in
         # ProductionService._merge_ok or the screen promises a stage the log then
         # refuses.
@@ -279,13 +270,6 @@ class BarcodeService:
                                 f"'{code}' is not a known material-lot barcode.")
         return row.material_lot_id
 
-    async def resolve_drawer_id(self, code: str) -> uuid.UUID:
-        row = await self._get_active_or_410(code)   # F18
-        if row.type != BarcodeType.DRAWER.value or not row.drawer_id:
-            raise HTTPException(status.HTTP_404_NOT_FOUND,
-                                f"'{code}' is not a known drawer barcode.")
-        return row.drawer_id
-
     # ── payloads (shape only; the repository owns every query) ───────────────
     async def _piece_payload(self, piece_id: uuid.UUID) -> dict:
         r = await self.repo.piece_card(piece_id)
@@ -316,29 +300,33 @@ class BarcodeService:
             "order_number": r.order_number,
             "client": r.client_name,
             "current_stage": r.current_stage,
-            # BUG #12: the drawer, in every payload that names a piece — so an
-            # operator on any production stage can see where the garment lives
-            # without opening the Store Management hub. Null pre-merge / post-ship
-            # (a LEFT join, not an error); `drawer_code` is kept flat alongside it
-            # for callers written against the old shape.
-            "drawer_code": r.drawer_code,
-            "drawer": None if not r.drawer_id else {
-                "drawer_id": str(r.drawer_id),
-                "code": r.drawer_code,
-                "state": r.drawer_state,
+            # BUG #12: WHERE THE GARMENT STANDS IN THE STORE, in every payload
+            # that names a piece — so an operator on any production stage can see
+            # it without opening the Store Management hub.
+            #
+            # This used to be a `drawer` block naming a numbered box, read through
+            # a join. There is no box: the garment carries its own state, so the
+            # same three facts (what it holds, whether it is complete, whether it
+            # has been released) are columns on the row this query already loaded.
+            "store": {
+                "state": r.store_state,
                 "holding": holding_label(leather_in=r.leather_in,
                                          lining_in=r.lining_in),
                 "leather_in": bool(r.leather_in),
                 "lining_in": bool(r.lining_in),
+                "accessories_in": bool(r.accessories_in),
             },
+            # Flat, alongside the block, for callers written against the old
+            # shape that only ever read the one word.
+            "store_state": r.store_state,
             "leather_consumption_dcm": (
                 float(r.consumption_qty) if r.consumption_qty is not None else None),
             "needs_lining": bool(r.needs_lining),
             # ── WHAT THIS GARMENT NEEDS, AND WHAT IT HAS BEEN GIVEN ──────────
-            # The answer to "how does the operator know which accessories go in
-            # the drawer?". It hangs off the PIECE code because that is one of
-            # the two things a person at the store physically has in their hand
-            # (the other is the drawer code, which carries the same block).
+            # The answer to "how does the operator know which accessories go
+            # into this garment?". It hangs off the PIECE code because the
+            # garment is what the person at the store physically has in hand —
+            # the store scan is the worker and the garment, nothing else.
             #
             # ADDITIVE: one new key on a payload the schema already types as
             # `dict | None`, so nothing a current client reads changes. For a
@@ -362,26 +350,6 @@ class BarcodeService:
             "designation": r.designation,
             "wage_type": getattr(r.wage_type, "value", str(r.wage_type)),
             "is_active": r.is_active,
-        }
-
-    async def _drawer_payload(self, drawer_id: uuid.UUID) -> dict:
-        r = await self.repo.drawer_card(drawer_id)
-        if not r:
-            return {"drawer_id": str(drawer_id)}
-        return {
-            "drawer_id": str(r.id), "drawer_code": r.code, "seq": r.seq,
-            "state": r.state,
-            "current_piece_id": str(r.current_piece_id) if r.current_piece_id else None,
-            "leather_in": r.leather_in, "lining_in": r.lining_in,
-            # The third bucket, and the drawer-side answer to the same question
-            # the piece payload answers. Resolved for whatever piece the drawer
-            # currently holds; an empty drawer gets the NOT_REQUIRED shape rather
-            # than a null, so the screen always has something to render.
-            "accessories_in": bool(getattr(r, "accessories_in", False)),
-            "holding": holding_label(leather_in=r.leather_in,
-                                     lining_in=r.lining_in),
-            "material_requirement": await self._material_requirement(
-                r.current_piece_id),
         }
 
     async def _material_requirement(self, piece_id) -> dict:
@@ -494,27 +462,62 @@ class BarcodeService:
         return True
 
     async def list_lot_barcodes(self, *, category: str | None = None,
-                                active_only: bool = True) -> list[dict]:
-        """EVERY MATERIAL LOT BARCODE, for the material-barcode print screen.
+                                active_only: bool = True,
+                                kind: str | None = None) -> list[dict]:
+        """EVERY MATERIAL LABEL, for the material-barcode print screen.
 
-        The barcode section had screens for pieces, drawers and employee cards
+        The barcode section had screens for pieces and employee cards
         but none for material lots, so a lot minted a code nobody could reprint
         after the first label was lost. This is that list.
+
+        HIDES ARE ON IT TOO, and that is the point of `kind`. Creating a leather
+        lot with `sheets` mints a LEATHER_SHEET barcode per hide — the response
+        to POST /materials/lots returns them — but this screen listed only the
+        three LOT types, so the hide labels existed in the registry and no screen
+        could reprint them. A lot label and a hide label are different stickers
+        for different objects: the lot says "SHEEP GLESS · BLACK · 3400 dcm" and
+        goes on the shelf; the hide says "LS-000014 · 45 dcm" and goes on one
+        skin. Both have to be printable.
+
+        The join to MaterialLot is INNER for both kinds, which is safe because
+        `mint_sheet_code_nocommit` sets material_lot_id on the sheet's registry
+        row as well as material_sheet_id — a scan has to answer "which hide" and
+        "what article is it" in one read.
+
+            kind=None (default)   lots and hides, each lot followed by its own
+            kind="LOT"            the three lot types only — the old behaviour
+            kind="SHEET"          hides only, for a print run of skin labels
         """
-        from app.modules.barcode.models import BarcodeRegistry, MaterialLot
+        from app.modules.barcode.models import (
+            BarcodeRegistry, MaterialLot, MaterialSheet,
+        )
         from sqlalchemy import select as _select
 
         lot_types = [BarcodeType.LEATHER_LOT.value, BarcodeType.LINING_LOT.value,
                      BarcodeType.ACCESSORY_LOT.value]
+        wanted = {"LOT": lot_types,
+                  "SHEET": [BarcodeType.LEATHER_SHEET.value]}.get(
+                      (kind or "").strip().upper(),
+                      lot_types + [BarcodeType.LEATHER_SHEET.value])
+
         stmt = (_select(BarcodeRegistry.code, BarcodeRegistry.type,
                         BarcodeRegistry.status, BarcodeRegistry.caption,
                         MaterialLot.id, MaterialLot.category, MaterialLot.subtype,
                         MaterialLot.article, MaterialLot.colour,
                         MaterialLot.thickness, MaterialLot.size,
-                        MaterialLot.uom, MaterialLot.on_hand)
+                        MaterialLot.uom, MaterialLot.on_hand,
+                        MaterialSheet.id, MaterialSheet.dcm,
+                        MaterialSheet.status, MaterialSheet.cutting_row_id)
                 .join(MaterialLot, MaterialLot.id == BarcodeRegistry.material_lot_id)
-                .where(BarcodeRegistry.type.in_(lot_types))
-                .order_by(MaterialLot.category, MaterialLot.article))
+                .outerjoin(MaterialSheet,
+                           MaterialSheet.id == BarcodeRegistry.material_sheet_id)
+                .where(BarcodeRegistry.type.in_(wanted))
+                # Each lot, then its own hides under it — a print queue is read
+                # top to bottom and a hide three pages from its lot is useless.
+                .order_by(MaterialLot.category, MaterialLot.article,
+                          MaterialLot.id,
+                          BarcodeRegistry.material_sheet_id.is_(None).desc(),
+                          BarcodeRegistry.code))
         if active_only:
             stmt = stmt.where(BarcodeRegistry.status == BarcodeStatus.ACTIVE.value)
         if category:
@@ -526,31 +529,58 @@ class BarcodeService:
 
     @staticmethod
     def _lot_barcode_row(r) -> dict:
+        """One printable row — a LOT sticker or a HIDE sticker.
+
+        `kind` is what the print screen branches on, and `label_line` is already
+        the right sentence for each: a hide prints its own measurement, not the
+        lot's running total, because the total is not true of the skin in your
+        hand.
+        """
+        # DEFENSIVE INDEXING, because this row is built by TWO queries. The lot
+        # screen selects the four hide columns; older callers (and the pure unit
+        # tests) hand over just the thirteen lot columns, and an IndexError there
+        # is a 500 on a print screen rather than a missing field. A short row is
+        # simply a LOT row — which is exactly what it was before hides existed.
+        def col(i):
+            return r[i] if len(r) > i else None
+
+        is_sheet = col(13) is not None
+        lot_line = " · ".join(str(v) for v in
+                              [r[7], r[8], r[9] or r[10],
+                               f"{float(r[12] or 0)} {r[11]}"] if v)
         return {
+            "kind": "SHEET" if is_sheet else "LOT",
             "code": r[0], "type": r[1], "status": r[2], "caption": r[3],
             "lot_id": r[4], "category": r[5], "subtype": r[6],
             "article": r[7], "colour": r[8], "thickness": r[9], "size": r[10],
             "uom": r[11], "on_hand": float(r[12] or 0),
-            # Pre-joined sticker text, same convention as the piece label.
-            "label_line": " · ".join(str(v) for v in
-                                     [r[7], r[8], r[9] or r[10],
-                                      f"{float(r[12] or 0)} {r[11]}"] if v),
+            # Null on a LOT row: a lot is not a hide and has no single dcm.
+            "sheet_id": col(13),
+            "dcm": float(col(14)) if col(14) is not None else None,
+            "sheet_status": col(15),
+            "cutting_row_id": col(16),
+            "label_line": (
+                " · ".join(str(v) for v in
+                           [r[7], r[8], r[9], f"{float(col(14) or 0):g} dcm"] if v)
+                if is_sheet else lot_line),
         }
 
     async def page_lot_barcodes(self, params, *, category: str | None = None,
-                                active_only: bool = True) -> tuple[list[dict], int]:
-        """One page of the material-lot label screen.
+                                active_only: bool = True,
+                                kind: str | None = None) -> tuple[list[dict], int]:
+        """One page of the material-label screen.
 
         A print screen is a list a human scrolls, and the lot table grows with
         every delivery for the life of the factory — so this is paged like the
         other label screens rather than returning the whole registry. Filter by
-        `category` to narrow it instead of paging through it.
+        `category` or `kind` to narrow it instead of paging through it.
         """
         from app.core.pagination import paginate_rows
 
         # Build the statement through the same method the unpaged form uses, so
         # the two can never disagree about which rows they are describing.
-        await self.list_lot_barcodes(category=category, active_only=active_only)
+        await self.list_lot_barcodes(category=category, active_only=active_only,
+                                     kind=kind)
         stmt = self._lot_barcodes_stmt
         rows, total = await paginate_rows(self.db, stmt, params)
         return [self._lot_barcode_row(r) for r in rows], total
@@ -592,7 +622,7 @@ class BarcodeService:
                 "symbology": "code128",
                 "caption": captions.get(norm) or (c or ""),
                 "known": known,
-                # None for a drawer / employee / lot label: those name no garment,
+                # None for an employee / lot label: those name no garment,
                 # so there is no order·article·style line to print under them.
                 "details": detail,
                 "label_line": None if not detail else " · ".join(

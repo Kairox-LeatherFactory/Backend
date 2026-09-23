@@ -61,9 +61,9 @@ import app.modules.inventory.models         # noqa: F401
 
 from app.core.enums import (
     StoreState,
-    BarcodeStatus, BarcodeType, DrawerState, ProductionStage, UserRole, WageType,
+    BarcodeStatus, BarcodeType, ProductionStage, UserRole, WageType,
 )
-from app.modules.barcode.models import BarcodeRegistry, Drawer, MaterialLot, MaterialSupplier
+from app.modules.barcode.models import BarcodeRegistry, MaterialLot, MaterialSupplier
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
 from app.modules.employees.models import Employee
 from app.modules.production.models import Operation, OperationAccess, Piece
@@ -181,7 +181,7 @@ async def _make_employee(db, name, designation, wage_type=WageType.PIECE_RATE,
 
 
 # ── put a piece in the state the STORE actually accepts ──────────────────────
-# The store is the merge point of the two cut paths, and DrawerService now
+# The store is the merge point of the two cut paths, and StoreService now
 # enforces that at the WRITE (core/store_display.STORE_ENTRY_STAGE):
 #
 #     leather may enter a drawer only after PASTING
@@ -204,7 +204,7 @@ async def _log_stage(db, operations, piece, employee_id, code):
 
 async def _ready_for_store(db, operations, piece, employee_id, *,
                            leather=True, lining=True):
-    """Log the cut-side stages that let `piece` be scanned into its drawer.
+    """Log the cut-side stages that let `piece` be scanned into the store.
 
     leather=True  → LEATHER_CUTTING, FUSING, PASTING (the whole leather side, so
                     the piece's history is realistic and not just the one stage
@@ -279,10 +279,10 @@ async def cut_pieces(db, operations, cutter, pieces):
     The drawer/store tests are asserting what a drawer does with parts that
     arrive; they are not asserting how a piece gets to the store. This is that
     prerequisite as a fixture, so those tests read `cut_pieces` and stay about
-    drawers. Tests that are specifically probing the store-entry gate should take
+    the store. Tests that are specifically probing the store-entry gate should take
     `pieces` + `ready_for_store` instead and control each side themselves.
     """
-    for piece, _drawer in pieces:
+    for piece in pieces:
         await _ready_for_store(db, operations, piece, cutter[0].id)
     return pieces
 
@@ -362,39 +362,30 @@ def stitching_mgr():
 async def pieces(db, order_tree):
     """5 pieces of the SKU, needs_lining=True — the state after breakdown upload.
 
-    THE DRAWER IS VESTIGIAL HERE. It is still created so the tuple shape
-    `(piece, drawer)` that dozens of call sites unpack keeps working, but nothing
-    reads it any more: the store lives on `piece.store_state` since
-    20260902_store_piece. A freshly minted piece is WAITING — not in the store
-    yet — which is exactly what premint now writes."""
+    A LIST OF PIECES, not a list of (piece, drawer) tuples. The fixture used to
+    mint a vestigial drawer per piece purely to keep that tuple shape alive for
+    the call sites that unpacked it; the drawer module is gone, so the scaffolding
+    went with it. A freshly minted piece is WAITING — not in the store yet —
+    which is exactly what premint writes.
+    """
     sku = order_tree["sku"]
     out = []
     for seq in range(1, 6):
-        drawer = Drawer(code=f"DRW-{seq:04d}", seq=seq, state=DrawerState.MERGED.value)
-        db.add(drawer)
-        await db.flush()
         p = Piece(code=f"JP-CLERMONT-PINE-M-{seq:03d}", seq=seq, sku_id=sku.id,
                   current_operation_id=None)
         if hasattr(p, "needs_lining"):
             p.needs_lining = True
-        if hasattr(p, "drawer_id"):
-            p.drawer_id = drawer.id
         if hasattr(p, "store_state"):
             p.store_state = StoreState.WAITING.value
         db.add(p)
         await db.flush()
-        drawer.current_piece_id = p.id
         db.add(BarcodeRegistry(code=p.code, type=BarcodeType.PIECE.value,
                                status=BarcodeStatus.ACTIVE.value, piece_id=p.id,
                                caption=p.code))
-        db.add(BarcodeRegistry(code=drawer.code, type=BarcodeType.DRAWER.value,
-                               status=BarcodeStatus.ACTIVE.value, drawer_id=drawer.id,
-                               caption=drawer.code))
-        out.append((p, drawer))
+        out.append(p)
     await db.commit()
-    for p, d in out:
+    for p in out:
         await db.refresh(p)
-        await db.refresh(d)
     return out
 
 

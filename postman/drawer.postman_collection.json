@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "KairoX \u00b7 Drawer (WITHDRAWN)",
-    "description": "THE DRAWER MODULE IS GONE. `/api/v1/drawers/*` is unrouted \u2014 not renamed, not deprecated.\n\nWHY. There were 200 physical drawers. A style releases 100+ garments, the run stalls mid-chain, and the next 50 have nowhere to go; re-allocating by hand was too complicated for the DM to actually do. The drawer was a bottleneck that earned nothing.\n\nWHAT REPLACED IT. The store is now a STATE ON THE GARMENT, so it has no capacity and nothing runs out. Use `store.postman_collection.json`:\n    POST /drawers/store-scan   ->  POST /store/scan   (one scan fewer)\n    POST /drawers/send         ->  POST /store/send\n    GET  /drawers/by-code/{c}  ->  GET  /store/pieces/{piece_code}\n    GET  /drawers              ->  GET  /store/pieces\n    GET  /drawers/pool         ->  (nothing \u2014 there is no pool)\n\nThe two requests below are the only drawer-shaped endpoints left. They read FROZEN history for audit; they are not live state.\n\nSETUP\n  1. Import the whole folder and SELECT the KairoX environment\n     (top-right). That is what shares one token across every\n     collection \u2014 a collection variable is visible only to the\n     collection that set it.\n  2. Run `user` \u2192 Login. Its test script stores `access_token` for\n     you; there is nothing to copy and paste.\n  3. Every request here inherits bearer auth from that token.\n\n`base_url` defaults to http://127.0.0.1:8000.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. File uploads are real form-data rows \u2014 click Select Files on\nthe `file` row. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "description": "THE DRAWER MODULE IS DELETED. `/api/v1/drawers/*` is gone \u2014 not renamed, not deprecated.\n\nWHY. There were 200 physical drawers. A style releases 100+ garments, the run stalls mid-chain, and the next 50 have nowhere to go; re-allocating by hand was too complicated for the DM to actually do. The drawer was a bottleneck that earned nothing.\n\nWHAT REPLACED IT. The store is now a STATE ON THE GARMENT, so it has no capacity and nothing runs out. Use `store.postman_collection.json`:\n    POST /drawers/store-scan   ->  POST /store/scan   (one scan fewer)\n    POST /drawers/send         ->  POST /store/send\n    GET  /drawers/by-code/{c}  ->  GET  /store/pieces/{piece_code}\n    GET  /drawers              ->  GET  /store/pieces\n    GET  /drawers/pool         ->  (nothing \u2014 there is no pool)\n\nThe two requests below replace the drawer detail/movement screens. They are keyed by the GARMENT, which is what an operator can scan. read FROZEN history for audit; they are not live state.\n\nSETUP\n  1. Import the whole folder and SELECT the KairoX environment\n     (top-right). That is what shares one token across every\n     collection \u2014 a collection variable is visible only to the\n     collection that set it.\n  2. Run `user` \u2192 Login. Its test script stores `access_token` for\n     you; there is nothing to copy and paste.\n  3. Every request here inherits bearer auth from that token.\n\n`base_url` defaults to http://127.0.0.1:8000.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. File uploads are real form-data rows \u2014 click Select Files on\nthe `file` row. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -28,12 +28,12 @@
   ],
   "item": [
     {
-      "name": "Store Drawer Detail",
+      "name": "Store Piece Detail",
       "request": {
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "{{base_url}}/api/v1/dashboard/store/drawers/{{drawer_id}}",
+          "raw": "{{base_url}}/api/v1/dashboard/store/garments/{{piece_id}}",
           "host": [
             "{{base_url}}"
           ],
@@ -42,27 +42,27 @@
             "v1",
             "dashboard",
             "store",
-            "drawers",
-            "{{drawer_id}}"
+            "garments",
+            "{{piece_id}}"
           ],
           "variable": [
             {
-              "key": "drawer_id",
+              "key": "piece_id",
               "value": "00000000-0000-0000-0000-000000000000"
             }
           ]
         },
-        "description": "Store \u00a76 \u2014 full drawer info + who cut the leather / lining it holds."
+        "description": "Store \u00a76 \u2014 a garment in the store + who cut its leather / lining."
       },
       "response": []
     },
     {
-      "name": "Store Drawer Movement",
+      "name": "Store Piece Movement",
       "request": {
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "{{base_url}}/api/v1/dashboard/store/drawers/{{drawer_id}}/movement",
+          "raw": "{{base_url}}/api/v1/dashboard/store/garments/{{piece_id}}/movement",
           "host": [
             "{{base_url}}"
           ],
@@ -71,18 +71,18 @@
             "v1",
             "dashboard",
             "store",
-            "drawers",
-            "{{drawer_id}}",
+            "garments",
+            "{{piece_id}}",
             "movement"
           ],
           "variable": [
             {
-              "key": "drawer_id",
+              "key": "piece_id",
               "value": "00000000-0000-0000-0000-000000000000"
             }
           ]
         },
-        "description": "Store \u00a717 \u2014 a drawer's movement history from the audit trail."
+        "description": "Store \u00a717 \u2014 a garment's store movement history, from the audit trail."
       },
       "response": []
     }

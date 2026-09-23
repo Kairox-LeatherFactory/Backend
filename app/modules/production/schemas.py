@@ -252,9 +252,11 @@ class LogResult(BaseModel):
     # has always returned these; without the field the response model dropped
     # them, so the floor never saw the warning it was told it would get.
     skill_warnings: list[dict] = Field(default_factory=list)
-    # BUG #12 — {piece_code: {drawer_id, code, state, holding, leather_in,
-    # lining_in}} for every scanned piece that has a drawer.
-    drawer_by_piece: dict[str, dict] = Field(default_factory=dict)
+    # BUG #12 — {piece_code: {state, holding, leather_in, lining_in,
+    # accessories_in}} for every scanned piece. It used to be `drawer_by_piece`
+    # and name a numbered box, which meant a garment no box was claiming had no
+    # entry at all; every piece has a store standing.
+    store_by_piece: dict[str, dict] = Field(default_factory=dict)
     # BUG #8 — {sku_id, stage, total, done, remaining, closed} for the stage just
     # logged. `closed: true` means every piece of the SKU is done here and the
     # style must stop being offered for scanning. Null on a preview or a MIXED
@@ -264,7 +266,7 @@ class LogResult(BaseModel):
     # {piece_code: {kit_required, kit_status, outstanding}}. DELIBERATELY LEAN:
     # a 40-piece batch carrying the full requirement block would dwarf the rest
     # of the response, and three fields is all the scan screen needs to show a
-    # "kit still owed" chip and link through to the drawer. `kit_status` is
+    # "kit still owed" chip and link through to the garment. `kit_status` is
     # NOT_REQUIRED for every style with no accessory spec.
     kit_by_piece: dict[str, dict] = Field(default_factory=dict)
     # Where the cut quantity came from: "typed" (the operator entered it),
@@ -307,10 +309,13 @@ class PieceState(BaseModel):
     operator's hand.
     """
     piece: dict                      # the full barcode piece card (article, serial…)
-    drawer: dict | None = None       # bug #12
+    # BUG #12 — where the garment stands in the store: what it holds, what it is
+    # still owed. Was `drawer`, which named a box and was null for any piece the
+    # 200-slot pool had no room for.
+    store: dict | None = None
     completed_stages: list[str] = Field(default_factory=list)
     # WHERE THE PIECE IS NOW — the real, event-backed stage. Distinct from
-    # `display_stage`, which may read STORE (a drawer state, not an event).
+    # `display_stage`, which may read STORE (a store state, not an event).
     current_stage: str | None = None
     current_stage_label: str | None = None
     next_stage: str | None = None    # bug #4 — inferred, never chosen by the user

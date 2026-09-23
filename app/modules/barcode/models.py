@@ -181,7 +181,7 @@ class Drawer(Base, UUIDMixin, TimestampMixin):
     # NOT NULL + server_default "0" so every drawer already in the building reads
     # False, which — combined with `kit_required` being false for any style with
     # no accessory spec — makes the completeness predicate degenerate to exactly
-    # what it computed before this column existed. See DrawerService._kit_required.
+    # what it computed before this column existed. See StoreService._kit_required.
     #
     # NO `kit_issued_at`. leather_in/lining_in carry no timestamps either, and
     # piece_material_issue.issued_at plus last_activity_at below already answer
@@ -316,10 +316,31 @@ class MaterialReservation(Base, UUIDMixin, TimestampMixin):
 
 
 class MaterialReceipt(Base, UUIDMixin, TimestampMixin):
-    """One receiving record: approved qty added to a lot, rejected qty logged.
+    """One delivery. Approved qty added to a lot, rejected qty logged.
 
     Rejected quantity is kept for the supplier's quality history — it is the only
     place the factory learns which suppliers ship rejects.
+
+    ── A DELIVERY IS ENTERED IN TWO SITTINGS, BECAUSE THAT IS HOW IT ARRIVES ──
+    The van turns up and somebody has ten seconds: article, colour, total dcm.
+    Splitting that total into approved and rejected, counting the hides and
+    measuring each one is twenty minutes of work that happens when the floor is
+    quiet — sometimes the same afternoon, sometimes the next day. A form that
+    demanded all of it at once got one of two answers: nothing recorded until
+    somebody had twenty minutes, or made-up numbers typed to get past the field.
+
+    So a receipt has a `status`:
+        PENDING    the arrival is recorded and the material is in the building.
+                   `declared_qty` is what was said to have arrived and is what
+                   went into stock provisionally, so the floor can cut from it.
+                   approved/rejected are not known yet.
+        COMPLETED  the QC split and (for leather) the per-hide measurements have
+                   been entered. `approved_qty` is now real and on_hand has been
+                   corrected to it.
+
+    A receipt written before this existed has no status column value in the
+    database and reads COMPLETED via the server default — which is exactly what
+    it was: a delivery entered in one sitting.
     """
     __tablename__ = "material_receipt"
     material_lot_id: Mapped[uuid.UUID] = mapped_column(
@@ -330,6 +351,26 @@ class MaterialReceipt(Base, UUIDMixin, TimestampMixin):
     rejected_qty: Mapped[Decimal] = mapped_column(Numeric(14, 3), default=0)
     received_by: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True)
+
+    # PENDING | COMPLETED — see the class docstring. Indexed because the only
+    # query that reads it is "what is still waiting to be finished", which is the
+    # worklist screen and has to stay cheap as receipts accumulate.
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, index=True,
+        default="COMPLETED", server_default="COMPLETED")
+    # WHAT WAS SAID TO HAVE ARRIVED, kept beside what was later approved. Without
+    # it a completion cannot tell how much of on_hand this delivery provisionally
+    # contributed, so it could not correct it — it would have to trust that
+    # nothing had been cut in between, which on a busy floor is never true.
+    declared_qty: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
+    # OPTIONAL AT ARRIVAL. "Twelve bundles came in" is often known at the gate
+    # even when nobody has measured one yet; it is what the completion's hide
+    # count is checked against, and a mismatch is reported, never enforced.
+    declared_sheet_count: Mapped[int | None] = mapped_column(Integer)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_by: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(300))
 
 
 class MaterialSupplier(Base, UUIDMixin, TimestampMixin):
@@ -531,7 +572,7 @@ class PieceMaterialIssue(Base, UUIDMixin, TimestampMixin):
     uom: Mapped[str] = mapped_column(String(20))
     source: Mapped[str] = mapped_column(String(20), index=True)   # MaterialIssueSource
 
-    # WHO, in the two-identities sense DrawerService.store_scan documents: the
+    # WHO, in the two-identities sense StoreService.store_scan documents: the
     # WORKER whose card was scanned is DATA about the act; the LOGIN that
     # performed it is entered_by (a name, like ProductionEvent.entered_by) plus
     # the audit row. An employee is not an app_user and must never be written as

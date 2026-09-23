@@ -11,7 +11,7 @@ WHAT THIS FILE PROTECTS
       2. A SECOND TAP SPENDS NOTHING. Scan guns double-tap and gateways retry;
          `outstanding = required − issued` must make the repeat a no-op.
       3. A PARTIAL KIT DOES NOT LOOK COMPLETE. A line whose article matches no
-         lot must leave the drawer unsendable rather than quietly pass.
+         lot must leave the garment unsendable rather than quietly pass.
 
     Everything else in this file is a gate around those three.
 """
@@ -20,10 +20,10 @@ import datetime
 import pytest
 from sqlalchemy import func, select
 
-from app.core.enums import DrawerPart, DrawerState, KitStatus
+from app.core.enums import KitStatus, StorePart, StoreState
 from app.modules.barcode.models import (MaterialLot, PieceMaterialIssue,
                                         StyleMaterialSpec)
-from app.modules.drawers.service import DrawerService
+from app.modules.store.service import StoreService
 
 pytestmark = pytest.mark.integrity
 
@@ -86,9 +86,15 @@ async def spec(db, order_tree, button_lot, zip_lot):
     return rows
 
 
-async def _kit(db, piece, drawer, employee_id=None, lines=None):
-    return await DrawerService(db).store_scan(
-        drawer_id=drawer.id, piece_id=piece.id, part=DrawerPart.ACCESSORY,
+async def _kit(db, piece, employee_id=None, lines=None):
+    """The kit scan: the worker, the garment, and what is being issued.
+
+    TWO SCANS, NOT THREE. It used to take a drawer id as well, to find the box
+    the garment was assigned to at upload — a scan that existed only to locate a
+    number and a 409 that existed only to police it.
+    """
+    return await StoreService(db).store_scan(
+        piece_id=piece.id, part=StorePart.ACCESSORY,
         employee_id=employee_id, lines=lines, entered_by="TESTER")
 
 
@@ -96,18 +102,18 @@ async def _kit(db, piece, drawer, employee_id=None, lines=None):
 @pytest.mark.asyncio
 async def test_a_kit_scan_decrements_each_lot_exactly_once(
         db, pieces, spec, button_lot, zip_lot, cutter):
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     btn_before, zip_before = await _on_hand(db, button_lot.id), await _on_hand(db, zip_lot.id)
 
-    res = await _kit(db, piece, drawer, employee_id=cutter[0].id)
+    res = await _kit(db, piece, employee_id=cutter[0].id)
 
     assert res["kit"]["status"] == KitStatus.ISSUED.value
     assert await _on_hand(db, button_lot.id) == pytest.approx(btn_before - 4)
     assert await _on_hand(db, zip_lot.id) == pytest.approx(zip_before - 1)
     # One ledger row per recipe line — not per scan, and not per unit.
     assert await _issue_rows(db, piece.id) == 2
-    await db.refresh(drawer)
-    assert drawer.accessories_in is True
+    await db.refresh(piece)
+    assert piece.accessories_in is True
 
 
 # ══════════════════════════════ 2 · THE HEADLINE: a second tap spends nothing
@@ -116,11 +122,11 @@ async def test_scanning_the_same_kit_twice_spends_nothing_the_second_time(
         db, pieces, spec, button_lot, zip_lot, cutter):
     """Scan guns double-tap; gateways retry. Both land here, and both must be
     no-ops rather than a second issue — `outstanding = required − issued`."""
-    piece, drawer = pieces[0]
-    await _kit(db, piece, drawer, employee_id=cutter[0].id)
+    piece = pieces[0]
+    await _kit(db, piece, employee_id=cutter[0].id)
     after_first = await _on_hand(db, button_lot.id)
 
-    res = await _kit(db, piece, drawer, employee_id=cutter[0].id)
+    res = await _kit(db, piece, employee_id=cutter[0].id)
 
     assert res["kit"]["issued_now"] == []
     assert len(res["kit"]["already_issued"]) == 2
@@ -136,11 +142,11 @@ async def test_a_short_lot_still_issues_and_reports_the_shortfall(
     """The same rule the cut path has always had. The buttons are physically in
     the operator's hand; refusing to record them to protect a number would lose
     the record and teach the floor to work around the system."""
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     button_lot.on_hand = 2                      # spec wants 4
     await db.commit()
 
-    res = await _kit(db, piece, drawer, employee_id=cutter[0].id)
+    res = await _kit(db, piece, employee_id=cutter[0].id)
 
     assert res["kit"]["status"] == KitStatus.ISSUED.value
     assert await _on_hand(db, button_lot.id) == pytest.approx(-2)
@@ -155,24 +161,27 @@ async def test_a_short_lot_still_issues_and_reports_the_shortfall(
 async def test_a_line_with_no_matching_lot_partial_accepts_and_blocks_the_send(
         db, pieces, spec, button_lot, zip_lot, cutter):
     """The resolvable lines still go out — one bad button must not lose the zip —
-    but `accessories_in` stays False, so the drawer cannot leave the store with
+    but `accessories_in` stays False, so the garment cannot leave the store with
     an incomplete kit."""
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     # Retire the button lot and unpin it, so the line resolves to nothing.
     button_lot.is_active = False
     spec[0].material_lot_id = None
     await db.commit()
 
-    res = await _kit(db, piece, drawer, employee_id=cutter[0].id)
+    res = await _kit(db, piece, employee_id=cutter[0].id)
 
     assert res["kit"]["status"] == KitStatus.PARTIAL.value
     assert [r["article"] for r in res["kit"]["unresolved"]] == ["BTN-4H"]
     assert [r["article"] for r in res["kit"]["issued_now"]] == ["ZIP-YKK"]
-    await db.refresh(drawer)
-    assert drawer.accessories_in is False
+    await db.refresh(piece)
+    assert piece.accessories_in is False
     assert "ACCESSORIES" in res["awaiting"]
-    # And the operator is told what to actually do about it.
-    assert "no stock lot matches" in res["next_action"].lower()
+    # And the operator is told what to actually do about it. The reason rides on
+    # the LINE, not on `next_action`: this garment has no leather in it yet, so
+    # its single most useful next action is the leather — which is the store
+    # answering the more urgent question first, not losing the kit one.
+    assert res["kit"]["unresolved"][0]["reason"] == "NONE",         "NONE means 'no lot matches this line' — receive that stock first"
 
 
 @pytest.mark.asyncio
@@ -181,7 +190,7 @@ async def test_an_ambiguous_line_is_reported_with_its_candidates_and_spends_noth
     """Two lots carry the same article/colour/size, so the recipe cannot say
     which one to spend. Same verdict the cut-lot picker reaches — but as DATA, so
     one ambiguous button does not lose the rest of the kit."""
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     twin = MaterialLot(category="ACCESSORY", subtype="BUTTON", article="BTN-4H",
                        colour="BLACK", size="18L", uom="pcs", on_hand=50,
                        is_active=True)
@@ -190,7 +199,7 @@ async def test_an_ambiguous_line_is_reported_with_its_candidates_and_spends_noth
     await db.commit()
     before = await _on_hand(db, button_lot.id)
 
-    res = await _kit(db, piece, drawer, employee_id=cutter[0].id)
+    res = await _kit(db, piece, employee_id=cutter[0].id)
 
     unresolved = res["kit"]["unresolved"]
     assert [r["article"] for r in unresolved] == ["BTN-4H"]
@@ -205,7 +214,7 @@ async def test_a_pinned_lot_wins_over_a_key_match(
         db, pieces, spec, button_lot, cutter):
     """Two lots would match the key; the recipe names one, so ambiguity never
     arises. This is why the authoring screen pins material_lot_id."""
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     twin = MaterialLot(category="ACCESSORY", subtype="BUTTON", article="BTN-4H",
                        colour="BLACK", size="18L", uom="pcs", on_hand=50,
                        is_active=True)
@@ -213,7 +222,7 @@ async def test_a_pinned_lot_wins_over_a_key_match(
     await db.commit()
     await db.refresh(twin)
 
-    res = await _kit(db, piece, drawer, employee_id=cutter[0].id)
+    res = await _kit(db, piece, employee_id=cutter[0].id)
 
     assert res["kit"]["status"] == KitStatus.ISSUED.value
     assert await _on_hand(db, twin.id) == pytest.approx(50)      # untouched
@@ -222,21 +231,28 @@ async def test_a_pinned_lot_wins_over_a_key_match(
 
 # ═══════════════════════════ 6 · the gate ordering inside store_scan is intact
 @pytest.mark.asyncio
-async def test_the_merge_map_still_refuses_first_and_no_stock_moves(
+async def test_a_garment_already_sent_refuses_the_kit_and_spends_nothing(
         db, pieces, spec, button_lot, cutter):
-    """The merge map is the FIRST business authority in store_scan, and adding a
-    kit branch must not have moved it. A piece scanned into the wrong drawer is a
-    409 — and, critically, nothing is spent on the way to that 409."""
+    """THE FIRST BUSINESS AUTHORITY IN store_scan, and adding a kit branch must
+    not have moved it: nothing is spent on the way to the refusal.
+
+    THIS TEST USED TO BE "the wrong drawer is a 409". There is no wrong drawer —
+    that rejection policed an assignment the system invented at upload, and its
+    absence is the feature. What remains genuinely refusable is a garment that
+    has already LEFT the store, which is a fact about the world rather than about
+    the paperwork.
+    """
     from fastapi import HTTPException
-    piece, _own = pieces[0]
-    _other_piece, wrong_drawer = pieces[1]
+    piece = pieces[0]
+    piece.store_state = StoreState.SENDED.value
+    await db.commit()
     before = await _on_hand(db, button_lot.id)
 
     with pytest.raises(HTTPException) as exc:
-        await _kit(db, piece, wrong_drawer, employee_id=cutter[0].id)
+        await _kit(db, piece, employee_id=cutter[0].id)
 
     assert exc.value.status_code == 409
-    assert "not merged to drawer" in str(exc.value.detail)
+    assert "already been sent" in str(exc.value.detail)
     assert await _on_hand(db, button_lot.id) == pytest.approx(before)
     assert await _issue_rows(db, piece.id) == 0
 
@@ -246,22 +262,21 @@ async def test_accessory_is_never_inferred(db, pieces, spec, cutter,
                                            operations, ready_for_store):
     """A mis-inferred cut part sets the wrong boolean, which a human can undo. A
     mis-inferred KIT would spend money. So inference still chooses only between
-    the two cut parts, and a drawer holding both gets the old 409 rather than a
+    the two cut parts, and a garment holding both gets the old 409 rather than a
     surprise kit."""
     from fastapi import HTTPException
-    piece, drawer = pieces[0]
-    drawer.leather_in = True
-    drawer.lining_in = True
+    piece = pieces[0]
+    piece.leather_in = True
+    piece.lining_in = True
     await db.commit()
     before = await _issue_rows(db, piece.id)
 
     with pytest.raises(HTTPException) as exc:
-        await DrawerService(db).store_scan(
-            drawer_id=drawer.id, piece_id=piece.id, part=None,
-            employee_id=cutter[0].id)
+        await StoreService(db).store_scan(
+            piece_id=piece.id, part=None, employee_id=cutter[0].id)
 
     assert exc.value.status_code == 409
-    assert "already holds both" in str(exc.value.detail)
+    assert "already has both" in str(exc.value.detail)
     assert await _issue_rows(db, piece.id) == before
 
 
@@ -271,10 +286,10 @@ async def test_a_style_with_no_accessory_spec_is_told_so_loudly(
     """A cheerful 200 here would let an operator believe they issued a kit that
     does not exist, and nobody would find out until finishing."""
     from fastapi import HTTPException
-    piece, drawer = pieces[0]
+    piece = pieces[0]
 
     with pytest.raises(HTTPException) as exc:
-        await _kit(db, piece, drawer, employee_id=cutter[0].id)
+        await _kit(db, piece, employee_id=cutter[0].id)
 
     assert exc.value.status_code == 409
     assert "no accessory spec" in str(exc.value.detail)
@@ -285,21 +300,21 @@ async def test_a_style_with_no_accessory_spec_is_told_so_loudly(
 async def test_auto_received_waits_for_the_kit_when_the_style_has_one(
         db, pieces, spec, operations, cutter, lining_cutter):
     """HALF ONE OF R1. Auto-RECEIVE used to fire the instant both cut parts were
-    in. With a recipe outstanding that is wrong: the drawer is not complete, and
-    firing there is what made the third (kit) scan hit a RECEIVED drawer."""
+    in. With a recipe outstanding that is wrong: the garment is not complete, and
+    firing there is what made the kit scan hit an already-RECEIVED garment."""
     from tests.conftest import _ready_for_store
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     await _ready_for_store(db, operations, piece, cutter[0].id)
 
-    await DrawerService(db).store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                                       part=DrawerPart.LEATHER,
-                                       employee_id=cutter[0].id)
-    res = await DrawerService(db).store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                                             part=DrawerPart.LINING,
-                                             employee_id=lining_cutter[0].id)
+    await StoreService(db).store_scan(piece_id=piece.id,
+                                      part=StorePart.LEATHER,
+                                      employee_id=cutter[0].id)
+    res = await StoreService(db).store_scan(piece_id=piece.id,
+                                            part=StorePart.LINING,
+                                            employee_id=lining_cutter[0].id)
 
     assert res["auto_received"] is False
-    assert res["state"] == DrawerState.HOLDING_BOTH.value
+    assert res["store_state"] == StoreState.HOLDING_BOTH.value
     assert "ACCESSORIES" in res["awaiting"]
     # The checklist rides the CUT scan too — the person holding the leather is
     # the one who has to find the buttons.
@@ -307,92 +322,95 @@ async def test_auto_received_waits_for_the_kit_when_the_style_has_one(
     assert "BTN-4H" in res["kit"]["summary_line"]
 
     # ...and the kit scan then completes it.
-    kit = await _kit(db, piece, drawer, employee_id=cutter[0].id)
+    kit = await _kit(db, piece, employee_id=cutter[0].id)
     assert kit["auto_received"] is True
-    assert kit["state"] == DrawerState.RECEIVED.value
+    assert kit["store_state"] == StoreState.RECEIVED.value
 
 
 @pytest.mark.asyncio
-async def test_a_kit_may_be_issued_into_an_already_received_drawer(
+async def test_a_kit_may_be_issued_into_an_already_received_garment(
         db, pieces, spec, cutter):
     """HALF TWO OF R1, and the regression that would otherwise make the feature
-    unusable. A drawer that reached RECEIVED before its spec existed must still
+    unusable. A garment that reached RECEIVED before its spec existed must still
     accept its kit: an accessory issue is purely ADDITIVE and cannot revoke a
-    gate the drawer has already passed, which is the property the RECEIVED/SENDED
-    block actually protects."""
-    piece, drawer = pieces[0]
-    drawer.leather_in = True
-    drawer.lining_in = True
-    drawer.state = DrawerState.RECEIVED.value
+    gate the garment has already passed, which is the property the
+    RECEIVED/SENDED block actually protects."""
+    piece = pieces[0]
+    piece.leather_in = True
+    piece.lining_in = True
+    piece.store_state = StoreState.RECEIVED.value
     await db.commit()
 
-    res = await _kit(db, piece, drawer, employee_id=cutter[0].id)
+    res = await _kit(db, piece, employee_id=cutter[0].id)
 
-    assert res["late_kit"] is True
     assert res["kit"]["status"] == KitStatus.ISSUED.value
-    await db.refresh(drawer)
-    assert drawer.accessories_in is True
+    await db.refresh(piece)
+    assert piece.accessories_in is True
 
 
 @pytest.mark.asyncio
-async def test_a_sended_drawer_still_refuses_every_part_including_a_kit(
+async def test_a_sent_garment_still_refuses_every_part_including_a_kit(
         db, pieces, spec, cutter):
-    """SENDED is different in kind: the drawer has physically left the store, so
+    """SENDED is different in kind: the garment has physically left the store, so
     there is nothing there to put anything into."""
     from fastapi import HTTPException
-    piece, drawer = pieces[0]
-    drawer.state = DrawerState.SENDED.value
+    piece = pieces[0]
+    piece.store_state = StoreState.SENDED.value
     await db.commit()
 
     with pytest.raises(HTTPException) as exc:
-        await _kit(db, piece, drawer, employee_id=cutter[0].id)
+        await _kit(db, piece, employee_id=cutter[0].id)
     assert exc.value.status_code == 409
 
 
 # ══════════════════════════ 8 · the kit gates the SEND, not line-stitching
 @pytest.mark.asyncio
-async def test_an_unkitted_drawer_cannot_leave_the_store(
+async def test_an_unkitted_garment_cannot_leave_the_store(
         db, pieces, spec, operations, cutter, dm):
     """Sending is the garment physically LEAVING the store, which is the moment
-    the accessories have to be in the drawer. (Line-stitching is deliberately NOT
+    the accessories have to be with it. (Line-stitching is deliberately NOT
     gated on the kit — buttons are an input to finishing, not to stitching.)"""
     from tests.conftest import _ready_for_store
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     await _ready_for_store(db, operations, piece, cutter[0].id)
-    svc = DrawerService(db)
-    await svc.store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                         part=DrawerPart.LEATHER, employee_id=cutter[0].id)
-    await svc.store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                         part=DrawerPart.LINING, employee_id=cutter[0].id)
+    svc = StoreService(db)
+    await svc.store_scan(piece_id=piece.id, part=StorePart.LEATHER,
+                         employee_id=cutter[0].id)
+    await svc.store_scan(piece_id=piece.id, part=StorePart.LINING,
+                         employee_id=cutter[0].id)
 
-    blocked = await svc.send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
+    blocked = await svc.send(piece_ids=[piece.id], actor_user_id=dm.id)
     assert blocked["sent"] == []
-    reason = blocked["not_ready"][0]["reason"]
-    assert "accessory kit" in reason
-    assert "part=ACCESSORY" in reason          # actionable, not just refused
+    assert blocked["not_ready"][0]["missing"] == "accessory kit"
 
-    await _kit(db, piece, drawer, employee_id=cutter[0].id)
-    ok = await DrawerService(db).send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
+    await _kit(db, piece, employee_id=cutter[0].id)
+    ok = await StoreService(db).send(piece_ids=[piece.id], actor_user_id=dm.id)
     assert len(ok["sent"]) == 1
 
 
 @pytest.mark.asyncio
-async def test_the_drawer_recycles_with_all_three_buckets_empty(
+async def test_the_garment_leaves_the_store_with_all_three_buckets_empty(
         db, pieces, spec, cutter):
-    """PACKAGE_EXPORT hands the drawer back to the pool. The kit went out with
-    the garment, so the next piece merged here must start unkitted."""
-    piece, drawer = pieces[0]
-    await _kit(db, piece, drawer, employee_id=cutter[0].id)
-    await db.refresh(drawer)
-    assert drawer.accessories_in is True
+    """PACKAGE_EXPORT takes the garment OUT OF THE STORE, and it takes its kit
+    with it.
 
-    await DrawerService(db).release_nocommit(piece.id)
+    THIS USED TO BE "the drawer recycles to WAITING for the next piece". There is
+    no box to hand back — a drawer recycled because it was reused, and a garment
+    ships once. What still has to be true is that nothing is left claiming to
+    hold parts that physically left the building.
+    """
+    piece = pieces[0]
+    await _kit(db, piece, employee_id=cutter[0].id)
+    await db.refresh(piece)
+    assert piece.accessories_in is True
+
+    await StoreService(db).release_nocommit(piece.id)
     await db.commit()
-    await db.refresh(drawer)
+    await db.refresh(piece)
 
-    assert (drawer.leather_in, drawer.lining_in, drawer.accessories_in) == (
+    assert (piece.leather_in, piece.lining_in, piece.accessories_in) == (
         False, False, False)
-    assert drawer.state == DrawerState.WAITING.value
+    assert piece.store_state == StoreState.WAITING.value
 
 
 # ══════════════════════════ 9 · THE BACK-COMPATIBILITY PROOF
@@ -402,23 +420,23 @@ async def test_a_style_with_no_spec_reaches_received_on_exactly_the_old_scans(
     """Every style that predates this feature has no accessory lines, so
     `kit_required` is False, so the completeness predicate collapses to the two
     clauses it had before. This asserts that directly: leather + lining and the
-    drawer auto-receives, with no third scan and no kit anywhere in sight.
+    garment auto-receives, with no third scan and no kit anywhere in sight.
 
     If this test ever fails, the feature has become retroactive — which is
     precisely what keying the requirement on "the style declares accessories"
     exists to prevent."""
     from tests.conftest import _ready_for_store
-    piece, drawer = pieces[0]                 # NOTE: no `spec` fixture here
+    piece = pieces[0]                 # NOTE: no `spec` fixture here
     await _ready_for_store(db, operations, piece, cutter[0].id)
-    svc = DrawerService(db)
+    svc = StoreService(db)
 
-    await svc.store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                         part=DrawerPart.LEATHER, employee_id=cutter[0].id)
-    res = await svc.store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                               part=DrawerPart.LINING, employee_id=cutter[0].id)
+    await svc.store_scan(piece_id=piece.id, part=StorePart.LEATHER,
+                         employee_id=cutter[0].id)
+    res = await svc.store_scan(piece_id=piece.id, part=StorePart.LINING,
+                               employee_id=cutter[0].id)
 
     assert res["auto_received"] is True
-    assert res["state"] == DrawerState.RECEIVED.value
+    assert res["store_state"] == StoreState.RECEIVED.value
     assert "ACCESSORIES" not in res["awaiting"]
     # And the block that rides every scan says "nothing to kit", so the screen
     # hides the panel rather than rendering an empty checklist.

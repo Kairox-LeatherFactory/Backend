@@ -605,7 +605,7 @@ class TestListLots:
         """Derived live from production_event, so it cannot go stale."""
         from app.modules.production.models import ProductionEvent
         res = await make_lot(db)
-        piece, _ = pieces[0]
+        piece = pieces[0]
         db.add(ProductionEvent(
             sku_id=order_tree["sku"].id, piece_id=piece.id,
             operation_id=operations["LEATHER_CUTTING"].id,
@@ -624,7 +624,7 @@ class TestListLots:
         lining = await make_lot(db, category="LINING", subtype="PLAIN_LINING",
                                 article="POLY-1",
                                 attributes={"thickness": "0.4mm", "mtrs": 50})
-        piece, _ = pieces[0]
+        piece = pieces[0]
         db.add(ProductionEvent(
             sku_id=order_tree["sku"].id, piece_id=piece.id,
             operation_id=operations["LINING_CUTTING"].id,
@@ -640,7 +640,7 @@ class TestListLots:
         from app.modules.production.models import ProductionEvent
         await make_lot(db, article="AAA-FIRST")
         target = await make_lot(db, article="ZZZ-LAST")
-        piece, _ = pieces[0]
+        piece = pieces[0]
         db.add(ProductionEvent(
             sku_id=order_tree["sku"].id, piece_id=piece.id,
             operation_id=operations["LEATHER_CUTTING"].id,
@@ -663,17 +663,29 @@ class TestStock:
         await make_lot(db, colour="FOREST", attributes={"thickness": "1.2mm",
                                                         "dcm": 100})
         out = await MaterialService(db).stock(category="LEATHER")
-        assert out["on_hand"] == 500.0
+        assert out["arrived"] == 500.0
+        assert out["on_hand"] == 500.0          # nothing cut yet, so they agree
         assert out["lot_count"] == 2
         assert out["uom"] == "dcm"
 
-    async def test_consumption_shows_as_used_while_received_stays_whole(self, db):
+    async def test_the_three_numbers_reconcile_after_a_cut(self, db):
+        """arrived − used == balance, and `on_hand` is the BALANCE.
+
+        `on_hand` used to mean ARRIVED on this endpoint while meaning BALANCE on
+        a lot's own page, and `reserved` here silently carried everything already
+        consumed — so the two screens could not both be read as the same
+        quantity, and "how much of this have we used" had no honest answer.
+        """
         res = await make_lot(db)
         await MaterialService(db).decrement_for_cut_nocommit(res["lot_id"], 150)
         await db.commit()
         out = await MaterialService(db).stock(category="LEATHER")
-        assert out["used"] == 150.0
-        assert out["on_hand"] == 400.0          # received, not remaining
+        assert out["arrived"] == 400.0          # everything that ever came in
+        assert out["used"] == 150.0             # cut into garments
+        assert out["balance"] == 250.0          # left on the shelf
+        assert out["arrived"] - out["used"] == out["balance"]
+        assert out["on_hand"] == out["balance"]
+        assert out["reserved"] == 0.0,             "consumption is not a reservation — it is already out of the balance"
         assert out["available"] == 250.0
 
     async def test_a_shortfall_is_computed_and_a_supplier_suggested(self, db):
@@ -1197,8 +1209,8 @@ class TestConsumptionReports:
         """Two garments cut from one lot, the second one a rework."""
         from app.modules.production.models import ProductionEvent
         lot = await make_lot(db)
-        for (piece, _), qty, rework in ((pieces[0], 12.5, False),
-                                        (pieces[1], 7.5, True)):
+        for piece, qty, rework in ((pieces[0], 12.5, False),
+                                   (pieces[1], 7.5, True)):
             db.add(ProductionEvent(
                 sku_id=order_tree["sku"].id, piece_id=piece.id,
                 operation_id=operations["LEATHER_CUTTING"].id,
@@ -1256,7 +1268,7 @@ class TestConsumptionReports:
 
     async def test_piece_consumption_lists_every_event_for_one_garment(
             self, db, cut_history, pieces):
-        out = await MaterialService(db).piece_consumption(pieces[1][0].id)
+        out = await MaterialService(db).piece_consumption(pieces[1].id)
         assert out["total"] == 7.5
         assert out["rework"] == 7.5
         assert out["original"] == 0.0
@@ -1266,11 +1278,11 @@ class TestConsumptionReports:
     async def test_a_garment_cut_the_old_way_lists_no_hides(
             self, db, cut_history, pieces):
         """The honest answer: nobody recorded which hides those were."""
-        out = await MaterialService(db).piece_consumption(pieces[0][0].id)
+        out = await MaterialService(db).piece_consumption(pieces[0].id)
         assert out["sheets"] == []
 
     async def test_a_garment_nobody_cut_reports_zero(self, db, pieces):
-        out = await MaterialService(db).piece_consumption(pieces[4][0].id)
+        out = await MaterialService(db).piece_consumption(pieces[4].id)
         assert out["total"] == 0 and out["events"] == []
 
 
@@ -1289,7 +1301,7 @@ class TestRepositoryEdges:
         from app.modules.production.models import ProductionEvent
         lot = await make_lot(db)
         db.add(ProductionEvent(
-            sku_id=order_tree["sku"].id, piece_id=pieces[0][0].id,
+            sku_id=order_tree["sku"].id, piece_id=pieces[0].id,
             operation_id=operations["LEATHER_CUTTING"].id,
             work_date=date.today(), leather_lot_id=lot["lot_id"],
             consumption_qty=Decimal("9")))
@@ -1400,7 +1412,7 @@ class TestRepositoryEdges:
         for lot_id, when in ((new["lot_id"], date.today() - timedelta(days=2)),
                              (old["lot_id"], date.today())):
             db.add(ProductionEvent(
-                sku_id=order_tree["sku"].id, piece_id=pieces[0][0].id,
+                sku_id=order_tree["sku"].id, piece_id=pieces[0].id,
                 operation_id=operations["LEATHER_CUTTING"].id,
                 work_date=when, leather_lot_id=lot_id,
                 consumption_qty=Decimal("1")))

@@ -101,7 +101,7 @@ async def test_the_store_manager_cannot_log_production(
 ):
     """Store functions only. A store login that could also log cutting would make
     the separation the client asked for cosmetic."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     as_role(UserRole.STORE_MANAGER)
 
     r = await api_client.post(f"{API}/production/log", json={
@@ -117,7 +117,7 @@ async def test_the_store_manager_cannot_log_production(
 async def test_the_store_manager_cannot_reach_the_production_reads(
     api_client, as_role, operations, pieces
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     as_role(UserRole.STORE_MANAGER)
     for path in (f"{API}/production/operations",
                  f"{API}/production/events",
@@ -148,7 +148,7 @@ async def test_a_floor_manager_may_scan_but_may_not_release(
 
 @pytest.mark.asyncio
 async def test_a_viewer_reaches_none_of_the_store(api_client, as_role, pieces):
-    _, drawer = pieces[0]
+    piece = pieces[0]
     as_role(UserRole.VIEWER)
     assert (await api_client.get(f"{API}/drawers")).status_code == 403
     assert (await api_client.get(f"{API}/drawers/{drawer.id}")).status_code == 403

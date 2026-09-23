@@ -405,6 +405,11 @@ _NULLABLE_FKS_BORN_WITH_RULE = [
     # with ON DELETE SET NULL inline.
     ("order_style", "pattern_reference_id", "pattern_extraction",
      "fk_order_style_pattern_reference_id_pattern_extraction"),
+    # 20260923_material_arrival — who finished entering a staged delivery. The
+    # login can be deactivated and deleted; the delivery it recorded is a fact
+    # about material that physically arrived and must outlive them.
+    ("material_receipt", "completed_by", "app_user",
+     "fk_material_receipt_completed_by_app_user"),
 ]
 
 

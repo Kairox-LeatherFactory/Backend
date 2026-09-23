@@ -47,10 +47,15 @@ async def raise_inspection(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(_RAISERS),
 ):
-    """Record a PASS, or raise a REJECT for the DM.
+    """Raise a REJECT for the DM. A PASS may still be recorded deliberately.
+
+    `verdict` IS OPTIONAL AND DEFAULTS TO REJECT — this screen is opened when a
+    defect has been found, so the smallest useful call is the piece and the stage
+    it was seen at. `action` defaults to FIX (repair it where it stands); a REDO
+    still has to be asked for by name, with the stage to go back to.
 
     A PASS closes immediately — there is nothing to approve about a garment that
-    is fine, and making somebody sign one off means nobody records passes at all.
+    is fine.
     """
     piece_id = body.piece_id
     if piece_id is None:

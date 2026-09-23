@@ -15,16 +15,26 @@ PURPOSE
     What it writes, in order:
       1. Operations (the ProductionStage vocabulary) + role->operation access.
       2. Clients, ClientOrders, Styles, SKUs — through the real import engine.
-      3. A MOCK material spec per style (leather dcm/piece, no accessories),
-         because the release gate refuses an unspecced style.
-      4. The drawer pool.
-      5. RELEASE — mints the Piece rows, their parent barcodes, and merges each
-         piece into a drawer. This is the step that makes the floor scannable.
+      3. Suppliers + material lots for all three floor categories, each with its
+         child barcode (delegates to scripts/seed_materials.py — the single
+         stock record).
+      4. A MOCK material spec per style: the leather dcm/piece PLUS four trim
+         lines that resolve to the lots step 3 just created, because the release
+         gate refuses an unspecced style and a no-accessory declaration would
+         make the whole kit subsystem unreachable.
+      5. RELEASE — mints the Piece rows and their parent barcodes. This is the
+         step that makes the floor scannable.
       6. Employees + employee barcodes + staff logins (delegates to
          scripts/seed_employees.py — the single roster of record).
       7. Mock piece rates, one card per style.
       8. Management / client logins.
       9. Stage-1..4 reference registries (templates, garment types, POM, aliases).
+
+    THERE IS NO DRAWER STEP, and that is the change, not an omission. The store
+    is a state on the GARMENT (`piece.store_state`), so a drawer pool would seed
+    nothing the floor reads and the old "N pieces waiting for a drawer" warning
+    was telling operators about a constraint that no longer exists. See
+    `release_orders` for the details and for what happened to allow_pool_growth.
 
 WHAT CHANGED (and why this script needed updating at all)
     The importer moved on and this script did not, so it died on its first call:
@@ -53,7 +63,8 @@ USAGE
     python -m scripts.seed                      # everything
     python -m scripts.seed --no-release         # orders only, mint nothing
     python -m scripts.seed --skip-people        # leave the roster alone
-    python -m scripts.seed --drawers 400        # bigger drawer pool
+    python -m scripts.seed --skip-stock         # leave suppliers + lots alone
+    python -m scripts.seed --no-accessories     # leather-only recipe (old shape)
 
     Idempotent: re-running reuses existing rows and tops up what is missing. It
     never deletes anything outside the orders it owns.
@@ -98,7 +109,7 @@ from app.modules.clients.models import Client, Style, SKU
 from app.modules.production.models import Operation, OperationAccess, Piece
 from app.modules.wages.models import Rate
 from app.modules.attendance.models import AttendanceLog, ShiftConfig  # noqa: F401
-from app.modules.barcode.models import Drawer, StyleMaterialSpec
+from app.modules.barcode.models import MaterialLot, StyleMaterialSpec
 from app.core import models as _core_models  # noqa: F401  (cross-cutting tables)
 from app.modules.procurement import models as _procurement  # noqa: F401
 from app.modules.bom import models as _bom  # noqa: F401
@@ -114,9 +125,9 @@ from app.modules.imports.parse_orders import parse_order_sheet
 from app.modules.imports.load_to_db import (
     load_preview_into_order, _get_or_create_client, _get_or_create_order,
 )
-from app.modules.imports.premint import (
-    INITIAL_DRAWER_POOL, allocate_waiting_pieces, bootstrap_drawer_pool,
-)
+# premint HAS NO DRAWER HALF ANY MORE. bootstrap_drawer_pool /
+# allocate_waiting_pieces / grow_drawer_pool / INITIAL_DRAWER_POOL are deleted
+# along with the drawers module — see the note above `release_orders`.
 
 # ── Reference data ────────────────────────────────────────────────────────
 GARMENT_FILE = "data/GARMENT_ORDERPRODUCTION_DETAILS.xlsx"
@@ -198,6 +209,36 @@ MOCK_RATES = {
 # figure comes off the DM's material-spec screen per garment, and inventing a
 # per-style number here would look like data rather than a placeholder.
 MOCK_LEATHER_DCM = Decimal("12.500")
+
+# ── The mock ACCESSORY recipe ────────────────────────────────────────────────
+# WHY THE SEED DECLARES ACCESSORIES AT ALL. It used to stamp every style
+# `material_spec_no_accessories = True`, which is the one answer that makes the
+# entire kit subsystem unreachable: no accessory line means kit_required is
+# False for every garment, so the store scan has nothing to issue,
+# `piece_material_issue` stays empty, and POST /materials/issues, the kit
+# checklist and every KitStatus other than NOT_REQUIRED can never be seen on a
+# seeded database. A seed that hides half the feature is not a seed of it.
+#
+# EACH LINE RESOLVES TO EXACTLY ONE SEEDED LOT, which is the whole point —
+# `_resolve_lot` matches on (category, subtype, article, colour, thickness,
+# size), so these six values are copied from scripts/seed_materials.py's
+# catalogue and must stay in step with it. A line that matched nothing would
+# seed a recipe that resolves NONE and issues nothing, which is exactly the
+# broken state this is here to avoid.
+#
+# `garment_size` is deliberately NULL on all four: these are the trims every
+# jacket takes whatever its size, and a sized line would only reach the SKUs of
+# that size (see StyleSpecService.applies_to_size).
+MOCK_ACCESSORIES = [
+    dict(subtype="THREAD", article="POLY CORE THREAD", colour="BLACK",
+         thickness="TEX 40", size=None, qty_per_piece=Decimal("120.000")),
+    dict(subtype="OTHER", article="MAIN LABEL", colour="BLACK",
+         thickness=None, size=None, qty_per_piece=Decimal("1.000")),
+    dict(subtype="OTHER", article="HANG TAG", colour="PRINTED",
+         thickness=None, size=None, qty_per_piece=Decimal("1.000")),
+    dict(subtype="OTHER", article="POLY BAG", colour="CLEAR",
+         thickness=None, size=None, qty_per_piece=Decimal("1.000")),
+]
 
 SEED_ACTOR = "seed script"
 
@@ -347,20 +388,58 @@ def seed_orders(db: Session) -> dict[str, str]:
 
 
 # ── Step 3: a mock material spec, so the release gate can pass ──────────────
-def seed_material_specs(db: Session, order_numbers: list[str]) -> int:
-    """Give every seeded style a confirmed recipe: one LEATHER line, no accessories.
+def seed_material_specs(db: Session, order_numbers: list[str], *,
+                        with_accessories: bool = True) -> dict:
+    """Give every seeded style a confirmed recipe: a LEATHER line + the trims.
 
     kit_rules.release_blockers refuses to release a style whose material spec is
     unconfirmed or has no leather line, because release freezes the recipe the
     ledger then spends. Real data comes off the DM's material-spec screen; the
     seed writes the minimum truthful placeholder so the rest of the pipeline is
     reachable, and leaves `note` saying so.
+
+    THE ACCESSORY HALF IS WHAT MAKES THE KIT REACHABLE (see MOCK_ACCESSORIES).
+    With it, a seeded garment reports kit_required=True / kit_status=PENDING and
+    the store scan has something to issue; without it every garment is
+    NOT_REQUIRED and the ledger stays empty forever. Pass
+    `with_accessories=False` (`--no-accessories`) for the old leather-only
+    behaviour.
+
+    THE THREE-STATE `no_accessories` FLAG IS SET TO MATCH WHAT WAS WRITTEN, not
+    hard-coded: declaring "this style takes none" while accessory lines exist is
+    the exact contradiction StyleSpecService.confirm refuses with a 422, and a
+    seed must not write a row the API would have rejected.
     """
     from app.modules.clients.models import ClientOrder
 
     now = datetime.now(timezone.utc)
     uom = uom_for(MaterialCategory.LEATHER.value, None)
-    made = 0
+    made = {"leather": 0, "accessory": 0, "styles": 0}
+
+    # ── WHICH LEATHER, and why this is not `style.article` ───────────────────
+    # It used to write `article=style.article, thickness=style.thickness`, and
+    # that line resolved AMBIGUOUS for every seeded style — often against all
+    # seven leather lots at once. Two reasons, both worth stating:
+    #   · `style.article` is the GARMENT's article code ("CL1"), not a leather
+    #     article ("GOAT SUEDE"). They are different vocabularies that happen to
+    #     share a column name, and _resolve_lot matches the material one.
+    #   · it is NULL on most of the seeded styles anyway, and a line with a null
+    #     article/colour/thickness constrains nothing, so find_lots returns the
+    #     whole shelf.
+    # So the seed picks a REAL lot per style, round-robin across whatever leather
+    # the catalogue holds, and copies that lot's own six columns onto the line.
+    # material_lot_id is pinned as well: that is what the column is for, and it
+    # makes the line resolve PINNED rather than depending on the key match
+    # staying unique as more stock arrives.
+    leather_lots = list(db.scalars(
+        select(MaterialLot)
+        .where(MaterialLot.category == MaterialCategory.LEATHER.value,
+               MaterialLot.is_active.is_(True))
+        .order_by(MaterialLot.created_at, MaterialLot.id)))
+    if not leather_lots:
+        print("   ! no LEATHER lots in stock — the leather spec line will fall "
+              "back to the style's own article and resolve to no lot. Run "
+              "without --skip-stock, or seed materials first.")
     # Scoped to the orders THIS run loaded. A style that arrived some other way
     # belongs to whoever entered it; the seed does not confirm recipes it did
     # not write.
@@ -369,60 +448,104 @@ def seed_material_specs(db: Session, order_numbers: list[str]) -> int:
         .where(ClientOrder.order_number.in_(order_numbers))
     ).all()
 
-    for style in styles:
+    for index, style in enumerate(styles):
+        made["styles"] += 1
         line = db.scalar(select(StyleMaterialSpec).where(
             StyleMaterialSpec.style_id == style.id,
             StyleMaterialSpec.sku_id.is_(None),
             StyleMaterialSpec.category == MaterialCategory.LEATHER.value,
             StyleMaterialSpec.is_active.is_(True)))
         if line is None:
+            lot = leather_lots[index % len(leather_lots)] if leather_lots else None
             db.add(StyleMaterialSpec(
                 style_id=style.id, sku_id=None,
                 category=MaterialCategory.LEATHER.value, subtype=None,
-                article=style.article, colour=None,
-                thickness=style.thickness, size=None, garment_size=None,
+                article=(lot.article if lot else style.article),
+                colour=(lot.colour if lot else None),
+                thickness=(lot.thickness if lot else style.thickness),
+                size=None, garment_size=None,
+                material_lot_id=(lot.id if lot else None),
                 qty_per_piece=MOCK_LEATHER_DCM, uom=uom,
                 note="MOCK consumption seeded by scripts/seed.py — replace with "
                      "the real per-piece figure before costing anything.",
                 is_active=True))
-            made += 1
+            made["leather"] += 1
+
+        if with_accessories:
+            for trim in MOCK_ACCESSORIES:
+                # Matched on the same identity the duplicate rule uses, so a
+                # re-run adds nothing — the seed is run repeatedly against a
+                # half-filled database and must not grow the recipe each time.
+                existing = db.scalar(select(StyleMaterialSpec).where(
+                    StyleMaterialSpec.style_id == style.id,
+                    StyleMaterialSpec.sku_id.is_(None),
+                    StyleMaterialSpec.category == MaterialCategory.ACCESSORY.value,
+                    StyleMaterialSpec.subtype == trim["subtype"],
+                    StyleMaterialSpec.article == trim["article"],
+                    StyleMaterialSpec.is_active.is_(True)))
+                if existing is not None:
+                    continue
+                db.add(StyleMaterialSpec(
+                    style_id=style.id, sku_id=None,
+                    category=MaterialCategory.ACCESSORY.value,
+                    subtype=trim["subtype"], article=trim["article"],
+                    colour=trim["colour"], thickness=trim["thickness"],
+                    size=trim["size"], garment_size=None,
+                    qty_per_piece=trim["qty_per_piece"],
+                    # DERIVED, never typed — buttons are pcs and thread is
+                    # mtrs whatever anyone writes here (StyleSpecService
+                    # discards a sent uom for exactly this reason).
+                    uom=uom_for(MaterialCategory.ACCESSORY.value,
+                                trim["subtype"]),
+                    note="MOCK trim seeded by scripts/seed.py — resolves to the "
+                         "lot scripts/seed_materials.py creates.",
+                    is_active=True))
+                made["accessory"] += 1
+
         # The three-state accessory answer: NULL ("nobody asked") does not pass
-        # the gate, so the seed answers it explicitly.
-        if style.material_spec_no_accessories is None:
-            style.material_spec_no_accessories = True
+        # the gate, so the seed answers it explicitly — and answers it TRUTHFULLY
+        # against what it just wrote.
+        style.material_spec_no_accessories = not with_accessories
         if style.material_spec_confirmed_at is None:
             style.material_spec_confirmed_at = now
+            style.material_spec_confirmed_by = SEED_ACTOR
     db.commit()
     return made
 
 
-# ── Step 4: the drawer pool ─────────────────────────────────────────────────
-def seed_drawers(db: Session, size: int) -> dict:
-    stats = bootstrap_drawer_pool(db, size=size)
-    db.commit()
-    return stats
-
-
 # ── Step 5: release — this is what mints pieces and barcodes ────────────────
-def release_orders(db: Session, order_numbers: list[str], *,
-                   allow_pool_growth: bool) -> dict:
-    """Release every DRAFT style, minting pieces + parent barcodes + drawers.
+def release_orders(db: Session, order_numbers: list[str]) -> dict:
+    """Release every DRAFT style, minting pieces + their parent barcodes.
 
     Uploading a breakdown no longer mints anything — the DM releases the styles
     that are actually going to the floor, and that transition is what mints. The
     seed reuses `breakdown._release_sync`, the exact sync half of
     BreakdownService.release_styles, so the seeded rows are identical to the ones
-    the real DM transition produces (style stamped RELEASED, pieces minted,
-    drawers merged, all in one transaction per order).
+    the real DM transition produces (style stamped RELEASED, pieces minted, all
+    in one transaction per order).
 
-    IT SKIPS THE API's PER-STYLE SPEC GATE, which step 3 has already satisfied,
+    IT SKIPS THE API's PER-STYLE SPEC GATE, which step 4 has already satisfied,
     and it writes no audit_log row — a seed has no DM to name.
+
+    NO DRAWER POOL, AND NOTHING IS "WAITING" FOR ONE.
+        This step used to bootstrap 200 drawers, then report thousands of pieces
+        as `pieces_waiting_for_drawer` and warn that they "cannot pass the merge
+        gate until one frees up". That warning is now FALSE, and it was the most
+        misleading line the seed printed: the store moved onto the garment
+        (`piece.store_state`, 20260902_store_piece), and
+        ProductionService._merge_ok says so in as many words — "a piece with no
+        drawer is no longer a piece that cannot be line-stitched: there are no
+        drawers to run out of". StoreService issues kits with `drawer=None`.
+
+        Every one of the 4,983 seeded garments is immediately storable, sendable
+        and line-stitchable. `allow_pool_growth` is gone from the signature; a
+        caller that still passes it is swallowed by `**_legacy` rather than
+        dying on a TypeError mid-release.
     """
     from app.modules.clients.models import ClientOrder
     from app.modules.imports.breakdown import _release_sync
 
-    total = {"styles_released": 0, "pieces_minted": 0,
-             "pieces_waiting_for_drawer": 0, "drawers_minted": 0}
+    total = {"styles_released": 0, "pieces_minted": 0}
     for number in order_numbers:
         order = db.scalar(select(ClientOrder).where(
             ClientOrder.order_number == number))
@@ -435,27 +558,13 @@ def release_orders(db: Session, order_numbers: list[str], *,
         if not style_ids:
             continue
         db.commit()          # _release_sync opens its own session; don't hold locks
-        stats = _release_sync(order.id, list(style_ids), SEED_ACTOR,
-                              allow_pool_growth, None)
+        # allow_pool_growth=False — still declared by _release_sync, governs
+        # nothing here. See the docstring.
+        stats = _release_sync(order.id, list(style_ids), SEED_ACTOR, False, None)
         total["styles_released"] += len(style_ids)
-        for k in ("pieces_minted", "pieces_waiting_for_drawer", "drawers_minted"):
-            total[k] += int(stats.get(k, 0))
+        total["pieces_minted"] += int(stats.get("pieces_minted", 0))
         print(f"   - {number:22} styles={len(style_ids):<3} "
-              f"pieces={stats.get('pieces_minted', 0):<5} "
-              f"waiting_for_drawer={stats.get('pieces_waiting_for_drawer', 0)}")
-
-    # DRAIN THE WAITING LIST — the same call POST /drawers/allocate-waiting
-    # makes. premint mints the piece and its barcode but allocates no drawer;
-    # this is what merges each one into a free slot. It is bounded by the pool
-    # ON PURPOSE: a drawer is a physical shelf, so an order of 4,983 garments
-    # against 200 drawers leaves most pieces correctly queued rather than
-    # inventing storage that does not exist.
-    drained = allocate_waiting_pieces(db)
-    db.commit()
-    total["drawers_allocated"] = drained["allocated"]
-    total["pieces_waiting_for_drawer"] = drained["still_waiting"]
-    print(f"   - drawers allocated={drained['allocated']}  "
-          f"pieces still waiting={drained['still_waiting']}")
+              f"pieces={stats.get('pieces_minted', 0)}")
     return total
 
 
@@ -475,6 +584,36 @@ def seed_people(db: Session) -> int:
     db.commit()          # the async seeder opens its own connection; release ours
     asyncio.run(seed_roster())
     return int(db.scalar(select(func.count(Employee.id))) or 0)
+
+
+# ── Step 3: suppliers + material lots ───────────────────────────────────────
+def seed_stock(db: Session) -> int:
+    """Delegate to scripts/seed_materials.py — the single stock record.
+
+    WHY THE FULL SEED NEEDED THIS AT ALL. It released 4,983 garments into a
+    factory holding ZERO material: the cut screen's lot picker
+    (GET /materials/lots) came back empty, so no frontend could supply the
+    `leather_lot_id` POST /production/log wants; `/materials/stock` read zero for
+    every category; and no accessory line could resolve to anything. Orders and
+    people were seeded, and the entire Stage-0 half of Phase 1 was not.
+
+    IT RUNS BEFORE THE MATERIAL SPECS ON PURPOSE (step 4). A spec line resolves
+    to a lot by matching six columns; if the lots do not exist yet, every line
+    resolves NONE and the seeded recipe is a recipe for nothing.
+
+    Same delegation shape as seed_people: one script owns the data, this one
+    calls it, and the two cannot drift into two catalogues. `only=set()` means
+    all three categories; `dry=False` writes.
+    """
+    from scripts.seed_materials import seed as seed_catalogue
+
+    db.commit()          # the async seeder opens its own connection; release ours
+    rc = asyncio.run(seed_catalogue(set(), dry=False))
+    if rc:
+        print("   ! seed_materials reported failures — see the log above. The "
+              "seed continues; accessory spec lines for missing lots will "
+              "resolve NONE until the stock is there.")
+    return int(db.scalar(select(func.count(MaterialLot.id))) or 0)
 
 
 # ── Step 7: mock piece rates ────────────────────────────────────────────────
@@ -600,18 +739,17 @@ def _count(db: Session, model) -> int:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("PURPOSE")[0].strip())
     ap.add_argument("--no-release", dest="release", action="store_false",
-                    help="load the orders but mint no pieces/barcodes/drawers")
+                    help="load the orders but mint no pieces or barcodes")
     ap.add_argument("--skip-people", action="store_true",
                     help="leave the employee roster and staff logins untouched")
-    ap.add_argument("--drawers", type=int, default=INITIAL_DRAWER_POOL,
-                    help=f"target drawer pool size (default {INITIAL_DRAWER_POOL})")
-    # Passed through to _release_sync for fidelity with the real transition.
-    # It has little effect today: premint_order no longer allocates a drawer at
-    # mint time at all, so the pool is sized by --drawers and drained afterwards
-    # by allocate_waiting_pieces, which never grows it.
-    ap.add_argument("--grow-pool", action="store_true",
-                    help="pass allow_pool_growth to the release (see --drawers, "
-                         "which is the knob that actually sizes the pool)")
+    ap.add_argument("--skip-stock", action="store_true",
+                    help="leave suppliers and material lots alone (the accessory "
+                         "spec lines will then resolve to no lot)")
+    ap.add_argument("--no-accessories", dest="accessories",
+                    action="store_false",
+                    help="seed a LEATHER-only recipe, as this script used to. "
+                         "Every garment then reports kit_required=false and the "
+                         "kit/issue surface cannot be exercised.")
     ap.add_argument("--create-all", action="store_true",
                     help="dev only: CREATE TABLE anything missing (prod uses Alembic)")
     args = ap.parse_args()
@@ -627,16 +765,21 @@ def main() -> None:
         print("2/9  clients, orders, styles, SKUs")
         loaded = seed_orders(db)
 
-        print("3/9  mock material specs (the release gate)")
-        n_specs = seed_material_specs(db, list(loaded.values()))
+        if args.skip_stock:
+            print("3/9  suppliers + material lots SKIPPED (--skip-stock)")
+            n_lots = _count(db, MaterialLot)
+        else:
+            print("3/9  suppliers + material lots (Stage-0 stock)")
+            n_lots = seed_stock(db)
 
-        print(f"4/9  drawer pool -> {args.drawers}")
-        drawer_stats = seed_drawers(db, args.drawers)
+        print("4/9  material specs — leather%s (the release gate)"
+              % (" + trims" if args.accessories else " only"))
+        spec_stats = seed_material_specs(db, list(loaded.values()),
+                                         with_accessories=args.accessories)
 
         if args.release:
-            print("5/9  release: minting pieces, barcodes, drawers")
-            release_stats = release_orders(db, list(loaded.values()),
-                                           allow_pool_growth=args.grow_pool)
+            print("5/9  release: minting pieces + their barcodes")
+            release_stats = release_orders(db, list(loaded.values()))
         else:
             print("5/9  release SKIPPED (--no-release)")
             release_stats = {}
@@ -666,8 +809,10 @@ def main() -> None:
         print(f"   styles     : {_count(db, Style)}")
         print(f"   skus       : {_count(db, SKU)}")
         print(f"   pieces     : {_count(db, Piece)}")
-        print(f"   drawers    : {_count(db, Drawer)}  ({drawer_stats})")
-        print(f"   specs      : {n_specs} new leather lines")
+        print(f"   lots       : {n_lots}  (suppliers + leather/lining/accessory)")
+        print(f"   specs      : {spec_stats['styles']} styles · "
+              f"{spec_stats['leather']} new leather line(s) · "
+              f"{spec_stats['accessory']} new trim line(s)")
         print(f"   employees  : {n_people}")
         print(f"   rates      : {n_rates} new")
         print(f"   templates  : {n_templates}")
@@ -676,16 +821,16 @@ def main() -> None:
         print(f"   users      : {user_stats}")
         if release_stats:
             print(f"   release    : {release_stats}")
-            if release_stats.get("pieces_waiting_for_drawer"):
-                print("   NOTE: some pieces have a barcode but NO drawer - they "
-                      "cannot pass the merge gate until one frees up. That is "
-                      "the real constraint (a drawer is a physical shelf); to "
-                      "seed more, re-run with --drawers N.")
+            print("   Every released garment is immediately storable and "
+                  "line-stitchable: the store is a state on the PIECE, so "
+                  "nothing is queued waiting for space.")
         print("-" * 62)
         print("   Login (Swagger Authorize / POST /api/v1/auth/login):")
         print("     username=9000000000  password=9000000000  (managing director)")
         print("     username=9000000001  password=9000000001  (direct manager)")
         print("   Every seeded login must change its password on first use.")
+        print("   Printable labels: data/employee_cards.csv (worker cards) and "
+              "data/material_lot_labels.csv (lot + hide labels).")
     finally:
         db.close()
 

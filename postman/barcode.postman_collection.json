@@ -188,7 +188,13 @@
             {
               "key": "active_only",
               "value": "True",
-              "description": "Hide retired lot labels.",
+              "description": "Hide retired labels.",
+              "disabled": true
+            },
+            {
+              "key": "kind",
+              "value": "",
+              "description": "LOT = shelf labels only \u00b7 SHEET = hide labels only \u00b7 omit for both, each lot followed by its own hides.",
               "disabled": true
             },
             {
@@ -205,7 +211,7 @@
             }
           ]
         },
-        "description": "THE MATERIAL-BARCODE SCREEN (change-list item 7).\n\nThe barcode section had screens for pieces, drawers and employee cards but\nnone for material lots \u2014 so a lot minted a code at creation and nobody could\nreprint it once the first label was lost or damaged.\n\nEach row carries `code` (encode as Code128) and `label_line` (typeset\nunderneath as text), the same convention as POST /barcode/print. A row with\n`status: retired` belongs to a retired lot: show it greyed, do not print it.\n\nNOTE FOR THE UI: the drawer screen's label reads \"bucket barcode\" and should\nread \"drawer barcode\". The backend has only ever called it DRAWER \u2014 there is\nno `bucket` anywhere in the API \u2014 so that rename is frontend-only."
+        "description": "THE MATERIAL-BARCODE SCREEN \u2014 lot labels AND hide labels.\n\nThe barcode section had screens for pieces and employee cards but\nnone for material lots \u2014 so a lot minted a code at creation and nobody could\nreprint it once the first label was lost or damaged.\n\nHIDE LABELS ARE HERE TOO. Creating a leather lot with `sheets` mints a\nLEATHER_SHEET barcode per skin (POST /materials/lots returns them in\n`sheets`), and this screen used to list only the three LOT types \u2014 so those\ncodes existed in the registry and no screen could ever reprint them. Branch\non `kind`:\n\n    LOT     one sticker for the shelf: article \u00b7 colour \u00b7 thickness \u00b7 total\n    SHEET   one sticker per skin:      article \u00b7 colour \u00b7 that hide's dcm\n\nA SHEET row carries `sheet_id`, `dcm`, `sheet_status` (IN_STOCK / ALLOCATED\n/ ISSUED / CONSUMED \u2026) and `cutting_row_id`; all four are null on a LOT row.\nEach row carries `code` (encode as Code128) and `label_line` (typeset\nunderneath as text), the same convention as POST /barcode/print. A row with\n`status: retired` belongs to a retired lot or hide: show it greyed, do not\nprint it."
       },
       "response": []
     },

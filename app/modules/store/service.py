@@ -243,7 +243,7 @@ class StoreService:
         if chosen is StorePart.ACCESSORY:
             from app.modules.materials.style_spec_service import StyleSpecService
             kit = await StyleSpecService(self.db).issue_kit_nocommit(
-                piece=piece, drawer=None, requested_lines=lines,
+                piece=piece, requested_lines=lines,
                 employee_id=employee_id, entered_by=entered_by)
             piece.accessories_in = bool(kit["complete"])
         elif chosen is StorePart.LEATHER:

@@ -69,7 +69,7 @@ async def minted(db, order_tree, pieces):
     """Registry rows as premint writes them: a compact primary code carrying
     order/style/sku, and the long code kept alive as an alias."""
     codes = []
-    for i, (piece, _drawer) in enumerate(pieces, start=1):
+    for i, piece in enumerate(pieces, start=1):
         legacy = await db.scalar(select(BarcodeRegistry).where(
             BarcodeRegistry.code == piece.code))
         legacy.is_alias = True
@@ -109,7 +109,7 @@ class TestResolveEndpoint:
             self, api_client, as_role, pieces):
         as_role(UserRole.CUTTING_MANAGER)
         r = await api_client.get(f"{API}/barcode/resolve",
-                                 params={"code": pieces[0][0].code})
+                                 params={"code": pieces[0].code})
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["type"] == "PIECE"
@@ -128,7 +128,7 @@ class TestResolveEndpoint:
 
     async def test_an_anonymous_scan_is_refused(self, api_client, pieces):
         r = await api_client.get(f"{API}/barcode/resolve",
-                                 params={"code": pieces[0][0].code})
+                                 params={"code": pieces[0].code})
         assert r.status_code in (401, 403)
 
     async def test_an_unknown_code_is_404_on_the_wire(self, api_client, as_role):
@@ -184,7 +184,7 @@ class TestPrintEndpoint:
     async def test_a_print_run_returns_labels(self, api_client, as_role, pieces):
         as_role(UserRole.DIRECT_MANAGER)
         r = await api_client.post(f"{API}/barcode/print",
-                                  json={"codes": [pieces[0][0].code]})
+                                  json={"codes": [pieces[0].code]})
         assert r.status_code == 200, r.text
         label = r.json()["labels"][0]
         assert label["symbology"] == "code128"
@@ -203,7 +203,7 @@ class TestPrintEndpoint:
             self, api_client, as_role, pieces, role):
         as_role(role)
         r = await api_client.post(f"{API}/barcode/print",
-                                  json={"codes": [pieces[0][0].code]})
+                                  json={"codes": [pieces[0].code]})
         assert r.status_code == 200
 
     @pytest.mark.parametrize("role", [UserRole.SECURITY, UserRole.VIEWER,
@@ -364,7 +364,7 @@ class TestBarcodeScreens:
             self, api_client, as_role, pieces):
         as_role(UserRole.DIRECT_MANAGER)
         r = await api_client.get(f"{API}/barcode/detail",
-                                 params={"code": pieces[0][0].code})
+                                 params={"code": pieces[0].code})
         assert r.status_code == 200, r.text
         assert r.json()["piece"]["seq"] == 1
 
@@ -380,10 +380,10 @@ class TestBarcodeScreens:
             json={"lines": [BUTTON_SPEC_LINE]})
 
         r = await api_client.get(
-            f"{API}/barcode/pieces/{pieces[0][0].code}/materials")
+            f"{API}/barcode/pieces/{pieces[0].code}/materials")
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["piece_code"] == pieces[0][0].code
+        assert body["piece_code"] == pieces[0].code
         assert body["applies"]["accessories"][0]["article"] == "BTN-4H"
 
     async def test_the_gun_door_404s_on_an_unknown_garment(
@@ -844,7 +844,7 @@ class TestReportEndpoints:
         from datetime import date
         from app.modules.production.models import ProductionEvent
         db.add(ProductionEvent(
-            sku_id=order_tree["sku"].id, piece_id=pieces[0][0].id,
+            sku_id=order_tree["sku"].id, piece_id=pieces[0].id,
             operation_id=operations["LEATHER_CUTTING"].id,
             work_date=date.today(),
             leather_lot_id=uuid.UUID(lot["lot_id"]),
@@ -853,7 +853,7 @@ class TestReportEndpoints:
 
         as_role(UserRole.CUTTING_MANAGER)
         r = await api_client.get(
-            f"{API}/materials/pieces/{pieces[0][0].id}/consumption")
+            f"{API}/materials/pieces/{pieces[0].id}/consumption")
         assert r.status_code == 200, r.text
         assert r.json()["total"] == 12.5
         assert r.json()["events"][0]["stage"] == "LEATHER_CUTTING"
@@ -862,7 +862,7 @@ class TestReportEndpoints:
             self, api_client, as_role, pieces):
         as_role(UserRole.HR)
         r = await api_client.get(
-            f"{API}/materials/pieces/{pieces[0][0].id}/consumption")
+            f"{API}/materials/pieces/{pieces[0].id}/consumption")
         assert r.status_code == 200 and r.json()["total"] == 0
 
 
@@ -1062,7 +1062,7 @@ class TestManualIssueEndpoint:
                 accessory_lot["lot_id"])))
         as_role(UserRole.STORE_MANAGER)
         r = await api_client.post(f"{API}/materials/issues", json={
-            "piece_barcode": pieces[0][0].code, "lot_barcode": code,
+            "piece_barcode": pieces[0].code, "lot_barcode": code,
             "employee_barcode": cutter[1].code, "qty": 2,
             "note": "wrong button on the sheet"})
         assert r.status_code == 201, r.text
@@ -1076,7 +1076,7 @@ class TestManualIssueEndpoint:
         endpoint being broken outright."""
         as_role(UserRole.STORE_MANAGER)
         r = await api_client.post(f"{API}/materials/issues", json={
-            "piece_barcode": pieces[0][0].code,
+            "piece_barcode": pieces[0].code,
             "material_lot_id": accessory_lot["lot_id"],
             "employee_id": str(cutter[0].id), "qty": 2})
         assert r.status_code == 201, r.text
@@ -1086,7 +1086,7 @@ class TestManualIssueEndpoint:
             self, api_client, as_role, pieces, accessory_lot):
         as_role(UserRole.DIRECT_MANAGER)
         r = await api_client.post(f"{API}/materials/issues", json={
-            "piece_id": str(pieces[0][0].id),
+            "piece_id": str(pieces[0].id),
             "material_lot_id": accessory_lot["lot_id"], "qty": 1})
         assert r.status_code == 201, r.text
 
@@ -1101,7 +1101,7 @@ class TestManualIssueEndpoint:
     async def test_naming_no_material_is_422(self, api_client, as_role, pieces):
         as_role(UserRole.DIRECT_MANAGER)
         r = await api_client.post(f"{API}/materials/issues", json={
-            "piece_id": str(pieces[0][0].id), "qty": 1})
+            "piece_id": str(pieces[0].id), "qty": 1})
         assert r.status_code == 422
         assert "lot_barcode or material_lot_id" in r.text
 
@@ -1119,6 +1119,6 @@ class TestManualIssueEndpoint:
             self, api_client, as_role, pieces, accessory_lot, role):
         as_role(role)
         r = await api_client.post(f"{API}/materials/issues", json={
-            "piece_id": str(pieces[0][0].id),
+            "piece_id": str(pieces[0].id),
             "material_lot_id": accessory_lot["lot_id"], "qty": 1})
         assert r.status_code == 403

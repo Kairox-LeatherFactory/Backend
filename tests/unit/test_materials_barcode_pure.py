@@ -33,7 +33,9 @@ from app.modules.barcode.repository import (
     SHORT_CODE_PREFIX, _B30, _norm, decode_short, encode_short,
 )
 from app.modules.barcode.service import BarcodeService
-from app.modules.materials.service import MaterialService, display_stock
+from app.modules.materials.service import (
+    MaterialService, display_stock, sheet_rollup, stock_numbers,
+)
 from app.modules.materials.style_spec_service import StyleSpecService
 
 pytestmark = pytest.mark.integrity
@@ -86,32 +88,85 @@ class TestNorm:
 
 # ══════════════════════════════════════════════ the three stock numbers
 class TestDisplayStock:
-    def test_received_is_what_is_left_plus_what_was_spent(self):
-        received, reserved, available = display_stock(100, 400, 0)
-        assert (received, reserved, available) == (
+    """arrived / used / balance — and they RECONCILE, which is the whole point.
+
+    The middle number used to be `used + active_reserved` under the name
+    "reserved", so a lot looked more and more committed the more of it was cut,
+    and `used` itself appeared nowhere. `available` was right either way (the
+    term cancels), which is how it survived: the one figure anybody checked was
+    correct for the wrong reason.
+    """
+
+    def test_arrived_is_what_is_left_plus_what_was_spent(self):
+        arrived, used, balance = display_stock(100, 400, 0)
+        assert (arrived, used, balance) == (
             Decimal("500"), Decimal("400"), Decimal("100"))
 
-    def test_an_active_reservation_lowers_available_but_not_received(self):
-        received, reserved, available = display_stock(100, 0, 30)
-        assert received == Decimal("100")
-        assert reserved == Decimal("30")
-        assert available == Decimal("70")
+    def test_a_reservation_does_not_change_any_of_the_three(self):
+        """A reservation is a claim on stock, not a movement of it.
+
+        It lowers what may be PROMISED, which is `available` on the full block —
+        never what arrived, what was used, or what is on the shelf.
+        """
+        assert display_stock(100, 0, 30) == (
+            Decimal("100"), Decimal("0"), Decimal("100"))
+        assert stock_numbers(100, 0, 30)["available"] == 70.0
 
     def test_nulls_read_as_zero_rather_than_raising(self):
         assert display_stock(None, None, None) == (
             Decimal("0"), Decimal("0"), Decimal("0"))
 
-    def test_available_is_derived_and_never_stored(self):
-        """available == received - reserved, always — the invariant CLAUDE.md
-        §5 states as 'so the two can't drift'."""
-        received, reserved, available = display_stock(
+    def test_the_three_always_reconcile(self):
+        """arrived − used == balance, always. A stock screen whose figures do not
+        add up is one the floor stops believing."""
+        arrived, used, balance = display_stock(
             Decimal("12.5"), Decimal("7.25"), Decimal("1.25"))
-        assert available == received - reserved
+        assert arrived - used == balance
+
+    def test_the_block_spells_the_same_numbers_out_consistently(self):
+        """stock_numbers is what every read renders, so it cannot drift from the
+        function under it — and `on_hand` must mean BALANCE, not arrived."""
+        out = stock_numbers(Decimal("100"), Decimal("400"), Decimal("30"))
+        assert out["arrived"] == 500.0
+        assert out["used"] == 400.0
+        assert out["balance"] == 100.0
+        assert out["on_hand"] == out["balance"]
+        assert out["reserved"] == 30.0
+        assert out["available"] == 70.0
 
     def test_the_service_staticmethod_is_the_same_function(self):
         """style_spec_service imports the module-level one; MaterialService keeps
         the staticmethod alias. They must not become two implementations."""
         assert MaterialService._display_stock(10, 1, 1) == display_stock(10, 1, 1)
+
+
+# ══════════════════════════════════════════════ the same three, in HIDES
+class TestSheetRollup:
+    """A cutter is handed SKINS. "How many are on the shelf" is not answerable
+    from a sum of decimetres, so the hide count is its own roll-up."""
+
+    def test_the_buckets_split_the_shelf_from_what_is_out_and_what_is_gone(self):
+        out = sheet_rollup({
+            "IN_STOCK": {"count": 5, "dcm": 250.0},
+            "RETURNED": {"count": 1, "dcm": 40.0},
+            "ALLOCATED": {"count": 2, "dcm": 95.0},
+            "ISSUED": {"count": 1, "dcm": 48.0},
+            "CONSUMED": {"count": 9, "dcm": 430.0},
+            "SCRAPPED": {"count": 1, "dcm": 12.0},
+        })
+        assert out["sheets_balance"] == 6          # on the shelf: IN_STOCK + RETURNED
+        assert out["sheets_allocated"] == 3        # out on a row, not yet cut
+        assert out["sheets_used"] == 9             # CONSUMED
+        assert out["sheets_scrapped"] == 1
+        assert out["sheets_arrived"] == 19
+        assert out["sheets_arrived_dcm"] == 875.0
+
+    def test_a_lot_nobody_sheeted_is_zeroes_not_a_crash(self):
+        """Lining is metres and a button is a button — neither has hides."""
+        out = sheet_rollup({})
+        assert out["sheets_arrived"] == 0
+        assert out["sheets_balance"] == 0
+        assert out["sheets_by_status"] == {}
 
 
 # ══════════════════════════════════════════════ PO vs delivered matching

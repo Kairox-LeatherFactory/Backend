@@ -41,6 +41,32 @@ class RowRead(BaseModel):
     logged_at: datetime | None = None
     # Non-blocking notes: short of stock, over/under the target, no cutter set.
     warnings: list[str] = Field(default_factory=list)
+    # WHICH HIDE A TYPED MEASUREMENT RESOLVED TO. Only present on the response to
+    # POST /rows/{id}/sheets — the operator typed a number and never chose a
+    # code, so the reply has to say which skin actually left the shelf.
+    matched_sheet: dict | None = None
+
+
+class SheetOption(BaseModel):
+    """One hide the row could take, as the dcm box offers it."""
+    sheet_id: uuid.UUID
+    code: str
+    dcm: float
+    status: str
+    material_lot_id: uuid.UUID | None = None
+    # Signed gap from the dcm the caller asked about; None when none was given.
+    difference: float | None = None
+
+
+class SheetOptions(BaseModel):
+    """What is on the shelf for this row — the lookup behind the dcm box."""
+    row_id: uuid.UUID
+    article: str | None = None
+    colour: str | None = None
+    requested_dcm: float | None = None
+    available_count: int = 0
+    sheets: list[SheetOption] = Field(default_factory=list)
+    lots: list[dict] = Field(default_factory=list)
 
 
 class CuttingGrid(BaseModel):
@@ -110,15 +136,30 @@ class RowPatch(BaseModel):
 
 
 class SheetAdd(BaseModel):
-    """Put a hide on the row — by barcode (scanned) or id (picked).
+    """Put a hide on the row — by measurement, by barcode, or by id.
 
-    `dcm` creates a NEW hide against the lot instead of claiming an existing one,
-    for the delivery that was never sheeted at receiving.
+    `dcm` IS THE PRIMARY DOOR and it is a LOOKUP: the cutter reads the number
+    written on the skin, types it, and the system resolves it to the hide of this
+    row's article and colour that measures that — no code to find, no list to
+    pick from. Exact match first, then the nearest hide within `dcm_tolerance`;
+    outside that the call is refused and names the hides that ARE on the shelf.
+
+    It used to CREATE a hide instead, which put stock in that nobody had
+    received. That is now `create_if_missing`, so adding stock is asked for
+    rather than being what a mistyped measurement does.
     """
     sheet_code: str | None = None
     sheet_id: uuid.UUID | None = None
+    # Narrows the lookup (and names the lot on a create). Omitted, the row's own
+    # hides say which lot the cutter is working out of, then its article+colour.
     material_lot_id: uuid.UUID | None = None
     dcm: float | None = Field(default=None, gt=0)
+    # How far off the typed number a hide may be and still be "the one he means".
+    # Omitted → 2% of the typed value, never tighter than 1 dcm.
+    dcm_tolerance: float | None = Field(default=None, gt=0)
+    # THE DELIVERY NOBODY SHEETED. True mints a new hide at this dcm when the
+    # shelf has nothing that matches. It ADDS a stock row, so it is deliberate.
+    create_if_missing: bool = False
 
 
 class SheetPatch(BaseModel):

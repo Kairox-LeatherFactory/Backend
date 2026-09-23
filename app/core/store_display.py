@@ -72,7 +72,7 @@ _CUT_SIDE_TERMINALS = {_PASTING, _LINING_CUT}
 # stage a given PART must have reached before it may be scanned INTO one. They
 # are the same rule read from two ends, and they were only ever enforced at one:
 # display_stage() would not show a piece as "in store" until PASTING or
-# LINING_CUTTING, while DrawerService.store_scan accepted any merged piece at any
+# LINING_CUTTING, while the old drawer store_scan accepted any merged piece at any
 # time — so leather could be scanned into a drawer straight off the breakdown
 # upload, before it was cut, and the drawer read HOLDING LEATHER over an empty
 # slot. The store screen believed it, the merge gate opened on it, and the
@@ -134,7 +134,6 @@ def display_stage(
     current_event_stage: str | None,
     store_state: str | None = None,
     needs_lining: bool = True,
-    drawer_state: str | None = None,      # legacy alias, see below
 ) -> dict:
     """Resolve what the production/barcode UI should SHOW for a piece.
 
@@ -143,8 +142,8 @@ def display_stage(
     current_event_stage : the operation code of the piece's furthest real
         production EVENT (Piece.current_operation_id's op code), or None if the
         piece has never been logged.
-    drawer_state : the piece's drawer state (DrawerState value), or None if the
-        piece has no drawer (already shipped / released).
+    store_state : where the garment stands in the store (a StoreState value),
+        or None if it is not in the store (never entered, or already shipped).
     needs_lining : whether this piece needs a lining at all (leather-only pieces
         are "complete" on leather alone).
 
@@ -153,17 +152,16 @@ def display_stage(
     dict with:
         display_stage  : the stage string the UI shows (may be STORE)
         in_store       : bool — True while the piece is parked in the store
-        store_status   : the drawer sub-state driving the caption (or None)
+        store_status   : the store sub-state driving the caption (or None)
         label          : a ready-to-render human caption
     """
-    # `drawer_state` IS THE OLD NAME OF `store_state`, and the values are
-    # identical — the migration copied drawer.state onto piece.store_state
-    # unchanged, precisely so this overlay, the label tables, the dashboard
-    # filters and the analytics buckets all kept working without a translation
-    # layer. Accepting both keeps the drawer module (being retired, not
-    # rewritten) calling something real during the changeover.
+    # THE VALUES ARE THE DRAWER'S OLD ONES, unchanged: 20260902_store_on_piece
+    # copied drawer.state onto piece.store_state as-is, precisely so this
+    # overlay, the label tables, the dashboard filters and the analytics buckets
+    # kept working with no translation layer. The `drawer_state=` keyword this
+    # used to also accept is gone with the drawer module that passed it.
     ev = (current_event_stage or "").strip().upper() or None
-    ds = ((store_state if store_state is not None else drawer_state) or "")
+    ds = (store_state or "")
     ds = ds.strip().lower() or None
 
     # 1) The piece has an actual LINE_STITCHING (or later) event → it has left

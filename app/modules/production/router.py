@@ -208,7 +208,8 @@ async def piece_state(
                         false -> show `blockers`; each names its gate and reason
                         null  -> no employee sent, so the question is unanswered
 
-    Also carries the piece's drawer (bug #12) and how many pieces of its SKU are
+    Also carries where the garment stands in the store (bug #12) and how many
+    pieces of its SKU are
     still outstanding at the next stage (bug #8).
     """
     if not code and not piece_id:

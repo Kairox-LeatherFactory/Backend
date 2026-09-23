@@ -45,7 +45,7 @@ def _card(state: dict, stage: str) -> dict:
 async def test_a_fresh_piece_offers_the_two_cut_entries_and_nothing_else(
     db, operations, pieces, cutting_mgr
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     state = await ProductionService(db).piece_state(piece.id, user=cutting_mgr)
 
     assert state["completed_stages"] == []
@@ -63,7 +63,7 @@ async def test_the_next_stage_advances_as_work_is_logged(
     db, operations, pieces, cutter, paster, cutting_mgr, stitching_mgr,
     leather_lot
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     svc = ProductionService(db)
 
     await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
@@ -93,7 +93,7 @@ async def test_a_locked_card_is_exactly_what_the_log_refuses(
     leather_lot
 ):
     """THE AGREEMENT TEST. If these two ever disagree the UI is lying."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     svc = ProductionService(db)
     await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
                         piece_ids=[piece.id], work_date=TODAY,
@@ -126,7 +126,7 @@ async def test_line_stitching_is_locked_on_the_merge_gate_and_names_the_drawer(
     a complete-but-unsent drawer says send it. That second branch is asserted in
     the test below.
     """
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     state = await ProductionService(db).piece_state(piece.id, user=cutting_mgr)
 
     card = _card(state, "LINE_STITCHING")
@@ -145,7 +145,7 @@ async def test_a_complete_but_unsent_drawer_is_told_to_send(
     needs, so the only thing left is the store releasing it."""
     from app.core.enums import StoreState
 
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     # HOLDING BOTH — both physical parts scanned in, so completeness is satisfied
     # however the lining question is answered, and the only thing left is the
     # store's send.
@@ -168,7 +168,7 @@ async def test_the_lining_cut_is_not_applicable_to_an_unlined_piece(
     """"Locked" would be a lie: nothing will ever unlock it, because this garment
     has no lining. A card that can never open is a different thing from a card
     that is waiting its turn."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     piece.needs_lining = False
     await db.commit()
 
@@ -182,7 +182,7 @@ async def test_the_lining_cut_is_not_applicable_to_an_unlined_piece(
 @pytest.mark.asyncio
 async def test_the_drawer_travels_with_the_piece(db, operations, pieces, cutter,
                                                  cutting_mgr, ready_for_store):
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     # Leather side only, so the inferred bucket is unambiguously LEATHER: a piece
     # whose lining is also cut would be read as the LINING arriving first.
     await ready_for_store(piece, lining=False)
@@ -201,7 +201,7 @@ async def test_the_drawer_travels_with_the_piece(db, operations, pieces, cutter,
 async def test_the_piece_card_carries_article_and_a_padded_serial(
     db, operations, pieces, cutting_mgr, order_tree
 ):
-    piece, _ = pieces[2]        # seq 3
+    piece = pieces[2]           # seq 3
     state = await ProductionService(db).piece_state(piece.id, user=cutting_mgr)
 
     card = state["piece"]
@@ -221,7 +221,7 @@ async def test_the_sku_closes_only_when_every_piece_is_logged(
     db, operations, pieces, cutter, cutting_mgr, leather_lot
 ):
     svc = ProductionService(db)
-    first = pieces[0][0]
+    first = pieces[0]
 
     state = await svc.piece_state(first.id, user=cutting_mgr)
     assert state["sku"]["total"] == 5
@@ -230,11 +230,11 @@ async def test_the_sku_closes_only_when_every_piece_is_logged(
 
     # cut four of the five
     await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
-                        piece_ids=[p.id for p, _ in pieces[:4]], work_date=TODAY,
+                        piece_ids=[p.id for p in pieces[:4]], work_date=TODAY,
                         screen=ScreenContext.LEATHER_CUT,
                         leather_lot_id=leather_lot.id, consumption_qty=10.0)
 
-    last = pieces[4][0]
+    last = pieces[4]
     state = await svc.piece_state(last.id, user=cutting_mgr)
     assert state["sku"]["done"] == 4 and state["sku"]["remaining"] == 1
     assert state["sku"]["closed"] is False, "one piece is still outstanding"
@@ -249,18 +249,26 @@ async def test_the_sku_closes_only_when_every_piece_is_logged(
 
 
 @pytest.mark.asyncio
-async def test_the_log_response_carries_each_pieces_drawer(
+async def test_the_log_response_carries_each_pieces_store_standing(
     db, operations, pieces, cutter, cutting_mgr, leather_lot
 ):
     """bug #12 on the write path — the scan screen must not need a second call
-    to find out where the garment it just logged actually lives."""
-    piece, drawer = pieces[0]
+    to find out where the garment it just logged stands.
+
+    This used to assert a DRAWER CODE, the box to walk to. There is no box; what
+    the operator needed the code in order to learn is what the store is holding
+    and what it is still owed, and unlike the code that has an answer for every
+    garment rather than only one that a box happened to be claiming.
+    """
+    piece = pieces[0]
     res = await ProductionService(db).log_batch(
         user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[piece.id],
         work_date=TODAY, screen=ScreenContext.LEATHER_CUT,
         leather_lot_id=leather_lot.id, consumption_qty=12.0)
 
-    assert res["drawer_by_piece"][piece.code]["code"] == drawer.code
+    store = res["store_by_piece"][piece.code]
+    assert store["state"] == piece.store_state
+    assert {"holding", "leather_in", "lining_in", "accessories_in"} <= set(store)
 
 
 # ══════════════════════════════════════════════ the per-piece VERIFY
@@ -274,7 +282,7 @@ async def test_the_current_stage_is_answered_at_the_top_level(
 ):
     """"What stage is this piece in" had two plausible answers — one buried in
     `piece`, and a `display_stage` that can read STORE. Now it has one."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     svc = ProductionService(db)
 
     fresh = await svc.piece_state(piece.id, user=cutting_mgr)
@@ -296,7 +304,7 @@ async def test_the_current_stage_is_answered_at_the_top_level(
 async def test_a_scan_with_a_worker_answers_ready_to_log(
     db, operations, pieces, cutter, paster, cutting_mgr, stitching_mgr, leather_lot
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     svc = ProductionService(db)
     await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
                         piece_ids=[piece.id], work_date=TODAY,
@@ -318,7 +326,7 @@ async def test_without_a_worker_the_verdict_is_null_not_false(
 ):
     """null and false mean different things: "not asked" must not render as
     "blocked"."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     st = await ProductionService(db).piece_state(piece.id, user=cutting_mgr)
     assert st["ready_to_log"] is None
     assert st["actor"] is None
@@ -329,7 +337,7 @@ async def test_an_absent_worker_blocks_and_says_so(
     db, operations, pieces, absent_worker, cutter, cutting_mgr, stitching_mgr,
     leather_lot
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     svc = ProductionService(db)
     await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
                         piece_ids=[piece.id], work_date=TODAY,
@@ -350,7 +358,7 @@ async def test_the_merge_gate_blocks_the_verify_and_names_the_drawer(
     db, operations, pieces, cutter, paster, tailor, cutting_mgr, stitching_mgr,
     leather_lot
 ):
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     svc = ProductionService(db)
     await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
                         piece_ids=[piece.id], work_date=TODAY,
@@ -375,7 +383,7 @@ async def test_a_skill_mismatch_warns_but_never_blocks(
 ):
     """GATE 2 is a warning on the write path, so the verify must not refuse work
     the log would accept — that would stall the line over an advisory."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     svc = ProductionService(db)
     await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
                         piece_ids=[piece.id], work_date=TODAY,
@@ -405,7 +413,7 @@ async def test_the_verify_agrees_with_what_the_log_then_does(
     """THE POINT OF THE WHOLE THING: if verify says ready, the very next log must
     succeed at exactly the stage it advertised — otherwise the screen cannot act
     on it without a human."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     svc = ProductionService(db)
     await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
                         piece_ids=[piece.id], work_date=TODAY,
@@ -429,7 +437,7 @@ async def test_the_verify_agrees_with_what_the_log_then_does(
 async def test_a_finished_piece_is_not_ready_and_says_why(
     db, operations, pieces, cutter, tailor, dm, leather_lot, ready_for_store
 ):
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     svc = ProductionService(db)
     await svc.log_batch(user=dm, employee_id=cutter[0].id, piece_ids=[piece.id],
                         work_date=TODAY, screen=ScreenContext.LEATHER_CUT,
@@ -460,7 +468,7 @@ async def test_can_log_next_reflects_the_role_gate(
 ):
     """So the screen can say "ask the stitching manager" instead of letting the
     scan come back as a 403 the operator has to interpret."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     svc = ProductionService(db)
     await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
                         piece_ids=[piece.id], work_date=TODAY,

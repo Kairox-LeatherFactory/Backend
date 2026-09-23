@@ -51,7 +51,7 @@ async def test_replaying_a_cut_scan_writes_nothing_and_spends_nothing(
     """The same cut posted twice must cost the factory one cut's worth of hide."""
     lot_id = await _lot(db, 1000)
     repo = MaterialRepository(db)
-    ids = [p.id for p, _d in pieces]
+    ids = [p.id for p in pieces]
 
     first = await ProductionService(db).log_batch(
         user=cutting_mgr, employee_id=cutter[0].id, piece_ids=ids,
@@ -93,7 +93,7 @@ async def test_a_partial_replay_still_logs_only_the_new_pieces(
     """
     lot_id = await _lot(db, 1000)
     repo = MaterialRepository(db)
-    ids = [p.id for p, _d in pieces]
+    ids = [p.id for p in pieces]
     assert len(ids) >= 5, "fixture must supply enough pieces for this split"
 
     await ProductionService(db).log_batch(

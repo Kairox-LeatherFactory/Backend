@@ -31,6 +31,49 @@
       "name": "Materials",
       "item": [
         {
+          "name": "Add Sheets",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/lots/{{lot_id}}/sheets",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "lots",
+                "{{lot_id}}",
+                "sheets"
+              ],
+              "variable": [
+                {
+                  "key": "lot_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Add hides to a lot that already exists \u2014 the missed-one path.\n\nA bundle is sheeted at the gate under time pressure and the skin at the\nbottom gets missed. Without this the only way to record it was a second lot\nfor the same material, which one-lot-per-spec refuses \u2014 so it was not\nrecorded at all.\n\nSTOCK IS NOT TOUCHED. `on_hand` is what the delivery note said arrived; the\nhides are the detail beneath it, and typing the one that was forgotten does\nnot mean more leather walked in. The reconciliation block reports the gap.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sheets\": [\n    {\n      \"dcm\": 0,\n      \"note\": \"\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
           "name": "Adjust Lot",
           "request": {
             "method": "PATCH",
@@ -64,6 +107,49 @@
             "body": {
               "mode": "raw",
               "raw": "{\n  \"delta\": 0,\n  \"reason\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Complete Arrival",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/arrivals/{{receipt_id}}/complete",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "arrivals",
+                "{{receipt_id}}",
+                "complete"
+              ],
+              "variable": [
+                {
+                  "key": "receipt_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "The second sitting: what was approved, what went back, and every hide.\n\nStock is corrected by (approved \u2212 declared), NOT set to approved \u2014 the floor\nmay have cut some of this delivery in between, and assigning would silently\nundo that. The rejected quantity is logged against the supplier's quality\nhistory; it was never in stock, because it went back on the van.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"approved_qty\": 0,\n  \"rejected_qty\": 0,\n  \"sheets\": [\n    {\n      \"dcm\": 0,\n      \"note\": \"\"\n    }\n  ],\n  \"thickness\": \"\",\n  \"note\": \"\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -109,6 +195,90 @@
           "response": []
         },
         {
+          "name": "Delete Arrival",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/arrivals/{{receipt_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "arrivals",
+                "{{receipt_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "receipt_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Void a PENDING arrival \u2014 the van that got entered twice.\n\nThe receipt goes and the stock it put on the floor comes back out. Same rule\nas a hide: a PENDING arrival nobody has QC'd is a typed line, not history.\nOnce COMPLETED it is the record of what a supplier delivered and what went\nback on the van, and this answers 409.\n\nTHE LOT SURVIVES even when this was its only delivery \u2014 its barcode may be\nprinted and a material spec may already point at it. A lot at zero is an\nempty shelf, which is a true statement; retire it separately if it should\nnever have existed.\n\n409 if some of the arrival has already been cut: the material was real."
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Sheet",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/sheets/{{sheet_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "sheets",
+                "{{sheet_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "sheet_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Remove a hide entered by mistake. A real delete, and only while untouched.\n\nTHE ONE PLACE THIS MODULE DELETES A ROW. An employee who leaves worked\nshifts, a retired lot has cut events, a deactivated spec line has issues \u2014\nall three RETIRE because history hangs off them. A hide still IN_STOCK on no\ncutting row has none: nothing was allocated, issued or cut from it. It is a\ntyped line that should not have been typed, and keeping it would leave a\nskin that does not exist in every hide count on the stock screen.\n\nIts BARCODE is retired, not deleted \u2014 a label may already be stuck on\nsomething, and that scan must read 410 Gone, never \"unknown code\".\n\n409 the moment a cutter has been given it."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Arrival",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/arrivals/{{receipt_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "arrivals",
+                "{{receipt_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "receipt_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "One arrival, in the same shape the queue lists it \u2014 the click-through."
+          },
+          "response": []
+        },
+        {
           "name": "Get Lot",
           "request": {
             "method": "GET",
@@ -133,6 +303,34 @@
               ]
             },
             "description": "One lot: identity, its three stock numbers, its barcode, and which of its\nfields the edit form may show."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Sheet",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/sheets/{{sheet_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "sheets",
+                "{{sheet_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "sheet_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "One hide: its measurement, where it is in its life, and its lot.\n\n`editable` is computed from the same rule the writes enforce, so an Edit\nbutton and the endpoint behind it cannot disagree."
           },
           "response": []
         },
@@ -174,6 +372,53 @@
               ]
             },
             "description": "Arrived / consumed / available per style \u2014 #19.\n\nAll three come from places that already record them, which is why this is a\nread and not a new ledger. The consumed figure is split by rework (#3), so\n\"this style cost X, of which Y was defects\" is answerable."
+          },
+          "response": []
+        },
+        {
+          "name": "List Arrivals",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/arrivals",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "arrivals"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "",
+                  "description": "PENDING (the default) | COMPLETED | omit for both.",
+                  "disabled": true
+                },
+                {
+                  "key": "lot_id",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "",
+                  "disabled": false
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "",
+                  "disabled": false
+                }
+              ]
+            },
+            "description": "THE COME-BACK-TO-IT QUEUE, oldest first. This is what makes the two-sitting\nintake safe: an unfinished arrival that nobody can find is provisional stock\nquietly becoming permanent stock that was never checked.\n\nOldest first rather than newest, because the arrival nobody has returned to\nfor three days is the one that matters and newest-first buries it."
           },
           "response": []
         },
@@ -245,6 +490,43 @@
               ]
             },
             "description": "THE LOT PICKER for the cut screen \u2014 filter down to the lot, get its id.\n\nThis is the endpoint that lets a frontend supply `leather_lot_id` /\n`lining_lot_id` to `POST /production/log`. The other two material GETs\ncannot: `/materials/spec` returns the FORM DEFINITION (which boxes to\nrender), and `/materials/stock` returns AGGREGATE TOTALS with the lot ids\nsummed away.\n\nTypical cut-screen flow:\n    GET /materials/lots?category=LEATHER&sku_id=<sku>\n      \u2192 `options` fills the article / colour / thickness dropdowns\n      \u2192 the row with `last_used_for_sku: true` is pre-selected\n    \u2026narrow with &article=&colour=&thickness= as the user picks\n      \u2192 one row (material is one lot per spec), take its `lot_id`\n    POST /production/log with consumption.leather_lot_id + dcm\n\nPass `required` (dcm per piece \u00d7 piece count) and each lot reports\n`covers_required`, so a lot that cannot cover the batch can be greyed out\nBEFORE the cut instead of warning after it.\n\nExhausted lots are returned, not hidden \u2014 a manager searching for a lot they\nknow exists must find it, with `available: 0` explaining itself."
+          },
+          "response": []
+        },
+        {
+          "name": "List Sheets",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/lots/{{lot_id}}/sheets",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "lots",
+                "{{lot_id}}",
+                "sheets"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "",
+                  "description": "Comma list: IN_STOCK,ALLOCATED,ISSUED,CONSUMED,RETURNED,SCRAPPED. Omit for all.",
+                  "disabled": true
+                }
+              ],
+              "variable": [
+                {
+                  "key": "lot_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Every hide in one lot, smallest first, with the stock roll-up.\n\nSmallest first is not cosmetic: the allocator spends offcuts before it\nbreaks into a big skin, so this is the order a cutter is offered them in."
           },
           "response": []
         },
@@ -367,6 +649,41 @@
             "body": {
               "mode": "raw",
               "raw": "{\n  \"lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"supplier_order_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"approved_qty\": 0,\n  \"rejected_qty\": 0,\n  \"reserve_for_required\": 0,\n  \"approve_mismatch\": false,\n  \"sheets\": [\n    {\n      \"dcm\": 0,\n      \"note\": \"\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Record Arrival",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/arrivals",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "arrivals"
+              ]
+            },
+            "description": "THE VAN JUST CAME IN. Article, colour, total \u2014 and that is allowed to be all.\n\nMints or tops up the lot, prints the lot barcode, and puts the quantity into\nstock so the floor can cut from it straight away. The approved/rejected split\nand the per-hide measurements are entered later, at\nPOST /materials/arrivals/{receipt_id}/complete \u2014 the response carries that id\nand names, in `outstanding`, exactly which fields are still owed.\n\n`sheet_count` is optional and is what the completion's hide count is checked\nagainst. A mismatch is reported, never enforced: a bundle count taken at the\ngate is a glance.\n\nTHE STOCK IS PROVISIONAL UNTIL THE ARRIVAL IS COMPLETED, and every read says\nso \u2014 `pending_arrivals` / `pending_arrival_qty` ride along on the lot page,\nthe lot directory and the stock check.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"article\": \"\",\n  \"colour\": \"\",\n  \"total_qty\": 0,\n  \"sheet_count\": 0,\n  \"category\": \"LEATHER\",\n  \"subtype\": \"\",\n  \"thickness\": \"\",\n  \"size\": \"\",\n  \"supplier_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"supplier_order_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"note\": \"\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -505,6 +822,48 @@
           "response": []
         },
         {
+          "name": "Update Arrival",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/arrivals/{{receipt_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "arrivals",
+                "{{receipt_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "receipt_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Correct a PENDING gate entry: its quantity, bundle count or note.\n\n`declared_qty` MOVES STOCK, because that quantity is what this arrival put\non the floor \u2014 correcting 3400 to 340 has to take 3060 back out, or the\ncorrection is cosmetic and the shelf still claims material that never\narrived. It is applied as a DELTA, so a cut made in between is not silently\nundone.\n\n409 once the arrival is COMPLETED (that is the QC record of a delivery), and\n409 if the correction would drive the lot negative \u2014 an entry wrong by more\nthan what is left is a different delivery, not a typo, so void it and enter\nthe real one.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"declared_qty\": 0,\n  \"declared_sheet_count\": 0,\n  \"note\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
           "name": "Update Lot",
           "request": {
             "method": "PATCH",
@@ -537,6 +896,48 @@
             "body": {
               "mode": "raw",
               "raw": "{\n  \"article\": \"\",\n  \"colour\": \"\",\n  \"thickness\": \"\",\n  \"size\": \"\",\n  \"supplier_id\": \"00000000-0000-0000-0000-000000000000\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Sheet",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/sheets/{{sheet_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "sheets",
+                "{{sheet_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "sheet_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Correct ONE hide's measurement or note. Audited.\n\n409 once the hide is ALLOCATED / ISSUED / CONSUMED or sits on a cutting row:\nits dcm is then part of what a garment was cut from, and the honest\ncorrection is PATCH /materials/lots/{id}/adjust, which records a movement\nwith a reason instead of rewriting a measurement.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"dcm\": 0,\n  \"note\": \"\"\n}",
               "options": {
                 "raw": {
                   "language": "json"

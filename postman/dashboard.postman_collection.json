@@ -615,12 +615,12 @@
       "response": []
     },
     {
-      "name": "Store Drawer Detail",
+      "name": "Store Piece Detail",
       "request": {
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "{{base_url}}/api/v1/dashboard/store/drawers/{{drawer_id}}",
+          "raw": "{{base_url}}/api/v1/dashboard/store/garments/{{piece_id}}",
           "host": [
             "{{base_url}}"
           ],
@@ -629,27 +629,27 @@
             "v1",
             "dashboard",
             "store",
-            "drawers",
-            "{{drawer_id}}"
+            "garments",
+            "{{piece_id}}"
           ],
           "variable": [
             {
-              "key": "drawer_id",
+              "key": "piece_id",
               "value": "00000000-0000-0000-0000-000000000000"
             }
           ]
         },
-        "description": "Store \u00a76 \u2014 full drawer info + who cut the leather / lining it holds."
+        "description": "Store \u00a76 \u2014 a garment in the store + who cut its leather / lining."
       },
       "response": []
     },
     {
-      "name": "Store Drawer Movement",
+      "name": "Store Piece Movement",
       "request": {
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "{{base_url}}/api/v1/dashboard/store/drawers/{{drawer_id}}/movement",
+          "raw": "{{base_url}}/api/v1/dashboard/store/garments/{{piece_id}}/movement",
           "host": [
             "{{base_url}}"
           ],
@@ -658,18 +658,18 @@
             "v1",
             "dashboard",
             "store",
-            "drawers",
-            "{{drawer_id}}",
+            "garments",
+            "{{piece_id}}",
             "movement"
           ],
           "variable": [
             {
-              "key": "drawer_id",
+              "key": "piece_id",
               "value": "00000000-0000-0000-0000-000000000000"
             }
           ]
         },
-        "description": "Store \u00a717 \u2014 a drawer's movement history from the audit trail."
+        "description": "Store \u00a717 \u2014 a garment's store movement history, from the audit trail."
       },
       "response": []
     },

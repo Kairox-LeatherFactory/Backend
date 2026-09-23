@@ -57,10 +57,10 @@
             }
           ]
         },
-        "description": "The cutter needed one more skin. Scan it, pick it, or create it.",
+        "description": "The cutter needed one more skin. TYPE ITS MEASUREMENT, scan it, or pick it.\n\n`dcm` alone is the normal path and it is a LOOKUP: the number written on the\nskin resolves to that hide of this row's article and colour, and the reply\nsays which code it matched. Nothing of that article in stock is a 422 saying\nso plainly \u2014 there is no sheet available to cut this row from.",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"sheet_code\": \"\",\n  \"sheet_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"dcm\": 0\n}",
+          "raw": "{\n  \"sheet_code\": \"\",\n  \"sheet_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"dcm\": 0,\n  \"dcm_tolerance\": 0,\n  \"create_if_missing\": false\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -519,6 +519,49 @@
           ]
         },
         "description": "Un-freeze an approved row. Recorded, because it un-signs a signature."
+      },
+      "response": []
+    },
+    {
+      "name": "Sheet Options",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/cutting/rows/{{row_id}}/sheet-options",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "cutting",
+            "rows",
+            "{{row_id}}",
+            "sheet-options"
+          ],
+          "query": [
+            {
+              "key": "dcm",
+              "value": "0",
+              "description": "Rank the shelf by distance from this measurement.",
+              "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "",
+              "disabled": false
+            }
+          ],
+          "variable": [
+            {
+              "key": "row_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "What is actually on the shelf for this row, so the dcm box can suggest.\n\nThe operator types a measurement rather than choosing a code, so the screen\nneeds to be able to show what measurements exist before they guess at one."
       },
       "response": []
     }

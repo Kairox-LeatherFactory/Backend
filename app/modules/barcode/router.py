@@ -85,26 +85,39 @@ async def employee_barcode_action(
 @router.get("/materials", response_model=Page[schemas.MaterialBarcodeRow])
 async def material_barcodes(
     category: str | None = Query(None, description="LEATHER | LINING | ACCESSORY"),
-    active_only: bool = Query(True, description="Hide retired lot labels."),
+    active_only: bool = Query(True, description="Hide retired labels."),
+    kind: str | None = Query(
+        None, pattern="^(LOT|SHEET|lot|sheet)$",
+        description="LOT = shelf labels only · SHEET = hide labels only · "
+                    "omit for both, each lot followed by its own hides."),
     params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_SCREEN_READERS),
 ):
-    """THE MATERIAL-BARCODE SCREEN (change-list item 7).
+    """THE MATERIAL-BARCODE SCREEN — lot labels AND hide labels.
 
-    The barcode section had screens for pieces, drawers and employee cards but
+    The barcode section had screens for pieces and employee cards but
     none for material lots — so a lot minted a code at creation and nobody could
     reprint it once the first label was lost or damaged.
 
+    HIDE LABELS ARE HERE TOO. Creating a leather lot with `sheets` mints a
+    LEATHER_SHEET barcode per skin (POST /materials/lots returns them in
+    `sheets`), and this screen used to list only the three LOT types — so those
+    codes existed in the registry and no screen could ever reprint them. Branch
+    on `kind`:
+
+        LOT     one sticker for the shelf: article · colour · thickness · total
+        SHEET   one sticker per skin:      article · colour · that hide's dcm
+
+    A SHEET row carries `sheet_id`, `dcm`, `sheet_status` (IN_STOCK / ALLOCATED
+    / ISSUED / CONSUMED …) and `cutting_row_id`; all four are null on a LOT row.
     Each row carries `code` (encode as Code128) and `label_line` (typeset
     underneath as text), the same convention as POST /barcode/print. A row with
-    `status: retired` belongs to a retired lot: show it greyed, do not print it.
-
-    NOTE FOR THE UI: the drawer screen's label reads "bucket barcode" and should
-    read "drawer barcode". The backend has only ever called it DRAWER — there is
-    no `bucket` anywhere in the API — so that rename is frontend-only."""
+    `status: retired` belongs to a retired lot or hide: show it greyed, do not
+    print it.
+"""
     rows, total = await BarcodeService(db).page_lot_barcodes(
-        params, category=category, active_only=active_only)
+        params, category=category, active_only=active_only, kind=kind)
     return Page[schemas.MaterialBarcodeRow].of(
         [schemas.MaterialBarcodeRow.model_validate(r) for r in rows],
         total=total, params=params)

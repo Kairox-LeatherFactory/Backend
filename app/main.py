@@ -17,7 +17,7 @@ WHAT CHANGED vs your version (read these — they are real fixes):
      It is now defined in users/deps.py (see PASTE_block_employees_into_users_deps.py).
 
   4. ADDED the barcode feature: model imports + router registration for
-     barcode / materials / drawers / attendance-scan..
+     barcode / materials / store / attendance-scan..
 
 ROUTER LOCKING (employees may reach ONLY their own attendance):
   Every write router already 403s an employee via its own require_roles, so the
@@ -61,7 +61,7 @@ from app.modules.clients import models as _clients          # noqa: F401
 from app.modules.production import models as _production     # noqa: F401
 from app.modules.wages import models as _wages              # noqa: F401
 from app.modules.attendance import models as _attendance    # noqa: F401
-from app.modules.barcode import models as _barcode          # noqa: F401  (barcode + materials + drawer + supplier + style-spec/issue-ledger tables all live here)
+from app.modules.barcode import models as _barcode          # noqa: F401  (barcode + materials + supplier + style-spec/issue-ledger tables all live here; the retired drawer table too, so autogenerate does not drop it)
 from app.modules.jobwork import models as _jobwork            # noqa: F401  (vendor — production_event FKs to it)
 from app.modules.cutting import models as _cutting          # noqa: F401  (cutting_row — material_sheet FKs to it, so it must load with the barcode tables)
 from app.core import models as _core_models                 # noqa: F401
@@ -98,13 +98,16 @@ from app.modules.barcode.router import emp_router as barcode_emp_router
 from app.modules.materials.router import router as materials_router
 from app.modules.materials.router import sup_router as suppliers_router
 from app.modules.materials.router import spec_router as style_spec_router
-# DRAWERS ARE RETIRED — replaced by app/modules/store (20260902_store_piece).
-# There were 200 physical drawers; a style releases 100+ garments and stalled
-# mid-chain, so the DM had to re-allocate by hand and in practice did not. Every
-# fact the drawer held was a fact about the GARMENT and now lives on the piece.
-# The module and its tables are KEPT, unwritten, so the movement history stays
-# auditable — only the routes are withdrawn.
-# from app.modules.drawers.router import router as drawers_router
+# THE DRAWER IS GONE — app/modules/drawers is deleted, replaced by
+# app/modules/store. There were 200 physical drawers; a style releases 100+
+# garments, so the pool stalled mid-chain and a DM had to re-allocate by hand,
+# which in practice did not happen. Every fact a drawer held was a fact about the
+# GARMENT and now lives on the piece (store_state / leather_in / lining_in /
+# accessories_in), where it has no capacity to run out of.
+#
+# THE TABLES STAY, unwritten and unread, so the historical movement rows remain
+# auditable — `barcode.models` still maps them so Alembic autogenerate does not
+# try to DROP them (the schema-drift trap, §11). Nothing imports them.
 from app.modules.cutting.router import router as cutting_router
 from app.modules.store.router import router as store_router
 from app.modules.production.inspection_router import router as inspection_router
@@ -325,7 +328,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 #
 # The handler above gives an unhandled error a `request_id` the caller can quote
 # to support. Every DELIBERATE failure — the 403 on the payroll gate, the 409 on
-# a piece scanned into the wrong drawer, the 422 on a material lot missing its
+# a piece released before its parts merged, the 422 on a material lot missing its
 # category's fields — came back as a bare {"detail": ...} with nothing to quote.
 # Those are the errors the floor actually hits, and they were the ones support
 # could not trace.
@@ -396,9 +399,8 @@ app.include_router(suppliers_router,   prefix=API_PREFIX, dependencies=_LOCKED) 
 # locked like every other manager surface; its own routes then split read
 # (_STOCK_READERS — the floor needs the accessory list) from write (DM/MD).
 app.include_router(style_spec_router, prefix=API_PREFIX, dependencies=_LOCKED)
-# app.include_router(drawers_router,     prefix=API_PREFIX, dependencies=_LOCKED)  # NEW   # retired -> /store
 app.include_router(cutting_router,     prefix=API_PREFIX, dependencies=_LOCKED)  # Cutting V2
-app.include_router(store_router,       prefix=API_PREFIX, dependencies=_LOCKED)  # replaces /drawers
+app.include_router(store_router,       prefix=API_PREFIX, dependencies=_LOCKED)  # the merge, on the piece
 app.include_router(inspection_router,  prefix=API_PREFIX, dependencies=_LOCKED)  # reject & rework
 app.include_router(jobwork_router,     prefix=API_PREFIX, dependencies=_LOCKED)  # outsourcing
 

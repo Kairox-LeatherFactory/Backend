@@ -9,8 +9,17 @@ class InspectionRequest(BaseModel):
     piece_id: uuid.UUID | None = None
     piece_barcode: str | None = None
     found_at_stage: str                       # where the defect was SEEN
-    verdict: str                              # PASS | REJECT
-    action: str | None = None                 # FIX | REDO   (a reject must say)
+    # OPTIONAL, AND IT DEFAULTS TO REJECT. This endpoint is opened when somebody
+    # has FOUND A DEFECT — a manager who is happy with a garment simply logs the
+    # next stage and moves on, so a PASS here was a verdict nobody ever sent and
+    # a required field everybody had to fill in with the same word. PASS is still
+    # accepted (it writes a closed, resolved row) for a caller that wants to
+    # record one deliberately; omitting the field means REJECT.
+    verdict: str | None = None                # REJECT (default) | PASS
+    # FIX | REDO. Omitted on a REJECT means FIX — repair it where it stands.
+    # A REDO is never inferred: sending a garment backwards re-opens a completed
+    # stage and has to name `return_to_stage`, so it stays an explicit choice.
+    action: str | None = None
     return_to_stage: str | None = None        # on a REDO — the rejector chooses
     defect_type: str | None = None            # PRODUCT_DAMAGE | WORKMANSHIP
     # WHO IS ANSWERABLE FOR THIS PIECE. Required for WORKMANSHIP, refused for

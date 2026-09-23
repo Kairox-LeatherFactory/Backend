@@ -53,7 +53,31 @@ _CAPTION_FIELDS = {
 
 
 def display_stock(on_hand, used, active_reserved):
-    """Present received, consumed/reserved, and remaining stock together.
+    """THE THREE NUMBERS THE FLOOR ACTUALLY ASKS FOR: arrived, used, balance.
+
+    Returns `(arrived, used, balance)`.
+
+        arrived   everything that ever came in for this material = on_hand + used
+        used      what has physically been cut or issued out of it (lot.used)
+        balance   what is left on the shelf                       (lot.on_hand)
+
+    `arrived − used == balance` ALWAYS, by construction, because arrived is
+    derived from the other two rather than summed from a different table. That
+    identity is the whole point: a stock screen whose three figures do not
+    reconcile teaches people to stop believing any of them.
+
+    WHAT THIS USED TO RETURN, AND WHY IT WAS WRONG. The second element used to be
+    `used + active_reserved` under the name "reserved". Consumption is not a
+    reservation — a reservation is a claim on stock that has NOT been spent, and
+    stock that HAS been spent is already out of on_hand. Adding the two produced a
+    "reserved" figure that grew with every cut, so the screen showed a lot as more
+    and more committed the more of it was used up, and "used" itself was nowhere.
+    `available` is unaffected either way (the term cancels), which is why this
+    survived: the one number anybody checked was right for the wrong reason.
+
+    Reservations are still real and still subtract from what can be promised —
+    they are reported separately, as `reserved`, and `available = balance −
+    reserved`. See MaterialService.stock_numbers.
 
     Pure — no DB, no self. It lives at module level because BOTH the service and
     StyleSpecService need it, and StyleSpecService only holds a MaterialRepository.
@@ -63,12 +87,81 @@ def display_stock(on_hand, used, active_reserved):
     500 on every style material-spec read that resolved a lot. Import this function;
     do not reach for a private attribute across the two objects again.
     """
-    current = Decimal(str(on_hand or 0))
+    balance = Decimal(str(on_hand or 0))
     consumed = Decimal(str(used or 0))
-    committed = Decimal(str(active_reserved or 0))
-    received = current + consumed
-    reserved = consumed + committed
-    return received, reserved, received - reserved
+    return balance + consumed, consumed, balance
+
+
+def stock_numbers(on_hand, used, active_reserved) -> dict:
+    """One block of stock figures, spelled out, used by every material read.
+
+    Every screen that shows stock shows the same six numbers, and they were being
+    assembled by hand at five call sites with three different meanings for
+    `on_hand`. This is the single shape:
+
+        arrived    on_hand + used      everything that ever came in
+        used       lot.used            cut or issued out of it
+        balance    lot.on_hand         what is on the shelf now
+        reserved   Σ active            committed to a requirement, not yet spent
+        available  balance − reserved  what may be promised to something new
+        on_hand    == balance          the legacy key, kept so existing callers
+                                       and saved API clients do not break
+
+    `on_hand` MEANS BALANCE HERE, and on `/materials/stock` it used to mean
+    `arrived`. That was the bug: two endpoints used one word for two quantities,
+    so a manager comparing the stock screen with a lot's own page saw numbers that
+    could not both be right. Read `arrived`, `used` and `balance` — they say what
+    they are.
+    """
+    arrived, consumed, balance = display_stock(on_hand, used, active_reserved)
+    reserved = Decimal(str(active_reserved or 0))
+    return {
+        "arrived": float(arrived),
+        "used": float(consumed),
+        "balance": float(balance),
+        "reserved": float(reserved),
+        "available": float(balance - reserved),
+        "on_hand": float(balance),
+    }
+
+
+# Which SheetStatus values belong in which bucket of the sheet-wise roll-up.
+# The dcm ledger above answers "how much leather"; this answers "how many
+# hides", and the floor counts in both — a cutter is handed SKINS, and a store
+# check is a count of what is on the shelf, not a sum of decimetres.
+_SHEET_BUCKETS = {
+    # On the shelf and claimable by a cutting row.
+    "balance": ("IN_STOCK", "RETURNED"),
+    # Out on a row but not yet cut — spoken for, still physically here.
+    "allocated": ("ALLOCATED", "ISSUED"),
+    # Gone: the cutting event was logged and its dcm is spent.
+    "used": ("CONSUMED",),
+    # Left stock without ever being cut.
+    "scrapped": ("SCRAPPED",),
+}
+
+
+def sheet_rollup(counts_by_status: dict) -> dict:
+    """{status: {count, dcm}} → the four buckets, plus the totals.
+
+    Pure, like display_stock, and for the same reason: the lot page, the stock
+    screen and the lot directory all render it and none of them should be
+    computing it themselves.
+    """
+    out = {}
+    for bucket, statuses in _SHEET_BUCKETS.items():
+        count = sum(int(counts_by_status.get(s, {}).get("count", 0))
+                    for s in statuses)
+        dcm = sum(float(counts_by_status.get(s, {}).get("dcm", 0.0))
+                  for s in statuses)
+        out[f"sheets_{bucket}"] = count
+        out[f"sheets_{bucket}_dcm"] = round(dcm, 3)
+    out["sheets_arrived"] = sum(int(v.get("count", 0))
+                                for v in counts_by_status.values())
+    out["sheets_arrived_dcm"] = round(
+        sum(float(v.get("dcm", 0.0)) for v in counts_by_status.values()), 3)
+    out["sheets_by_status"] = counts_by_status
+    return out
 
 
 class MaterialService:
@@ -246,8 +339,18 @@ class MaterialService:
             "lot_id": lot.id, "lot_barcode": bc.code,
             "category": lot.category, "subtype": lot.subtype,
             "article": lot.article, "colour": lot.colour,
-            "on_hand": float(lot.on_hand), "used": 0.0, "reserved": 0.0,
-            "available": float(lot.on_hand), "uom": lot.uom,
+            # A brand-new lot has nothing used and nothing reserved, so arrived
+            # == balance == on_hand. Built through the same helper as every other
+            # read so the shape cannot drift from them.
+            **stock_numbers(lot.on_hand, Decimal(0), Decimal(0)),
+            # The hides this create minted are all IN_STOCK by definition — they
+            # were measured a moment ago and nothing has claimed one — so the
+            # roll-up is built from them rather than re-queried.
+            **sheet_rollup({SheetStatus.IN_STOCK.value: {
+                "count": len(sheets),
+                "dcm": round(sum(float(x.dcm or 0) for x in sheets), 3),
+            }} if sheets else {}),
+            "uom": lot.uom,
             "sheets": sheet_rows,
         }
 
@@ -404,7 +507,20 @@ class MaterialService:
     #     `adjust` below, which is the same movement with a reason attached.
 
     async def get_lot(self, lot_id: uuid.UUID) -> dict:
-        """One lot: identity, its three stock numbers, and its barcode."""
+        """One lot: identity, its stock numbers — in dcm AND in hides — and its
+        barcode.
+
+        `used` USED TO BE A LIE HERE, and it was the only figure on the page
+        nobody could act on. The key was declared on the response schema with a
+        default of 0.0 and this method never set it, so every lot in the building
+        reported "used: 0" however much of it had been cut. It is `lot.used`, the
+        same column `_decrement_nocommit` moves on every cut and every kit issue.
+
+        THE THREE THAT MATTER: `arrived` came in, `used` went out, `balance` is
+        left — and they reconcile. `reserved` / `available` sit beside them for
+        what is promised. The same three are given SHEET-WISE, because a store
+        check counts skins, not decimetres.
+        """
         lot = await self.repo.get_lot(lot_id)
         if not lot:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Material lot not found.")
@@ -416,23 +532,28 @@ class MaterialService:
         totals = (await self.repo.received_totals([lot_id])).get(lot_id, {})
         # #18 — how many hides this lot has taken in, for the lot directory.
         sheets = await self.repo.sheet_counts_by_status(lot_id)
+        pending = (await self.repo.pending_intake_by_lot([lot_id])).get(lot_id) or {}
         return {
             "lot_id": lot.id, "barcode": barcodes.get(lot.id),
             "category": lot.category, "subtype": lot.subtype,
             "article": lot.article, "colour": lot.colour,
             "thickness": lot.thickness, "size": lot.size, "uom": lot.uom,
-            "on_hand": float(lot.on_hand or 0),
-            "reserved": float(reserved),
-            "available": float((lot.on_hand or Decimal(0)) - reserved),
-            # WHAT EVER ARRIVED, beside what is left. on_hand is the remainder
-            # after consumption; received answers "how much of this have we
-            # bought", which is a different question and the one the stock screen
-            # was asking.
+            # arrived / used / balance / reserved / available / on_hand
+            **stock_numbers(lot.on_hand, lot.used, reserved),
+            # WHAT WAS BOUGHT, beside what arrived. `received` sums the delivery
+            # rows and so answers "how much of this have we ever paid for";
+            # `arrived` is the ledger's own on_hand + used. They agree unless a
+            # lot has been hand-adjusted, and seeing them diverge is exactly how
+            # an adjustment is noticed.
             "received": totals.get("received", 0.0),
             "rejected": totals.get("rejected", 0.0),
             "deliveries": totals.get("deliveries", 0),
+            # Deliveries recorded at the gate whose approved/rejected split and
+            # per-hide measurements nobody has come back to enter yet.
+            "pending_arrivals": pending.get("count", 0),
+            "pending_arrival_qty": pending.get("declared_qty", 0.0),
+            **sheet_rollup(sheets),
             "sheets_total": sum(v["count"] for v in sheets.values()),
-            "sheets_by_status": sheets,
             "attributes": dict(lot.attributes or {}),
             "supplier_id": lot.supplier_id,
             "is_active": bool(lot.is_active),
@@ -733,6 +854,399 @@ class MaterialService:
                         f"cut recorded against it is untouched."),
         }
 
+    # ══════════════════════════════════════════════════════════════════════
+    # HIDE CRUD — the correction path for per-sheet data entry
+    # ══════════════════════════════════════════════════════════════════════
+    # WHY THIS EXISTS. A leather delivery is typed hide by hide, by a person
+    # reading a number written on a skin, and there was no way to fix any of it:
+    # a hide entered as 45 when the skin says 4.5 stayed wrong forever, and a
+    # fifth hide typed by accident stayed in the count forever. The lot had
+    # update/adjust/retire; its hides had nothing.
+    #
+    # THE STATE IS THE PERMISSION, and it is the same rule throughout: a hide
+    # that is still IN_STOCK and on no cutting row has not been acted on by
+    # anybody, so correcting it is data entry. The moment it is ALLOCATED,
+    # ISSUED or CONSUMED it is part of a cutting decision somebody made, and
+    # changing its measurement underneath them would rewrite what a garment
+    # cost. Those are refused with a 409 that names the row holding it.
+
+    #: A hide nobody has claimed yet. Editable and deletable; everything else is
+    #: history and is not.
+    _SHEET_EDITABLE = {SheetStatus.IN_STOCK.value, SheetStatus.RETURNED.value}
+
+    async def _sheet_or_404(self, sheet_id: uuid.UUID):
+        sheet = await self.repo.get_sheet(sheet_id)
+        if sheet is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Hide not found.")
+        return sheet
+
+    def _assert_sheet_untouched(self, sheet, verb: str) -> None:
+        if sheet.cutting_row_id is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"{sheet.code} is on cutting row {sheet.cutting_row_id} — a hide "
+                f"a cutter has been given cannot be {verb}. Take it off the row "
+                f"first, or record what actually happened to it.")
+        if sheet.status not in self._SHEET_EDITABLE:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"{sheet.code} is {sheet.status}, so it cannot be {verb}: its "
+                f"measurement is part of what a garment was cut from. Correct "
+                f"the LOT's stock instead with PATCH /materials/lots/"
+                f"{sheet.material_lot_id}/adjust, which records the movement "
+                f"with a reason.")
+
+    @staticmethod
+    def _sheet_row(sheet) -> dict:
+        return {"sheet_id": sheet.id, "code": sheet.code,
+                "dcm": float(sheet.dcm or 0), "status": sheet.status,
+                "cutting_row_id": sheet.cutting_row_id,
+                "material_lot_id": sheet.material_lot_id,
+                "note": sheet.note,
+                "received_at": (sheet.received_at.isoformat()
+                                if sheet.received_at else None)}
+
+    async def list_sheets(self, lot_id: uuid.UUID, *,
+                          status_filter: str | None = None) -> dict:
+        """Every hide in one lot, with the roll-up the stock screen prints.
+
+        Smallest first — the order `sheets_for_lot` already returns, because the
+        allocator spends offcuts before it breaks into a big skin.
+        """
+        lot = await self.repo.get_lot(lot_id)
+        if not lot:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Material lot not found.")
+        statuses = ({s.strip().upper() for s in status_filter.split(",")}
+                    if status_filter else None)
+        sheets = await self.repo.sheets_for_lot(lot_id, statuses=statuses)
+        counts = await self.repo.sheet_counts_by_status(lot_id)
+        return {
+            "lot_id": lot.id, "article": lot.article, "colour": lot.colour,
+            "uom": lot.uom,
+            "count": len(sheets),
+            "sheets": [self._sheet_row(s) for s in sheets],
+            "sheets_by_status": counts,
+            "reconciliation": await self.sheet_reconciliation(lot),
+        }
+
+    async def get_sheet(self, sheet_id: uuid.UUID) -> dict:
+        """One hide, plus the lot it belongs to — the click-through from a scan."""
+        sheet = await self._sheet_or_404(sheet_id)
+        lot = await self.repo.get_lot(sheet.material_lot_id)
+        codes = await self.repo.barcodes_by_lot([sheet.material_lot_id])
+        return dict(
+            self._sheet_row(sheet),
+            article=getattr(lot, "article", None),
+            colour=getattr(lot, "colour", None),
+            thickness=getattr(lot, "thickness", None),
+            lot_barcode=codes.get(sheet.material_lot_id),
+            editable=(sheet.cutting_row_id is None
+                      and sheet.status in self._SHEET_EDITABLE),
+        )
+
+    async def add_sheets(self, lot_id: uuid.UUID, sheets: list, *,
+                         actor_id=None) -> dict:
+        """Add hides to a lot that already exists — the missed-one path.
+
+        A delivery is sheeted at the gate under time pressure and a skin at the
+        bottom of the bundle gets missed. Without this the only way to record it
+        was to create a second lot for the same material, which the one-lot-per-
+        spec rule refuses, so it was not recorded at all.
+
+        STOCK IS NOT TOUCHED, deliberately. `lot.on_hand` is what the delivery
+        note said arrived and the hides are the detail beneath it; adding the
+        hide somebody forgot to type does not mean more leather walked in. The
+        reconciliation block reports the gap either way, which is exactly the
+        conversation this is meant to start.
+        """
+        lot = await self.repo.get_lot(lot_id)
+        if not lot:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Material lot not found.")
+        if not sheets:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "Send at least one hide.")
+        minted = await self.mint_sheets_nocommit(lot, [
+            s if isinstance(s, dict) else {"dcm": s.dcm, "note": s.note}
+            for s in sheets])
+        await self._audit(actor_id, "MATERIAL_SHEETS_ADDED", lot.id, {
+            "article": lot.article, "colour": lot.colour,
+            "added": [{"code": m.code, "dcm": float(m.dcm)} for m in minted]})
+        await self.db.commit()
+        for m in minted:
+            await self.db.refresh(m)
+        return {
+            "lot_id": lot.id,
+            "added": [self._sheet_row(m) for m in minted],
+            "reconciliation": await self.sheet_reconciliation(lot),
+            "message": (f"{len(minted)} hide(s) added to {lot.article}. Stock is "
+                        f"unchanged — the delivery total is what it always was; "
+                        f"only the per-hide detail grew."),
+        }
+
+    async def update_sheet(self, sheet_id: uuid.UUID, patch: dict, *,
+                           actor_id=None) -> dict:
+        """Correct ONE hide's measurement or note. Audited.
+
+        The measurement is the whole point of sheeting a delivery, so a wrong
+        one is worth a row in the audit log: it changes what the reconciliation
+        says and, once the hide is cut, what the garment is recorded as costing.
+        """
+        sheet = await self._sheet_or_404(sheet_id)
+        self._assert_sheet_untouched(sheet, "corrected")
+
+        fields = {k: v for k, v in patch.items() if k in {"dcm", "note"}
+                  and v is not None}
+        if not fields:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "Nothing to update. Send dcm and/or note.")
+        before = {"dcm": float(sheet.dcm or 0), "note": sheet.note}
+        if "dcm" in fields:
+            try:
+                dcm = Decimal(str(fields["dcm"]))
+            except Exception:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                    "dcm must be a number.")
+            if dcm <= 0:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    "A hide's dcm must be greater than 0 — the measurement "
+                    "written on the skin is what the whole ledger is built on.")
+            sheet.dcm = dcm
+        if "note" in fields:
+            sheet.note = fields["note"]
+
+        await self._audit(actor_id, "MATERIAL_SHEET_UPDATED",
+                          sheet.material_lot_id,
+                          {"code": sheet.code, "before": before,
+                           "after": {"dcm": float(sheet.dcm or 0),
+                                     "note": sheet.note}})
+        await self.db.commit()
+        await self.db.refresh(sheet)
+        lot = await self.repo.get_lot(sheet.material_lot_id)
+        return dict(self._sheet_row(sheet),
+                    reconciliation=await self.sheet_reconciliation(lot))
+
+    async def delete_sheet(self, sheet_id: uuid.UUID, *, actor_id=None) -> dict:
+        """Remove a hide entered by mistake. HARD delete, and only while untouched.
+
+        THE ONE PLACE THIS CODEBASE DELETES A ROW, and the reason is that there
+        is nothing here to keep. An employee who leaves worked shifts; a retired
+        lot has cut events pointing at it; a deactivated spec line has issues
+        pointing at it — all three are retired rather than deleted because
+        history hangs off them. A hide that is still IN_STOCK and on no cutting
+        row has no history at all: nothing has been allocated from it, issued
+        from it or cut from it. It is a typed line that should not have been
+        typed, and keeping it forever would leave a skin that does not exist in
+        every hide count on the stock screen.
+
+        Its BARCODE is retired rather than deleted, because a label may already
+        have been printed and stuck on something — a scan of it must say "this
+        was removed" (410 Gone), never "unknown code".
+
+        `_assert_sheet_untouched` is what keeps this safe: the moment a cutter
+        has been given the skin, this is a 409 and the honest correction is
+        PATCH /materials/lots/{id}/adjust with a reason.
+        """
+        sheet = await self._sheet_or_404(sheet_id)
+        self._assert_sheet_untouched(sheet, "deleted")
+
+        lot_id, code, dcm = sheet.material_lot_id, sheet.code, float(sheet.dcm or 0)
+        from app.modules.barcode.models import BarcodeRegistry
+        from sqlalchemy import select as _select
+        from app.modules.barcode.service import BarcodeService
+
+        row = await self.db.scalar(
+            _select(BarcodeRegistry)
+            .where(BarcodeRegistry.material_sheet_id == sheet.id)
+            .limit(1))
+        retired = False
+        if row is not None:
+            # Retire, then unhook: the registry row keeps its own history but
+            # must stop pointing at a sheet that is about to stop existing, or
+            # the FK fails and the delete takes the label down with it.
+            await BarcodeService(self.db).repo.retire_nocommit(
+                row, reason="sheet_deleted")
+            row.material_sheet_id = None
+            retired = True
+
+        await self.db.delete(sheet)
+        await self._audit(actor_id, "MATERIAL_SHEET_DELETED", lot_id, {
+            "code": code, "dcm": dcm, "barcode_retired": retired})
+        await self.db.commit()
+
+        lot = await self.repo.get_lot(lot_id)
+        return {
+            "sheet_id": sheet_id, "code": code, "deleted": True,
+            "barcode_retired": retired,
+            "lot_id": lot_id,
+            "reconciliation": await self.sheet_reconciliation(lot) if lot else None,
+            "message": (f"{code} ({dcm:g} dcm) is gone. The lot's stock figure is "
+                        f"unchanged — a hide nobody had claimed was never part "
+                        f"of it — and a scan of its label now reads 410 Gone."),
+        }
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ARRIVAL CRUD — correcting and voiding a gate entry
+    # ══════════════════════════════════════════════════════════════════════
+    # An arrival is typed at the gate, in a hurry, from a delivery note. It is
+    # the single most mistake-prone entry in the module, it puts stock straight
+    # onto the floor, and until now it could only be created and completed —
+    # never corrected, never withdrawn. A van entered twice was two lots' worth
+    # of stock that nobody could take back out.
+
+    async def _pending_arrival_or_404(self, receipt_id: uuid.UUID, verb: str):
+        from app.core.enums import IntakeStatus
+        receipt = await self.repo.get_receipt(receipt_id)
+        if receipt is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Arrival not found.")
+        if receipt.status != IntakeStatus.PENDING.value:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"This arrival is {receipt.status}. A completed arrival is the "
+                f"QC record of a delivery and cannot be {verb} — correct the "
+                f"stock with PATCH /materials/lots/"
+                f"{receipt.material_lot_id}/adjust, which records the movement "
+                f"with a reason.")
+        return receipt
+
+    async def get_arrival(self, receipt_id: uuid.UUID) -> dict:
+        """One arrival, in the same shape the queue lists it."""
+        receipt = await self.repo.get_receipt(receipt_id)
+        if receipt is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Arrival not found.")
+        lot = await self.repo.get_lot(receipt.material_lot_id)
+        return self._arrival_row(receipt, lot)
+
+    async def update_arrival(self, receipt_id: uuid.UUID, patch: dict, *,
+                             actor_id=None) -> dict:
+        """Correct a PENDING arrival's declared quantity, bundle count or note.
+
+        THE QUANTITY MOVES STOCK, because the declared quantity IS the stock this
+        arrival put on the floor. Correcting 3400 to 340 has to take 3060 back
+        out of the lot, or the correction is cosmetic and the shelf still claims
+        material that never arrived. It is applied as a DELTA for the same reason
+        `complete_arrival` uses one: the floor may have cut some of this delivery
+        in between, and assigning the new figure would silently undo that.
+
+        It refuses to drive the lot negative. A gate entry wrong by more than
+        what is left on the shelf is not a typo, it is a different delivery, and
+        the honest fix is to void this arrival and enter the real one.
+        """
+        receipt = await self._pending_arrival_or_404(receipt_id, "corrected")
+        lot = await self.repo.get_lot_for_update(receipt.material_lot_id)
+        if lot is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                "This arrival's lot no longer exists.")
+
+        before = {"declared_qty": float(receipt.declared_qty or 0),
+                  "declared_sheet_count": receipt.declared_sheet_count,
+                  "note": receipt.note}
+        delta = Decimal(0)
+        if patch.get("declared_qty") is not None:
+            try:
+                new_qty = Decimal(str(patch["declared_qty"]))
+            except Exception:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                    "declared_qty must be a number.")
+            if new_qty <= 0:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    "declared_qty must be > 0. An arrival of nothing is not an "
+                    "arrival — void it instead.")
+            delta = new_qty - Decimal(str(receipt.declared_qty or 0))
+            new_on_hand = (lot.on_hand or Decimal(0)) + delta
+            if new_on_hand < 0:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    f"Correcting this arrival to {float(new_qty):g} {lot.uom} "
+                    f"would take {lot.article} to {float(new_on_hand):g} — below "
+                    f"zero, because {float(delta * -1):g} {lot.uom} of it has "
+                    f"already been cut or issued. Void the arrival and enter the "
+                    f"real delivery instead.")
+            lot.on_hand = new_on_hand
+            # approved_qty tracks the declared figure until `complete` splits it;
+            # leaving it behind would make `received` and the purchase history
+            # disagree with the arrival they came from.
+            receipt.approved_qty = new_qty
+            receipt.declared_qty = new_qty
+        if patch.get("declared_sheet_count") is not None:
+            receipt.declared_sheet_count = patch["declared_sheet_count"]
+        if patch.get("note") is not None:
+            receipt.note = patch["note"]
+
+        await self._audit(actor_id, "MATERIAL_ARRIVAL_UPDATED",
+                          receipt.material_lot_id,
+                          {"receipt_id": str(receipt.id), "before": before,
+                           "after": {"declared_qty": float(receipt.declared_qty or 0),
+                                     "declared_sheet_count": receipt.declared_sheet_count,
+                                     "note": receipt.note},
+                           "stock_delta": float(delta)})
+        await self.db.commit()
+        await self.db.refresh(receipt)
+        await self.db.refresh(lot)
+        return dict(self._arrival_row(receipt, lot),
+                    stock_delta=float(delta),
+                    **stock_numbers(lot.on_hand, lot.used,
+                                    await self.repo.active_reserved(lot.id)))
+
+    async def delete_arrival(self, receipt_id: uuid.UUID, *,
+                             actor_id=None) -> dict:
+        """Void a PENDING arrival — the van that was entered twice.
+
+        HARD delete of the receipt, and the stock it put on the floor comes back
+        out. Same reasoning as a hide: a PENDING arrival that nobody has QC'd is
+        a typed line, not history. The moment it is COMPLETED it is the record of
+        what a supplier delivered and what went back on the van, and it is
+        refused with a 409.
+
+        THE LOT SURVIVES even when this was its only delivery. It may already
+        carry a printed barcode, a material spec line pinned to it and a cut
+        event, and deleting it would orphan all three; a lot at zero is an empty
+        shelf, which is a true statement. Retire it separately if it was minted
+        in error.
+        """
+        receipt = await self._pending_arrival_or_404(receipt_id, "voided")
+        lot = await self.repo.get_lot_for_update(receipt.material_lot_id)
+        qty = Decimal(str(receipt.declared_qty or 0))
+
+        if lot is not None:
+            new_on_hand = (lot.on_hand or Decimal(0)) - qty
+            if new_on_hand < 0:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    f"Voiding this arrival would take {lot.article} to "
+                    f"{float(new_on_hand):g} {lot.uom}: some of its "
+                    f"{float(qty):g} has already been cut or issued, so the "
+                    f"material was real. Correct the quantity with PATCH "
+                    f"/materials/arrivals/{receipt_id} instead.")
+            lot.on_hand = new_on_hand
+
+        await self.db.delete(receipt)
+        await self._audit(actor_id, "MATERIAL_ARRIVAL_VOIDED",
+                          receipt.material_lot_id,
+                          {"receipt_id": str(receipt_id),
+                           "declared_qty": float(qty),
+                           "article": getattr(lot, "article", None)})
+        await self.db.commit()
+        if lot is not None:
+            await self.db.refresh(lot)
+
+        return {
+            "receipt_id": receipt_id, "voided": True,
+            "lot_id": getattr(lot, "id", None),
+            "qty_removed": float(qty),
+            "lot_retained": lot is not None,
+            **(stock_numbers(lot.on_hand, lot.used,
+                             await self.repo.active_reserved(lot.id))
+               if lot is not None else {}),
+            "message": (
+                f"The arrival is void and {float(qty):g} "
+                f"{getattr(lot, 'uom', '')} came back off the shelf. The lot "
+                f"itself is kept — its barcode may be printed and a recipe may "
+                f"already point at it; retire it separately if it should not "
+                f"exist."),
+        }
+
     async def _audit(self, actor_id, action: str, entity_id, after: dict) -> None:
         from datetime import datetime, timezone
         from app.core.models import AuditLog
@@ -801,10 +1315,17 @@ class MaterialService:
             last_used_id = await self.repo.last_lot_for_sku(sku_id, lining=is_lining)
 
         need = Decimal(str(required)) if required is not None else None
+        # Sheet-wise figures for the whole page in ONE query, and the unfinished
+        # arrivals in one more — a lot carrying a PENDING arrival is holding
+        # PROVISIONAL stock, and a directory that cannot say so is presenting an
+        # estimate as a measurement.
+        sheets_map = await self.repo.sheet_totals_for_lots(lot_ids)
+        pending_map = await self.repo.pending_intake_by_lot(lot_ids)
         items = []
         for lot in lots:
             reserved = reserved_map.get(lot.id, Decimal(0))
-            available = (lot.on_hand or Decimal(0)) - reserved
+            numbers = stock_numbers(lot.on_hand, lot.used, reserved)
+            pending = pending_map.get(lot.id)
             items.append({
                 "lot_id": lot.id,
                 "barcode": barcode_map.get(lot.id),
@@ -812,17 +1333,16 @@ class MaterialService:
                 "article": lot.article, "colour": lot.colour,
                 "thickness": lot.thickness, "size": lot.size,
                 "uom": lot.uom,
-                "on_hand": float(self._display_stock(
-                    lot.on_hand, lot.used, reserved)[0]),
-                "used": float(lot.used or 0),
-                "reserved": float(self._display_stock(
-                    lot.on_hand, lot.used, reserved)[1]),
-                "available": float(self._display_stock(
-                    lot.on_hand, lot.used, reserved)[2]),
+                # arrived / used / balance / reserved / available / on_hand
+                **numbers,
+                **sheet_rollup(sheets_map.get(lot.id, {})),
                 # Pre-select this one in the UI, but SHOW it — never silently.
                 "last_used_for_sku": lot.id == last_used_id,
                 # None when the caller did not say how much it needs.
-                "covers_required": None if need is None else bool(available >= need),
+                "covers_required": (None if need is None
+                                    else bool(numbers["available"] >= float(need))),
+                "pending_arrivals": (pending or {}).get("count", 0),
+                "pending_arrival_qty": (pending or {}).get("declared_qty", 0.0),
             })
 
         # Oldest first = FIFO, the order find_lots already returns. Then surface
@@ -851,31 +1371,71 @@ class MaterialService:
     async def stock(self, *, category=None, subtype=None, article=None,
                     colour=None, thickness=None, size=None,
                     required: float | None = None) -> dict:
+        """THE STOCK CHECK, summed over every lot that matches the filter.
+
+        THREE NUMBERS, AND THEY RECONCILE: `arrived` came in, `used` was cut or
+        issued, `balance` is what is left — and arrived − used == balance, always.
+        `reserved` is what is committed to a requirement but not yet spent, and
+        `available` is balance − reserved: what may still be promised.
+
+        The same three are given SHEET-WISE for leather (`sheets_arrived`,
+        `sheets_used`, `sheets_balance`, each with its dcm), because the floor
+        counts hides as well as decimetres — a cutter is handed skins, and "how
+        many are on the shelf" is not answerable from a sum of measurements.
+
+        WHAT CHANGED. `on_hand` here used to be the ARRIVED total while `on_hand`
+        on a lot's own page was the BALANCE, and `reserved` here silently included
+        everything already consumed. So the two screens disagreed and neither said
+        how much had been used. `on_hand` now means balance everywhere; read
+        `arrived` / `used` / `balance`, which say what they are.
+        """
         lots = await self.repo.find_lots(
             category=category, subtype=subtype, article=article,
             colour=colour, thickness=thickness, size=size)
+        lot_ids = [lot.id for lot in lots]
+        # ONE query for every lot's reservations instead of one per lot: this is
+        # the DM's first screen and it is opened on every shortfall check.
+        reserved_map = await self.repo.reserved_by_lot(lot_ids)
         on_hand = Decimal(0)
         used = Decimal(0)
         active_reserved = Decimal(0)
         for lot in lots:
-            on_hand += lot.on_hand
+            on_hand += lot.on_hand or Decimal(0)
             used += lot.used or Decimal(0)
-            active_reserved += await self.repo.active_reserved(lot.id)
-        received, reserved, available = self._display_stock(
-            on_hand, used, active_reserved)
+            active_reserved += reserved_map.get(lot.id, Decimal(0))
+        numbers = stock_numbers(on_hand, used, active_reserved)
         uom = lots[0].uom if lots else uom_for(category or "", subtype)
 
+        # SHEET-WISE, rolled up across the same lots. Empty for anything that is
+        # not leather, which is the honest answer rather than a row of zeroes:
+        # lining is metres and a button is a button — neither has hides to count.
+        sheets_map = await self.repo.sheet_totals_for_lots(lot_ids)
+        merged: dict = {}
+        for per_lot in sheets_map.values():
+            for st, v in per_lot.items():
+                cell = merged.setdefault(st, {"count": 0, "dcm": 0.0})
+                cell["count"] += int(v.get("count", 0))
+                cell["dcm"] = round(cell["dcm"] + float(v.get("dcm", 0.0)), 3)
+
+        pending_map = await self.repo.pending_intake_by_lot(lot_ids)
         out = {
             "category": (category or "").upper() or None,
             "subtype": (subtype or None),
             "article": article, "colour": colour, "thickness": thickness,
             "size": size, "uom": uom,
-            "on_hand": float(received), "used": float(used),
-            "reserved": float(reserved),
-            "available": float(available),
+            **numbers,
+            **sheet_rollup(merged),
             "lot_count": len(lots),
+            # DELIVERIES NOT YET FINISHED. The qty they brought in is already in
+            # `arrived` and cuttable — it is PROVISIONAL until somebody enters the
+            # approved/rejected split, and a stock figure that cannot say which
+            # part of itself is provisional is the number people stop trusting.
+            "pending_arrivals": sum(v["count"] for v in pending_map.values()),
+            "pending_arrival_qty": round(
+                sum(v["declared_qty"] for v in pending_map.values()), 3),
         }
         if required is not None:
+            available = Decimal(str(numbers["available"]))
             short = max(Decimal(0), Decimal(str(required)) - available)
             out["required"] = float(required)
             out["short_by"] = float(short)
@@ -884,6 +1444,342 @@ class MaterialService:
                 out["suggested_supplier"] = (
                     {"id": str(sup.id), "name": sup.name} if sup else None)
         return out
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ARRIVALS — a delivery entered in TWO SITTINGS
+    # ══════════════════════════════════════════════════════════════════════
+    # THE PROBLEM THIS EXISTS FOR, in the floor's own words: the van turns up and
+    # whoever signs for it has ten seconds. Article, colour, total dcm — that is
+    # all anybody knows at the gate. Splitting the total into approved and
+    # rejected, counting the hides and measuring every one of them is twenty
+    # minutes of quiet work that happens later the same day, or the next.
+    #
+    # `create_lot` and `receive` both demand the whole story at once: the strict
+    # per-category field set (leather needs a THICKNESS nobody has read off the
+    # packing note yet) and an approved/rejected split that has not been done.
+    # A form like that gets one of two answers, and both are worse than nothing:
+    # the delivery goes unrecorded until somebody has twenty minutes, or numbers
+    # are invented to get past the required fields.
+    #
+    # So: ARRIVE now, FINISH later.
+    #   arrive()    article + colour + total + (optional) sheet count. Mints or
+    #               tops up the lot, prints the barcode, puts the material into
+    #               stock PROVISIONALLY so the floor can cut from it, and leaves
+    #               a PENDING receipt behind as the thing to come back to.
+    #   complete()  the approved/rejected split and the per-hide measurements.
+    #               on_hand is corrected by (approved − declared), the rejection
+    #               is logged against the supplier, the hides are minted and
+    #               labelled, and the receipt closes.
+    #
+    # THE STOCK IS PROVISIONAL, NOT FICTIONAL, and everything that reads it says
+    # so — `pending_arrivals` and `pending_arrival_qty` ride along on the lot
+    # page, the lot directory and the stock check. That is the whole difference
+    # between a number the floor can use and one it has to guess about.
+
+    async def arrive(self, body, actor_id=None) -> dict:
+        """Record a delivery at the gate. The smallest honest entry there is.
+
+        Finds the lot this material belongs to by its spec and tops it up; mints
+        the lot and its barcode when this is the first delivery of it. The
+        per-category STRICT field set is deliberately NOT enforced here — it is
+        enforced by `create_lot`, which is the considered path. A gate entry
+        carries what the person at the gate actually knows, and `complete` (or a
+        later PATCH of the lot) fills the rest in.
+        """
+        from app.core.enums import IntakeStatus
+
+        cat = (getattr(body, "category", None) or
+               MaterialCategory.LEATHER.value).upper()
+        if cat not in _LOT_BARCODE_TYPE:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                f"Unknown category '{cat}'.")
+        subtype = (body.subtype or None)
+        subtype = subtype.upper() if subtype else None
+
+        article = (body.article or "").strip()
+        colour = (body.colour or "").strip()
+        if not article:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "article is required — it is what the lot IS.")
+        if not colour:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "colour is required.")
+        try:
+            qty = Decimal(str(body.total_qty))
+        except Exception:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "total_qty must be a number.")
+        if qty <= 0:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "total_qty (the quantity that arrived) must be > 0. An arrival "
+                "of nothing is not an arrival.")
+
+        spec = resolve_spec(cat, subtype) or {}
+        uom = spec.get("qty_uom") or uom_for(cat, subtype)
+        thickness = (body.thickness or None)
+        size = (body.size or None)
+
+        lot = await self.repo.find_duplicate_lot(
+            category=cat, subtype=subtype, article=article, colour=colour,
+            thickness=thickness, size=size)
+        created = lot is None
+        barcode = None
+        if created:
+            # ONE LOT PER SPEC still holds (see create_lot). A gate entry for
+            # material nobody has received before mints the lot, so the first
+            # delivery of a new article does not have to wait for somebody with
+            # the full field set in front of them.
+            attrs = {k: v for k, v in {
+                "thickness": thickness, "size": size,
+                spec.get("qty_field") or "qty": float(qty),
+            }.items() if v is not None}
+            lot = self.repo.add_lot_nocommit(
+                category=cat, subtype=subtype, article=article, colour=colour,
+                thickness=thickness, size=size, uom=uom, on_hand=qty,
+                supplier_id=body.supplier_id, attributes=attrs, is_active=True)
+            await self.db.flush()          # need lot.id for the barcode
+            caption = " · ".join(str(v) for v in
+                                 [article, colour, thickness, f"{qty} {uom}"] if v)
+            bc = await self.barcodes.mint_lot_code_nocommit(
+                lot.id, _LOT_BARCODE_TYPE[cat], caption)
+            barcode = bc.code
+        else:
+            lot.on_hand = (lot.on_hand or Decimal(0)) + qty
+            if body.supplier_id and lot.supplier_id is None:
+                lot.supplier_id = body.supplier_id
+            codes = await self.repo.barcodes_by_lot([lot.id])
+            barcode = codes.get(lot.id)
+
+        # THE RECEIPT IS THE THING TO COME BACK TO. approved_qty is set to the
+        # declared total so `received` and the purchase history read correctly
+        # from the moment the material is in the building — an arrival IS a
+        # receipt of that quantity, provisionally. `complete` corrects both.
+        receipt = self.repo.add_receipt_nocommit(
+            material_lot_id=lot.id, supplier_order_id=body.supplier_order_id,
+            approved_qty=qty, rejected_qty=Decimal(0), received_by=actor_id,
+            status=IntakeStatus.PENDING.value, declared_qty=qty,
+            declared_sheet_count=body.sheet_count, note=body.note)
+        await self.db.flush()
+
+        await self._audit(actor_id, "MATERIAL_ARRIVED", lot.id, {
+            "article": article, "colour": colour, "declared_qty": float(qty),
+            "declared_sheet_count": body.sheet_count,
+            "lot_created": created, "receipt_id": str(receipt.id)})
+        await self.db.commit()
+        await self.db.refresh(lot)
+
+        reserved = await self.repo.active_reserved(lot.id)
+        is_leather = (lot.category or "").upper() == MaterialCategory.LEATHER.value
+        return {
+            "receipt_id": receipt.id,
+            "lot_id": lot.id,
+            "lot_barcode": barcode,
+            "lot_created": created,
+            "category": lot.category, "subtype": lot.subtype,
+            "article": lot.article, "colour": lot.colour,
+            "thickness": lot.thickness, "uom": lot.uom,
+            "declared_qty": float(qty),
+            "declared_sheet_count": body.sheet_count,
+            "status": IntakeStatus.PENDING.value,
+            **stock_numbers(lot.on_hand, lot.used, reserved),
+            "outstanding": self._outstanding_fields(lot, body.sheet_count),
+            "message": (
+                f"{float(qty):g} {lot.uom} of {article}"
+                f"{' · ' + colour if colour else ''} is in stock and cuttable. "
+                f"The approved/rejected split"
+                + (" and the per-hide measurements are" if is_leather else " is")
+                + f" still to be entered — POST /materials/arrivals/"
+                  f"{receipt.id}/complete when there is time."),
+        }
+
+    @staticmethod
+    def _outstanding_fields(lot, sheet_count) -> list:
+        """What a PENDING arrival is still waiting for, named one by one.
+
+        A worklist that only says "unfinished" makes somebody open every row to
+        find out what it wants. These are the field names the completion form
+        renders, in the order it renders them.
+        """
+        out = ["approved_qty", "rejected_qty"]
+        category = (getattr(lot, "category", "") or "").upper()
+        if category == MaterialCategory.LEATHER.value:
+            out.append("sheets")
+            if sheet_count is None:
+                out.append("sheet_count")
+        if not getattr(lot, "thickness", None) and category in ("LEATHER", "LINING"):
+            out.append("thickness")
+        return out
+
+    async def list_arrivals(self, *, status_filter: str | None = "PENDING",
+                            lot_id=None, limit: int = 200,
+                            offset: int = 0) -> dict:
+        """The come-back-to-it queue, oldest first. THIS IS THE WHOLE POINT.
+
+        A two-sitting intake is only safe if the second sitting is findable.
+        Without this list a PENDING receipt is a row nobody knows exists, and
+        provisional stock silently becomes permanent stock that was never checked.
+        """
+        rows = await self.repo.find_receipts(
+            status=status_filter, lot_id=lot_id, limit=limit, offset=offset)
+        total = await self.repo.count_receipts(status=status_filter, lot_id=lot_id)
+        lots = {}
+        for r in rows:
+            if r.material_lot_id not in lots:
+                lots[r.material_lot_id] = await self.repo.get_lot(r.material_lot_id)
+        return {
+            "count": len(rows),
+            "total": total,
+            "status": (status_filter or None),
+            "arrivals": [self._arrival_row(r, lots.get(r.material_lot_id))
+                         for r in rows],
+        }
+
+    def _arrival_row(self, receipt, lot) -> dict:
+        from app.core.enums import IntakeStatus
+        return {
+            "receipt_id": receipt.id,
+            "lot_id": receipt.material_lot_id,
+            "status": receipt.status,
+            "article": getattr(lot, "article", None),
+            "colour": getattr(lot, "colour", None),
+            "thickness": getattr(lot, "thickness", None),
+            "category": getattr(lot, "category", None),
+            "uom": getattr(lot, "uom", None),
+            "declared_qty": float(receipt.declared_qty or 0),
+            "declared_sheet_count": receipt.declared_sheet_count,
+            "approved_qty": float(receipt.approved_qty or 0),
+            "rejected_qty": float(receipt.rejected_qty or 0),
+            "supplier_order_id": receipt.supplier_order_id,
+            "note": receipt.note,
+            "arrived_at": receipt.created_at.isoformat() if receipt.created_at else None,
+            "completed_at": (receipt.completed_at.isoformat()
+                             if receipt.completed_at else None),
+            "outstanding": (
+                self._outstanding_fields(lot, receipt.declared_sheet_count)
+                if (lot is not None
+                    and receipt.status == IntakeStatus.PENDING.value) else []),
+        }
+
+    async def complete_arrival(self, receipt_id: uuid.UUID, body,
+                               actor_id=None) -> dict:
+        """The second sitting: the QC split, and the hides one by one.
+
+        WHAT THIS CORRECTS, AND WHY IT IS A DELTA. The arrival put `declared_qty`
+        into on_hand so the floor could work. Between then and now the floor may
+        well have cut some of it. So the correction is `approved − declared`
+        applied to on_hand — NOT `on_hand = approved`, which would silently undo
+        every cut logged in between and is the one arithmetic mistake here that
+        would lose real production data.
+
+        Rejected quantity was never in stock (it went back on the van), so it is
+        logged for the supplier's quality history and nothing else.
+        """
+        from datetime import datetime, timezone
+        from app.core.enums import IntakeStatus
+
+        receipt = await self.repo.get_receipt(receipt_id)
+        if receipt is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Arrival not found.")
+        if receipt.status == IntakeStatus.COMPLETED.value:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "This arrival was already completed"
+                + (f" at {receipt.completed_at.isoformat()}"
+                   if receipt.completed_at else "")
+                + ". Correcting a finished delivery is an adjustment with a "
+                  "reason on it — PATCH /materials/lots/<lot_id>/adjust — so "
+                  "the movement keeps a name against it.")
+        lot = await self.repo.get_lot(receipt.material_lot_id)
+        if lot is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Material lot not found.")
+
+        declared = Decimal(str(receipt.declared_qty or receipt.approved_qty or 0))
+        approved = Decimal(str(body.approved_qty))
+        rejected = Decimal(str(body.rejected_qty or 0))
+        if approved < 0 or rejected < 0:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "Quantities cannot be negative.")
+
+        # A DELTA, not an assignment — see the docstring.
+        delta = approved - declared
+        lot.on_hand = (lot.on_hand or Decimal(0)) + delta
+        if body.thickness and not lot.thickness:
+            # The one identity field a gate entry routinely cannot supply. It is
+            # filled in here rather than needing a separate PATCH nobody makes.
+            lot.thickness = body.thickness
+            attrs = dict(lot.attributes or {})
+            attrs["thickness"] = body.thickness
+            lot.attributes = attrs
+
+        receipt.approved_qty = approved
+        receipt.rejected_qty = rejected
+        receipt.status = IntakeStatus.COMPLETED.value
+        receipt.completed_at = datetime.now(timezone.utc)
+        receipt.completed_by = actor_id
+        if body.note:
+            receipt.note = body.note
+
+        # THE HIDES. Checked against the approved quantity, not the declared one:
+        # what was rejected went back on the van and was never sheeted.
+        minted = await self._mint_sheets_for(
+            lot, getattr(body, "sheets", None), declared_qty=approved)
+
+        warnings = list(self.decrement_warnings)
+        expected = receipt.declared_sheet_count
+        if expected is not None and minted and len(minted) != expected:
+            # REPORTED, NEVER ENFORCED, exactly like the dcm reconciliation: a
+            # bundle count taken at the gate is a glance, and refusing the
+            # measurements over it is how a floor learns to stop counting at all.
+            warnings.append({
+                "kind": "sheet_count_mismatch",
+                "lot_id": str(lot.id),
+                "declared_sheet_count": expected,
+                "sheets_entered": len(minted),
+                "note": (f"{expected} sheet(s) were counted at the gate but "
+                         f"{len(minted)} were measured. The hides that exist are "
+                         f"the ones entered here; check whether one is missing."),
+            })
+        if delta != 0:
+            warnings.append({
+                "kind": "arrival_corrected",
+                "lot_id": str(lot.id),
+                "declared_qty": float(declared),
+                "approved_qty": float(approved),
+                "difference": float(delta),
+                "note": (f"{float(declared):g} {lot.uom} was entered at the gate; "
+                         f"{float(approved):g} was approved. Stock has been "
+                         f"corrected by {float(delta):+g} {lot.uom}."),
+            })
+
+        await self._audit(actor_id, "MATERIAL_ARRIVAL_COMPLETED", lot.id, {
+            "receipt_id": str(receipt.id),
+            "declared_qty": float(declared), "approved_qty": float(approved),
+            "rejected_qty": float(rejected), "on_hand_delta": float(delta),
+            "sheets_entered": len(minted)})
+        await self.db.commit()
+        await self.db.refresh(lot)
+        await self.db.refresh(receipt)
+
+        reserved = await self.repo.active_reserved(lot.id)
+        sheets_now = await self.repo.sheet_counts_by_status(lot.id)
+        return {
+            "receipt_id": receipt.id,
+            "lot_id": lot.id,
+            "status": receipt.status,
+            "declared_qty": float(declared),
+            "approved_qty": float(approved),
+            "rejected_logged": float(rejected),
+            "on_hand_delta": float(delta),
+            **stock_numbers(lot.on_hand, lot.used, reserved),
+            **sheet_rollup(sheets_now),
+            "sheets": [{"sheet_id": s.id, "code": s.code, "dcm": float(s.dcm),
+                        "status": s.status, "cutting_row_id": None}
+                       for s in minted],
+            "sheet_reconciliation": (
+                await self.sheet_reconciliation(lot) if minted else None),
+            "warnings": warnings,
+        }
 
     # ── receive (approved / rejected) ────────────────────────────────────────
     async def receive(self, body, actor_id, actor_role=None) -> dict:
@@ -981,15 +1877,12 @@ class MaterialService:
         await self.db.refresh(target_lot)
  
         reserved = await self.repo.active_reserved(target_lot.id)
+        sheets_now = await self.repo.sheet_counts_by_status(target_lot.id)
         return {
             "lot_id": target_lot.id,
-            "on_hand": float(self._display_stock(
-                target_lot.on_hand, target_lot.used, reserved)[0]),
-            "used": float(target_lot.used or 0),
-            "reserved": float(self._display_stock(
-                target_lot.on_hand, target_lot.used, reserved)[1]),
-            "available": float(self._display_stock(
-                target_lot.on_hand, target_lot.used, reserved)[2]),
+            # arrived / used / balance / reserved / available / on_hand
+            **stock_numbers(target_lot.on_hand, target_lot.used, reserved),
+            **sheet_rollup(sheets_now),
             "rejected_logged": float(rejected),
             "supplier_order_status": order_status,
             "substituted": substituted,
@@ -1028,7 +1921,7 @@ class MaterialService:
         """Drop a lot's on_hand by qty when the store ISSUES it to a garment.
 
         Same engine, same warn-never-block rule, different vocabulary: nothing
-        was cut here, a kit was issued. NO commit — DrawerService.store_scan owns
+        was cut here, a kit was issued. NO commit — StoreService.store_scan owns
         the transaction so the ledger row, the stock move and the drawer flags
         land together or not at all.
 

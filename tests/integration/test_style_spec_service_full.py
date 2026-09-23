@@ -797,12 +797,12 @@ class TestKitSurfaces:
     async def test_kit_required_is_true_only_when_accessories_reach_the_garment(
             self, db, kitted, draft_style, pieces):
         svc = StyleSpecService(db)
-        assert await svc.kit_required_for_piece(pieces[0][0].id) is True
+        assert await svc.kit_required_for_piece(pieces[0].id) is True
         await svc.replace_spec(draft_style.id, [leather_line()], actor_name=BY)
-        assert await svc.kit_required_for_piece(pieces[0][0].id) is False
+        assert await svc.kit_required_for_piece(pieces[0].id) is False
 
     async def test_a_piece_with_no_parent_style_needs_no_kit(self, db, pieces):
-        piece = await orphan_piece(db, pieces[0][0])
+        piece = await orphan_piece(db, pieces[0])
         assert await StyleSpecService(db).kit_required_for_piece(piece.id) is False
 
     async def test_the_batched_kit_read_reports_three_fields_per_piece(
@@ -810,8 +810,8 @@ class TestKitSurfaces:
         """/production/log can carry 40 pieces; the full requirement block per
         piece would dwarf the response the scan screen actually reads."""
         out = await StyleSpecService(db).kit_by_pieces(
-            [p.id for p, _ in pieces])
-        row = out[pieces[0][0].code]
+            [p.id for p in pieces])
+        row = out[pieces[0].code]
         assert row["kit_required"] is True
         assert row["kit_status"] == KitStatus.PENDING.value
         assert row["outstanding"] == 4.0
@@ -834,7 +834,7 @@ class TestMaterialRequirementBlock:
     async def test_a_garment_reports_what_it_needs_and_what_it_was_given(
             self, db, specced, pieces):
         out = await StyleSpecService(db).material_requirement_block(
-            pieces[0][0].id)
+            pieces[0].id)
         assert out["kit_required"] is True
         assert out["kit_status"] == KitStatus.PENDING.value
         assert out["leather"]["article"] == "SUEDE-A32"
@@ -846,7 +846,7 @@ class TestMaterialRequirementBlock:
             self, db, specced, pieces, order_tree, operations):
         """Beside what the recipe SAID it should. The two differing is normal
         and is the first thing a costing question asks about."""
-        piece, _ = pieces[0]
+        piece = pieces[0]
         db.add(ProductionEvent(
             sku_id=order_tree["sku"].id, piece_id=piece.id,
             operation_id=operations["LEATHER_CUTTING"].id,
@@ -861,7 +861,7 @@ class TestMaterialRequirementBlock:
         await StyleSpecService(db).replace_spec(
             draft_style.id, [button_line()], actor_name=BY)
         out = await StyleSpecService(db).material_requirement_block(
-            pieces[0][0].id)
+            pieces[0].id)
         assert out["accessories"][0]["short"] is True
 
     async def test_an_unresolvable_line_holds_the_kit_at_partial(
@@ -871,7 +871,7 @@ class TestMaterialRequirementBlock:
         await StyleSpecService(db).replace_spec(
             draft_style.id, [button_line()], actor_name=BY)
         out = await StyleSpecService(db).material_requirement_block(
-            pieces[0][0].id)
+            pieces[0].id)
         assert out["accessories"][0]["resolution"] == RESOLUTION_NONE
         assert out["kit_status"] == KitStatus.PARTIAL.value
 
@@ -888,7 +888,7 @@ class TestMaterialRequirementBlock:
 
     async def test_a_piece_whose_style_is_gone_returns_the_same_shape(
             self, db, pieces):
-        piece = await orphan_piece(db, pieces[0][0])
+        piece = await orphan_piece(db, pieces[0])
         out = await StyleSpecService(db).material_requirement_block(piece.id)
         assert out["kit_status"] == KitStatus.NOT_REQUIRED.value
         assert out["leather"] is None and out["lining"] is None
@@ -907,7 +907,7 @@ class TestMaterialRequirementBlock:
                  colour="BLACK", thickness="0.4mm", qty_per_piece=1.5),
         ], actor_name=BY)
         out = await StyleSpecService(db).material_requirement_block(
-            pieces[0][0].id)
+            pieces[0].id)
         assert out["lining"]["article"] == "POLY-1"
         assert out["lining"]["qty_per_piece"] == 1.5
         assert out["lining"]["uom"] == "mtrs"
@@ -918,7 +918,7 @@ class TestMaterialRequirementBlock:
         draft_style.material_spec_confirmed_at = None
         await db.commit()
         out = await StyleSpecService(db).material_requirement_block(
-            pieces[0][0].id)
+            pieces[0].id)
         assert out["kit_required"] is False and out["spec_confirmed"] is False
 
 
@@ -928,7 +928,7 @@ class TestKitView:
         await make_lot(db)
         await StyleSpecService(db).replace_spec(
             draft_style.id, [button_line()], actor_name=BY)
-        out = await StyleSpecService(db).kit_view(pieces[0][0].id)
+        out = await StyleSpecService(db).kit_view(pieces[0].id)
         assert out["issued_now"] == [] and out["stock_warnings"] == []
         assert len(out["outstanding"]) == 1
         assert out["complete"] is False
@@ -938,7 +938,7 @@ class TestKitView:
         """This used to require kit_required, so every garment of every style
         released before the material spec came back complete: false on a kit it
         could never be given."""
-        out = await StyleSpecService(db).kit_view(pieces[0][0].id)
+        out = await StyleSpecService(db).kit_view(pieces[0].id)
         assert out["status"] == KitStatus.NOT_REQUIRED.value
         assert out["complete"] is True
 
@@ -946,7 +946,7 @@ class TestKitView:
             self, db, draft_style, pieces):
         await StyleSpecService(db).replace_spec(
             draft_style.id, [button_line()], actor_name=BY)
-        out = await StyleSpecService(db).kit_view(pieces[0][0].id)
+        out = await StyleSpecService(db).kit_view(pieces[0].id)
         assert len(out["unresolved"]) == 1
 
 
@@ -957,7 +957,7 @@ class TestIssueKit:
         lot = await make_lot(db)
         await StyleSpecService(db).replace_spec(
             draft_style.id, [leather_line(), button_line()], actor_name=BY)
-        return draft_style, pieces[0][0], lot
+        return draft_style, pieces[0], lot
 
     async def test_the_kit_spends_stock_and_writes_the_ledger_row(
             self, db, ready, cutter):
@@ -1037,7 +1037,7 @@ class TestIssueKit:
         button = next(l for l in lines if l.article == "BTN-4H")
 
         out = await svc.issue_kit_nocommit(
-            piece=pieces[0][0], drawer=None,
+            piece=pieces[0], drawer=None,
             requested_lines=[{"spec_id": str(button.id)}])
         await db.commit()
         assert [r["article"] for r in out["issued_now"]] == ["BTN-4H"]
@@ -1083,7 +1083,7 @@ class TestIssueKit:
                         qty_per_piece=1),
         ], actor_name=BY)
         out = await StyleSpecService(db).issue_kit_nocommit(
-            piece=pieces[0][0], drawer=None)
+            piece=pieces[0], drawer=None)
         await db.commit()
         assert [r["article"] for r in out["issued_now"]] == ["BTN-4H"]
         assert out["unresolved"][0]["article"] == "NOT-IN-STOCK"
@@ -1098,7 +1098,7 @@ class TestIssueKit:
         await StyleSpecService(db).replace_spec(
             draft_style.id, [button_line(thickness=None)], actor_name=BY)
         out = await StyleSpecService(db).issue_kit_nocommit(
-            piece=pieces[0][0], drawer=None)
+            piece=pieces[0], drawer=None)
         assert out["unresolved"][0]["reason"] == RESOLUTION_AMBIGUOUS
         assert "pick" in out["unresolved"][0]["note"]
 
@@ -1110,7 +1110,7 @@ class TestIssueKit:
         await StyleSpecService(db).replace_spec(
             draft_style.id, [button_line()], actor_name=BY)
         out = await StyleSpecService(db).issue_kit_nocommit(
-            piece=pieces[0][0], drawer=None)
+            piece=pieces[0], drawer=None)
         await db.commit()
         assert out["stock_warnings"][0]["short_by"] == 3.0
         assert out["status"] == KitStatus.ISSUED.value
@@ -1125,7 +1125,7 @@ class TestIssueKit:
             draft_style.id, [leather_line()], actor_name=BY)
         with pytest.raises(HTTPException) as e:
             await StyleSpecService(db).issue_kit_nocommit(
-                piece=pieces[0][0], drawer=None)
+                piece=pieces[0], drawer=None)
         assert e.value.status_code == 409
         assert "no accessory spec" in e.value.detail
         assert "material-spec" in e.value.detail
@@ -1144,7 +1144,7 @@ class TestIssueKit:
             draft_style.id, [button_line(sku_id=other.id)], actor_name=BY)
         with pytest.raises(HTTPException) as e:
             await StyleSpecService(db).issue_kit_nocommit(
-                piece=pieces[0][0], drawer=None)
+                piece=pieces[0], drawer=None)
         assert "scoped to other colourways" in e.value.detail
         assert "NAVY" in e.value.detail
 
@@ -1156,7 +1156,7 @@ class TestIssueKit:
             actor_name=BY)
         with pytest.raises(HTTPException) as e:
             await StyleSpecService(db).issue_kit_nocommit(
-                piece=pieces[0][0], drawer=None)
+                piece=pieces[0], drawer=None)
         assert "garment size(s) L" in e.value.detail
         assert "an L zip is not an S zip" in e.value.detail
 
@@ -1168,12 +1168,12 @@ class TestIssueKit:
             actor_name=BY)
         with pytest.raises(HTTPException) as e:
             await StyleSpecService(db).issue_kit_nocommit(
-                piece=pieces[0][0], drawer=None)
+                piece=pieces[0], drawer=None)
         assert "takes none of its" in e.value.detail
         assert "the spec working as written" in e.value.detail
 
     async def test_a_piece_with_no_parent_style_is_a_404(self, db, pieces):
-        piece = await orphan_piece(db, pieces[0][0])
+        piece = await orphan_piece(db, pieces[0])
         with pytest.raises(HTTPException) as e:
             await StyleSpecService(db).issue_kit_nocommit(
                 piece=piece, drawer=None)
@@ -1189,7 +1189,7 @@ class TestIssueManual:
         acceptable."""
         lot = await make_lot(db)
         out = await StyleSpecService(db).issue_manual(
-            piece_id=pieces[0][0].id, material_lot_id=lot.id, qty=2,
+            piece_id=pieces[0].id, material_lot_id=lot.id, qty=2,
             note="wrong button on the sheet", employee_id=cutter[0].id,
             entered_by="STORE MGR", actor_id=ACTOR)
 
@@ -1199,7 +1199,7 @@ class TestIssueManual:
         assert "outside the spec" in out["message"]
 
         row = await db.scalar(select(PieceMaterialIssue).where(
-            PieceMaterialIssue.piece_id == pieces[0][0].id))
+            PieceMaterialIssue.piece_id == pieces[0].id))
         assert row.spec_line_id is None
         assert row.source == MaterialIssueSource.MANUAL.value
 
@@ -1209,10 +1209,10 @@ class TestIssueManual:
         lot = await make_lot(db)
         svc = StyleSpecService(db)
         for _ in range(3):
-            await svc.issue_manual(piece_id=pieces[0][0].id,
+            await svc.issue_manual(piece_id=pieces[0].id,
                                    material_lot_id=lot.id, qty=1)
         rows = (await db.execute(select(PieceMaterialIssue).where(
-            PieceMaterialIssue.piece_id == pieces[0][0].id))).scalars().all()
+            PieceMaterialIssue.piece_id == pieces[0].id))).scalars().all()
         assert len(rows) == 3
 
     async def test_a_correction_never_satisfies_a_spec_line(
@@ -1222,23 +1222,23 @@ class TestIssueManual:
         await StyleSpecService(db).replace_spec(
             draft_style.id, [button_line()], actor_name=BY)
         await StyleSpecService(db).issue_manual(
-            piece_id=pieces[0][0].id, material_lot_id=lot.id, qty=4)
+            piece_id=pieces[0].id, material_lot_id=lot.id, qty=4)
         out = await StyleSpecService(db).material_requirement_block(
-            pieces[0][0].id)
+            pieces[0].id)
         assert out["accessories"][0]["outstanding"] == 4.0
         assert out["kit_status"] == KitStatus.PENDING.value
 
     async def test_an_over_issue_warns_without_blocking(self, db, pieces):
         lot = await make_lot(db, on_hand=1)
         out = await StyleSpecService(db).issue_manual(
-            piece_id=pieces[0][0].id, material_lot_id=lot.id, qty=5)
+            piece_id=pieces[0].id, material_lot_id=lot.id, qty=5)
         assert out["stock_warning"]["short_by"] == 4.0
 
     async def test_the_correction_is_audited(self, db, pieces):
         from app.core.models import AuditLog
         lot = await make_lot(db)
         await StyleSpecService(db).issue_manual(
-            piece_id=pieces[0][0].id, material_lot_id=lot.id, qty=1,
+            piece_id=pieces[0].id, material_lot_id=lot.id, qty=1,
             note="swapped", actor_id=ACTOR)
         row = await db.scalar(select(AuditLog).where(
             AuditLog.action == "MATERIAL_ISSUED_MANUAL"))
@@ -1249,13 +1249,13 @@ class TestIssueManual:
         lot = await make_lot(db)
         with pytest.raises(HTTPException) as e:
             await StyleSpecService(db).issue_manual(
-                piece_id=pieces[0][0].id, material_lot_id=lot.id, qty=qty)
+                piece_id=pieces[0].id, material_lot_id=lot.id, qty=qty)
         assert e.value.status_code == 422
 
     async def test_an_unknown_lot_is_a_404(self, db, pieces):
         with pytest.raises(HTTPException) as e:
             await StyleSpecService(db).issue_manual(
-                piece_id=pieces[0][0].id, material_lot_id=uuid.uuid4(), qty=1)
+                piece_id=pieces[0].id, material_lot_id=uuid.uuid4(), qty=1)
         assert e.value.status_code == 404
 
     async def test_an_unknown_piece_is_a_404(self, db):
@@ -1277,11 +1277,11 @@ class TestPieceMaterials:
         await StyleSpecService(db).replace_spec(
             draft_style.id, [leather_line(), button_line()], actor_name=BY)
         await StyleSpecService(db).issue_kit_nocommit(
-            piece=pieces[0][0], drawer=None, employee_id=cutter[0].id)
+            piece=pieces[0], drawer=None, employee_id=cutter[0].id)
         await db.commit()
 
-        out = await StyleSpecService(db).piece_materials(pieces[0][0].id)
-        assert out["piece_code"] == pieces[0][0].code
+        out = await StyleSpecService(db).piece_materials(pieces[0].id)
+        assert out["piece_code"] == pieces[0].code
         assert out["sku_label"] == "PINE GREEN · M"
         assert out["garment_size"] == "M"
         assert out["applies"]["leather"]["article"] == "SUEDE-A32"
@@ -1308,7 +1308,7 @@ class TestPieceMaterials:
                         qty_per_piece=0),
         ], actor_name=BY)
 
-        out = await StyleSpecService(db).piece_materials(pieces[0][0].id)
+        out = await StyleSpecService(db).piece_materials(pieces[0].id)
         reasons = {r["article"]: r["reason"] for r in out["not_applicable"]}
         assert reasons == {"BTN-NAVY": "other_sku", "ZIP-1": "other_size",
                            "BTN-ZERO": "zeroed"}
@@ -1323,13 +1323,13 @@ class TestPieceMaterials:
         it."""
         lot = await make_lot(db)
         await StyleSpecService(db).issue_manual(
-            piece_id=pieces[0][0].id, material_lot_id=lot.id, qty=2)
-        out = await StyleSpecService(db).piece_materials(pieces[0][0].id)
+            piece_id=pieces[0].id, material_lot_id=lot.id, qty=2)
+        out = await StyleSpecService(db).piece_materials(pieces[0].id)
         assert out["issued"][0]["source"] == MaterialIssueSource.MANUAL.value
         assert out["issued"][0]["spec_line_id"] is None
 
     async def test_a_piece_with_no_style_returns_the_empty_shape(self, db, pieces):
-        piece = await orphan_piece(db, pieces[0][0])
+        piece = await orphan_piece(db, pieces[0])
         out = await StyleSpecService(db).piece_materials(piece.id)
         assert out["kit_required"] is False
         assert out["applies"]["accessories"] == []
@@ -1385,8 +1385,8 @@ class TestSpecRepositoryEdges:
         await StyleSpecService(db).replace_spec(
             draft_style.id, [button_line()], actor_name=BY)
         await StyleSpecService(db).issue_manual(
-            piece_id=pieces[0][0].id, material_lot_id=lot.id, qty=4)
-        issued = await StyleSpecService(db).repo.issued_by_piece(pieces[0][0].id)
+            piece_id=pieces[0].id, material_lot_id=lot.id, qty=4)
+        issued = await StyleSpecService(db).repo.issued_by_piece(pieces[0].id)
         assert issued == {}
 
     async def test_the_idempotency_read_can_be_narrowed_to_one_source(
@@ -1397,14 +1397,14 @@ class TestSpecRepositoryEdges:
         await StyleSpecService(db).replace_spec(
             draft_style.id, [button_line()], actor_name=BY)
         await StyleSpecService(db).issue_kit_nocommit(
-            piece=pieces[0][0], drawer=None)
+            piece=pieces[0], drawer=None)
         await db.commit()
         repo = StyleSpecService(db).repo
         kit = await repo.issued_by_piece(
-            pieces[0][0].id, source=MaterialIssueSource.STORE_KIT.value)
+            pieces[0].id, source=MaterialIssueSource.STORE_KIT.value)
         assert sum(kit.values()) == Decimal("4.000")
         assert await repo.issued_by_piece(
-            pieces[0][0].id, source=MaterialIssueSource.MANUAL.value) == {}
+            pieces[0].id, source=MaterialIssueSource.MANUAL.value) == {}
 
     async def test_the_batched_issue_read_answers_for_many_pieces_at_once(
             self, db, draft_style, pieces):
@@ -1414,20 +1414,20 @@ class TestSpecRepositoryEdges:
         await StyleSpecService(db).replace_spec(
             draft_style.id, [button_line()], actor_name=BY)
         svc = StyleSpecService(db)
-        for piece, _ in pieces[:2]:
+        for piece in pieces[:2]:
             await svc.issue_kit_nocommit(piece=piece, drawer=None)
         await db.commit()
 
-        out = await svc.repo.issued_by_pieces([p.id for p, _ in pieces])
+        out = await svc.repo.issued_by_pieces([p.id for p in pieces])
         assert len(out) == 2
         assert all(sum(v.values()) == Decimal("4.000") for v in out.values())
 
     async def test_the_ledger_read_includes_them(self, db, pieces):
         lot = await make_lot(db)
         await StyleSpecService(db).issue_manual(
-            piece_id=pieces[0][0].id, material_lot_id=lot.id, qty=4)
+            piece_id=pieces[0].id, material_lot_id=lot.id, qty=4)
         rows = await StyleSpecService(db).repo.issue_rows_for_piece(
-            pieces[0][0].id)
+            pieces[0].id)
         assert len(rows) == 1
 
     async def test_issues_for_piece_returns_the_rows_oldest_first(
@@ -1435,9 +1435,9 @@ class TestSpecRepositoryEdges:
         lot = await make_lot(db)
         svc = StyleSpecService(db)
         for _ in range(2):
-            await svc.issue_manual(piece_id=pieces[0][0].id,
+            await svc.issue_manual(piece_id=pieces[0].id,
                                    material_lot_id=lot.id, qty=1)
-        rows = await svc.repo.issues_for_piece(pieces[0][0].id)
+        rows = await svc.repo.issues_for_piece(pieces[0].id)
         assert len(rows) == 2
         assert rows[0].issued_at <= rows[1].issued_at
 

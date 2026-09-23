@@ -15,8 +15,8 @@ STITCHING  GET /dashboard/stitching                        composite (Stitching 
            GET /dashboard/stitching/pieces/{piece_code}     piece trace (§21)
 
 STORE      GET /dashboard/store                             composite (Store §18/§20)
-           GET /dashboard/store/drawers/{drawer_id}         drawer detail (§6)
-           GET /dashboard/store/drawers/{drawer_id}/movement movement history (§17)
+           GET /dashboard/store/garments/{piece_id}         garment detail (§6)
+           GET /dashboard/store/garments/{piece_id}/movement movement history (§17)
            GET /dashboard/store/traceability                who-cut-what (§8)
 
 ROLE
@@ -45,7 +45,7 @@ from app.core.cache import cached
 from app.core.database import get_db
 from app.core.enums import ProductionStage, UserRole
 from app.modules.dashboard.schemas import (
-    CuttingDashboard, DirectManagerDashboard, DrawerDetail, DrawerMovementRow,
+    CuttingDashboard, DirectManagerDashboard, StorePieceDetail, StoreMovementRow,
     EmployeePieceRow, FactoryAlerts, LiningDashboard, MaterialCutterTrace,
     OrderTracking, PieceConsumptionRow, PieceTrace, StitchingDashboard,
     StoreDashboard, StyleTracking,
@@ -365,28 +365,37 @@ async def store_dashboard(
         material_type=material_type)
 
 
-@router.get("/store/drawers/{drawer_id}", response_model=DrawerDetail)
-async def store_drawer_detail(
-    drawer_id: uuid.UUID,
+# KEYED BY THE GARMENT, not by a box. These were /store/drawers/{drawer_id}: the
+# drawer is gone, and pointing the screen at the piece is what the operator could
+# always actually scan.
+#
+# `/garments/`, NOT `/pieces/`. `/store/pieces/{piece_code}` above is the SHARED
+# piece trace and takes a CODE; a second `/store/pieces/{piece_id}` taking a UUID
+# would be the same path template, and FastAPI matches in declaration order — so
+# the one declared second is unreachable, silently, with no error at startup.
+# Two different screens need two different segments.
+@router.get("/store/garments/{piece_id}", response_model=StorePieceDetail)
+async def store_piece_detail(
+    piece_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_DASHBOARD_READERS),
 ):
-    """Store §6 — full drawer info + who cut the leather / lining it holds."""
-    detail = await DashboardService(db).drawer_detail(drawer_id=drawer_id)
+    """Store §6 — a garment in the store + who cut its leather / lining."""
+    detail = await DashboardService(db).store_piece_detail(piece_id=piece_id)
     if detail is None:
         from fastapi import HTTPException, status
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Drawer not found")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Piece not found")
     return detail
 
 
-@router.get("/store/drawers/{drawer_id}/movement", response_model=list[DrawerMovementRow])
-async def store_drawer_movement(
-    drawer_id: uuid.UUID,
+@router.get("/store/garments/{piece_id}/movement", response_model=list[StoreMovementRow])
+async def store_piece_movement(
+    piece_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_DASHBOARD_READERS),
 ):
-    """Store §17 — a drawer's movement history from the audit trail."""
-    return await DashboardService(db).drawer_movement(drawer_id=drawer_id)
+    """Store §17 — a garment's store movement history, from the audit trail."""
+    return await DashboardService(db).store_movement(piece_id=piece_id)
 
 
 @router.get("/store/traceability", response_model=list[MaterialCutterTrace])

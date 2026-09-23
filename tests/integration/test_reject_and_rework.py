@@ -54,21 +54,32 @@ async def _walk_to_line_stitching(db, operations, piece, emp_id):
 
 
 def _piece(pieces, i=0):
-    return pieces[i][0] if isinstance(pieces[i], tuple) else pieces[i]
+    return pieces[i]
 
 
 # ═════════════════════════════════════════════════════════ raising
-async def test_a_reject_must_say_what_it_needs(db, operations, pieces, cutter):
-    """FIX or REDO. "It is bad" is not actionable by whoever picks it up."""
-    from fastapi import HTTPException
+async def test_a_bare_rejection_is_a_reject_that_gets_fixed_where_it_stands(
+        db, operations, pieces, cutter):
+    """THE SMALLEST USEFUL CALL: the piece and the stage the defect was seen at.
+
+    `verdict` used to be required and `action` used to be required on a reject,
+    so every real call carried two fields with one sensible value each — this
+    endpoint is only ever opened because somebody found a defect. Both now
+    default: REJECT, and FIX (repair it where it stands, nothing moves).
+
+    A REDO is still explicit, because it sends the garment backwards — see
+    test_a_redo_must_name_where_it_goes_back_to.
+    """
     piece = _piece(pieces)
     await _walk_to_line_stitching(db, operations, piece, cutter[0].id)
-    with pytest.raises(HTTPException) as exc:
-        await InspectionService(db).raise_inspection(
-            piece_id=piece.id, found_at_stage="LINE_STITCHING",
-            verdict="REJECT", reason="looks wrong")
-    assert exc.value.status_code == 422
-    assert "FIX" in str(exc.value.detail)
+    out = await InspectionService(db).raise_inspection(
+        piece_id=piece.id, found_at_stage="LINE_STITCHING",
+        reason="looks wrong")
+    assert out["verdict"] == "REJECT"
+    assert out["action"] == "FIX"
+    assert out["return_to_stage"] is None
+    # Still the DM's call: a FIX is PENDING until somebody signs it off.
+    assert out["status"] == "PENDING"
 
 
 async def test_a_workmanship_defect_must_name_who_is_answerable(

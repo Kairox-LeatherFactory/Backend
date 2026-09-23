@@ -249,6 +249,7 @@ from app.core.enums_barcode import (  # noqa: E402
     MaterialCategory,
     MaterialSubtype,
     ReceiptStatus,
+    IntakeStatus,
     SupplierOrderStatus,
     DrawerState,
     DrawerPart,

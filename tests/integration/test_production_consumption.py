@@ -42,7 +42,7 @@ async def _on_hand(db, lot_id) -> float:
 async def test_cutting_one_piece_decrements_the_lot_once(db, operations, pieces,
                                                          cutter, cutting_mgr,
                                                          leather_lot):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     before = await _on_hand(db, leather_lot.id)
 
     res = await ProductionService(db).log_batch(
@@ -63,7 +63,7 @@ async def test_a_batch_decrements_once_for_the_whole_batch_not_once_per_query(
         db, operations, pieces, cutter, cutting_mgr, leather_lot):
     """B4 (service.py:346-353): `total = consumption_qty * fresh_cut`, applied in
     a single call. 5 pieces at 10 dcm is one 50 dcm move, not five races."""
-    ids = [p.id for p, _ in pieces]
+    ids = [p.id for p in pieces]
     before = await _on_hand(db, leather_lot.id)
 
     res = await ProductionService(db).log_batch(
@@ -83,7 +83,7 @@ async def test_the_consumption_rides_the_event_never_the_piece(
     """CLAUDE.md §8: 'The lot link lives on the EVENT (the act of cutting), never
     on the piece.' A piece cut twice from two lots has two truths; a column on
     the piece could only hold one."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     await ProductionService(db).log_batch(
         user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[piece.id],
         work_date=TODAY, screen=ScreenContext.LEATHER_CUT,
@@ -105,7 +105,7 @@ async def test_a_rework_cut_re_logs_the_event_but_consumes_no_new_hide(
     pieces cutting for the FIRST time. Re-scanning a piece that was already cut
     is a rework pass over material already deducted — deducting again would
     invent consumption that never happened."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     svc = ProductionService(db)
     await svc.log_batch(
         user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[piece.id],
@@ -129,7 +129,7 @@ async def test_a_mixed_batch_charges_only_the_pieces_cutting_for_the_first_time(
         db, operations, pieces, cutter, cutting_mgr, leather_lot):
     """The realistic floor case: a manager rescans a tray holding one already-cut
     piece alongside four fresh ones. Only the four may move stock."""
-    already, _ = pieces[0]
+    already = pieces[0]
     svc = ProductionService(db)
     await svc.log_batch(
         user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[already.id],
@@ -139,7 +139,7 @@ async def test_a_mixed_batch_charges_only_the_pieces_cutting_for_the_first_time(
 
     res = await ProductionService(db).log_batch(
         user=cutting_mgr, employee_id=cutter[0].id,
-        piece_ids=[p.id for p, _ in pieces], work_date=TODAY,
+        piece_ids=[p.id for p in pieces], work_date=TODAY,
         screen=ScreenContext.LEATHER_CUT,
         leather_lot_id=leather_lot.id, consumption_qty=10.0)
 
@@ -153,7 +153,7 @@ async def test_a_duplicated_piece_id_in_one_request_is_charged_once(
     """A double-scan of the same barcode inside one batch. `seen` de-duplicates
     (service.py:294-299) — otherwise a jittery scanner gun doubles the hide
     consumption of whatever it double-read."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     before = await _on_hand(db, leather_lot.id)
 
     res = await ProductionService(db).log_batch(
@@ -171,7 +171,7 @@ async def test_a_duplicated_piece_id_in_one_request_is_charged_once(
 async def test_cutting_without_a_quantity_is_refused(db, operations, pieces,
                                                      cutter, cutting_mgr,
                                                      leather_lot):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     with pytest.raises(HTTPException) as exc:
         await ProductionService(db).log_batch(
             user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[piece.id],
@@ -187,7 +187,7 @@ async def test_a_non_positive_quantity_is_refused(db, operations, pieces, cutter
                                                   cutting_mgr, leather_lot, qty):
     """A zero or negative cut is not a cut. Allowing it would let a scan ADD
     stock back to the lot (service.py:280-283)."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     with pytest.raises(HTTPException) as exc:
         await ProductionService(db).log_batch(
             user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[piece.id],
@@ -201,7 +201,7 @@ async def test_cutting_without_a_lot_is_refused(db, operations, pieces, cutter,
                                                 cutting_mgr):
     """Consumption with no lot cannot be attributed to any material
     (service.py:284-290)."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     with pytest.raises(HTTPException) as exc:
         await ProductionService(db).log_batch(
             user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[piece.id],
@@ -218,7 +218,7 @@ async def test_an_unknown_lot_is_a_404_and_nothing_is_logged(
     BEFORE the single commit at :355. A bad lot must therefore take the whole
     batch down with it — events for a cut that consumed nothing are a phantom."""
     import uuid
-    piece, _ = pieces[0]
+    piece = pieces[0]
     # Hold the id as a plain value: the rollback below expires every ORM
     # instance, and touching an expired attribute afterwards triggers a lazy
     # reload that cannot run inside the async session's greenlet. Same trap the
@@ -253,8 +253,8 @@ async def test_an_uncut_piece_on_the_pipeline_screen_is_blocked_per_piece(
     (The mixed-batch guard stays in the service as a belt-and-braces invariant.)
     """
     svc = ProductionService(db)
-    advanced, _ = pieces[0]
-    fresh, _ = pieces[1]
+    advanced = pieces[0]
+    fresh = pieces[1]
     await svc.log_batch(
         user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[advanced.id],
         work_date=TODAY, screen=ScreenContext.LEATHER_CUT,
@@ -295,7 +295,7 @@ async def test_cutting_more_than_the_lot_holds_drives_stock_negative(
     the prior passes cite it by inspection — so the fix now has a test that
     turns red the moment the floor check lands.
     """
-    piece, _ = pieces[0]
+    piece = pieces[0]
     before = await _on_hand(db, leather_lot.id)   # fixture seeds 1000 dcm
 
     res = await ProductionService(db).log_batch(
@@ -323,7 +323,7 @@ async def test_a_lining_cut_charges_the_lining_lot_and_leaves_leather_alone(
     await db.commit()
     await db.refresh(lining)
 
-    piece, _ = pieces[0]
+    piece = pieces[0]
     leather_before = await _on_hand(db, leather_lot.id)
 
     res = await ProductionService(db).log_batch(

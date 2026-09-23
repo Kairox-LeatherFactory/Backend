@@ -36,7 +36,7 @@ async def _advance_to_pasted(db, piece, cutter, paster, cutting_mgr, stitching_m
 async def test_line_stitch_blocked_until_sended(db, operations, pieces, cutter, paster,
                                                 tailor, cutting_mgr, stitching_mgr, dm,
                                                 leather_lot):
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     await _advance_to_pasted(db, piece, cutter[0], paster[0], cutting_mgr,
                              stitching_mgr, leather_lot)
 
@@ -54,7 +54,7 @@ async def test_store_scan_and_full_merge_then_line_stitch(db, operations, cut_pi
                                                           cutter, lining_cutter, paster,
                                                           tailor, cutting_mgr, lining_mgr,
                                                           stitching_mgr, dm, leather_lot):
-    piece, drawer = cut_pieces[0]
+    piece = cut_pieces[0]
     store = StoreService(db)
 
     # store leather → holding_leather
@@ -116,8 +116,8 @@ async def test_role_gate_rejects_only_the_pieces_it_owns_in_a_mixed_batch(
     not the two APPROVAL stages. So the pair is FINAL_FINISH (owned) +
     FINAL_INSPECTION (denied — bypass roles only).
     """
-    piece1, _ = pieces[0]
-    piece2, _ = pieces[1]
+    piece1 = pieces[0]
+    piece2 = pieces[1]
 
     # piece1: done through SHELL_STITCHING -> next is FINAL_FINISH     (allowed)
     # piece2: done through FINAL_FINISH    -> next is FINAL_INSPECTION (denied)
@@ -156,8 +156,8 @@ async def test_role_gate_is_still_a_403_when_no_stage_in_the_batch_is_owned(
     """The documented whole-request 403 survives for the case it was written for:
     every stage in the batch is closed to this role, so the ROLE is what's wrong
     and there is nothing to salvage."""
-    piece1, _ = pieces[0]
-    piece2, _ = pieces[1]
+    piece1 = pieces[0]
+    piece2 = pieces[1]
 
     # both pieces are past FUSING -> both infer PASTING, which cutting_mgr lacks
     for p in (piece1, piece2):
@@ -184,7 +184,7 @@ async def test_role_gate_is_still_a_403_when_no_stage_in_the_batch_is_owned(
 @pytest.mark.asyncio
 async def test_leather_only_piece_complete_on_leather(db, operations, pieces, dm,
                                                      cutter, ready_for_store):
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     # mark this piece leather-only
     piece.needs_lining = False
     await db.commit()
@@ -210,7 +210,7 @@ async def test_an_incomplete_garment_cannot_leave_the_store(db, operations,
     enforced at the one place a human decides, the SEND, rather than at a
     separate RECEIVE tap that no longer exists.
     """
-    piece, _drawer = pieces[0]   # needs_lining True, nothing stored
+    piece = pieces[0]   # needs_lining True, nothing stored
     out = await StoreService(db).send(piece_ids=[piece.id], actor_user_id=dm.id)
     assert out["sent"] == []
     assert out["not_ready"][0]["piece"] == piece.code
@@ -228,7 +228,7 @@ async def test_sended_requires_received(db, operations, pieces, dm, cutter,
     "incomplete drawers do not leave the store", so the setup now uses a piece
     that genuinely still needs its lining.
     """
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     piece.needs_lining = True
     await db.commit()
     # Leather pasted, lining NOT cut — exactly the drawer this test is about.
@@ -263,8 +263,8 @@ async def test_there_is_no_wrong_place_to_store_a_garment(db, operations, pieces
     practice did not happen. The store is a state now, so any garment can be
     received anywhere and there is nothing to get wrong.
     """
-    piece_a, _ = pieces[0]
-    piece_b, _ = pieces[1]
+    piece_a = pieces[0]
+    piece_b = pieces[1]
     store = StoreService(db)
     for p in (piece_a, piece_b):
         await ready_for_store(p, lining=False)

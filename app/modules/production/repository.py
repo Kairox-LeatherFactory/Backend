@@ -402,53 +402,48 @@ class ProductionRepository:
             .where(Piece.sku_id == sku_id, Piece.is_active.is_(True),
                    ProductionEvent.operation_id == operation_id)) or 0)
     
-    async def drawer_states_for_pieces(
+    async def store_states_for_pieces(
         self, piece_ids: list[uuid.UUID]
     ) -> dict[uuid.UUID, str]:
-        """piece_id -> its drawer's state, in ONE query (no N+1 on the checklist).
-
-        Reads the drawer by current_piece_id so it reflects the LIVE holding
-        state, not a stale Piece.drawer_id snapshot.
-        """
+        """piece_id -> its store state, in ONE query (no N+1 on the checklist)."""
         if not piece_ids:
             return {}
-        from app.modules.barcode.models import Drawer
         res = await self.db.execute(
-            select(Drawer.current_piece_id, Drawer.state)
-            .where(Drawer.current_piece_id.in_(piece_ids))
-        )
+            select(Piece.id, Piece.store_state).where(Piece.id.in_(piece_ids)))
         return {pid: st for pid, st in res.all() if pid is not None}
 
-    async def drawers_for_pieces(
+    async def store_for_pieces(
         self, piece_ids: list[uuid.UUID]
     ) -> dict[uuid.UUID, dict]:
-        """piece_id -> {code, state, holding, leather_in, lining_in}, ONE query.
+        """piece_id -> {state, holding, leather_in, lining_in, …}, ONE query.
 
-        BUG #12: every production stage must show the drawer assigned to the piece
-        being scanned, not just the Store hub. drawer_states_for_pieces above
-        returns only the state, which cannot render a card — the operator needs
-        the drawer CODE to walk to it. Same single query, four more columns.
+        BUG #12: every production stage must show where the scanned garment
+        stands, not just the Store hub. The answer used to be a drawer CODE to
+        walk to; it is now what the store is holding and what it is still owed,
+        which is what the operator actually needed the code in order to find out.
+
+        It also reads for EVERY piece. The drawer form joined
+        `Drawer.current_piece_id`, so a garment no box was claiming — which, when
+        the pool was full, was a great many of them — simply had no entry.
         """
         if not piece_ids:
             return {}
         from app.core.store_display import holding_label
-        from app.modules.barcode.models import Drawer
         res = await self.db.execute(
-            select(Drawer.current_piece_id, Drawer.id, Drawer.code, Drawer.state,
-                   Drawer.leather_in, Drawer.lining_in)
-            .where(Drawer.current_piece_id.in_(piece_ids))
+            select(Piece.id, Piece.store_state, Piece.leather_in,
+                   Piece.lining_in, Piece.accessories_in)
+            .where(Piece.id.in_(piece_ids))
         )
         return {
-            r.current_piece_id: {
-                "drawer_id": str(r.id),
-                "code": r.code,
-                "state": r.state,
+            r.id: {
+                "state": r.store_state,
                 "holding": holding_label(leather_in=r.leather_in,
                                          lining_in=r.lining_in),
                 "leather_in": bool(r.leather_in),
                 "lining_in": bool(r.lining_in),
+                "accessories_in": bool(r.accessories_in),
             }
-            for r in res.all() if r.current_piece_id is not None
+            for r in res.all()
         }
 
     async def piece_ids_done_at_op(

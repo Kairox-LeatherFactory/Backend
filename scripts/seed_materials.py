@@ -77,11 +77,13 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 
 from app.core.database import AsyncSessionLocal
-from app.core.enums import BarcodeStatus, MaterialCategory, resolve_spec
+from app.core.enums import (BarcodeStatus, MaterialCategory,
+                            SupplierOrderStatus, resolve_spec)
 from app.modules.barcode.models import (BarcodeRegistry, MaterialSheet,
-                                        MaterialSupplier)
+                                        MaterialSupplier, SupplierOrder)
 from app.modules.materials.repository import MaterialRepository
-from app.modules.materials.schemas import LotCreate, SheetIn
+from app.modules.materials.schemas import (LotCreate, SheetIn,
+                                           SupplierOrderCreate)
 from app.modules.materials.service import (_LOT_BARCODE_TYPE, MaterialService)
 
 # EVERY model module must be imported before the first ORM operation — not just
@@ -275,6 +277,42 @@ CATALOGUE = {
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# OPEN SUPPLIER ORDERS  —  so the ORDERED -> ARRIVED half of the module exists
+# ══════════════════════════════════════════════════════════════════════════════
+# WHY THESE ARE HERE. Seeding suppliers without a single order on them leaves an
+# entire, working surface unreachable on a seeded database: PATCH
+# /suppliers/orders/{id} (ORDERED -> ARRIVED), PATCH .../spec (the DM/MD
+# correction, which is refused once ARRIVED), and — the one that matters —
+# POST /materials/receive WITH a supplier_order_id, which is where the PO-match
+# check and the DM/MD substitution path live. None of it can be demonstrated,
+# reviewed or QA'd against an empty supplier_order table.
+#
+# EVERY ORDER BELOW IS DELIBERATELY LEFT `ORDERED`, because that is the state
+# with something still to do. Two of them match a seeded lot exactly, so
+# receiving them is the clean path; the third (`SHEEP NAPPA` in a colour nobody
+# stocks) is the MISMATCH case, and receiving it against the BLACK lot is what
+# produces the 409 and, for a DM/MD with approve_mismatch, the substitute lot.
+#
+# `article` MUST be one the named supplier carries, or create_order refuses it
+# with a 422 — the same validation the API applies. Keep these in step with
+# SUPPLIERS above.
+SUPPLIER_ORDERS = [
+    dict(supplier="Chennai Tannery Works", category="LEATHER",
+         article="GOAT SUEDE", colour="PINE GREEN", thickness="0.6MM",
+         dcm=365.0, qty=365.0,
+         note="matches the PINE GREEN lot — the clean receive"),
+    dict(supplier="Metro Trims & Zips", category="ACCESSORY", subtype="BUTTON",
+         article="HORN BUTTON", colour="DARK BROWN", qty=1200,
+         note="matches the HORN BUTTON lot — a straight top-up"),
+    dict(supplier="Ranipet Hides & Skins", category="LEATHER",
+         article="SHEEP NAPPA", colour="OLIVE", thickness="0.8MM",
+         dcm=250.0, qty=250.0,
+         note="NO OLIVE LOT EXISTS — receive this against the BLACK lot to see "
+              "the 409, and again with approve_mismatch for the substitution"),
+]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # PRE-FLIGHT VALIDATION — pure, no DB
 # ══════════════════════════════════════════════════════════════════════════════
 def spec_key(row: dict) -> tuple:
@@ -398,6 +436,65 @@ async def upsert_suppliers(db, dry: bool) -> dict[str, object]:
     return out
 
 
+async def upsert_supplier_orders(db, suppliers: dict, dry: bool) -> Counter:
+    """The open POs, through MaterialService.create_order — same reason as lots.
+
+    The service validates the article against the chosen supplier's catalogue
+    and derives the uom from the category, so a typo here fails exactly as it
+    would over HTTP instead of writing an order nobody can fill.
+
+    IDEMPOTENT ON (supplier, article, colour, qty) WHILE STILL `ORDERED`.
+    SupplierOrder has no unique constraint — a factory legitimately orders the
+    same article twice — so the seed matches on the fields it wrote and skips
+    when one is already open. An order somebody has since ARRIVED is NOT
+    re-created: that would resurrect a closed purchase on every re-run.
+    """
+    counts: Counter = Counter()
+    svc = MaterialService(db)
+    for row in SUPPLIER_ORDERS:
+        supplier = suppliers.get(row["supplier"])
+        if supplier is None:
+            counts["skipped"] += 1
+            log.warning("  ! %s: supplier %r is not seeded", row["article"],
+                        row["supplier"])
+            continue
+
+        existing = await db.scalar(
+            select(SupplierOrder).where(
+                SupplierOrder.supplier_id == supplier.id,
+                SupplierOrder.article == row["article"],
+                SupplierOrder.status == SupplierOrderStatus.ORDERED.value,
+            ).limit(1))
+        if existing is not None:
+            counts["skipped"] += 1
+            log.info("  = %-22s %-14s %s", row["article"], row.get("colour") or "",
+                     "already ordered")
+            continue
+
+        if dry:
+            counts["would create"] += 1
+            log.info("  would create  %-22s %-14s %s", row["article"],
+                     row.get("colour") or "", row["supplier"])
+            continue
+
+        body = SupplierOrderCreate(
+            category=row["category"], subtype=row.get("subtype"),
+            article=row["article"], colour=row.get("colour"),
+            thickness=row.get("thickness"), dcm=row.get("dcm"),
+            qty=row["qty"], supplier_id=supplier.id)
+        try:
+            out = await svc.create_order(body, actor_id=None)
+        except HTTPException as exc:
+            await db.rollback()
+            counts["failed"] += 1
+            log.error("  x %-22s %s", row["article"], exc.detail)
+            continue
+        counts["created"] += 1
+        log.info("  + %-22s %-14s %8.3f %-5s %s", row["article"],
+                 row.get("colour") or "", out["qty"], out["uom"], row["note"])
+    return counts
+
+
 async def active_lot_code(db, lot_id) -> str | None:
     """The lot's live label, or None if it has none. `None` is the state this
     script repairs — see the barcode note in the module docstring."""
@@ -512,6 +609,8 @@ async def seed(only: set[str], dry: bool) -> int:
                 counts[action] += 1
                 log.info("  %-13s %-22s %-14s %s", action, row["article"],
                          row["colour"], row["category"])
+            log.info("-- SUPPLIER ORDERS (dry run) --")
+            counts.update(await upsert_supplier_orders(db, suppliers, dry))
             await db.rollback()
             log.info("\n[DRY RUN] nothing written. %s",
                      "  ".join(f"{k}={v}" for k, v in sorted(counts.items())))
@@ -565,6 +664,14 @@ async def seed(only: set[str], dry: bool) -> int:
                         size="", qty=sheet["dcm"], uom="dcm",
                         supplier=entry.get("supplier", "")))
 
+        # ── the open POs ────────────────────────────────────────────────────
+        # FULL RUNS ONLY. The orders below name LEATHER and ACCESSORY articles,
+        # and raising a leather PO during `--only lining` would write a row the
+        # caller did not ask for and cannot see in that run's output.
+        if not only:
+            log.info("-- SUPPLIER ORDERS (%d) --", len(SUPPLIER_ORDERS))
+            counts.update(await upsert_supplier_orders(db, suppliers, dry))
+
     # ── the print queue ──────────────────────────────────────────────────────
     # Same idea as seed_employees.py's cards CSV: a code that exists in the DB
     # but was never printed is not yet usable on the floor. EVERY label the run
@@ -586,6 +693,9 @@ async def seed(only: set[str], dry: bool) -> int:
     log.info("   Stock reads: GET /api/v1/materials/stock?category=LEATHER "
              "(and LINING / ACCESSORY)")
     log.info("   Every lot is SCANNABLE: GET /api/v1/barcode/resolve?code=LOT-...")
+    log.info("   Open POs   : GET /api/v1/materials/lots then POST "
+             "/api/v1/materials/receive with supplier_order_id to exercise the "
+             "PO match, the 409 and the DM/MD substitution.")
     return 1 if counts["failed"] else 0
 
 

@@ -40,99 +40,20 @@ from scripts.make_postman_collection import _example, _request  # noqa: E402
 _METHODS = ("get", "post", "put", "patch", "delete")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# service -> (filename stem, OpenAPI tags, one line saying what it is for)
+# THE SERVICE REGISTRY LIVES IN ONE PLACE, AND IT IS NOT THIS FILE.
 #
-# The names are the FACTORY's words, not the router's: somebody looking for the
-# store's requests should not have to know the tag is lowercase "store" while
-# Wages is capitalised. Auth is folded into `user` because you cannot use any
-# other collection until you have logged in.
+# `scripts/docgen/services.py` holds which OpenAPI tags belong to which service,
+# because two generators read it: this one (Postman collections) and
+# `scripts/make_service_docs.py` (the Word system guides + API references). With
+# a copy in each, adding a tag to one and forgetting the other is invisible —
+# the routes simply are not there for anyone downstream.
+#
+# `check_coverage()` turns a tag that belongs to no service into a loud failure
+# rather than a silently missing collection.
 # ─────────────────────────────────────────────────────────────────────────────
-SERVICES: list[tuple[str, list[str], str]] = [
-    ("analytics", ["Analytics"],
-     "Factory overview, the order/style explorer, stage spread, freight-risk "
-     "alerts and one garment's whole life story. READ-ONLY — analytics owns no "
-     "tables and never writes."),
-    ("dashboard", ["Dashboard"],
-     "The per-role manager screens: cutting, lining, stitching, store and the "
-     "Direct Manager's own. Every one is a read."),
-    ("production", ["Production"],
-     "POST /production/log is the whole floor's logging surface — the caller "
-     "sends an ACTOR and TARGETS and never a stage. Also the two correction "
-     "endpoints for a record that named the wrong worker."),
-    ("employee", ["Employees"],
-     "The roster and one worker. Shop-floor workers get NO login — creating one "
-     "needs only a name, a designation and a wage type, and the response carries "
-     "the barcode so the card can be printed immediately."),
-    ("attendance", ["Attendance"],
-     "Two doors — the card scan at the gate and the manual fallback — plus the "
-     "corrections. PATCH with a new employee_id RE-ALLOCATES the day and moves "
-     "that day's production events with it."),
-    ("import", ["Imports"],
-     "Breakdown upload: preview, commit, edit, then RELEASE. Release is the "
-     "mint — it creates the pieces and their barcodes and cannot be undone."),
-    ("material", ["Materials", "MaterialSuppliers", "Style material spec"],
-     "Lots, stock, receiving (with per-hide leather sheets), the supplier "
-     "directory, and the style's material recipe."),
-    ("barcode", ["Barcode"],
-     "GET /barcode/resolve is every scan's front door: unknown code 404, retired "
-     "card 410 Gone, otherwise the code's type and a live payload for it."),
-    ("jobwork", ["job work"],
-     "Garments sent to an outside factory. A dispatched piece cannot be scanned "
-     "in-house; the return logs the stage against the VENDOR, so it advances the "
-     "garment without generating a wage."),
-    ("user", ["Authentication", "Users"],
-     "Login and the logins themselves. START HERE: run login, paste "
-     "access_token into the collection's `token` variable, and every other "
-     "collection is authorised."),
-    ("cutting", ["cutting"],
-     "The grid that replaced the cutting manager's spreadsheet. One row is ONE "
-     "garment; hides are allocated to it, edited freely while DRAFT, then frozen "
-     "by an audited approval."),
-    ("client", ["Clients"],
-     "Buyers, their orders, and the styles under them."),
-    ("store", ["store"],
-     "Scan employee + piece — two scans, not three. Send releases a batch into "
-     "line-stitching, which is the ONLY gate LINE_STITCHING has."),
-    ("wage", ["Wages"],
-     "Rates, runs and the ledger. A CLOSED run is a frozen snapshot and is never "
-     "recomputed. Visible to HR, DM and MD only."),
-    ("inspection", ["inspections"],
-     "Reject and rework, recorded against the stage RESPONSIBLE for the defect "
-     "rather than the stage it was found at. The DM approves the re-walk."),
-    ("procurement", ["Procurement — Stage 1 intake",
-                     "Procurement — Stage 2/3 BOM",
-                     "Procurement — Stage 4 inventory",
-                     "Procurement — Stage 5 supplier PO"],
-     "PHASE 2 — the auto-generation pipeline, in the five stages it actually "
-     "runs in: a client submission comes in, a BOM is generated and approved, "
-     "stock is checked against it, and the shortfall becomes supplier POs. "
-     "Folders are ordered by stage, not alphabetically, because the stages only "
-     "work in order — you cannot check inventory against a BOM you have not "
-     "generated."),
-    ("system", ["Health", "Root", "Chatbot"],
-     "Liveness, readiness and the chatbot. `/health` answers without touching "
-     "the database and `/ready` does not — that difference is the point of "
-     "having both, so a load balancer can tell a slow database from a dead "
-     "process. Neither is under /api/v1, and neither needs a token."),
-]
-
-# Endpoints that belong to a service's SCREEN but carry another module's tag.
-# `PATCH /employees/{id}/barcode` is tagged Barcode because the barcode module
-# owns the code; the person who needs it is on the employee screen, reissuing a
-# card somebody lost. It appears in both collections rather than neither.
-EXTRAS: dict[str, set[str]] = {
-    "employee": {"/api/v1/employees/{employee_id}/barcode"},
-    "store": {"/api/v1/materials/issues"},
-    "cutting": {"/api/v1/materials/lots", "/api/v1/materials/receive"},
-}
-
-
-# `drawer` is not a tag, because the module is withdrawn. It still gets a file —
-# see _drawer_collection() for why.
-DRAWER_HISTORY_PATHS = {
-    "/api/v1/dashboard/store/drawers/{drawer_id}",
-    "/api/v1/dashboard/store/drawers/{drawer_id}/movement",
-}
+from scripts.docgen.services import (   # noqa: E402
+    DRAWER_HISTORY_PATHS, EXTRAS, SERVICES, check_coverage,
+)
 
 
 def _shell(name: str, description: str) -> dict:
@@ -204,7 +125,7 @@ def _drawer_collection(spec: dict) -> dict:
     """
     coll = _shell(
         "KairoX · Drawer (WITHDRAWN)",
-        "THE DRAWER MODULE IS GONE. `/api/v1/drawers/*` is unrouted — not "
+        "THE DRAWER MODULE IS DELETED. `/api/v1/drawers/*` is gone — not "
         "renamed, not deprecated.\n\n"
         "WHY. There were 200 physical drawers. A style releases 100+ garments, "
         "the run stalls mid-chain, and the next 50 have nowhere to go; "
@@ -218,7 +139,8 @@ def _drawer_collection(spec: dict) -> dict:
         "    GET  /drawers/by-code/{c}  ->  GET  /store/pieces/{piece_code}\n"
         "    GET  /drawers              ->  GET  /store/pieces\n"
         "    GET  /drawers/pool         ->  (nothing — there is no pool)\n\n"
-        "The two requests below are the only drawer-shaped endpoints left. They "
+        "The two requests below replace the drawer detail/movement screens. "
+        "They are keyed by the GARMENT, which is what an operator can scan. "
         "read FROZEN history for audit; they are not live state." + _SETUP)
     for path in sorted(DRAWER_HISTORY_PATHS):
         ops = spec["paths"].get(path, {})
@@ -232,6 +154,15 @@ def build() -> list[tuple[pathlib.Path, dict, int]]:
     from app.main import app
 
     spec = app.openapi()
+
+    # A tag that belongs to no service gets no collection AND no documentation,
+    # silently. Fail loudly instead — see docgen/services.check_coverage.
+    orphans = check_coverage(spec)
+    if orphans:
+        raise SystemExit(
+            "ERROR: these OpenAPI tags belong to no service, so they would get "
+            "no collection:\n  - " + "\n  - ".join(orphans) +
+            "\nAdd them to scripts/docgen/services.py.")
 
     by_tag: dict[str, list] = {}
     for path, ops in spec["paths"].items():

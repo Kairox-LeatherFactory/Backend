@@ -5,7 +5,9 @@ modules/cutting/router.py — HTTP only. The grid that replaced the Excel.
 GET    /cutting/grid                       the sheet for one style + colour
 POST   /cutting/rows/generate              one row per un-cut garment, hides on
 PATCH  /cutting/rows/{id}                  edit any cell
-POST   /cutting/rows/{id}/sheets           the cutter needed another hide
+POST   /cutting/rows/{id}/sheets           the cutter needed another hide —
+                                           type its dcm, it is looked up
+GET    /cutting/rows/{id}/sheet-options    what is on the shelf for this row
 DELETE /cutting/rows/{id}/sheets/{sid}     he handed one back
 PATCH  /cutting/rows/{id}/sheets/{sid}     correct a hide's measurement
 POST   /cutting/rows/assign                 the cutter column, one per garment
@@ -82,8 +84,32 @@ async def add_sheet(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(_CUTTING),
 ):
-    """The cutter needed one more skin. Scan it, pick it, or create it."""
+    """The cutter needed one more skin. TYPE ITS MEASUREMENT, scan it, or pick it.
+
+    `dcm` alone is the normal path and it is a LOOKUP: the number written on the
+    skin resolves to that hide of this row's article and colour, and the reply
+    says which code it matched. Nothing of that article in stock is a 422 saying
+    so plainly — there is no sheet available to cut this row from.
+    """
     return await CuttingService(db).add_sheet(row_id, body)
+
+
+@router.get("/rows/{row_id}/sheet-options", response_model=schemas.SheetOptions)
+async def sheet_options(
+    row_id: uuid.UUID,
+    dcm: float | None = Query(default=None, gt=0,
+                              description="Rank the shelf by distance from this "
+                                          "measurement."),
+    limit: int = Query(default=50, le=200),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_CUTTING),
+):
+    """What is actually on the shelf for this row, so the dcm box can suggest.
+
+    The operator types a measurement rather than choosing a code, so the screen
+    needs to be able to show what measurements exist before they guess at one.
+    """
+    return await CuttingService(db).sheet_options(row_id, dcm=dcm, limit=limit)
 
 
 @router.delete("/rows/{row_id}/sheets/{sheet_id}", response_model=schemas.RowRead)

@@ -31,12 +31,35 @@ class WageRepository:
     # ── rates ───────────────────────────────────────────────────────────────
     async def effective_rate(
         self, style_id: uuid.UUID, operation_id: uuid.UUID, on: date
-    ) -> float | None:
+    ) -> tuple[float | None, bool]:
         """The rate in force for one operation on one style on `on`.
 
-        Latest row with effective_from <= on. None means no rate was ever
-        configured for that pair — the caller must NOT treat that as zero
+        Returns `(rate, was_backdated)`. `(None, False)` means no rate has EVER
+        been configured for that pair — the caller must not treat that as zero
         silently; compute_run reports it as unpaid work.
+
+        ── WHY THERE IS A FALLBACK, AND WHY IT IS REPORTED ─────────────────────
+        The first query is the real rule: the latest row with
+        `effective_from <= on`, which is what makes a mid-period rate change
+        price each day at the rate that was in force on it.
+
+        But the commonest way a payroll comes out at ZERO has nothing to do with
+        mid-period changes. Work is logged for a fortnight; the manager then sits
+        down and fills in the rate sheet, and the form sends TODAY as
+        `effective_from` because that is the obvious default. Every rate is now
+        dated after every piece, so the strict query matches nothing, every
+        operation lands in `unrated`, and `total_amount` is 0.00 against a sheet
+        that visibly has a rate in every row. That is not a rate that does not
+        exist — it is a rate whose start date is a data-entry artefact.
+
+        So when nothing is effective on or before the work date, the EARLIEST
+        rate ever set for that pair applies, and the second element of the tuple
+        says so. compute_run surfaces every backdated pricing in its diagnostics,
+        because a manager is entitled to know that a rate was applied to work
+        that predates it — the alternative was paying nothing and saying nothing.
+
+        It can only ever turn a 0.00 into a payment: if any rate is effective on
+        the date, the fallback is not consulted at all.
         """
         stmt = (
             select(Rate.rate)
@@ -49,7 +72,16 @@ class WageRepository:
             .limit(1)
         )
         val = await self.db.scalar(stmt)
-        return float(val) if val is not None else None
+        if val is not None:
+            return float(val), False
+
+        earliest = await self.db.scalar(
+            select(Rate.rate)
+            .where(Rate.style_id == style_id, Rate.operation_id == operation_id)
+            .order_by(Rate.effective_from.asc())
+            .limit(1)
+        )
+        return (float(earliest), True) if earliest is not None else (None, False)
 
     async def rates_for_style(
         self, style_id: uuid.UUID, on: date

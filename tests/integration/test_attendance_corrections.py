@@ -25,7 +25,7 @@ TODAY = datetime.date.today()
 
 
 def _piece(pieces, i=0):
-    return pieces[i][0] if isinstance(pieces[i], tuple) else pieces[i]
+    return pieces[i]
 
 
 async def _punch(db, employee_id, work_date=None):

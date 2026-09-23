@@ -3,11 +3,11 @@
 modules/barcode/repository.py — Async data access for the barcode registry
 ================================================================================
 Owns every write to barcode_registry + the sequence counters that make employee
-and drawer codes unique. resolve() is a single indexed read on `code`.
+and lot codes unique. resolve() is a single indexed read on `code`.
 
 CODE GENERATION IS DETERMINISTIC AND COLLISION-SAFE.
     Piece codes come from the piece (STYLE-COLOUR-SIZE-seq, already unique).
-    Employee/drawer/lot codes are minted here as PREFIX + zero-padded counter
+    Employee/lot codes are minted here as PREFIX + zero-padded counter
     (EMP-000123). The counter is the current max for that prefix + 1; the unique
     index on `code` is the hard guard, so a concurrent mint fails loudly rather
     than colliding — retry the request if that ever fires (create rate is a few
@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import BarcodeStatus, BarcodeType
 from app.modules.barcode.models import (
-    BarcodeRegistry, Drawer, MaterialLot, MaterialReservation,
+    BarcodeRegistry, MaterialLot, MaterialReservation,
 )
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
 from app.modules.employees.models import Employee
@@ -158,16 +158,16 @@ class BarcodeRepository:
         """Everything the PIECE payload shows, in one query.
 
         This was 3 round-trips in the service (piece+joins, then a drawer get, then
-        a consumption select). The drawer is a LEFT JOIN (null before merge) and the
-        consumption is a correlated scalar subquery (null before cutting), so the
-        whole card is one statement — one scan, one query.
+        a consumption select). The consumption is a correlated scalar subquery
+        (null before cutting), so the whole card is one statement — one scan, one
+        query.
 
-        THE DRAWER JOIN IS ON `Drawer.current_piece_id`, NOT `Piece.drawer_id`.
-        Those two are the same link from opposite ends, but only one of them is
-        live: `release_nocommit` nulls BOTH when a piece ships, while a store scan
-        moves `Drawer.state`/`leather_in`/`lining_in` on the row that CLAIMS the
-        piece. Reading the drawer through the claim is what makes the state and
-        holding columns below (bug #12) the same answer the store screen gives.
+        THE STORE COLUMNS COME OFF THE PIECE, and there is no join left to get
+        them wrong. They used to be read through `Drawer.current_piece_id` — the
+        live claim, as opposed to `Piece.drawer_id`, the piece's own assignment —
+        and picking the wrong one of those two gave a card that disagreed with the
+        store screen. The garment carries its own state now, so the question does
+        not arise.
 
         ARTICLE (bug #7/#19) comes off Style — it is the field the printed sticker
         must show and the one the barcode payload never carried.
@@ -194,10 +194,8 @@ class BarcodeRepository:
                 ClientOrder.order_number,
                 Client.name.label("client_name"),
                 Operation.code.label("current_stage"),
-                Drawer.id.label("drawer_id"),
-                Drawer.code.label("drawer_code"),
-                Drawer.state.label("drawer_state"),
-                Drawer.leather_in, Drawer.lining_in,
+                Piece.store_state, Piece.leather_in, Piece.lining_in,
+                Piece.accessories_in,
                 consumption.label("consumption_qty"),
             )
             .join(SKU, SKU.id == Piece.sku_id)
@@ -205,7 +203,6 @@ class BarcodeRepository:
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .join(Client, Client.id == ClientOrder.client_id)
             .outerjoin(Operation, Operation.id == Piece.current_operation_id)
-            .outerjoin(Drawer, Drawer.current_piece_id == Piece.id)
             .where(Piece.id == piece_id)
         )).first()
 
@@ -214,15 +211,6 @@ class BarcodeRepository:
             select(Employee.id, Employee.name, Employee.designation,
                    Employee.wage_type, Employee.is_active)
             .where(Employee.id == employee_id)
-        )).first()
-
-    async def drawer_card(self, drawer_id: uuid.UUID) -> Row | None:
-        return (await self.db.execute(
-            select(Drawer.id, Drawer.code, Drawer.seq, Drawer.state,
-                   Drawer.current_piece_id, Drawer.leather_in, Drawer.lining_in,
-                   Drawer.accessories_in,
-                   )
-            .where(Drawer.id == drawer_id)
         )).first()
 
     async def lot_card(self, lot_id: uuid.UUID) -> Row | None:
@@ -326,7 +314,6 @@ class BarcodeRepository:
                           caption: str | None = None,
                           piece_id: uuid.UUID | None = None,
                           employee_id: uuid.UUID | None = None,
-                          drawer_id: uuid.UUID | None = None,
                           material_lot_id: uuid.UUID | None = None,
                           material_sheet_id: uuid.UUID | None = None,
                           order_id: uuid.UUID | None = None,
@@ -336,7 +323,7 @@ class BarcodeRepository:
         row = BarcodeRegistry(
             code=_norm(code), type=type_.value, status=BarcodeStatus.ACTIVE.value,
             caption=caption, piece_id=piece_id, employee_id=employee_id,
-            drawer_id=drawer_id, material_lot_id=material_lot_id,
+            material_lot_id=material_lot_id,
             material_sheet_id=material_sheet_id,
             order_id=order_id, sku_id=sku_id, style_id=style_id,
             is_alias=is_alias,
@@ -350,13 +337,6 @@ class BarcodeRepository:
         return self.register_nocommit(
             code=code, type_=BarcodeType.EMPLOYEE,
             employee_id=employee_id, caption=caption)
-
-    async def mint_drawer_code_nocommit(self, drawer_id: uuid.UUID, seq: int,
-                                        caption: str | None = None) -> BarcodeRegistry:
-        code = f"DRW-{seq:04d}"
-        return self.register_nocommit(
-            code=code, type_=BarcodeType.DRAWER, drawer_id=drawer_id,
-            caption=caption or f"Drawer {seq}")
 
     # ── the compact piece code (bug #19) ─────────────────────────────────────
     async def max_short_code_counter(self) -> int:
@@ -769,7 +749,7 @@ class BarcodeRepository:
         count_stmt = count_stmt.where(and_(*conds))
         total = int(await self.db.scalar(count_stmt) or 0)
 
-        # page of rows, enriched with sku/style/size/colour/seq/stage/drawer
+        # page of rows, enriched with sku/style/size/colour/seq/stage
         stmt = (
             select(
                 BarcodeRegistry.code,

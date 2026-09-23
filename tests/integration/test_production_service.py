@@ -51,7 +51,7 @@ async def _cut(db, cutting_mgr, cutter, piece, lot, qty=10.0):
 @pytest.mark.asyncio
 async def test_the_cut_screen_fixes_the_stage(db, operations, pieces, cutter,
                                               cutting_mgr, leather_lot):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     res = await _cut(db, cutting_mgr, cutter, piece, leather_lot)
     assert res["stage"] == "LEATHER_CUTTING"
     assert res["count_logged"] == 1 and res["logged"] == [piece.code]
@@ -62,7 +62,7 @@ async def test_pipeline_infers_the_next_stage_from_the_pieces_own_history(
     db, operations, pieces, cutter, cutting_mgr, stitching_mgr, leather_lot
 ):
     """Cut → the next PIPELINE scan is FUSING, not 'whatever was sent'."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
 
     res = await _log(db, stitching_mgr, cutter, [piece.id])
@@ -73,7 +73,7 @@ async def test_pipeline_infers_the_next_stage_from_the_pieces_own_history(
 async def test_a_second_scan_at_the_same_stage_is_rework_not_a_duplicate(
     db, operations, pieces, cutter, cutting_mgr, leather_lot
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
     again = await _cut(db, cutting_mgr, cutter, piece, leather_lot)
 
@@ -90,7 +90,7 @@ async def test_a_second_scan_at_the_same_stage_is_rework_not_a_duplicate(
 async def test_the_role_gate_403s_the_whole_request(
     db, operations, pieces, cutter, stitching_mgr, leather_lot
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     with pytest.raises(HTTPException) as exc:
         await _log(db, stitching_mgr, cutter, [piece.id],
                    screen=ScreenContext.LEATHER_CUT,
@@ -110,7 +110,7 @@ async def test_the_stitching_manager_owns_fusing_not_the_cutting_manager(
     LEATHER_CUTTING and never infers FUSING. The grant's only live effect was to
     403 the stitching manager — the one role that CAN reach the stage.
     """
-    piece, _ = pieces[0]
+    piece = pieces[0]
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
 
     # the cutting manager is now refused the stage outright
@@ -127,7 +127,7 @@ async def test_the_stitching_manager_owns_fusing_not_the_cutting_manager(
 @pytest.mark.asyncio
 async def test_md_and_dm_bypass_the_role_gate(db, operations, pieces, cutter,
                                               md, leather_lot):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     res = await _log(db, md, cutter, [piece.id], screen=ScreenContext.LEATHER_CUT,
                      leather_lot_id=leather_lot.id, consumption_qty=10.0)
     assert res["count_logged"] == 1
@@ -138,7 +138,7 @@ async def test_md_and_dm_bypass_the_role_gate(db, operations, pieces, cutter,
 async def test_a_wrong_skill_warns_but_still_logs(
     db, operations, pieces, paster, cutting_mgr, leather_lot
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     res = await _log(db, cutting_mgr, paster, [piece.id],
                      screen=ScreenContext.LEATHER_CUT,
                      leather_lot_id=leather_lot.id, consumption_qty=10.0)
@@ -155,8 +155,8 @@ async def test_one_out_of_sequence_piece_does_not_lose_the_good_ones(
 ):
     """THE per-piece promise: piece 1 is cut and ready for FUSING; piece 2 was
     never cut. One batch → piece 1 logs, piece 2 lands in sequence_blocked."""
-    ready, _ = pieces[0]
-    skipped, _ = pieces[1]
+    ready = pieces[0]
+    skipped = pieces[1]
     await _cut(db, cutting_mgr, cutter, ready, leather_lot)
 
     res = await _log(db, stitching_mgr, cutter, [ready.id, skipped.id])
@@ -172,7 +172,7 @@ async def test_line_stitching_is_blocked_until_the_drawer_is_sended(
     db, operations, pieces, cutter, paster, cutting_mgr, stitching_mgr,
     leather_lot, ready_for_store
 ):
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
     await _log(db, stitching_mgr, cutter, [piece.id])          # FUSING
     await _log(db, stitching_mgr, paster, [piece.id])          # PASTING
@@ -202,7 +202,7 @@ async def test_stock_is_decremented_once_per_batch_not_once_per_piece(
     db, operations, pieces, cutter, cutting_mgr, leather_lot
 ):
     before = float(leather_lot.on_hand)
-    ids = [p.id for p, _ in pieces[:3]]
+    ids = [p.id for p in pieces[:3]]
     res = await _log(db, cutting_mgr, cutter, ids,
                      screen=ScreenContext.LEATHER_CUT,
                      leather_lot_id=leather_lot.id, consumption_qty=15.0)
@@ -226,7 +226,7 @@ async def test_stock_is_decremented_once_per_batch_not_once_per_piece(
 async def test_a_cut_without_consumption_or_a_lot_is_422(
     db, operations, pieces, cutter, cutting_mgr, leather_lot
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     with pytest.raises(HTTPException) as exc:
         await _log(db, cutting_mgr, cutter, [piece.id],
                    screen=ScreenContext.LEATHER_CUT, leather_lot_id=leather_lot.id)
@@ -249,7 +249,7 @@ async def test_rework_at_a_cut_stage_does_not_double_charge_the_lot(
     db, operations, pieces, cutter, cutting_mgr, leather_lot
 ):
     """fresh_cut_count drives the decrement, so a rework scan consumes nothing."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     await _cut(db, cutting_mgr, cutter, piece, leather_lot, qty=15.0)
     await db.refresh(leather_lot)
     after_first = float(leather_lot.on_hand)
@@ -265,7 +265,7 @@ async def test_rework_at_a_cut_stage_does_not_double_charge_the_lot(
 async def test_an_absent_worker_cannot_be_logged(
     db, operations, pieces, absent_worker, cutting_mgr, leather_lot
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     with pytest.raises(HTTPException) as exc:
         await _log(db, cutting_mgr, absent_worker[0], [piece.id],
                    screen=ScreenContext.LEATHER_CUT,
@@ -279,7 +279,7 @@ async def test_unknown_pieces_are_bucketed_not_fatal(
     db, operations, pieces, cutter, cutting_mgr, leather_lot
 ):
     import uuid as _uuid
-    piece, _ = pieces[0]
+    piece = pieces[0]
     ghost = _uuid.uuid4()
     res = await _log(db, cutting_mgr, cutter, [piece.id, ghost],
                      screen=ScreenContext.LEATHER_CUT,
@@ -301,7 +301,7 @@ async def test_package_export_takes_the_garment_out_of_the_store(
     md, leather_lot, ready_for_store
 ):
     """The ONLY point a drawer frees: the piece has shipped."""
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     store = StoreService(db)
 
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
@@ -337,7 +337,7 @@ async def test_the_piece_checklist_returns_its_envelope(
     """GET /production/skus/{id}/pieces — the STORE-overlay edit dropped this
     function's `return` and mis-unpacked its 4-tuple rows, so the endpoint
     answered `null` (and 500'd on the unpack). The envelope is the contract."""
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
     # Cut is not enough to store: the leather side hands off at PASTING.
     await ready_for_store(piece, lining=False)
@@ -366,7 +366,7 @@ async def test_the_checklist_marks_eligibility_against_an_operation(
     db, operations, pieces, order_tree, cutter, cutting_mgr, leather_lot,
     ready_for_store,
 ):
-    done_piece, _ = pieces[0]
+    done_piece = pieces[0]
     await _cut(db, cutting_mgr, cutter, done_piece, leather_lot)
 
     out = await ProductionService(db).list_pieces_for_sku(
@@ -391,7 +391,7 @@ async def test_style_progress_404s_for_another_clients_style(
     import uuid as _uuid
 
     style_id = order_tree["style"].id
-    await _cut(db, cutting_mgr, cutter, pieces[0][0], leather_lot)
+    await _cut(db, cutting_mgr, cutter, pieces[0], leather_lot)
     svc = ProductionService(db)
 
     assert (await svc.style_progress(style_id))["LEATHER_CUTTING"] == 1

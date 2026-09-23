@@ -52,7 +52,7 @@ def _ok(r, *allowed):
 
 
 def _piece(pieces, i=0):
-    return pieces[i][0] if isinstance(pieces[i], tuple) else pieces[i]
+    return pieces[i]
 
 
 @pytest_asyncio.fixture

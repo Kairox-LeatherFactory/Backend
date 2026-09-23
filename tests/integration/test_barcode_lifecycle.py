@@ -84,7 +84,7 @@ async def test_reissue_does_not_touch_the_work_already_logged(db, cutter,
     """The point of the whole design: a new plastic card is not a new person."""
     emp, _ = cutter
     db.add(ProductionEvent(
-        sku_id=pieces[0][0].sku_id, operation_id=operations["LEATHER_CUTTING"].id,
+        sku_id=pieces[0].sku_id, operation_id=operations["LEATHER_CUTTING"].id,
         employee_id=emp.id, work_date=__import__("datetime").date.today(),
         qty=40, entered_by="test"))
     await db.commit()
@@ -263,7 +263,7 @@ async def test_a_retired_piece_label_also_reports_410(db, pieces):
     """F18 (barcode/service.py:59-65): retirement is a lifecycle state on the
     registry, not an employee-only concept. A reprinted piece label whose old
     code is still stuck to a garment must not silently resolve."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     row = (await db.execute(select(BarcodeRegistry)
                             .where(BarcodeRegistry.piece_id == piece.id))
            ).scalars().first()
@@ -284,7 +284,7 @@ async def test_a_piece_code_is_rejected_by_the_employee_door(db, pieces):
     """Type confusion at the scan door: scanning a garment where the actor is
     expected must 404, not resolve to whatever id happens to be populated
     (barcode/service.py:95-98)."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     with pytest.raises(HTTPException) as exc:
         await BarcodeService(db).resolve_employee_id(piece.code)
     assert exc.value.status_code == 404
@@ -299,10 +299,14 @@ async def test_an_employee_code_is_rejected_by_the_piece_door(db, cutter):
 
 
 @pytest.mark.asyncio
-async def test_a_drawer_code_is_rejected_by_the_lot_door(db, pieces):
-    _, drawer = pieces[0]
+async def test_a_piece_code_is_rejected_by_the_lot_door(db, pieces):
+    """A narrow resolver must refuse a code of the wrong type, not answer with
+    whatever FK happens to be populated. This used to use a DRAWER code; the
+    piece code is the one every operator has and is just as wrong for this door.
+    """
+    piece = pieces[0]
     with pytest.raises(HTTPException) as exc:
-        await BarcodeService(db).resolve_lot_id(drawer.code)
+        await BarcodeService(db).resolve_lot_id(piece.code)
     assert exc.value.status_code == 404
 
 

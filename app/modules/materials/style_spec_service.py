@@ -9,12 +9,12 @@ WHAT THIS MODULE IS FOR
     so accessory stock only ever went up and the floor built each kit from
     memory. This module holds the recipe (what one garment of a style takes),
     the gate that makes a style declare it before release, and the primitive
-    that spends it when the store kits a drawer.
+    that spends it when the store kits a garment.
 
 THE FOUR SURFACES IT SERVES, and why they all come through here
     imports/breakdown   release gate      — blockers_for_styles
-    drawers/service     the kit scan      — issue_kit_nocommit
-    barcode/service     piece+drawer scan — material_requirement_block
+    store/service       the kit scan      — issue_kit_nocommit
+    barcode/service     the piece scan    — material_requirement_block
     production/service  the log response  — kit_by_pieces
     Each is a lazy import at its call site (CLAUDE.md §15), so the module graph
     stays acyclic and none of them pays for this import unless it asks.
@@ -47,7 +47,7 @@ from app.core.enums import (
 from app.modules.barcode.models import StyleMaterialSpec
 from app.modules.clients.models import SKU, Style, spec_editable
 from app.modules.materials.repository import MaterialRepository
-from app.modules.materials.service import display_stock
+from app.modules.materials.service import stock_numbers
 from app.modules.materials.style_spec_repository import StyleSpecRepository
 
 # How a spec line resolved to a physical lot. The screen renders each
@@ -409,20 +409,14 @@ class StyleSpecService:
         out["candidate_lot_ids"] = candidates
         if lot is not None:
             reserved = await self.materials.active_reserved(lot.id)
-            on_hand = Decimal(str(lot.on_hand or 0))
-            used = Decimal(str(lot.used or 0))
-            received, displayed_reserved, available = display_stock(
-                on_hand, used, reserved)
             out["lot"] = {
                 "lot_id": str(lot.id), "article": lot.article,
                 "colour": lot.colour, "uom": lot.uom,
-                "on_hand": float(received),
-                "used": float(used),
-                # RESERVED IS SHOWN, NOT SILENTLY SUBTRACTED. Nothing in this
-                # codebase can release a reservation, so a stuck one would
+                # arrived / used / balance / reserved / available / on_hand, all
+                # reconciling with each other. RESERVED IS SHOWN, NOT SILENTLY
+                # SUBTRACTED from what is on the shelf: a stuck reservation would
                 # otherwise present as a phantom shortfall with no visible cause.
-                "reserved": float(displayed_reserved),
-                "available": float(available),
+                **stock_numbers(lot.on_hand, lot.used, reserved),
             }
         return out
 
@@ -920,17 +914,17 @@ class StyleSpecService:
         """What this garment needs, what it has been given, and what is still owed.
 
         THE ANSWER TO "how does the operator know which accessories to put in the
-        drawer?". It hangs off BOTH scan payloads — the piece code and the drawer
-        code — because those are the two things a person at the store actually
-        has in their hand.
+        garment?". It hangs off the PIECE payload, because the garment is the one
+        thing the person at the store physically has in their hand — the store
+        scan is the worker and the garment, and nothing else.
 
         ONE READ SURFACE OVER TWO WRITE PATHS. Leather and lining consumption live
         on ProductionEvent (the act of cutting); accessories live in
         piece_material_issue (the act of issuing). A screen must not have to know
         that, so both are merged here.
 
-        A null piece_id returns the NOT_REQUIRED shape rather than None, so the
-        drawer payload for an empty drawer still has a block to render.
+        A null piece_id returns the NOT_REQUIRED shape rather than None, so a
+        screen always has something to render.
         """
         empty = {"kit_status": KitStatus.NOT_REQUIRED.value, "kit_required": False,
                  "spec_confirmed": False, "summary_line": None,
@@ -1224,15 +1218,19 @@ class StyleSpecService:
             f"for {piece.code}. See "
             f"GET /store/pieces/{piece.code}/materials.")
 
-    async def issue_kit_nocommit(self, *, piece, drawer, requested_lines=None,
+    async def issue_kit_nocommit(self, *, piece, requested_lines=None,
                                  employee_id=None, entered_by: str | None = None,
-                                 materials_service=None) -> dict:
-        """Issue a garment's accessories from stock into its drawer. NO COMMIT.
+                                 materials_service=None, **_legacy) -> dict:
+        """Issue a garment's accessories from stock into it. NO COMMIT.
 
-        THE CALLER OWNS THE TRANSACTION. DrawerService.store_scan commits once, at
-        the end, so the stock movements, the ledger rows, the drawer flags and the
-        audit row all land together or not at all. A half-issued kit is worse than
-        an unissued one, because nothing downstream can tell them apart.
+        THE CALLER OWNS THE TRANSACTION. StoreService.store_scan commits once, at
+        the end, so the stock movements, the ledger rows, the piece's flags and
+        the audit row all land together or not at all. A half-issued kit is worse
+        than an unissued one, because nothing downstream can tell them apart.
+
+        `drawer=` is swallowed by `**_legacy`. The kit went INTO a numbered box;
+        it goes into the garment, and `piece_material_issue.drawer_id` is left
+        NULL — the column is retained for the historical rows, not written.
 
         IDEMPOTENCY IS A READ, NOT A CONSTRAINT (CLAUDE.md §13 forbids ON
         CONFLICT). outstanding = qty_per_piece minus what is already issued, so a
@@ -1342,7 +1340,6 @@ class StyleSpecService:
             if row is None:
                 self.repo.add_issue_nocommit(
                     piece_id=piece.id,
-                    drawer_id=drawer.id if drawer is not None else None,
                     spec_line_id=line.id, material_lot_id=lot.id,
                     category=line.category, subtype=line.subtype,
                     article=lot.article, colour=lot.colour,
@@ -1398,12 +1395,12 @@ class StyleSpecService:
             out["issued"] = issued
         return out
 
-    async def kit_view(self, piece_id, drawer=None) -> dict:
+    async def kit_view(self, piece_id, **_legacy) -> dict:
         """The kit block WITHOUT issuing anything — the read-only checklist.
 
         Returned on every store-scan, not only the accessory one, because the
         operator holding the leather is the person who also has to put the buttons
-        in. Answering "what else does this drawer need?" on the scan they were
+        in. Answering "what else does this garment need?" on the scan they were
         already doing is the whole visibility ask.
         """
         block = await self.material_requirement_block(piece_id)
@@ -1459,7 +1456,7 @@ class StyleSpecService:
         available_after = await materials.decrement_for_issue_nocommit(
             lot.id, float(qty))
         self.repo.add_issue_nocommit(
-            piece_id=piece.id, drawer_id=piece.drawer_id,
+            piece_id=piece.id,
             spec_line_id=None, material_lot_id=lot.id,
             category=lot.category, subtype=lot.subtype, article=lot.article,
             colour=lot.colour, qty=Decimal(str(qty)), uom=lot.uom,

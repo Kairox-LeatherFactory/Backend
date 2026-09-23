@@ -66,7 +66,7 @@ async def _log_raw(db, ops, piece, employee_id, code):
 
 
 def _piece(pieces, i=0):
-    return pieces[i][0] if isinstance(pieces[i], tuple) else pieces[i]
+    return pieces[i]
 
 
 def _ok(r, *allowed):
@@ -134,7 +134,8 @@ async def test_flow1_leather_delivery_to_a_cut_garment(
     # never sheeted, create one now" case.
     added = _ok(await api_client.post(
         f"{API}/cutting/rows/{row['row_id']}/sheets",
-        json={"dcm": 44.0, "material_lot_id": lot["lot_id"]}))
+        json={"dcm": 44.0, "material_lot_id": lot["lot_id"],
+              "create_if_missing": True}))
     assert added["sheet_count"] == row["sheet_count"] + 1
 
     dropped = added["sheets"][0]

@@ -4,7 +4,7 @@ modules/dashboard/repository.py — Manager Dashboard data access (READ-ONLY)
 ================================================================================
 This module owns NO tables and writes NOTHING — it mirrors the analytics module:
 a query surface over production_event / piece / sku / style / client_order /
-material_lot / drawer / employee / audit_log.
+material_lot / employee / audit_log.
 
 DESIGN CONTRACT (why every method here is a single grouped aggregate)
     No widget fans out into one-query-per-row. Every method below is ONE round
@@ -24,9 +24,9 @@ STATUS DERIVATION (single source of truth, matched to the app's own model)
       • consumption       = SUM(ProductionEvent.consumption_qty) at cut stages
                             (dcm² for leather via leather_lot_id; mtrs for lining
                              via lining_lot_id — the lot uom disambiguates)
-      • STORE             = a DERIVED state of the piece's DRAWER, never an event
+      • STORE             = a DERIVED state of the PIECE itself, never an event
                             (see core/store_display.py). The store metrics below
-                            read Drawer.state / leather_in / lining_in, never a
+                            read Piece.store_state / leather_in / lining_in, never a
                             "STORE" production event, which does not exist.
 
     DAMAGE is intentionally absent: the schema has no damage state or table
@@ -73,7 +73,7 @@ _FINAL_INSPECTION = ProductionStage.FINAL_INSPECTION.value
 _CUT_STAGES = (_LEATHER_CUT, _LINING_CUT)
 
 # The VIRTUAL store stage. Not a ProductionStage member and not an Operation row
-# — a piece never "works" at STORE, it SITS there while its drawer fills. Sourced
+# — a piece never "works" at STORE, it SITS there while its parts arrive. Sourced
 # from core/store_display.py so the dashboard, the barcode screen and the piece
 # trace all name it with the same string.
 _STORE_STAGE = STORE_DISPLAY_STAGE
@@ -107,7 +107,7 @@ _STITCH_FUNNEL_OPS = (
     _SHELL_STITCHING, _FINAL_FINISH, _FINAL_INSPECTION,
 )
 
-# Drawer state values (mirror DrawerState; kept as plain strings exactly like
+# Store state values (mirror StoreState; kept as plain strings exactly like
 # core/store_display.py so this read path imports nothing heavy).
 _D_WAITING = "waiting"
 _D_MERGED = "merged"
@@ -358,30 +358,32 @@ class DashboardRepository:
         self, *, client_scope: uuid.UUID | None,
         order_id: uuid.UUID | None = None, style_id: uuid.UUID | None = None,
     ) -> dict:
-        """Pieces sitting in / released from the STORE, by drawer state. ONE query.
+        """Pieces sitting in / released from the STORE, by store state. ONE query.
 
         STORE has no production events (core/store_display.py), so its node is
-        priced from the drawer instead:
-            waiting   parts are arriving — drawer is holding_leather/lining/both
-            received  DM has confirmed the drawer is complete, not yet released
+        priced from the garment's own store state instead:
+            waiting   parts are arriving — holding_leather / lining / both
+            received  DM has confirmed it complete, not yet released
             released  DM has SENDED it; the piece may pass to line-stitching
 
-        Read through Drawer.current_piece_id (the LIVE CLAIM), matching
-        store_kpis and store_handoff. That pointer is nulled when the garment
-        ships and the drawer recycles to WAITING, so an exported piece is NOT in
-        `released` here — the service adds the exported count back, which is why
-        the two never double-count the same piece.
-        """
-        from app.modules.barcode.models import Drawer
+        READ OFF THE PIECE. This used to join `Drawer.current_piece_id` — the
+        LIVE CLAIM, as opposed to `Piece.drawer_id`, the piece's own assignment —
+        and getting that choice wrong gave a dashboard that disagreed with the
+        store screen. There is no choice to get wrong now.
 
+        `release_nocommit` resets an exported garment to WAITING, so an exported
+        piece is NOT in `released` here — the service adds the exported count
+        back, which is why the two never double-count the same piece. That is the
+        same property the drawer's recycle-to-WAITING used to give.
+        """
         stmt = select(
             func.coalesce(func.sum(
-                case((Drawer.state.in_(_D_HOLDING), 1), else_=0)), 0).label("waiting"),
+                case((Piece.store_state.in_(_D_HOLDING), 1), else_=0)), 0).label("waiting"),
             func.coalesce(func.sum(
-                case((Drawer.state == _D_RECEIVED, 1), else_=0)), 0).label("received"),
+                case((Piece.store_state == _D_RECEIVED, 1), else_=0)), 0).label("received"),
             func.coalesce(func.sum(
-                case((Drawer.state == _D_SENDED, 1), else_=0)), 0).label("released"),
-        ).select_from(Drawer).join(Piece, Piece.id == Drawer.current_piece_id)
+                case((Piece.store_state == _D_SENDED, 1), else_=0)), 0).label("released"),
+        ).select_from(Piece)
         if client_scope is not None or order_id is not None or style_id is not None:
             stmt = (
                 stmt.join(SKU, SKU.id == Piece.sku_id)
@@ -1298,28 +1300,32 @@ class DashboardRepository:
 
     # ══════════════════════════════════════════════════════════════ STORE
     async def store_kpis(self, *, client_scope: uuid.UUID | None) -> dict:
-        """§3 store KPIs — drawer counts by state + contents in ONE grouped read.
+        """§3 store KPIs — garment counts by store state + contents, ONE read.
 
         Contents are derived from leather_in / lining_in (which survive the
         RECEIVED/SENDED transitions), never from `state`, exactly as
-        core/store_display.holding_label does."""
-        from app.modules.barcode.models import Drawer
+        core/store_display.holding_label does.
 
-        both = and_(Drawer.leather_in.is_(True), Drawer.lining_in.is_(True))
-        leather_only = and_(Drawer.leather_in.is_(True), Drawer.lining_in.is_(False))
-        lining_only = and_(Drawer.leather_in.is_(False), Drawer.lining_in.is_(True))
-        empty = and_(Drawer.leather_in.is_(False), Drawer.lining_in.is_(False))
-        holds_something = Drawer.state.in_(_D_HOLDING)
+        THE UNIT IS THE GARMENT, and the key names keep saying `drawers` on
+        purpose: the numbers mean what they always meant (how many things are in
+        the store, how many hold leather, how many are complete), and renaming
+        every key would break every dashboard reading them for no change in
+        meaning. There simply is no box behind the count any more.
+        """
+        both = and_(Piece.leather_in.is_(True), Piece.lining_in.is_(True))
+        leather_only = and_(Piece.leather_in.is_(True), Piece.lining_in.is_(False))
+        lining_only = and_(Piece.leather_in.is_(False), Piece.lining_in.is_(True))
+        holds_something = Piece.store_state.in_(_D_HOLDING)
 
+        in_store_at_all = Piece.store_state != _D_WAITING
         stmt = select(
-            func.count(Drawer.id).label("total"),
+            func.count(Piece.id).label("total"),
             func.coalesce(func.sum(
-                case((and_(holds_something, Drawer.state != _D_SENDED), 1), else_=0)
+                case((and_(holds_something, Piece.store_state != _D_SENDED), 1), else_=0)
             ), 0).label("in_store"),
-            func.coalesce(func.sum(case((Drawer.state == _D_SENDED, 1), else_=0)), 0)
+            func.coalesce(func.sum(case((Piece.store_state == _D_SENDED, 1), else_=0)), 0)
                 .label("sent"),
-            func.coalesce(func.sum(case((empty, 1), else_=0)), 0).label("empty"),
-            func.coalesce(func.sum(case((Drawer.state == _D_RECEIVED, 1), else_=0)), 0)
+            func.coalesce(func.sum(case((Piece.store_state == _D_RECEIVED, 1), else_=0)), 0)
                 .label("held"),
             func.coalesce(func.sum(case((leather_only, 1), else_=0)), 0).label("leather"),
             func.coalesce(func.sum(case((lining_only, 1), else_=0)), 0).label("lining"),
@@ -1327,59 +1333,55 @@ class DashboardRepository:
         )
         if client_scope is not None:
             stmt = (
-                stmt.select_from(Drawer)
-                .join(Piece, Piece.id == Drawer.current_piece_id)
+                stmt.select_from(Piece)
                 .join(SKU, SKU.id == Piece.sku_id)
                 .join(Style, Style.id == SKU.style_id)
                 .where(style_in_production())
-            .where(style_in_production())
                 .join(ClientOrder, ClientOrder.id == Style.client_order_id)
                 .where(ClientOrder.client_id == client_scope)
             )
         else:
-            stmt = stmt.select_from(Drawer)
+            stmt = stmt.select_from(Piece)
+        stmt = stmt.where(in_store_at_all)
         r = (await self.db.execute(stmt)).one()
         return {
-            "total_drawers": int(r.total or 0),
-            "drawers_in_store": int(r.in_store or 0),
-            "drawers_sent": int(r.sent or 0),
-            "empty_drawers": int(r.empty or 0),
-            "held_drawers": int(r.held or 0),
-            "leather_drawers": int(r.leather or 0),
-            "lining_drawers": int(r.lining or 0),
-            "leather_lining_drawers": int(r.both or 0),
+            "garments_total": int(r.total or 0),
+            "garments_in_store": int(r.in_store or 0),
+            "garments_sent": int(r.sent or 0),
+            "garments_held": int(r.held or 0),
+            "leather_only": int(r.leather or 0),
+            "lining_only": int(r.lining or 0),
+            "leather_and_lining": int(r.both or 0),
         }
 
     async def store_handoff(self, *, client_scope: uuid.UUID | None) -> dict:
-        """Stitching §7 / store handoff — drawer-state rollups the stitching
+        """Stitching §7 / store handoff — store-state rollups the stitching
         manager reads. ONE grouped query."""
-        from app.modules.barcode.models import Drawer
-
-        holding = Drawer.state.in_(_D_HOLDING)
+        holding = Piece.store_state.in_(_D_HOLDING)
         stmt = select(
             func.coalesce(func.sum(case((holding, 1), else_=0)), 0).label("holding"),
-            func.coalesce(func.sum(case((Drawer.state == _D_RECEIVED, 1), else_=0)), 0)
+            func.coalesce(func.sum(case((Piece.store_state == _D_RECEIVED, 1), else_=0)), 0)
                 .label("received"),
-            func.coalesce(func.sum(case((Drawer.state == _D_SENDED, 1), else_=0)), 0)
+            func.coalesce(func.sum(case((Piece.store_state == _D_SENDED, 1), else_=0)), 0)
                 .label("sended"),
+            # Physically in the store: holding parts, or complete and not yet
+            # released. The old form also required a drawer to be claiming the
+            # piece; the garment's own state is that claim now.
             func.coalesce(func.sum(
-                case((and_(Drawer.current_piece_id.isnot(None),
-                           Drawer.state.in_((*_D_HOLDING, _D_RECEIVED))), 1), else_=0)
+                case((Piece.store_state.in_((*_D_HOLDING, _D_RECEIVED)), 1), else_=0)
             ), 0).label("in_drawer"),
         )
         if client_scope is not None:
             stmt = (
-                stmt.select_from(Drawer)
-                .join(Piece, Piece.id == Drawer.current_piece_id)
+                stmt.select_from(Piece)
                 .join(SKU, SKU.id == Piece.sku_id)
                 .join(Style, Style.id == SKU.style_id)
                 .where(style_in_production())
-            .where(style_in_production())
                 .join(ClientOrder, ClientOrder.id == Style.client_order_id)
                 .where(ClientOrder.client_id == client_scope)
             )
         else:
-            stmt = stmt.select_from(Drawer)
+            stmt = stmt.select_from(Piece)
         r = (await self.db.execute(stmt)).one()
         return {
             "holding": int(r.holding or 0),
@@ -1388,85 +1390,89 @@ class DashboardRepository:
             "in_drawer": int(r.in_drawer or 0),
         }
 
-    async def drawer_grid(
+    async def store_grid(
         self, *, client_scope: uuid.UUID | None,
         style_id: uuid.UUID | None = None,
         state: str | None = None,
         material_type: str | None = None,   # LEATHER | LINING | BOTH
         limit: int = 500,
     ) -> list:
-        """§4/§6 drawer list joined to its current piece → style → order. ONE
-        query. LEFT joins so empty/unmerged drawers still appear (they have no
-        piece). Filterable by style, state, material type."""
-        from app.modules.barcode.models import Drawer
+        """§4/§6 THE STORE GRID: every garment in the store, with its style and
+        order. ONE query. Filterable by style, state, material type.
 
+        IT LISTS GARMENTS, NOT BOXES. This used to list 200 drawers and LEFT-join
+        whatever piece each one held, so an empty drawer was a row and a garment
+        with no drawer was invisible. The store is a state on the garment, so the
+        rows are the garments that are in it — WAITING pieces (nothing scanned in
+        yet, nothing to see) are excluded, which is what "empty drawers do not
+        matter" always meant.
+
+        DELIBERATELY NOT RELEASE-FILTERED. Every other query here counts WORK,
+        and unreleased work is not on the floor yet. This one reports what is
+        PHYSICALLY IN THE STORE, and a garment whose parts have been scanned in
+        is in the store whatever its style's release state says.
+
+        The tuple shape is UNCHANGED so the service's `zip(keys, row)` keeps
+        working: `code` is the piece code and `seq` the piece's serial, which are
+        the identifiers the screen can actually act on now that no box has one.
+        """
         stmt = (
             select(
-                Drawer.id, Drawer.code, Drawer.seq, Drawer.state,
-                Drawer.leather_in, Drawer.lining_in,
-                Drawer.received_at, Drawer.sended_at, Drawer.created_at,
+                Piece.id, Piece.code, Piece.seq, Piece.store_state,
+                Piece.leather_in, Piece.lining_in,
+                Piece.store_received_at, Piece.store_sended_at, Piece.created_at,
                 Piece.id, Piece.code,
                 Style.id, Style.name,
                 ClientOrder.id, ClientOrder.order_number,
                 ClientOrder.delivery_deadline,
                 SKU.color_name, SKU.size,
             )
-            .select_from(Drawer)
-            # DELIBERATELY NOT RELEASE-FILTERED. Every other query here counts
-            # WORK, and unreleased work is not on the floor yet. This one reports
-            # what is PHYSICALLY IN A DRAWER, and a garment in a drawer is in that
-            # drawer whatever its style's release state says. Filtering here would
-            # render an occupied drawer as empty and send someone to put a second
-            # piece in it.
-            .outerjoin(Piece, Piece.id == Drawer.current_piece_id)
+            .select_from(Piece)
             .outerjoin(SKU, SKU.id == Piece.sku_id)
             .outerjoin(Style, Style.id == SKU.style_id)
             .outerjoin(ClientOrder, ClientOrder.id == Style.client_order_id)
         )
-        conds = []
+        conds = [Piece.store_state != _D_WAITING]
         if client_scope is not None:
             conds.append(ClientOrder.client_id == client_scope)
         if style_id is not None:
             conds.append(Style.id == style_id)
         if state is not None:
-            conds.append(Drawer.state == state)
+            conds = [c for c in conds if c is not conds[0]]
+            conds.insert(0, Piece.store_state == state)
         if material_type == "LEATHER":
-            conds.append(Drawer.leather_in.is_(True))
+            conds.append(Piece.leather_in.is_(True))
         elif material_type == "LINING":
-            conds.append(Drawer.lining_in.is_(True))
+            conds.append(Piece.lining_in.is_(True))
         elif material_type == "BOTH":
-            conds.append(and_(Drawer.leather_in.is_(True), Drawer.lining_in.is_(True)))
-        if conds:
-            stmt = stmt.where(*conds)
-        stmt = stmt.order_by(Drawer.seq).limit(limit)
+            conds.append(and_(Piece.leather_in.is_(True), Piece.lining_in.is_(True)))
+        stmt = stmt.where(*conds)
+        stmt = stmt.order_by(Piece.code).limit(limit)
         return (await self.db.execute(stmt)).all()
 
     async def store_current_styles(
         self, *, client_scope: uuid.UUID | None, limit: int = 100,
     ) -> list:
-        """§5 — styles that currently have material inside the store (drawer in a
-        holding/received state). ONE grouped query."""
-        from app.modules.barcode.models import Drawer
-
-        in_store = Drawer.state.in_((*_D_HOLDING, _D_RECEIVED))
-        both = and_(Drawer.leather_in.is_(True), Drawer.lining_in.is_(True))
-        leather_only = and_(Drawer.leather_in.is_(True), Drawer.lining_in.is_(False))
-        lining_only = and_(Drawer.leather_in.is_(False), Drawer.lining_in.is_(True))
-        ready = Drawer.state == _D_RECEIVED
+        """§5 — styles that currently have material inside the store (a garment
+        in a holding/received state). ONE grouped query."""
+        in_store = Piece.store_state.in_((*_D_HOLDING, _D_RECEIVED))
+        both = and_(Piece.leather_in.is_(True), Piece.lining_in.is_(True))
+        leather_only = and_(Piece.leather_in.is_(True), Piece.lining_in.is_(False))
+        lining_only = and_(Piece.leather_in.is_(False), Piece.lining_in.is_(True))
+        ready = Piece.store_state == _D_RECEIVED
 
         stmt = (
             select(
                 Style.id, Style.name,
                 ClientOrder.id, ClientOrder.order_number,
                 ClientOrder.delivery_deadline,
-                func.count(func.distinct(Drawer.id)).label("drawers"),
+                func.count(func.distinct(Piece.id)).label("drawers"),
                 func.coalesce(func.sum(case((leather_only, 1), else_=0)), 0).label("leather"),
                 func.coalesce(func.sum(case((lining_only, 1), else_=0)), 0).label("lining"),
                 func.coalesce(func.sum(case((both, 1), else_=0)), 0).label("both"),
                 func.coalesce(func.sum(case((ready, 1), else_=0)), 0).label("ready"),
             )
-            .select_from(Drawer)
-            .join(Piece, Piece.id == Drawer.current_piece_id)
+            .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
             .where(style_in_production())
@@ -1478,34 +1484,35 @@ class DashboardRepository:
         stmt = stmt.group_by(
             Style.id, Style.name, ClientOrder.id, ClientOrder.order_number,
             ClientOrder.delivery_deadline,
-        ).order_by(func.count(func.distinct(Drawer.id)).desc()).limit(limit)
+        ).order_by(func.count(func.distinct(Piece.id)).desc()).limit(limit)
         return (await self.db.execute(stmt)).all()
 
-    async def drawer_detail(self, *, drawer_id: uuid.UUID) -> dict | None:
-        """One drawer + its current piece/style/order. ONE query for the head."""
-        from app.modules.barcode.models import Drawer
+    async def store_piece_detail(self, *, piece_id: uuid.UUID) -> dict | None:
+        """One garment in the store + its style/order. ONE query for the head.
 
+        WAS `drawer_detail`, keyed by a box id. The keys it returns are unchanged
+        so the service and its response model keep working: `drawer_id` and
+        `code` are the PIECE's id and code, because the garment is the thing the
+        screen can now be pointed at.
+        """
         row = (await self.db.execute(
             select(
-                Drawer.id, Drawer.code, Drawer.seq, Drawer.state,
-                Drawer.leather_in, Drawer.lining_in,
-                Drawer.received_at, Drawer.sended_at, Drawer.created_at,
+                Piece.id, Piece.code, Piece.seq, Piece.store_state,
+                Piece.leather_in, Piece.lining_in,
+                Piece.store_received_at, Piece.store_sended_at, Piece.created_at,
                 Piece.id, Piece.code,
                 Style.name, ClientOrder.order_number,
                 SKU.color_name, SKU.size,
             )
-            .select_from(Drawer)
+            .select_from(Piece)
             # DELIBERATELY NOT RELEASE-FILTERED. Every other query here counts
             # WORK, and unreleased work is not on the floor yet. This one reports
-            # what is PHYSICALLY IN A DRAWER, and a garment in a drawer is in that
-            # drawer whatever its style's release state says. Filtering here would
-            # render an occupied drawer as empty and send someone to put a second
-            # piece in it.
-            .outerjoin(Piece, Piece.id == Drawer.current_piece_id)
+            # what is PHYSICALLY IN THE STORE, whatever the style's release state
+            # says.
             .outerjoin(SKU, SKU.id == Piece.sku_id)
             .outerjoin(Style, Style.id == SKU.style_id)
             .outerjoin(ClientOrder, ClientOrder.id == Style.client_order_id)
-            .where(Drawer.id == drawer_id)
+            .where(Piece.id == piece_id)
         )).first()
         if row is None:
             return None
@@ -1515,8 +1522,11 @@ class DashboardRepository:
         return dict(zip(keys, row))
 
     async def drawer_cutters(self, *, piece_id: uuid.UUID) -> list:
-        """Who cut the leather / lining held in a drawer — the cut events for its
-        current piece. ONE grouped query."""
+        """Who cut the leather / lining of this garment. ONE grouped query.
+
+        Already keyed by the piece — the drawer was only ever how the screen
+        found it — so only the name was ever about a box.
+        """
         stmt = (
             select(
                 Operation.code, Employee.id, Employee.name,
@@ -1531,16 +1541,21 @@ class DashboardRepository:
         )
         return (await self.db.execute(stmt)).all()
 
-    async def drawer_movement(self, *, drawer_id: uuid.UUID, limit: int = 100) -> list:
-        """§17 — a drawer's movement history from the audit trail. ONE query over
-        audit_log rows whose entity_id is this drawer (DRAWER_RECEIVED /
-        DRAWER_SENDED / MATERIAL_RECEIVED …), newest first."""
+    async def store_movement(self, *, piece_id: uuid.UUID, limit: int = 100) -> list:
+        """§17 — a garment's store movement history from the audit trail.
+
+        ONE query over audit_log rows whose entity_id is this PIECE (the store
+        scan, the RECEIVED and SENDED transitions, the kit issue), newest first.
+        It was keyed by a drawer id; the store writes its audit rows against the
+        garment now, which is also what makes the history survive — a drawer's
+        rows were overwritten in meaning every time the box was reused.
+        """
         from app.core.models import AuditLog
 
         stmt = (
             select(AuditLog.action, AuditLog.at, AuditLog.actor_user_id,
                    AuditLog.created_at)
-            .where(AuditLog.entity_id == drawer_id)
+            .where(AuditLog.entity_id == piece_id)
             .order_by(func.coalesce(AuditLog.at, AuditLog.created_at).desc())
             .limit(limit)
         )
@@ -1553,9 +1568,14 @@ class DashboardRepository:
         limit: int = 300,
     ) -> list:
         """§8 employee traceability — for each cut event, who cut the leather /
-        lining, for which piece/style/order, and which drawer holds it. ONE query."""
-        from app.modules.barcode.models import Drawer
+        lining, for which piece/style/order, and where the garment stands in the
+        store. ONE query.
 
+        The last column used to be the drawer's code, joined through
+        `Piece.drawer_id`. It is the garment's store state now: the same question
+        ("where is this?") with an answer that exists for every piece rather than
+        only for one that happened to hold a box.
+        """
         stages = _CUT_STAGES
         if material_type == "LEATHER":
             stages = (_LEATHER_CUT,)
@@ -1567,7 +1587,7 @@ class DashboardRepository:
                 Piece.code, Operation.code, Employee.id, Employee.name,
                 Style.name, ClientOrder.order_number,
                 SKU.color_name, SKU.size,
-                ProductionEvent.work_date, Drawer.code,
+                ProductionEvent.work_date, Piece.store_state,
             )
             .select_from(ProductionEvent)
             .join(Operation, Operation.id == ProductionEvent.operation_id)
@@ -1577,7 +1597,6 @@ class DashboardRepository:
             .join(Style, Style.id == SKU.style_id)
             .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
-            .outerjoin(Drawer, Drawer.id == Piece.drawer_id)
             .where(Operation.code.in_(stages))
         )
         if piece_code is not None:
@@ -1591,8 +1610,8 @@ class DashboardRepository:
     # ══════════════════════════════════ piece stage history (stitching trace)
     async def piece_stage_history(self, *, piece_code: str) -> dict | None:
         """§21 traceability — every real production event of a piece, in pipeline
-        order, plus its drawer for the STORE overlay. Two queries: the piece head
-        and its events.
+        order, plus its store standing for the STORE overlay. Two queries: the
+        piece head and its events.
 
         THIS IS THE ONE PIECE-TRACKING READ. It was mounted only under the
         stitching dashboard, which is why the other stages had no piece-level
@@ -1602,18 +1621,18 @@ class DashboardRepository:
           • CONSUMPTION + the lot article per cut event — the cutting and lining
             screens are about material, and without these they could show that a
             piece was cut but not what it cost.
-          • The drawer CODE, not just its state. "holding_leather" does not tell
-            an operator which drawer to walk to.
+          • WHAT THE GARMENT IS HOLDING, not just its state word. "holding_
+            leather" on its own does not tell an operator what is still owed.
           • The article and the padded serial, matching every other piece payload.
 
-        THE DRAWER JOIN READS `Drawer.current_piece_id`, NOT `Piece.drawer_id`.
-        Those are the same link from opposite ends, and only the first one is
-        live: a store scan mutates the drawer that CLAIMS the piece. Reading
-        through the stored pointer is how a payload ends up disagreeing with the
-        store screen about the same piece — the same correction already made in
-        barcode/repository.py::piece_card.
+        THE STORE COLUMNS COME OFF THE PIECE. They used to be joined from the
+        drawer that CLAIMED the piece (`Drawer.current_piece_id`, deliberately
+        not `Piece.drawer_id` — the same link from opposite ends, only one of
+        them live), and picking the wrong end was how a payload ended up
+        disagreeing with the store screen about the same garment. The garment
+        carries its own standing now, so there is no end to pick.
         """
-        from app.modules.barcode.models import Drawer, MaterialLot
+        from app.modules.barcode.models import MaterialLot
 
         # EVERY column is labelled. Four of the tables in this join have a `code`
         # and two have a `name`, so unlabelled attribute access on the Row would
@@ -1632,10 +1651,10 @@ class DashboardRepository:
                 SKU.color_name.label("color_name"),
                 SKU.color_code.label("color_code"),
                 SKU.size.label("size"),
-                Drawer.state.label("drawer_state"),
-                Drawer.code.label("drawer_code"),
-                Drawer.leather_in.label("leather_in"),
-                Drawer.lining_in.label("lining_in"),
+                Piece.store_state.label("store_state"),
+                Piece.leather_in.label("leather_in"),
+                Piece.lining_in.label("lining_in"),
+                Piece.accessories_in.label("accessories_in"),
             )
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
@@ -1643,7 +1662,6 @@ class DashboardRepository:
             .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .outerjoin(Operation, Operation.id == Piece.current_operation_id)
-            .outerjoin(Drawer, Drawer.current_piece_id == Piece.id)
             # BUG #29 — ACCEPT EITHER CODE A GARMENT ANSWERS TO.
             #
             # A piece has TWO live codes in the registry: the compact primary
@@ -1700,10 +1718,15 @@ class DashboardRepository:
             "order_number": head.order_number,
             "colour": head.color_name or head.color_code,
             "size": head.size,
-            "drawer_state": head.drawer_state,
-            "drawer_code": head.drawer_code,
+            # `drawer_*` KEY NAMES ARE KEPT so the service and its response model
+            # keep reading them; the values are the GARMENT's own standing, which
+            # is where these three facts live now. `drawer_code` is the piece
+            # code: the thing an operator can actually go and find.
+            "drawer_state": head.store_state,
+            "drawer_code": head.piece_code,
             "drawer_leather_in": bool(head.leather_in),
             "drawer_lining_in": bool(head.lining_in),
+            "accessories_in": bool(head.accessories_in),
             "events": events,
         }
 
@@ -1711,7 +1734,7 @@ class DashboardRepository:
     # Factory-wide aggregates for the DM control panel. All follow the same
     # single-grouped-query discipline as the four stage dashboards; attendance
     # and shift config are imported lazily inside their methods so the acyclic
-    # import chain is preserved (the same pattern used for MaterialLot/Drawer).
+    # import chain is preserved (the same pattern used for MaterialLot).
 
     # op -> department, in pipeline order. Cutting folds leather + lining cut;
     # Stitching folds line + shell + final finish.
@@ -1728,7 +1751,7 @@ class DashboardRepository:
     # which only means anything where one stage genuinely feeds the next.
     #
     # LINING_CUTTING is absent HERE on purpose — it is a PARALLEL entry that
-    # rejoins at the drawer, so it has no predecessor to subtract from. It is
+    # rejoins at the store, so it has no predecessor to subtract from. It is
     # NOT absent from the dashboard: see _DM_DISPLAY_PIPELINE below, which is
     # what the DM screen and order/style tracking actually render.
     _DM_PIPELINE = (
@@ -1753,7 +1776,7 @@ class DashboardRepository:
     #             cut, which would report a leather-only order as behind on
     #             lining forever.
     #   STORE     not a ProductionEvent at all (core/store_display.py). It is the
-    #             drawer's state, so its numbers come from store_pipeline_counts
+    #             store state, so its numbers come from store_pipeline_counts
     #             rather than from the event funnel.
     _K_CHAIN, _K_PARALLEL, _K_STORE = "CHAIN", "PARALLEL", "STORE"
     _DM_DISPLAY_PIPELINE = (

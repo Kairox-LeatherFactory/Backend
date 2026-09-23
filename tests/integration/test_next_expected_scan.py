@@ -53,8 +53,24 @@ async def test_a_lot_label_asks_for_the_piece(db, leather_lot):
 async def test_a_legacy_drawer_label_still_resolves_but_asks_for_nothing(db, pieces):
     """The DRAWER registry rows are KEPT so old labels do not 404 — the drawer
     tables are retained, unwritten, for audit. What they can no longer do is ask
-    for a pairing scan, because there is nothing left to pair them with."""
-    _, drawer = pieces[0]
+    for a pairing scan, because there is nothing left to pair them with.
+
+    THE ROW IS MINTED HERE, not taken from a fixture, because nothing mints one
+    any more. A label printed before the store moved onto the piece is exactly
+    this shape, and a sticker already on a shelf is the only way one is ever
+    scanned again."""
+    from app.core.enums import BarcodeStatus, BarcodeType, DrawerState
+    from app.modules.barcode.models import BarcodeRegistry, Drawer
+
+    drawer = Drawer(code="DRW-LEGACY-0001", seq=9001,
+                    state=DrawerState.WAITING.value)
+    db.add(drawer)
+    await db.flush()
+    db.add(BarcodeRegistry(code=drawer.code, type=BarcodeType.DRAWER.value,
+                           status=BarcodeStatus.ACTIVE.value, drawer_id=drawer.id,
+                           caption=drawer.code))
+    await db.commit()
+
     out = await BarcodeService(db).resolve(drawer.code)
     assert out["type"] == "DRAWER"
     assert out["next_expected_scan"] is None
@@ -69,7 +85,7 @@ async def test_a_piece_is_the_END_of_the_store_scan_not_the_middle(db, pieces):
     garment, and after the garment there is nothing to present. What the piece is
     waiting for is a STAGE, which `next_stage` in the same payload carries.
     """
-    piece, _ = pieces[0]
+    piece = pieces[0]
     out = await BarcodeService(db).resolve(piece.code)
     assert out["next_expected_scan"] is None
 
@@ -78,7 +94,7 @@ async def test_a_piece_is_the_END_of_the_store_scan_not_the_middle(db, pieces):
 async def test_a_piece_whose_drawer_is_full_asks_for_no_further_scan(db, cut_pieces, cutter):
     """Not a failure to answer — there IS no pairing scan left. The piece's next
     move is a production stage, which the same payload now reports."""
-    piece, drawer = cut_pieces[0]
+    piece = cut_pieces[0]
     svc = StoreService(db)
     for part in (StorePart.LEATHER, StorePart.LINING):
         await svc.store_scan(piece_id=piece.id, employee_id=cutter[0].id, part=part)
@@ -93,7 +109,7 @@ async def test_a_piece_whose_drawer_is_full_asks_for_no_further_scan(db, cut_pie
 # ══════════════════════════════════════════════ the production answer
 @pytest.mark.asyncio
 async def test_an_uncut_piece_reports_the_cut_and_where_it_is_logged(db, pieces):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     out = await BarcodeService(db).resolve(piece.code)
     assert out["next_stage"] == "LEATHER_CUTTING"
     assert out["next_stage_label"] == "Leather Cutting"
@@ -104,7 +120,7 @@ async def test_an_uncut_piece_reports_the_cut_and_where_it_is_logged(db, pieces)
 async def test_the_stage_advances_with_the_piece(
     db, operations, pieces, cutter, cutting_mgr, leather_lot
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     await ProductionService(db).log_batch(
         user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[piece.id],
         work_date=TODAY, screen=ScreenContext.LEATHER_CUT,
@@ -121,7 +137,7 @@ async def test_the_merge_gate_is_reported_and_names_the_drawer(
 ):
     """The piece is due at LINE_STITCHING but its drawer has not been sent. Both
     facts are returned: where it is going, and what is holding it."""
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     svc = ProductionService(db)
     await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
                         piece_ids=[piece.id], work_date=TODAY,
@@ -143,7 +159,7 @@ async def test_a_finished_piece_says_so_instead_of_going_quiet(
     db, operations, pieces, cutter, paster, tailor, cutting_mgr, stitching_mgr,
     dm, leather_lot, ready_for_store
 ):
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     svc = ProductionService(db)
     await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
                         piece_ids=[piece.id], work_date=TODAY,
@@ -182,7 +198,7 @@ async def test_resolve_and_the_log_infer_the_same_stage(
 ):
     """THE AGREEMENT TEST. `/resolve` advertises a stage; `/production/log` picks
     one. They read the same helper, and this is what keeps that true."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     svc = ProductionService(db)
     await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
                         piece_ids=[piece.id], work_date=TODAY,

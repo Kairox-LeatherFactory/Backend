@@ -24,7 +24,7 @@ a paging bug. This module is the one shape and the one way to ask for it.
 WHAT IT IS NOT
 
 It does not retrofit the existing shapes. `RunPiecePage`, `LedgerPage`,
-`BarcodeHistoryPage` and `DrawerLabelPage` are published contracts that a
+`BarcodeHistoryPage` and the label pages are published contracts that a
 frontend is reading today, and quietly changing a response shape breaks a screen
 without breaking a test. New and newly-paginated endpoints use `Page`; the older
 ones migrate when their consumer is ready.

@@ -25,11 +25,11 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.core.enums import (
-    BarcodeStatus, BarcodeType, DrawerState, SheetStatus, StoreState,
+    BarcodeStatus, BarcodeType, SheetStatus, StoreState,
 )
 from app.core.pagination import PageParams
 from app.modules.barcode.models import (
-    BarcodeRegistry, Drawer, MaterialLot, MaterialSheet,
+    BarcodeRegistry, MaterialLot, MaterialSheet,
 )
 from app.modules.barcode.repository import encode_short
 from app.modules.barcode.service import BarcodeService
@@ -76,7 +76,7 @@ async def order_barcodes(db, order_tree, pieces):
     order_id / style_id / sku_id, which is what premint writes and what every
     /barcode/orders* read filters on."""
     codes = []
-    for i, (piece, _drawer) in enumerate(pieces, start=1):
+    for i, piece in enumerate(pieces, start=1):
         # The fixture's long code becomes the LEGACY ALIAS, which is what the
         # compact-code switch actually did to it (bug #19): the printed label
         # keeps resolving, but it is no longer the code anything prints or
@@ -99,7 +99,7 @@ async def order_barcodes(db, order_tree, pieces):
 # ══════════════════════════════════════════════════════════════ resolve
 class TestResolve:
     async def test_a_piece_code_returns_the_whole_garment_card(self, db, pieces):
-        piece, drawer = pieces[0]
+        piece = pieces[0]
         out = await BarcodeService(db).resolve(piece.code)
 
         assert out["type"] == BarcodeType.PIECE.value
@@ -118,35 +118,42 @@ class TestResolve:
         assert card["needs_lining"] is True
 
     async def test_the_piece_payload_pre_joins_the_sticker_text(self, db, pieces):
-        out = await BarcodeService(db).resolve(pieces[0][0].code)
+        out = await BarcodeService(db).resolve(pieces[0].code)
         assert out["piece"]["label_line"] == \
             "JP-PO · CLERMONT · CL1 · PINE GREEN · M · 001"
 
-    async def test_the_drawer_travels_with_every_payload_that_names_a_piece(
+    async def test_the_store_travels_with_every_payload_that_names_a_piece(
             self, db, pieces):
-        """BUG #12 — so an operator on any stage can see where the garment lives
-        without opening the Store hub."""
-        piece, drawer = pieces[0]
+        """BUG #12 — so an operator on any stage can see where the garment
+        stands without opening the Store hub.
+
+        This used to carry a DRAWER: an id and the code of the box to walk to,
+        and null for any garment the 200-slot pool had no room for. The garment
+        carries its own standing, so every piece has an answer.
+        """
+        piece = pieces[0]
         out = await BarcodeService(db).resolve(piece.code)
-        assert out["piece"]["drawer_code"] == drawer.code
-        assert out["piece"]["drawer"]["drawer_id"] == str(drawer.id)
-        assert out["piece"]["drawer"]["leather_in"] is False
+        store = out["piece"]["store"]
+        assert store["state"] == piece.store_state
+        assert store["leather_in"] is False
+        assert store["holding"] is not None
+        assert out["piece"]["store_state"] == piece.store_state
 
     async def test_a_piece_minted_before_the_compact_switch_has_no_short_code(
             self, db, pieces):
         """null means 'not backfilled yet' — the long code still scans, so this
         is a gap to fill rather than a failure."""
         assert (await BarcodeService(db).resolve(
-            pieces[0][0].code))["piece"]["short_code"] is None
+            pieces[0].code))["piece"]["short_code"] is None
 
     async def test_a_backfilled_piece_reports_its_compact_code(
             self, db, pieces, order_barcodes):
-        out = await BarcodeService(db).resolve(pieces[0][0].code)
+        out = await BarcodeService(db).resolve(pieces[0].code)
         assert out["piece"]["short_code"] == order_barcodes[0]
 
     async def test_the_cut_consumption_is_carried_on_the_card(
             self, db, pieces, order_tree, operations):
-        piece, _ = pieces[0]
+        piece = pieces[0]
         db.add(ProductionEvent(
             sku_id=order_tree["sku"].id, piece_id=piece.id,
             operation_id=operations["LEATHER_CUTTING"].id,
@@ -164,14 +171,10 @@ class TestResolve:
         assert out["employee"]["is_active"] is True
         assert out["next_expected_scan"] == "PIECE"
 
-    async def test_a_drawer_code_returns_its_state_and_holding_label(
-            self, db, pieces):
-        _piece, drawer = pieces[0]
-        out = await BarcodeService(db).resolve(drawer.code)
-        assert out["type"] == BarcodeType.DRAWER.value
-        assert out["drawer"]["state"] == DrawerState.MERGED.value
-        assert out["drawer"]["holding"] is not None
-        assert out["drawer"]["accessories_in"] is False
+    # THE DRAWER CODE IS GONE. There used to be a test here that resolved a
+    # DRW- label to a box's state and holding label. No drawer barcode is minted
+    # any more, so there is nothing to scan and nothing to assert — what the
+    # label was read FOR is on the piece payload, above.
 
     async def test_a_lot_label_returns_its_stock(self, db):
         lot, code = await make_lot(db)
@@ -207,23 +210,30 @@ class TestResolve:
         assert e.value.status_code == 404 and "NOT-A-CODE" in e.value.detail
 
     async def test_resolution_is_case_and_whitespace_insensitive(self, db, pieces):
-        code = pieces[0][0].code
+        code = pieces[0].code
         out = await BarcodeService(db).resolve(f"  {code.lower()} ")
         assert out["code"] == code
 
     @pytest.mark.parametrize("type_,field", [
         (BarcodeType.PIECE, "piece_id"),
         (BarcodeType.EMPLOYEE, "employee_id"),
-        (BarcodeType.DRAWER, "drawer_id"),
+        (BarcodeType.LEATHER_SHEET, "material_sheet_id"),
     ])
     async def test_a_retired_code_of_any_type_is_410_not_404(
             self, db, pieces, cutter, type_, field):
         """F18: retirement is a lifecycle state on the REGISTRY, not an
         employee-only concept. 'never existed' and 'was deactivated' are
-        different facts and the UI must be able to tell them apart."""
-        piece, drawer = pieces[0]
+        different facts and the UI must be able to tell them apart.
+
+        DRAWER was the third case here and is gone with the drawer barcode. The
+        rule it was standing in for — "retirement applies to EVERY type, not just
+        EMPLOYEE" — needs a third type to be worth parametrising, so the hide
+        takes its place: it is the newest label in the registry and the one most
+        likely to be retired next.
+        """
+        piece = pieces[0]
         target = {"piece_id": piece.id, "employee_id": cutter[0].id,
-                  "drawer_id": drawer.id}[field]
+                  "material_sheet_id": uuid.uuid4()}[field]
         await register(db, code=f"RETIRED-{type_.value}", type=type_.value,
                        status=BarcodeStatus.RETIRED.value, **{field: target})
         with pytest.raises(HTTPException) as e:
@@ -240,18 +250,29 @@ class TestResolve:
         assert out["piece"]["piece_id"] is not None
         assert "code" not in out["piece"]
 
-    async def test_a_dangling_employee_lot_and_drawer_row_degrade_gracefully(
-            self, db):
+    async def test_a_dangling_employee_and_lot_row_degrade_gracefully(self, db):
         await register(db, code="ORPHAN-EMP", type=BarcodeType.EMPLOYEE.value,
                        employee_id=uuid.uuid4())
-        await register(db, code="ORPHAN-DRW", type=BarcodeType.DRAWER.value,
-                       drawer_id=uuid.uuid4())
         await register(db, code="ORPHAN-LOT", type=BarcodeType.LEATHER_LOT.value,
                        material_lot_id=uuid.uuid4())
         svc = BarcodeService(db)
         assert (await svc.resolve("ORPHAN-EMP"))["employee"].keys() == {"employee_id"}
-        assert (await svc.resolve("ORPHAN-DRW"))["drawer"].keys() == {"drawer_id"}
         assert (await svc.resolve("ORPHAN-LOT"))["lot"].keys() == {"lot_id"}
+
+    async def test_a_legacy_drawer_row_answers_with_its_code_and_nothing_else(
+            self, db):
+        """THE HISTORICAL ROWS ARE STILL THERE, and a scan of one must not 500.
+
+        The drawer tables are kept for audit, so DRW- registry rows survive in
+        databases that had them. Nothing resolves a drawer any more, so the
+        payload has no `drawer` block — the scan degrades to "known code, this
+        type", which is the same graceful floor every dangling row gets.
+        """
+        await register(db, code="LEGACY-DRW", type=BarcodeType.DRAWER.value)
+        out = await BarcodeService(db).resolve("LEGACY-DRW")
+        assert out["type"] == BarcodeType.DRAWER.value
+        assert "drawer" not in out
+        assert out["next_expected_scan"] is None
 
     async def test_a_sheet_row_pointing_at_no_hide_returns_an_empty_block(self, db):
         await register(db, code="ORPHAN-SHEET",
@@ -263,7 +284,7 @@ class TestResolve:
     async def test_a_legacy_long_code_reports_itself_as_an_alias(self, db, pieces):
         """The scan works; the UI can nudge the operator to reprint the label
         with the small code."""
-        piece, _ = pieces[0]
+        piece = pieces[0]
         await register(db, code="OLD-LONG-CODE-001", type=BarcodeType.PIECE.value,
                        piece_id=piece.id, is_alias=True)
         assert (await BarcodeService(db).resolve("OLD-LONG-CODE-001"))["is_alias"]
@@ -275,7 +296,7 @@ class TestNextStep:
             self, db, pieces):
         """A piece with no cut event yet is reached from a cut SCREEN, never by
         pipeline inference — say so rather than implying a pipeline scan."""
-        out = await BarcodeService(db).resolve(pieces[0][0].code)
+        out = await BarcodeService(db).resolve(pieces[0].code)
         assert out["next_stage"] == "LEATHER_CUTTING"
         assert out["next_stage_label"] == "Leather Cutting"
         assert "cut screen" in out["next_stage_blocked_reason"]
@@ -285,7 +306,7 @@ class TestNextStep:
         """The SOFT half of the merge gate. It has to agree with the hard gate
         in ProductionService._merge_ok, or the screen promises a stage the log
         then refuses."""
-        piece, _ = pieces[0]
+        piece = pieces[0]
         for code in ("LEATHER_CUTTING", "FUSING", "PASTING", "LINING_CUTTING"):
             db.add(ProductionEvent(
                 sku_id=order_tree["sku"].id, piece_id=piece.id,
@@ -298,7 +319,7 @@ class TestNextStep:
 
     async def test_a_released_garment_is_no_longer_blocked(
             self, db, pieces, order_tree, operations):
-        piece, _ = pieces[0]
+        piece = pieces[0]
         for code in ("LEATHER_CUTTING", "FUSING", "PASTING", "LINING_CUTTING"):
             db.add(ProductionEvent(
                 sku_id=order_tree["sku"].id, piece_id=piece.id,
@@ -312,7 +333,7 @@ class TestNextStep:
 
     async def test_a_finished_garment_says_so_rather_than_returning_nothing(
             self, db, pieces, order_tree, operations):
-        piece, _ = pieces[0]
+        piece = pieces[0]
         for code in operations:
             db.add(ProductionEvent(
                 sku_id=order_tree["sku"].id, piece_id=piece.id,
@@ -332,18 +353,16 @@ class TestNextStep:
 # ══════════════════════════════════════════════ the narrowed resolvers
 class TestNarrowResolvers:
     async def test_each_resolver_returns_its_own_id(self, db, pieces, cutter):
-        piece, drawer = pieces[0]
+        piece = pieces[0]
         lot, lot_code = await make_lot(db)
         svc = BarcodeService(db)
         assert await svc.resolve_piece_id(piece.code) == piece.id
         assert await svc.resolve_employee_id(cutter[1].code) == cutter[0].id
-        assert await svc.resolve_drawer_id(drawer.code) == drawer.id
         assert await svc.resolve_lot_id(lot_code) == lot.id
 
     @pytest.mark.parametrize("method,message", [
         ("resolve_piece_id", "not a known piece barcode"),
         ("resolve_employee_id", "not a known employee barcode"),
-        ("resolve_drawer_id", "not a known drawer barcode"),
         ("resolve_lot_id", "not a known material-lot barcode"),
     ])
     async def test_a_code_of_the_wrong_type_is_a_404_naming_the_type_wanted(
@@ -351,14 +370,14 @@ class TestNarrowResolvers:
         svc = BarcodeService(db)
         code = cutter[1].code if method != "resolve_employee_id" else "NOPE"
         if method == "resolve_employee_id":
-            await register(db, code="NOPE", type=BarcodeType.DRAWER.value,
-                           drawer_id=uuid.uuid4())
+            await register(db, code="NOPE", type=BarcodeType.LEATHER_LOT.value,
+                           material_lot_id=uuid.uuid4())
         with pytest.raises(HTTPException) as e:
             await getattr(svc, method)(code)
         assert e.value.status_code == 404 and message in e.value.detail
 
     async def test_every_narrow_resolver_honours_the_410(self, db, pieces):
-        piece, _ = pieces[0]
+        piece = pieces[0]
         await register(db, code="DEAD-PIECE", type=BarcodeType.PIECE.value,
                        piece_id=piece.id, status=BarcodeStatus.RETIRED.value)
         with pytest.raises(HTTPException) as e:
@@ -464,7 +483,7 @@ class TestEmployeeCardLifecycle:
         """You delete the scannable code, never the person or their record."""
         emp, bc = cutter
         db.add(ProductionEvent(
-            sku_id=order_tree["sku"].id, piece_id=pieces[0][0].id,
+            sku_id=order_tree["sku"].id, piece_id=pieces[0].id,
             operation_id=operations["LEATHER_CUTTING"].id,
             employee_id=emp.id, work_date=date.today()))
         await db.commit()
@@ -528,7 +547,7 @@ class TestEmployeeCardLifecycle:
 class TestPrintPayload:
     async def test_a_label_carries_the_code_the_caption_and_the_typeset_line(
             self, db, pieces):
-        piece, _ = pieces[0]
+        piece = pieces[0]
         out = await BarcodeService(db).print_payload(codes=[piece.code])
         label = out["labels"][0]
         assert label["symbology"] == "code128"
@@ -569,7 +588,7 @@ class TestPrintPayload:
         """Selecting Piece.code here would print a sheet of exactly the labels
         the compact-code change set out to shrink."""
         out = await BarcodeService(db).print_payload(sku_id=order_tree["sku"].id)
-        assert pieces[0][0].code not in {l["code"] for l in out["labels"]}
+        assert pieces[0].code not in {l["code"] for l in out["labels"]}
 
     async def test_a_retired_label_is_not_part_of_a_reprint_run(
             self, db, order_tree, order_barcodes):
@@ -697,7 +716,7 @@ class TestOrderScreens:
         """Since bug #19 a piece can hold two registry rows. Counting both would
         drive `balance` negative and make the duplicates=0 proof read broken."""
         await register(db, code="LEGACY-LONG-1", type=BarcodeType.PIECE.value,
-                       piece_id=pieces[0][0].id, is_alias=True,
+                       piece_id=pieces[0].id, is_alias=True,
                        order_id=order_tree["order"].id,
                        style_id=order_tree["style"].id,
                        sku_id=order_tree["sku"].id)
@@ -764,7 +783,7 @@ class TestHistory:
 
     async def test_the_current_stage_travels_with_the_row(
             self, db, order_tree, order_barcodes, pieces, operations):
-        piece, _ = pieces[0]
+        piece = pieces[0]
         piece.current_operation_id = operations["FUSING"].id
         await db.commit()
         out = await BarcodeService(db).list_history(order_tree["order"].id)
@@ -839,7 +858,7 @@ class TestHistory:
 class TestBarcodeDetail:
     async def test_the_click_through_returns_the_same_payload_as_a_scan(
             self, db, pieces):
-        code = pieces[0][0].code
+        code = pieces[0].code
         svc = BarcodeService(db)
         assert await svc.barcode_detail(code) == await svc.resolve(code)
 
@@ -896,20 +915,15 @@ class TestCodeMinting:
         await db.commit()
         assert row.code == "EMP-000001"
 
-    async def test_a_drawer_code_is_derived_from_its_sequence(self, db):
-        drawer = Drawer(code="X", seq=14, state=DrawerState.WAITING.value)
-        db.add(drawer)
-        await db.flush()
-        row = await BarcodeService(db).repo.mint_drawer_code_nocommit(
-            drawer.id, 14)
-        await db.commit()
-        assert row.code == "DRW-0014" and row.caption == "Drawer 14"
+    # `mint_drawer_code_nocommit` IS GONE, and with it the test that DRW-0014
+    # was derived from seq 14. Nothing mints a drawer label: the store is a state
+    # on the garment, and a state has no barcode.
 
     async def test_a_single_piece_short_code_continues_the_import_sequence(
             self, db, pieces, order_barcodes):
         repo = BarcodeService(db).repo
         assert await repo.max_short_code_counter() == 5
-        row = await repo.mint_piece_short_code_nocommit(pieces[0][0].id)
+        row = await repo.mint_piece_short_code_nocommit(pieces[0].id)
         await db.commit()
         assert row.code == encode_short(6)
 
@@ -925,7 +939,7 @@ class TestCodeMinting:
         """A piece minted before the switch has one row — its long code, primary
         and active. Returning that as `short_code` is precisely what it is not."""
         codes = await BarcodeService(db).repo.short_codes_for_pieces(
-            [pieces[0][0].id])
+            [pieces[0].id])
         assert codes == {}
 
     async def test_the_batched_print_reads_short_circuit_on_an_empty_list(self, db):

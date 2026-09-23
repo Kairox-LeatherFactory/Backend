@@ -870,19 +870,40 @@ class WageService:
         # up piece work it would pay a piece-rate cutter on the same window a
         # PIECE run pays them, which is the double payment the fork exists to
         # make impossible.
-        rate_cache: dict[tuple[uuid.UUID, uuid.UUID, date], float | None] = {}
+        rate_cache: dict[tuple[uuid.UUID, uuid.UUID, date], tuple] = {}
         rows = [] if is_monthly_run else await self.production.piece_counts(
             period_start, period_end, style_ids=style_ids, order_id=order_id)
+        # ── WHY A RUN CAME OUT SMALLER THAN EXPECTED ─────────────────────────
+        # Every `continue` in this loop is a piece that was worked and not paid.
+        # None of them used to leave a trace, so a run that priced nothing looked
+        # exactly like a run with nothing to price. These four counters are what
+        # the diagnostics block below is built from.
+        events_seen = 0
+        pieces_seen = 0
+        skipped_wage_type: dict = defaultdict(int)      # {employee_id: pieces}
+        backdated: dict = defaultdict(int)              # {(style, op): pieces}
         for emp_id, style_id, op_id, work_date, qty in rows:
+            events_seen += 1
+            pieces_seen += int(qty)
             if wage_type_of.get(emp_id) is not WageType.PIECE_RATE:
+                # A MONTHLY worker's piece work is not unpaid — their salary
+                # covers it — but a worker with NO wage type at all is a data
+                # error, and either way the manager asking "where are my 340
+                # pieces" deserves the answer.
+                skipped_wage_type[emp_id] += int(qty)
                 continue
             key = (style_id, op_id, work_date)
             if key not in rate_cache:
-                rate_cache[key] = await self.repo.effective_rate(style_id, op_id, work_date)
-            rate = rate_cache[key]
+                rate_cache[key] = await self.repo.effective_rate(
+                    style_id, op_id, work_date)
+            rate, was_backdated = rate_cache[key]
             if rate is None:
                 unrated[(style_id, op_id)] += int(qty)
                 continue
+            if was_backdated:
+                # Priced from a rate whose effective_from is AFTER this work.
+                # It is paid, and it is reported — see effective_rate.
+                backdated[(style_id, op_id)] += int(qty)
             amount = float(qty) * rate
             per_emp_amount[emp_id] += amount
             per_emp_pieces[emp_id] += int(qty)
@@ -968,6 +989,13 @@ class WageService:
         unrated_out = await self._name_unrated(unrated)
         await self.repo.persist_unrated(run, unrated_out)
 
+        diagnostics = await self._diagnostics(
+            is_monthly_run=is_monthly_run, pays_monthly=pays_monthly,
+            scoped=scoped, events_seen=events_seen, pieces_seen=pieces_seen,
+            skipped_wage_type=skipped_wage_type, backdated=backdated,
+            unrated_out=unrated_out, lines=lines,
+            period_start=period_start, period_end=period_end)
+
         if freeze:
             await self.repo.close_run(run)
 
@@ -996,6 +1024,10 @@ class WageService:
             "total_pieces": sum(int(ln.pieces) for ln in lines),
             "employee_count": len(lines),
             "unrated_operations": unrated_out,
+            # WHY THE TOTAL IS WHAT IT IS. Written on every run, not only empty
+            # ones — "why is this smaller than I expected" is the same question
+            # asked more quietly. See _diagnostics.
+            "diagnostics": diagnostics,
             # H13: every silent exclusion is now visible on the run.
             "excluded_untyped_employees": [
                 {"employee_id": str(e.id), "name": e.name,
@@ -1004,6 +1036,80 @@ class WageService:
             ],
             "lines": detail_lines,
             "gap_days": gap_days,
+        }
+
+    async def _diagnostics(self, *, is_monthly_run: bool, pays_monthly: bool,
+                           scoped: bool, events_seen: int, pieces_seen: int,
+                           skipped_wage_type: dict, backdated: dict,
+                           unrated_out: list, lines: list,
+                           period_start: date, period_end: date) -> dict:
+        """Account for every piece the window contained, paid or not.
+
+        THE COMPLAINT THIS ANSWERS, in the manager's own words: "after assigning
+        rates for all operations, Compute Wage is not calculating the total".
+        Three different situations produce that, and the response could not tell
+        them apart — an empty window, a population with the wrong wage type, and
+        a full rate sheet dated after the work all rendered as `total: 0.00` with
+        an empty `lines` list.
+
+        So: `pieces_in_window` is what the query found, and the three buckets
+        under it say where each piece went. They add up, and `notes` turns
+        whichever one is non-zero into a sentence naming what to do about it.
+        """
+        unpaid_unrated = sum(int(r.get("unpaid_pieces") or 0) for r in unrated_out)
+        skipped_pieces = sum(skipped_wage_type.values())
+        backdated_pieces = sum(backdated.values())
+        paid_pieces = sum(int(ln.pieces) for ln in lines)
+
+        notes: list[str] = []
+        if not is_monthly_run and events_seen == 0:
+            notes.append(
+                f"No production events were logged between {period_start} and "
+                f"{period_end}"
+                + (" for the style/order this run is scoped to." if scoped
+                   else " anywhere in the factory.")
+                + " A run can only pay work that has been logged — check the "
+                  "dates, and the scope if one was given.")
+        if skipped_pieces:
+            names = await self.employees.names_for(list(skipped_wage_type))
+            who = ", ".join(
+                f"{names.get(e) or str(e)} ({n})"
+                for e, n in sorted(skipped_wage_type.items(),
+                                   key=lambda kv: -kv[1])[:5])
+            notes.append(
+                f"{skipped_pieces} piece(s) were worked by people who are not on "
+                f"PIECE_RATE, so this run does not pay for them: {who}. A "
+                f"MONTHLY worker's salary already covers their work; an employee "
+                f"with no wage type at all is a record to fix.")
+        if unpaid_unrated:
+            notes.append(
+                f"{unpaid_unrated} piece(s) could not be priced because no rate "
+                f"has ever been set for their style and operation. See "
+                f"`unrated_operations` and set those rates, then recompute.")
+        if backdated_pieces:
+            notes.append(
+                f"{backdated_pieces} piece(s) were priced from a rate whose "
+                f"effective_from is AFTER the day they were worked — the rate "
+                f"sheet was filled in later. They ARE paid, at the earliest rate "
+                f"on file. If that is wrong, set the rate with the correct "
+                f"effective_from and recompute.")
+        if is_monthly_run and not lines:
+            notes.append(
+                "No salaried employee was paid: a MONTHLY run pays active "
+                "employees whose wage_type is MONTHLY and whose monthly_salary "
+                "is set. See `unrated_operations` for salaries that are missing.")
+        if not notes:
+            notes.append("Every piece in the window was priced.")
+
+        return {
+            "pieces_in_window": pieces_seen,
+            "events_in_window": events_seen,
+            "pieces_paid": paid_pieces,
+            "pieces_skipped_wrong_wage_type": skipped_pieces,
+            "pieces_unrated": unpaid_unrated,
+            "pieces_priced_from_a_backdated_rate": backdated_pieces,
+            "pays_monthly_salaries": bool(pays_monthly),
+            "notes": notes,
         }
 
     async def _name_unrated(self, unrated: dict[tuple, int]) -> list[dict]:

@@ -415,7 +415,8 @@ async def test_each_garment_is_charged_what_its_own_row_measured(
     gen = await svc.generate(GenerateRequest(
         style_id=order_tree["style"].id, colour="PINE GREEN"))
     # Force the two rows apart, which is what the floor does by hand anyway.
-    await svc.add_sheet(gen["rows"][0]["row_id"], SheetAdd(dcm=60))
+    await svc.add_sheet(gen["rows"][0]["row_id"],
+                        SheetAdd(dcm=60, create_if_missing=True))
     for r in gen["rows"]:
         await svc.approve(r["row_id"], actor_user_id=None,
                           cutter_employee_id=cutter[0].id)
@@ -466,7 +467,8 @@ async def test_a_garment_may_take_far_more_than_its_target(db, order_tree,
     gen = await svc.generate(GenerateRequest(
         style_id=order_tree["style"].id, colour="PINE GREEN"))
     row = gen["rows"][0]
-    piled = await svc.add_sheet(row["row_id"], SheetAdd(dcm=500))
+    piled = await svc.add_sheet(row["row_id"],
+                               SheetAdd(dcm=500, create_if_missing=True))
     assert piled["total_dcm"] > piled["target_dcm"] * 2
 
     out = await svc.approve(row["row_id"], actor_user_id=None,
@@ -492,3 +494,88 @@ async def test_the_target_is_the_size_baseline_when_no_spec_says_otherwise(db):
                                                                       "size_baseline")
     assert leather_target_dcm(size="S", spec_dcm_per_piece=412.5) == (412.5,
                                                                       "style_spec")
+
+
+# ══════════════════════════════════════════════ 1C · the dcm is the lookup
+# The cutter reads the number written on the skin and types it. He does not know
+# the LS- code and there is nothing on the screen to pick from — that was the
+# whole complaint. These pin the three answers the box can give.
+async def test_typing_a_measurement_finds_that_hide_and_takes_it_off_the_shelf(
+        db, order_tree, garments, cutter):
+    """One number in, one named hide out — and it is GONE from the shelf.
+
+    This used to MINT a sheet at the typed dcm, so the commonest entry on the
+    screen quietly added leather nobody had received: the skin was already an
+    LS- row, and now it was on the shelf twice.
+    """
+    await _lot(db)
+    svc = CuttingService(db)
+    gen = await svc.generate(GenerateRequest(
+        style_id=order_tree["style"].id, colour="PINE GREEN", allocate=False))
+    row_id = gen["rows"][0]["row_id"]
+
+    before = await svc.sheet_options(row_id)
+    wanted = next(s for s in before["sheets"] if s["dcm"] == 57.0)
+
+    out = await svc.add_sheet(row_id, SheetAdd(dcm=57))
+    assert out["matched_sheet"]["code"] == wanted["code"], \
+        "the typed measurement must resolve to a hide that already existed"
+    assert out["sheets"][0]["status"] == SheetStatus.ALLOCATED.value
+
+    after = await svc.sheet_options(row_id)
+    assert after["available_count"] == before["available_count"] - 1, \
+        "allocating it takes it off the shelf — that is the point of matching"
+
+
+async def test_a_near_miss_matches_the_closest_hide_and_says_so(
+        db, order_tree, garments, cutter):
+    """A hand measurement copied by hand: 52.6 typed for a 53-dcm skin.
+
+    Exactness would find nothing more often than it found the right hide, so the
+    nearest within tolerance wins — but the row is charged the HIDE's own
+    measurement and the difference is said out loud.
+    """
+    await _lot(db)
+    svc = CuttingService(db)
+    gen = await svc.generate(GenerateRequest(
+        style_id=order_tree["style"].id, colour="PINE GREEN", allocate=False))
+    row_id = gen["rows"][0]["row_id"]
+
+    out = await svc.add_sheet(row_id, SheetAdd(dcm=52.6))
+    assert out["matched_sheet"]["dcm"] == 53.0
+    assert out["total_dcm"] == 53.0, "the hide's own dcm is what is charged"
+    assert any("nearest hide" in w for w in out["warnings"])
+
+
+async def test_no_leather_of_that_article_is_a_plain_refusal_not_a_new_sheet(
+        db, order_tree, garments, cutter):
+    """'No sheet available for this' — in those words, and nothing is created.
+
+    The row's article has never been received. The old dcm door would have
+    minted a hide against whatever lot it could find; the honest answer is that
+    there is no leather to cut this from.
+    """
+    from fastapi import HTTPException
+    svc = CuttingService(db)
+    gen = await svc.generate(GenerateRequest(
+        style_id=order_tree["style"].id, colour="PINE GREEN", allocate=False))
+    with pytest.raises(HTTPException) as exc:
+        await svc.add_sheet(gen["rows"][0]["row_id"], SheetAdd(dcm=44))
+    assert exc.value.status_code == 422
+    assert "no sheet available" in str(exc.value.detail).lower()
+
+
+async def test_a_measurement_nothing_on_the_shelf_matches_names_what_is_there(
+        db, order_tree, garments, cutter):
+    """Refusing is only useful if it says what CAN be typed instead."""
+    from fastapi import HTTPException
+    await _lot(db)
+    svc = CuttingService(db)
+    gen = await svc.generate(GenerateRequest(
+        style_id=order_tree["style"].id, colour="PINE GREEN", allocate=False))
+    with pytest.raises(HTTPException) as exc:
+        await svc.add_sheet(gen["rows"][0]["row_id"], SheetAdd(dcm=900))
+    assert exc.value.status_code == 422
+    detail = str(exc.value.detail)
+    assert "nearest" in detail.lower()
+    assert "LS-" in detail, "it has to name hides the operator can actually type"

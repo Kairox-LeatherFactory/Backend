@@ -131,6 +131,55 @@ class MaterialRepository:
             .order_by(MaterialReceipt.created_at.desc()))
         return list(res.scalars().all())
 
+    # ── arrivals: the half-entered delivery (the two-sitting intake) ─────────
+    async def get_receipt(self, receipt_id: uuid.UUID) -> MaterialReceipt | None:
+        return await self.db.get(MaterialReceipt, receipt_id)
+
+    async def find_receipts(self, *, status: str | None = None,
+                            lot_id: uuid.UUID | None = None,
+                            limit: int = 200, offset: int = 0) -> list:
+        """The worklist: deliveries still waiting to be finished, oldest first.
+
+        OLDEST FIRST, unlike `receipts_for_lot`. This is a queue of unfinished
+        work rather than a history — the arrival nobody has come back to for
+        three days is the one that matters, and newest-first buries it.
+        """
+        stmt = select(MaterialReceipt)
+        if status:
+            stmt = stmt.where(MaterialReceipt.status == status.strip().upper())
+        if lot_id is not None:
+            stmt = stmt.where(MaterialReceipt.material_lot_id == lot_id)
+        stmt = stmt.order_by(MaterialReceipt.created_at.asc()).limit(limit).offset(offset)
+        return list((await self.db.execute(stmt)).scalars().all())
+
+    async def count_receipts(self, *, status: str | None = None,
+                             lot_id: uuid.UUID | None = None) -> int:
+        stmt = select(func.count()).select_from(MaterialReceipt)
+        if status:
+            stmt = stmt.where(MaterialReceipt.status == status.strip().upper())
+        if lot_id is not None:
+            stmt = stmt.where(MaterialReceipt.material_lot_id == lot_id)
+        return int(await self.db.scalar(stmt) or 0)
+
+    async def pending_intake_by_lot(self, lot_ids: list) -> dict:
+        """{lot_id: {"count": n, "declared_qty": x}} for PENDING arrivals only.
+
+        What the lot directory needs to put "2 deliveries not finished" on a row
+        without a query per lot. A lot with an unfinished arrival is carrying
+        provisional stock, and a stock screen that cannot say so is presenting an
+        estimate as a measurement.
+        """
+        if not lot_ids:
+            return {}
+        res = await self.db.execute(
+            select(MaterialReceipt.material_lot_id, func.count(),
+                   func.coalesce(func.sum(MaterialReceipt.declared_qty), 0))
+            .where(MaterialReceipt.material_lot_id.in_(tuple(lot_ids)),
+                   MaterialReceipt.status == "PENDING")
+            .group_by(MaterialReceipt.material_lot_id))
+        return {row[0]: {"count": int(row[1] or 0),
+                         "declared_qty": float(row[2] or 0)} for row in res.all()}
+
     # ── sheets (LEATHER only) ────────────────────────────────────────────────
     # A hide is a STOCK item first and a cutting-row member second: it exists
     # before any row claims it and survives the row being deleted. So its data
@@ -202,6 +251,48 @@ class MaterialRepository:
         already holds is the double-claim bug the status exists to prevent.
         """
         return await self.sheets_for_lot(lot_id, statuses=set(SHEET_ALLOCATABLE))
+
+    async def allocatable_sheets_for_lots(self, lot_ids: list) -> list:
+        """The same shelf, across SEVERAL lots, in ONE query.
+
+        The cut screen's DCM lookup asks "which hide of this article and colour
+        measures 223.5" and an article/colour can legitimately span more than one
+        lot (a substitution receipt mints one; a thickness variant is another).
+        Looping `allocatable_sheets` per lot would make the hot path on every
+        sheet entry N round trips, so the fan-out happens in SQL.
+
+        Smallest hide first, same as `sheets_for_lot`: it keeps the nearest-match
+        search deterministic when two hides tie on distance.
+        """
+        if not lot_ids:
+            return []
+        res = await self.db.execute(
+            select(MaterialSheet)
+            .where(MaterialSheet.material_lot_id.in_(tuple(lot_ids)),
+                   MaterialSheet.status.in_(tuple(SHEET_ALLOCATABLE)))
+            .order_by(MaterialSheet.dcm.asc(), MaterialSheet.code.asc()))
+        return list(res.scalars().all())
+
+    async def sheet_totals_for_lots(self, lot_ids: list) -> dict:
+        """{lot_id: {status: {"count": n, "dcm": x}}} for many lots in ONE query.
+
+        `sheet_counts_by_status` answers this for a single lot and the stock
+        screen needs it for every lot it is summing — see MaterialService.stock,
+        where the sheet-wise figures are rolled up beside the dcm ones.
+        """
+        if not lot_ids:
+            return {}
+        res = await self.db.execute(
+            select(MaterialSheet.material_lot_id, MaterialSheet.status,
+                   func.count(),
+                   func.coalesce(func.sum(MaterialSheet.dcm), 0))
+            .where(MaterialSheet.material_lot_id.in_(tuple(lot_ids)))
+            .group_by(MaterialSheet.material_lot_id, MaterialSheet.status))
+        out: dict = {}
+        for lot_id, st, count, dcm in res.all():
+            out.setdefault(lot_id, {})[st] = {
+                "count": int(count), "dcm": float(dcm or 0)}
+        return out
 
     async def sheet_dcm_in_store(self, lot_id: uuid.UUID) -> Decimal:
         """Σ dcm of the hides physically on the shelf for this lot.
@@ -317,14 +408,28 @@ class MaterialRepository:
 
     async def barcodes_by_lot(self, lot_ids: list[uuid.UUID]) -> dict:
         """{lot_id: printed lot barcode} in ONE query — the code a manager reads
-        off the physical label, so the picker can show it beside the article."""
+        off the physical label, so the picker can show it beside the article.
+
+        THE TYPE FILTER IS LOAD-BEARING, not tidiness. A LEATHER_SHEET registry
+        row carries `material_lot_id` as well as `material_sheet_id` — by design,
+        so one scan of a hide can answer "which hide" and "what article is it"
+        together (`mint_sheet_code_nocommit`). Without the filter those rows come
+        back here too, and since this is a dict comprehension the LAST row wins:
+        every sheeted lot reported one of its hides' codes (LS-000004) as the
+        lot's own barcode, on the lot picker, the lot detail page and anything
+        else that renders `barcode`. Restricting it to the three LOT types is
+        what makes the answer the lot's label and nothing else.
+        """
         if not lot_ids:
             return {}
-        from app.core.enums import BarcodeStatus
+        from app.core.enums import BarcodeStatus, BarcodeType
         from app.modules.barcode.models import BarcodeRegistry
+        lot_types = (BarcodeType.LEATHER_LOT.value, BarcodeType.LINING_LOT.value,
+                     BarcodeType.ACCESSORY_LOT.value)
         rows = await self.db.execute(
             select(BarcodeRegistry.material_lot_id, BarcodeRegistry.code)
             .where(BarcodeRegistry.material_lot_id.in_(lot_ids),
+                   BarcodeRegistry.type.in_(lot_types),
                    BarcodeRegistry.status == BarcodeStatus.ACTIVE.value)
         )
         return {lot_id: code for lot_id, code in rows.all() if lot_id is not None}

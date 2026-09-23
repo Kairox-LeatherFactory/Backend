@@ -21,7 +21,7 @@ FOUR GATES, cheapest / most-likely-to-fail first:
                    warning: skill_blocked; whole batch when the actor is wrong)
     3. SEQUENCE  — has this piece completed the previous leather-chain stage?
                    (per-piece: sequence_blocked)
-    4. MERGE     — for LINE_STITCHING only: is the piece's drawer SENDED (leather
+    4. MERGE     — for LINE_STITCHING only: has the piece been SENDED (leather
                    + lining merged)? (per-piece: merge_blocked)
 
     Gate 1 is a 403 because it is not per-piece — the role is wrong for the whole
@@ -46,10 +46,9 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import (
-    StoreState,
     MERGE_GATE_ENTRY, MULTI_STAGE_DESIGNATIONS, SCREEN_EXPECTED_ROLE,
     SCREEN_TO_STAGE, STAGE_DESIGNATIONS, STAGE_ROLE_ACCESS, Designation,
-    DrawerState, ProductionStage, ScreenContext, UserRole, next_chain_stage,
+    ProductionStage, ScreenContext, StoreState, UserRole, next_chain_stage,
 )
 from app.core.store_display import display_stage, holding_label
 from app.modules.clients.service import ClientService
@@ -308,11 +307,11 @@ class ProductionService:
         single previous stage. So if this returns True for everything, a garment
         can be line-stitched having never been cut at all.
 
-        READ FROM THE PIECE, NOT A DRAWER. The facts are identical — leather in,
+        READ FROM THE PIECE. The facts are identical — leather in,
         lining in, released — and they were always facts about the garment; the
-        drawer was merely where they were written. What changes is that a piece
-        with no drawer is no longer a piece that cannot be line-stitched: there
-        are no drawers to run out of.
+        drawer was merely where they used to be written. What changes is that a
+        piece with no drawer is no longer a piece that cannot be line-stitched:
+        there are no drawers to run out of.
 
         COMPLETENESS, THEN RELEASE, IN THAT ORDER. They are different failures
         with different fixes — "scan the missing part in" vs "send it" — and
@@ -345,7 +344,7 @@ class ProductionService:
         """Does this garment take a lining? The single resolver.
 
         THIS USED TO LIVE ON DrawerService and be called from here, which made
-        production depend on the drawer module for a question that has nothing to
+        production depend on that module for a question that has nothing to
         do with storage. The stored flag is EVIDENCE, not the verdict:
         `piece.needs_lining` is written once at upload and was wrong for 925 of
         1,425 pieces in one live order.
@@ -633,7 +632,7 @@ class ProductionService:
                 continue
 
             # GATE 2 — SKILL
-            # GATE 2 — SKILL: DEMOTED to a recorded warning (drawer-redesign
+            # GATE 2 — SKILL: DEMOTED to a recorded warning (store-redesign
             # build). Any employee may be recorded at any stage; the anomaly is
             # surfaced for audit but never blocks the log. The manager-role gate
             # (GATE 1) remains the hard authority on WHO may enter the log.
@@ -770,13 +769,10 @@ class ProductionService:
                     # one's dcm.
                     if piece_consumption is not None:
                         fresh_cut_consumption += piece_consumption
-                # RECYCLE THE DRAWER at PACKAGE_EXPORT: the piece has shipped, so
-                # its drawer returns to WAITING for the next merge. This is the
-                # ONLY point a drawer frees (Hamthan #4: empty only after PACKAGE).
-                # release_nocommit clears both sides of the piece<->drawer link.
-                # THE GARMENT LEAVES THE STORE at PACKAGE_EXPORT. There is no
-                # pool to return to any more: a drawer recycled because the BOX
-                # was reused, and a garment ships once.
+                # THE GARMENT LEAVES THE STORE at PACKAGE_EXPORT, and this is
+                # the only place it does (Hamthan #4: empty only after PACKAGE).
+                # There is no pool to return to: a drawer recycled because the
+                # BOX was reused, and a garment ships once.
                 if stage is ProductionStage.PACKAGE_EXPORT:
                     from app.modules.store.service import StoreService
                     await StoreService(self.db).release_nocommit(piece.id)
@@ -871,14 +867,14 @@ class ProductionService:
         else:
             rep_stage = None
 
-        # BUG #12 — the drawer for every piece in this batch, on the response the
-        # scan screen already reads. One query for the whole batch. Without it the
-        # operator has to leave the production screen to find out where the
-        # garment they just logged actually lives.
-        drawers_by_id = await self.repo.drawers_for_pieces(list(pieces))
-        drawer_by_piece = {
-            piece.code: drawers_by_id[pid]
-            for pid, piece in pieces.items() if pid in drawers_by_id
+        # BUG #12 — where every piece in this batch stands in the store, on the
+        # response the scan screen already reads. One query for the whole batch.
+        # Without it the operator has to leave the production screen to find out
+        # what the garment they just logged is still waiting for.
+        store_by_id = await self.repo.store_for_pieces(list(pieces))
+        store_by_piece = {
+            piece.code: store_by_id[pid]
+            for pid, piece in pieces.items() if pid in store_by_id
         }
 
         result = {
@@ -906,9 +902,9 @@ class ProductionService:
             "consumption_source": consumption_source if is_cut else None,
             "preview": bool(preview),
             "skill_warnings": skill_warnings,
-            # BUG #12 — where each scanned garment lives, on the response the scan
-            # screen already reads. {piece_code: {code, state, holding, …}}.
-            "drawer_by_piece": drawer_by_piece,
+            # BUG #12 — where each scanned garment stands, on the response the
+            # scan screen already reads. {piece_code: {state, holding, …}}.
+            "store_by_piece": store_by_piece,
             # BUG #8 — filled in after the commit; see below.
             "sku_progress": None,
             # The accessory kit, per scanned piece. Lean by design (three fields)
@@ -1008,7 +1004,8 @@ class ProductionService:
                   only inferred at WRITE time — the UI cannot see it in advance.
               #6  later stage cards can be scanned into before their predecessor
                   is done, because the UI has no way to know which are locked.
-              #12 the drawer is invisible outside the Store hub.
+              #12 where the garment stands in the store is invisible outside
+                  the Store hub.
 
             All three are answered by asking the server, at scan time, "what is
             true about this piece?" — which is what this returns.
@@ -1086,9 +1083,9 @@ class ProductionService:
         # ── how much of this SKU is left at that stage (bug #8) ──────────────
         sku_block = await self._sku_progress_at_stage(piece.sku_id, next_stage)
 
-        # THE STORE OVERLAY READS THE GARMENT NOW. Feeding it the drawer's state
+        # THE STORE OVERLAY READS THE GARMENT. Feeding it a drawer's state
         # left every stored piece showing its last cut stage instead of STORE,
-        # because nothing writes drawer.state any more.
+        # would show nothing: the drawer table is retired and unwritten.
         disp = display_stage(
             current_event_stage=card.get("current_stage"),
             store_state=getattr(piece, "store_state", None),
@@ -1147,7 +1144,6 @@ class ProductionService:
                 "lining_in": bool(getattr(piece, "lining_in", False)),
                 "accessories_in": bool(getattr(piece, "accessories_in", False)),
             },
-            "drawer": None,      # one release of null, then it goes
             # The EFFECTIVE lining requirement + why, so the scan screen shows the
             # same answer the store gate will enforce.
             "needs_lining": needs_lining,
@@ -1355,10 +1351,6 @@ class ProductionService:
                     prev_stage = None
 
         order_id = rows[0][3] if rows else None
-        # Live drawer per piece → drives the STORE overlay AND (bug #12) puts the
-        # drawer code on every checklist row, so a manager on any stage can see
-        # where the garment is without opening the Store hub.
-        drawers = await self.repo.drawers_for_pieces(piece_ids)
         # THE EFFECTIVE LINING REQUIREMENT, batched — not `p.needs_lining`. The
         # stored flag is a per-piece copy taken at mint time; the style's
         # declaration is the authority and can have been corrected since. Reading
@@ -1414,10 +1406,6 @@ class ProductionService:
                     "lining_in": bool(getattr(p, "lining_in", False)),
                     "accessories_in": bool(getattr(p, "accessories_in", False)),
                 },
-                # Kept as None for one release so a frontend still reading it
-                # gets a null rather than a KeyError while it moves to `store`.
-                "drawer": None,
-                "drawer_code": None,
                 "done_at_op": done, "eligible": eligible, "blocked_reason": reason,
             })
 

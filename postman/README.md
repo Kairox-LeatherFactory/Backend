@@ -12,8 +12,16 @@ are generated from the app's own `/openapi.json`, and a hand-edited collection i
 a second copy of the contract that drifts the moment a route changes. A stale
 collection is worse than none: it fails in ways that look like server bugs.
 
-Last regenerated against **224 live endpoints across 25 tags** — every route the
-app serves is in here, and nothing in here is a route the app no longer serves.
+Last regenerated against **240 live operations across 25 tags** (247 requests —
+five endpoints appear in a second collection because they belong to that
+screen). Every route the app serves is in here, and nothing in here is a route
+the app no longer serves.
+
+**Each of these services also has two Word documents** in `docs/service/`: a
+SYSTEM GUIDE (how the service works) and an API REFERENCE (every endpoint, with
+exact request and response bodies). Both are built by
+`python scripts/make_service_docs.py`, from the same service registry this
+folder uses — `scripts/docgen/services.py`.
 
 ---
 
@@ -49,13 +57,13 @@ Files** on the `file` row.
 | `user` | 5 | Login and the logins themselves. **Start here.** |
 | `employee` | 6 | The roster, one worker, and the card. Workers get **no login**. |
 | `attendance` | 11 | The gate scan, the manual fallback, and the corrections. |
-| `client` | 8 | Buyers, their orders, and the styles under them. |
+| `client` | 9 | Buyers, their orders, and the styles under them. |
 | `import` | 9 | Breakdown preview → commit → edit → **release** (the mint). |
-| `barcode` | 10 | `resolve` is every scan's front door. |
-| `material` | 24 | Lots, stock, receiving with per-hide sheets, the style recipe. |
-| `cutting` | 11 | The grid that replaced the cutting manager's spreadsheet. |
+| `barcode` | 11 | `resolve` is every scan's front door. |
+| `material` | 35 | Lots, stock, receiving with per-hide sheets, the style recipe. |
+| `cutting` | 13 | The grid that replaced the cutting manager's spreadsheet. |
 | `production` | 11 | `POST /production/log` — the whole floor's logging surface. |
-| `store` | 5 | Employee + piece, then send. Replaces the drawer. |
+| `store` | 6 | Employee + piece, then send. Replaces the drawer. |
 | `inspection` | 6 | Reject and rework, against the **responsible** stage. |
 | `jobwork` | 5 | Garments at an outside factory, and what they cost. |
 | `wage` | 16 | Rates, runs, the ledger. A closed run is frozen. |
