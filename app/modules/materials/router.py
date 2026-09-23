@@ -482,8 +482,15 @@ async def record_manual_issue(
                             "Provide lot_barcode or material_lot_id.")
     employee_id = body.employee_id
     if employee_id is None and body.employee_barcode:
+        # BOTH keyword-only arguments, always. resolve_actor declares them
+        # without defaults, so omitting one is a TypeError -> 500, not a
+        # missing-actor 422. `employee_id=None` rather than `body.employee_id`
+        # is deliberate: the branch above already established it is None, and
+        # the actor stays OPTIONAL on a manual issue — unlike the production
+        # and store doors, where resolve_actor is called unconditionally
+        # because a scan without a worker is meaningless there.
         employee_id = await barcodes.resolve_actor(
-            employee_barcode=body.employee_barcode)
+            employee_barcode=body.employee_barcode, employee_id=None)
     return await StyleSpecService(db).issue_manual(
         piece_id=piece_id, material_lot_id=lot_id, qty=body.qty, note=body.note,
         employee_id=employee_id, entered_by=user.name, actor_id=user.id)

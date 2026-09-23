@@ -353,6 +353,9 @@ them separate now is exactly what makes that connection a bridge instead of a re
 
 ## 13. Alembic migrations
 
+> **Day-to-day workflow, squashing the chain, and every autogenerate trap:
+> `docs/ALEMBIC_GUIDE.md`.** The rules below are the repo-specific ones.
+
 - **`app_user.role` is a native PG enum** (`Enum(UserRole, name="user_role")`). Adding
   `LINING_MANAGER` to the Python enum is **not enough** — Postgres needs the label added to the DB
   type:

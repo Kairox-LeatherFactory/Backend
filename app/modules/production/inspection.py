@@ -276,14 +276,22 @@ class InspectionService:
         return res.scalars().first()
 
     # ══════════════════════════════════════════════════════════ reading
-    async def list_open(self, *, status_filter=None, limit: int = 200) -> list:
+    async def list_open(self, *, status_filter=None, limit: int = 200,
+                        offset: int = 0) -> list:
+        """The DM's rejection queue. PAGED — `limit` alone could not page it.
+
+        A limit with no offset is a cap, not a pager: the caller can ask for the
+        first 200 and then has no way to ask for the next 200. That is what made
+        this list unpageable however small the limit was set.
+        """
         stmt = select(PieceInspection)
         if status_filter:
             stmt = stmt.where(PieceInspection.status == status_filter.upper())
         else:
             stmt = stmt.where(PieceInspection.status.in_(
                 (InspectionStatus.PENDING.value, InspectionStatus.APPROVED.value)))
-        stmt = stmt.order_by(PieceInspection.raised_at.desc()).limit(limit)
+        stmt = (stmt.order_by(PieceInspection.raised_at.desc())
+                .limit(limit).offset(offset))
         rows = list((await self.db.execute(stmt)).scalars().all())
         return [await self.payload(r) for r in rows]
 

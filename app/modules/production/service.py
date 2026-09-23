@@ -369,6 +369,7 @@ class ProductionService:
                         leather_lot_id: uuid.UUID | None = None,
                         lining_lot_id: uuid.UUID | None = None,
                         consumption_qty: float | None = None,
+                        consumption_by_piece: dict | None = None,
                         consumption_source: str | None = None,
                         preview: bool = False,
                         cutting_rows: dict | None = None) -> dict:
@@ -538,26 +539,48 @@ class ProductionService:
         #
         # Supplying consumption on a lining cut still behaves exactly as before —
         # it is optional, not ignored.
+        #
+        # ONE NUMBER OR ONE PER GARMENT. `consumption_by_piece` carries each
+        # piece's OWN measured dcm, straight from its approved cutting row — a
+        # cutting row is one garment cut from 7-12 individually-measured hides,
+        # so two jackets of the same size routinely differ by 40 dcm and the grid
+        # exists to record exactly that. Requiring a single batch number forced
+        # the scan to 409 on any mixed batch, which the floor read as "the system
+        # refuses a garment that took more than its target". Each piece now
+        # carries its own quantity onto its own event, and the batch decrement is
+        # their sum.
         lining_only = cut_stages == {ProductionStage.LINING_CUTTING}
+        per_piece_qty: dict = {}
+        for pid, qty in (consumption_by_piece or {}).items():
+            try:
+                value = Decimal(str(qty))
+            except Exception as exc:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    "Consumption quantity must be numeric.") from exc
+            if value > 0:
+                per_piece_qty[pid] = value
         consumption_value = None
-        if is_cut and (consumption_qty is not None or not lining_only):
-            if consumption_qty is None:
+        if is_cut and (consumption_qty is not None or per_piece_qty
+                       or not lining_only):
+            if consumption_qty is None and not per_piece_qty:
                 raise HTTPException(
                     status.HTTP_422_UNPROCESSABLE_ENTITY,
                     "Consumption quantity (dcm) is required at leather cutting — "
                     "it is what the material ledger and the costing are built on. "
                     "Send `consumption.dcm` with `consumption.article` (+ colour, "
                     "and thickness if it narrows the lot), or a lot id directly.")
-            try:
-                consumption_value = Decimal(str(consumption_qty))
-            except Exception as exc:
-                raise HTTPException(
-                    status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    "Consumption quantity must be numeric.") from exc
-            if consumption_value <= 0:
-                raise HTTPException(
-                    status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    "Consumption quantity must be > 0 at cutting.")
+            if consumption_qty is not None:
+                try:
+                    consumption_value = Decimal(str(consumption_qty))
+                except Exception as exc:
+                    raise HTTPException(
+                        status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        "Consumption quantity must be numeric.") from exc
+                if consumption_value <= 0:
+                    raise HTTPException(
+                        status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        "Consumption quantity must be > 0 at cutting.")
             if not (leather_lot_id or lining_lot_id):
                 raise HTTPException(
                     status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -580,6 +603,10 @@ class ProductionService:
         sequence_blocked += uncut_on_pipeline   # never cut → can't be past cutting
         skill_warnings: list[dict] = []   # GATE 2 anomalies (non-blocking now)
         fresh_cut_count = 0
+        # Σ of what the freshly-cut garments individually took. Accumulated in
+        # the loop rather than multiplied afterwards, because a mixed batch has
+        # no single per-piece number to multiply.
+        fresh_cut_consumption = Decimal(0)
         # The stage each piece was ACTUALLY resolved to. The single top-level
         # `stage` cannot describe a mixed pipeline batch, and guessing one from
         # dict order reported a stage no piece was written at — see below.
@@ -709,6 +736,10 @@ class ProductionService:
                 continue
  
             logged.append(piece.code)
+            # WHAT THIS GARMENT TOOK, not what the batch averaged. Its own
+            # approved row wins; the batch number is the fallback for a piece
+            # that has no row (the typed path, unchanged).
+            piece_consumption = per_piece_qty.get(pid, consumption_value)
             if not preview:
                 # REAL write only
                 await self.repo.add_event_nocommit(
@@ -717,7 +748,7 @@ class ProductionService:
                     entered_by=user.name,
                     leather_lot_id=leather_lot_id if is_cut and leather_lot_id is not None else None,
                     lining_lot_id=lining_lot_id if is_cut and lining_lot_id is not None else None,
-                    consumption_qty=consumption_value if is_cut else None,
+                    consumption_qty=piece_consumption if is_cut else None,
                     # A RE-WALK EVENT IS REWORK TOO. The redo itself is obvious;
                     # so is the pasting that has to be done again on top of it.
                     # Both are work performed a second time on one garment, and
@@ -733,6 +764,12 @@ class ProductionService:
                     rework.append(piece.code)
                 if is_cut:
                     fresh_cut_count += 1
+                    # SUM THE GARMENTS' OWN NUMBERS. `qty * count` was only ever
+                    # right because the batch was forced to one quantity; with
+                    # per-piece totals it would charge every jacket the first
+                    # one's dcm.
+                    if piece_consumption is not None:
+                        fresh_cut_consumption += piece_consumption
                 # RECYCLE THE DRAWER at PACKAGE_EXPORT: the piece has shipped, so
                 # its drawer returns to WAITING for the next merge. This is the
                 # ONLY point a drawer frees (Hamthan #4: empty only after PACKAGE).
@@ -772,22 +809,35 @@ class ProductionService:
         # its events and stops there: there is no quantity to take off any lot, and
         # inventing one would corrupt the ledger this block exists to keep honest.
         if (is_cut and not preview and fresh_cut_count > 0
-                and consumption_value is not None
+                and fresh_cut_consumption > 0
                 and (leather_lot_id or lining_lot_id)):
             lot_id = leather_lot_id or lining_lot_id
             from app.modules.materials.service import MaterialService
-            total_consumption = consumption_value * fresh_cut_count
+            # ONE DECREMENT PER BATCH, still — it is the sum of what each garment
+            # actually took rather than one number times a count.
+            total_consumption = fresh_cut_consumption
             # Hold the instance: the shortfall warning comes back on it, not in
             # the return value (which stays a float for existing callers).
             materials = MaterialService(self.db)
             avail = await materials.decrement_for_cut_nocommit(
                 lot_id, float(total_consumption))
             stock_warning = materials.last_decrement_warning
+            # NULL WHEN THE BATCH IS MIXED, and that is the honest answer: there
+            # is no one per-piece number. `dcm_by_piece` carries the truth, and a
+            # caller that reads `dcm_per_piece` on a mixed batch gets nothing
+            # rather than one garment's figure presented as everyone's.
+            uniform = (float(consumption_value) if consumption_value is not None
+                       and not per_piece_qty else None)
+            if uniform is None and per_piece_qty:
+                distinct = {round(float(v), 3) for v in per_piece_qty.values()}
+                uniform = next(iter(distinct)) if len(distinct) == 1 else None
             consumption_recorded = {
                 "lot_id": str(lot_id),
                 "pieces_consuming": fresh_cut_count,
-                "dcm_per_piece": float(consumption_value),
-                "reserved_per_piece": float(consumption_value),
+                "dcm_per_piece": uniform,
+                "reserved_per_piece": uniform,
+                "dcm_by_piece": {str(k): float(v)
+                                 for k, v in per_piece_qty.items()} or None,
                 "qty": float(total_consumption),
                 "dcm": float(total_consumption),
                 "onused": materials.last_used_after,

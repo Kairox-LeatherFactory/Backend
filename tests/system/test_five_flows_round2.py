@@ -333,7 +333,7 @@ async def test_flow8_hides_arrive_are_cut_on_the_grid_and_merge_in_the_store(
     gen = _ok(await api_client.post(f"{API}/cutting/rows/generate", json={
         "style_id": str(order_tree["style"].id),
         "colour": "PINE GREEN", "material_lot_id": lot_id,
-        "cutter_employee_id": str(cutter[0].id), "limit": 1, "work_date": TODAY}))
+        "limit": 1, "work_date": TODAY}))
     assert gen["created"] == 1, "one row is ONE GARMENT"
     row = gen["rows"][0]
     row_id = row["row_id"]
@@ -357,7 +357,10 @@ async def test_flow8_hides_arrive_are_cut_on_the_grid_and_merge_in_the_store(
     assert len(drop["sheets"]) == allocated
 
     # ── the manager signs the row off. After this it is read-only.
-    approved = _ok(await api_client.post(f"{API}/cutting/rows/{row_id}/approve"))
+    # The cutter is named per garment, on the approve — generate takes none.
+    approved = _ok(await api_client.post(
+        f"{API}/cutting/rows/{row_id}/approve",
+        json={"cutter_employee_id": str(cutter[0].id)}))
     assert approved["row"]["status"] == "APPROVED"
     assert all(x["status"] == "ISSUED" for x in approved["row"]["sheets"]),         "approval issues the hides — they are spoken for and cannot be re-allocated"
     frozen = await api_client.patch(f"{API}/cutting/rows/{row_id}",

@@ -59,6 +59,17 @@ def _resolve(schema: dict, spec: dict, depth: int = 0) -> dict:
     return schema
 
 
+# THE PAGING PARAMS, AND WHY THEY GET A SPECIAL CASE.
+# Every other optional query param is a FILTER — sending an empty or guessed one
+# changes what a request means, so those ship disabled. limit/offset do not:
+# they are the endpoint's own defaults written out, so enabling them changes
+# nothing about the result except that the pager is visibly in play. Shipping
+# them disabled meant nobody ever exercised paging through the collections.
+# A value here also replaces the schema's generic example (integer -> 0), because
+# `limit=0` is a 422 on every route that declares it (PageParams caps at ge=1).
+_PAGING_DEFAULTS = {"limit": 50, "offset": 0, "page": 1, "page_size": 50}
+
+
 def _example(schema: dict, spec: dict, depth: int = 0):
     """A plausible, editable value for one schema node."""
     s = _resolve(schema, spec, depth)
@@ -105,12 +116,21 @@ def _request(path: str, method: str, op: dict, spec: dict) -> dict:
             raw_path = raw_path.replace("{%s}" % name, "{{%s}}" % name)
             variables.append({"key": name, "value": "" if example is None else str(example)})
         elif where == "query":
+            example = _PAGING_DEFAULTS.get(name, example)
             query.append({
                 "key": name,
                 "value": "" if example is None else str(example),
                 "description": p.get("description", ""),
-                # Optional params start disabled so a request runs as-is.
-                "disabled": not p.get("required", False),
+                # Optional params start disabled so a request runs as-is —
+                # EXCEPT the paging ones. A disabled param is not sent at all,
+                # so every collection shipped `limit` and `offset` greyed out,
+                # and anyone who opened a list request, saw the boxes, and
+                # pressed Send got an unpaged response. It read as "pagination
+                # is not working anywhere" when nothing had ever been asked for.
+                # They are safe to send on every request that declares them —
+                # they are the endpoint's own defaults.
+                "disabled": (not p.get("required", False)
+                             and name not in _PAGING_DEFAULTS),
             })
 
     item = {

@@ -175,6 +175,26 @@ async def update_client(
         client_id, body.model_dump(exclude_unset=True))
 
 
+@router.get("/{client_id}/deletable", response_model=schemas.ClientDeletable)
+async def deletable(
+    client_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_roles(UserRole.DIRECT_MANAGER)),
+):
+    """CAN this client be deleted, and if not, what exactly is in the way?
+
+    The same check DELETE runs, without doing anything — so a screen can grey
+    the button out and say why, instead of offering it and then explaining a
+    409. `blockers` is [{table, count, what}]; empty means the delete will go
+    through.
+    """
+    blockers = await ClientService(db).deletion_blockers(client_id)
+    return {"client_id": str(client_id), "deletable": not blockers,
+            "blockers": blockers,
+            "alternative": (None if not blockers else
+                            f'PATCH /clients/{client_id} {{"is_active": false}}')}
+
+
 @router.delete("/{client_id}", status_code=204)
 async def delete_client(
     client_id: uuid.UUID,
@@ -183,12 +203,15 @@ async def delete_client(
 ):
     """Delete a client that has produced NOTHING — a mistyped or duplicate row.
 
-    Creating a client also creates its first order (order_number is required on
-    POST /clients), so "has an order" was never a sign the client had traded and
-    is no longer what this refuses on. The test is whether any PIECE exists: no
-    pieces, and the cascade removes an empty order shell; one piece, and the
-    barcodes are printed, so it is a 409 and the client is deactivated instead
-    (PATCH above). The error names the exact call to make.
+    NEITHER AN ORDER NOR A STYLE IS A REASON TO REFUSE. Creating a client also
+    creates its first order (order_number is required on POST /clients), and a
+    breakdown upload adds styles and SKUs that may never have been made from;
+    all of those cascade away with the customer. What refuses the delete is a
+    row recording real WORK — a minted garment, a logged production event, a
+    wage rate or a paid wage line — and the 409 now names which and how many,
+    rather than guessing at "a style rate, a supplier PO, a cutting entry".
+
+    Ask GET /clients/{id}/deletable first if you want to know before pressing it.
 
     DM only, matching client creation. MD passes as superuser."""
     await ClientService(db).delete_client(client_id)

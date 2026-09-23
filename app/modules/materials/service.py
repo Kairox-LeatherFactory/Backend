@@ -709,7 +709,16 @@ class MaterialService:
                 f"for a cut. Release the reservation before retiring the lot.")
 
         lot.is_active = False
-        retired = await self.barcodes.retire_lot_code_nocommit(lot.id)
+        # THE SERVICE, NOT `self.barcodes`. `self.barcodes` is a
+        # BarcodeRepository and this method lives on BarcodeService, so calling
+        # it through the repository handle was an AttributeError on every
+        # retire — the same mistake, in the same direction, that the note on
+        # `display_stock` above records (a service method reached through a
+        # repository attribute). Lazy import per CLAUDE.md §15: barcode.service
+        # reaches back into materials for the kit block, so hoisting this to
+        # module scope would close the cycle.
+        from app.modules.barcode.service import BarcodeService
+        retired = await BarcodeService(self.db).retire_lot_code_nocommit(lot.id)
         await self._audit(actor_id, "MATERIAL_LOT_RETIRED", lot.id, {
             "article": lot.article, "colour": lot.colour,
             "on_hand_at_retirement": float(lot.on_hand or 0),

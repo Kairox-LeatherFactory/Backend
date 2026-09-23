@@ -8,7 +8,8 @@ PATCH  /cutting/rows/{id}                  edit any cell
 POST   /cutting/rows/{id}/sheets           the cutter needed another hide
 DELETE /cutting/rows/{id}/sheets/{sid}     he handed one back
 PATCH  /cutting/rows/{id}/sheets/{sid}     correct a hide's measurement
-POST   /cutting/rows/{id}/approve          freeze it — audited
+POST   /cutting/rows/assign                 the cutter column, one per garment
+POST   /cutting/rows/{id}/approve          freeze it — audited (names the cutter)
 POST   /cutting/rows/{id}/reopen           un-freeze it — also audited
 
 WHO. The cutting manager owns this screen; DM and MD are on it because they are
@@ -108,20 +109,40 @@ async def patch_sheet(
     return await CuttingService(db).patch_sheet(row_id, sheet_id, body)
 
 
-@router.post("/rows/{row_id}/approve", response_model=schemas.ApproveResult)
-async def approve(
-    row_id: uuid.UUID,
+@router.post("/rows/assign", response_model=schemas.BulkAssignResult)
+async def assign_cutters(
+    body: schemas.BulkAssignRequest,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(_CUTTING),
 ):
-    """Freeze the row: these hides, this total, this cutter.
+    """Save the grid's cutter column — a different worker per garment.
+
+    The bulk form of PATCH /cutting/rows/{id}. Partial accept: a frozen row comes
+    back in `rejected` and never loses the rows that did assign.
+    """
+    return await CuttingService(db).bulk_assign(body.assignments)
+
+
+@router.post("/rows/{row_id}/approve", response_model=schemas.ApproveResult)
+async def approve(
+    row_id: uuid.UUID,
+    body: schemas.ApproveRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_CUTTING),
+):
+    """Freeze the row: these hides, this total, THIS cutter.
+
+    `cutter_employee_id` is named HERE, one garment at a time — `generate` takes
+    no cutter, because one id there put the same worker on every row of the
+    style and the cutting row is what a piece rate is paid from.
 
     `user.id` is an app_user id — the LOGIN — which is what AuditLog.actor_user_id
     requires. The WORKER is the row's cutter_employee_id and is a different
     person in a different table.
     """
     return await CuttingService(db).approve(
-        row_id, actor_user_id=user.id, actor_name=user.name)
+        row_id, actor_user_id=user.id, actor_name=user.name,
+        cutter_employee_id=(body.cutter_employee_id if body else None))
 
 
 @router.post("/rows/{row_id}/reopen", response_model=schemas.RowRead)

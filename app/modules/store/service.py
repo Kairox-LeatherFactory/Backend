@@ -461,12 +461,56 @@ class StoreService:
         piece.store_sended_at = None
 
     # ══════════════════════════════════════════════════════════ reading
-    async def piece_row(self, piece) -> dict:
+    async def _kit_summaries(self, piece_ids: list) -> dict:
+        """{piece_code: {kit_required, kit_status, outstanding}} for a batch.
+
+        THE ACCESSORY ANSWER IS NEVER A BARE BOOLEAN, and this is where the read
+        paths stop pretending it is. `piece.accessories_in` is a ROLL-UP —
+        "every accessory line this style declares has been issued in full" — and
+        on its own it cannot tell an operator whether the zip is missing or the
+        buttons are. `kit_status` names the three states the floor actually has
+        (NOT_REQUIRED / PENDING / PARTIAL / ISSUED) and `outstanding` says how
+        much is still owed across the lines.
+
+        Batched on purpose: the store list renders 200 garments, and asking the
+        spec per piece was 200 round-trips for a column.
+        """
+        if not piece_ids:
+            return {}
+        try:
+            from app.modules.materials.style_spec_service import StyleSpecService
+            return await StyleSpecService(self.db).kit_by_pieces(list(piece_ids))
+        except Exception:
+            # A style with no spec — everything released before the spec feature
+            # — requires no kit. Failing open keeps those garments readable.
+            return {}
+
+    async def piece_row(self, piece, *, kit_summary: dict | None = None) -> dict:
         from app.modules.clients.models import SKU, Style
         sku = await self.db.get(SKU, piece.sku_id) if piece.sku_id else None
         style = await self.db.get(Style, sku.style_id) if sku else None
         needs_lining, _ = await self.needs_lining(piece)
-        kit_required = await self._kit_required(piece)
+        if kit_summary is None:
+            kit_summary = (await self._kit_summaries([piece.id])).get(piece.code)
+        if kit_summary:
+            kit_required = bool(kit_summary.get("kit_required"))
+        else:
+            # The batch read found nothing for this code (no spec, or it threw).
+            # Ask the single-piece way rather than reporting "no kit" for a
+            # garment that may well owe one.
+            kit_summary = {}
+            kit_required = await self._kit_required(piece)
+
+        # WHAT IS STILL OWED, spelled the same way the scan response spells it, so
+        # the lookup screen and the scan screen cannot disagree about a garment.
+        awaiting = []
+        if not piece.leather_in:
+            awaiting.append("LEATHER")
+        if needs_lining and not piece.lining_in:
+            awaiting.append("LINING")
+        if kit_required and not piece.accessories_in:
+            awaiting.append("ACCESSORIES")
+
         return {
             "piece_id": piece.id, "piece_code": piece.code,
             "store_state": piece.store_state,
@@ -474,7 +518,16 @@ class StoreService:
                                      lining_in=piece.lining_in),
             "leather_in": piece.leather_in, "lining_in": piece.lining_in,
             "accessories_in": piece.accessories_in,
+            # The accessory side, as three fields instead of one boolean. See
+            # _kit_summaries for why the boolean alone was never enough.
+            "kit_required": kit_required,
+            "kit_status": kit_summary.get(
+                "kit_status", kit_rules.kit_status(
+                    kit_required=kit_required, required_total=0.0,
+                    issued_total=0.0)),
+            "accessories_outstanding": float(kit_summary.get("outstanding") or 0),
             "needs_lining": needs_lining,
+            "awaiting": awaiting,
             "complete": kit_rules.piece_complete(
                 leather_in=piece.leather_in, lining_in=piece.lining_in,
                 accessories_in=piece.accessories_in,
@@ -485,8 +538,57 @@ class StoreService:
             "size": getattr(sku, "size", None),
         }
 
+    async def piece_detail(self, piece) -> dict:
+        """One garment, WITH its accessory checklist line by line.
+
+        THE ANSWER TO "how do I verify they took the accessories?". The list view
+        answers it as a status; here every declared line comes back on its own —
+        4 BUTTON BLACK 20L, 1 ZIP GUNMETAL 60cm, 200 mtrs THREAD — with what has
+        been issued against it, what is still owed, and whether the lot it would
+        come from is even resolvable. A garment is not "accessories: true"; it is
+        five lines, each of which is or is not satisfied.
+        """
+        row = await self.piece_row(piece)
+        try:
+            from app.modules.materials.style_spec_service import StyleSpecService
+            block = await StyleSpecService(self.db).material_requirement_block(
+                piece.id)
+        except Exception:
+            block = {}
+        row["accessories"] = block.get("accessories") or []
+        row["summary_line"] = block.get("summary_line")
+        row["spec_confirmed"] = bool(block.get("spec_confirmed"))
+        return row
+
+    async def piece_materials(self, piece) -> dict:
+        """Everything merged into this garment, and everything that is not.
+
+        Delegates to StyleSpecService.piece_materials — the SAME call the
+        barcode scan makes, so the store screen and the scan gun cannot answer
+        "what is in this garment" differently.
+        """
+        from app.modules.materials.style_spec_service import StyleSpecService
+        out = await StyleSpecService(self.db).piece_materials(piece.id)
+        needs_lining, reason = await self.needs_lining(piece)
+        out["needs_lining"] = needs_lining
+        out["lining_reason"] = reason
+        return out
+
     async def list_pieces(self, *, state: str | None = None,
-                          style_id=None, limit: int = 200) -> dict:
+                          style_id=None, limit: int = 200,
+                          offset: int = 0) -> dict:
+        """What is in the store right now. PAGED.
+
+        `limit` ALONE WAS NOT A PAGER, it was a cap: a caller could ask for the
+        first 200 garments and had no way to ask for the next 200 — and a busy
+        store holds far more than 200. `offset` and `total` are what make it one.
+
+        The shape is ADDITIVE on purpose: `count` and `pieces` are what the store
+        screen already reads, so they keep their names and meanings and the new
+        pager fields sit beside them. See core/pagination.py on why the published
+        shapes are not retrofitted.
+        """
+        from sqlalchemy import func
         stmt = select(Piece).where(Piece.is_active.is_(True))
         if state:
             stmt = stmt.where(Piece.store_state == state.strip().lower())
@@ -496,10 +598,19 @@ class StoreService:
             from app.modules.clients.models import SKU
             stmt = stmt.join(SKU, SKU.id == Piece.sku_id).where(
                 SKU.style_id == style_id)
-        stmt = stmt.order_by(Piece.code.asc()).limit(limit)
+        # Counted from the SAME statement so the two cannot disagree about which
+        # rows they are talking about (core/pagination.paginate, same rule).
+        total = int(await self.db.scalar(
+            select(func.count()).select_from(stmt.subquery())) or 0)
+        stmt = stmt.order_by(Piece.code.asc()).limit(limit).offset(offset)
         pieces = list((await self.db.execute(stmt)).scalars().all())
-        return {"count": len(pieces),
-                "pieces": [await self.piece_row(p) for p in pieces]}
+        # ONE kit read for the whole page, not one per row.
+        kits = await self._kit_summaries([p.id for p in pieces])
+        return {"count": len(pieces), "total": total,
+                "limit": limit, "offset": offset,
+                "has_more": (offset + len(pieces)) < total,
+                "pieces": [await self.piece_row(p, kit_summary=kits.get(p.code))
+                           for p in pieces]}
 
     async def _audit(self, actor_user_id, action, entity_id, after: dict) -> None:
         """`actor_user_id` is an app_user.id — the LOGIN — never an employee.id.

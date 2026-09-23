@@ -108,6 +108,68 @@ class ClientRepository:
             .where(ClientOrder.client_id == client_id)
         )).scalar_one() or 0)
 
+    async def deletion_blockers(self, client_id: uuid.UUID) -> list[dict]:
+        """EXACTLY what stands between this client and a hard delete.
+
+        WHY THIS EXISTS. The delete used to test one thing (are there pieces?)
+        and then let the DATABASE find everything else, which meant the DM got
+        "other records (a style rate, a supplier PO, a cutting entry) still
+        reference their styles" — a list of guesses, none of them confirmed, and
+        no way to act on it. The rows that actually block are knowable, so they
+        are counted and named.
+
+        THESE ARE THE FKs WITH NO `ondelete`. `client_order -> client`,
+        `style -> client_order` and `sku -> style` are cascaded by the ORM
+        relationship, so they do not block. Everything below points at a style or
+        a SKU with a plain reference, and Postgres refuses the parent delete
+        while one exists. (SQLite does not enforce FKs by default, so this check
+        — not the IntegrityError backstop — is what makes the two behave alike.)
+
+        Returns [{table, count, what}] — empty means the delete will go through.
+        """
+        from app.modules.production.models import (
+            Piece, ProductionEvent, StyleOperation,
+        )
+        from app.modules.wages.models import Rate, WageLineDetailRow
+
+        style_ids = (
+            select(Style.id)
+            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
+            .where(ClientOrder.client_id == client_id)
+        ).scalar_subquery()
+        sku_ids = select(SKU.id).where(SKU.style_id.in_(style_ids)).scalar_subquery()
+
+        checks = [
+            (Piece, Piece.sku_id.in_(sku_ids), "piece",
+             "garment(s) minted with printed barcodes"),
+            (ProductionEvent, ProductionEvent.sku_id.in_(sku_ids),
+             "production_event", "logged production event(s)"),
+            (Rate, Rate.style_id.in_(style_ids), "rate",
+             "wage rate card(s) on their styles"),
+            (StyleOperation, StyleOperation.style_id.in_(style_ids),
+             "style_operation", "style/operation routing row(s)"),
+            (WageLineDetailRow, WageLineDetailRow.style_id.in_(style_ids),
+             "wage_line_detail", "wage line(s) already paid against their styles"),
+        ]
+        try:
+            # Phase 2 (supplier_po). Its FK to style also has no `ondelete`, so
+            # it blocks exactly like the rest; guarded because this module must
+            # not hard-depend on a Phase-2 table existing.
+            from app.modules.supplier_po.models import ProductionTracking
+            checks.append(
+                (ProductionTracking, ProductionTracking.style_id.in_(style_ids),
+                 "production_tracking", "supplier production-tracking row(s)"))
+        except Exception:
+            pass
+        out: list[dict] = []
+        for model, predicate, table, what in checks:
+            n = int((await self.db.execute(
+                select(func.count()).select_from(model).where(predicate)
+            )).scalar_one() or 0)
+            if n:
+                out.append({"table": table, "count": n, "what": what})
+        return out
+
     async def delete_client(self, client: Client) -> None:
         """Hard delete, cascading the client's orders -> styles -> SKUs.
 

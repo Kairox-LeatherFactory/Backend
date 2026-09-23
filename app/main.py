@@ -187,9 +187,21 @@ async def lifespan(app: FastAPI):
     verify_extractor_deps(strict=True)
 
     if settings.debug:
+        # Never create_all on a database Alembic manages. It builds tables from
+        # TODAY's models ahead of the migrations, which (a) hides revisions that
+        # were never written, so a fresh `alembic upgrade head` later dies on a
+        # missing table, and (b) makes the next migration die with
+        # DuplicateColumn/DuplicateTable. On a new DB: run `alembic upgrade head`
+        # BEFORE the first app start.
+        from sqlalchemy import inspect as _inspect
         async with async_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("Database tables verified (debug create_all)")
+            managed = await conn.run_sync(
+                lambda c: _inspect(c).has_table("alembic_version"))
+            if managed:
+                logger.info("Alembic-managed database: skipping debug create_all")
+            else:
+                await conn.run_sync(Base.metadata.create_all)
+                logger.info("Database tables verified (debug create_all)")
 
     # F130: config_store warm-up runs HERE (inside lifespan), not at module
     # import time. Importing app.main must not require a live database — tooling
@@ -225,13 +237,19 @@ async def lifespan(app: FastAPI):
 # ──────────────────────────────────────────────────────────
 # App
 # ──────────────────────────────────────────────────────────
-# THE INTERACTIVE DOCS ARE NOT PUBLIC IN PRODUCTION. /docs and /redoc were
-# served unconditionally, so the full route map, every request schema and every
-# role boundary was readable by anyone who could reach the host. The schema is
-# still generated (the frontend needs the OpenAPI JSON in CI); it is the
-# browsable UI that is switched off outside a developer's machine.
-_docs_url = None if settings.is_production else "/docs"
-_redoc_url = None if settings.is_production else "/redoc"
+# THE INTERACTIVE DOCS STAY ON — IN EVERY ENVIRONMENT (Hamthan, 2026-09-23).
+#
+# They used to switch themselves off outside a dev box (`if is_production`),
+# which quietly broke the people who need them most: the two frontend devs
+# integrating against staging, and anyone verifying a deploy. Hiding the route
+# map is not a security control — every route still enforces its JWT and its
+# role gate, and an attacker who can reach the host can enumerate it anyway.
+# The real control is not exposing this API to the open internet.
+#
+# It is a deliberate, reversible trade: DOCS_ENABLED=false on any single deploy
+# turns them dark again without touching this file.
+_docs_url = "/docs" if settings.docs_enabled else None
+_redoc_url = "/redoc" if settings.docs_enabled else None
 
 app = FastAPI(
     title=settings.app_name,

@@ -151,8 +151,7 @@ async def test_the_grid_allocates_hides_sized_to_the_garment(db, order_tree,
     """
     await _lot(db)
     gen = await CuttingService(db).generate(GenerateRequest(
-        style_id=order_tree["style"].id, colour="PINE GREEN",
-        cutter_employee_id=cutter[0].id))
+        style_id=order_tree["style"].id, colour="PINE GREEN"))
     assert gen["created"] == 2
     first = gen["rows"][0]
     assert first["target_source"] == "size_baseline"
@@ -168,7 +167,7 @@ async def test_generating_twice_creates_nothing_the_second_time(db, order_tree,
     await _lot(db)
     svc = CuttingService(db)
     body = GenerateRequest(style_id=order_tree["style"].id,
-                           colour="PINE GREEN", cutter_employee_id=cutter[0].id)
+                           colour="PINE GREEN")
     first = await svc.generate(body)
     second = await svc.generate(body)
     assert first["created"] == 2
@@ -186,8 +185,7 @@ async def test_one_hide_can_never_be_claimed_by_two_garments(db, order_tree,
     lot = await _lot(db)
     svc = CuttingService(db)
     gen = await svc.generate(GenerateRequest(
-        style_id=order_tree["style"].id, colour="PINE GREEN",
-        cutter_employee_id=cutter[0].id))
+        style_id=order_tree["style"].id, colour="PINE GREEN"))
     taken = gen["rows"][0]["sheets"][0]["code"]
     other_row = gen["rows"][1]["row_id"]
     with pytest.raises(HTTPException) as exc:
@@ -206,8 +204,7 @@ async def test_a_returned_hide_goes_back_on_the_shelf(db, order_tree,
     await _lot(db)
     svc = CuttingService(db)
     gen = await svc.generate(GenerateRequest(
-        style_id=order_tree["style"].id, colour="PINE GREEN",
-        cutter_employee_id=cutter[0].id))
+        style_id=order_tree["style"].id, colour="PINE GREEN"))
     row = gen["rows"][0]
     before_total, before_count = row["total_dcm"], row["sheet_count"]
     dropped = row["sheets"][0]
@@ -231,8 +228,7 @@ async def test_the_total_follows_the_hides_and_is_never_typed(db, order_tree,
     await _lot(db)
     svc = CuttingService(db)
     gen = await svc.generate(GenerateRequest(
-        style_id=order_tree["style"].id, colour="PINE GREEN",
-        cutter_employee_id=cutter[0].id))
+        style_id=order_tree["style"].id, colour="PINE GREEN"))
     row = gen["rows"][0]
     first = row["sheets"][0]
     delta = 41.5 - first["dcm"]
@@ -245,11 +241,11 @@ async def test_the_total_follows_the_hides_and_is_never_typed(db, order_tree,
 async def _approved(db, order_tree, cutter):
     svc = CuttingService(db)
     gen = await svc.generate(GenerateRequest(
-        style_id=order_tree["style"].id, colour="PINE GREEN",
-        cutter_employee_id=cutter[0].id))
+        style_id=order_tree["style"].id, colour="PINE GREEN"))
     row = gen["rows"][0]
     actor = uuid.uuid4()
-    out = await svc.approve(row["row_id"], actor_user_id=None, actor_name="KUMAR")
+    out = await svc.approve(row["row_id"], actor_user_id=None, actor_name="KUMAR",
+                            cutter_employee_id=cutter[0].id)
     return svc, row, out
 
 
@@ -306,8 +302,7 @@ async def test_a_row_with_no_hides_cannot_be_approved(db, order_tree,
     from fastapi import HTTPException
     svc = CuttingService(db)
     gen = await svc.generate(GenerateRequest(          # no lot -> no hides
-        style_id=order_tree["style"].id, colour="PINE GREEN",
-        cutter_employee_id=cutter[0].id))
+        style_id=order_tree["style"].id, colour="PINE GREEN"))
     with pytest.raises(HTTPException) as exc:
         await svc.approve(gen["rows"][0]["row_id"], actor_user_id=None)
     assert exc.value.status_code == 409
@@ -354,15 +349,16 @@ async def test_the_logger_reads_the_approved_row_and_spends_it_once(
     lot = await _lot(db)
     svc, row, _ = await _approved(db, order_tree, cutter)
 
-    approved, lot_id, dcm, _w = await _approved_cutting(
+    approved, lot_id, by_piece, _w = await _approved_cutting(
         db, [garments[0].id], ScreenContext.LEATHER_CUT)
+    dcm = by_piece[garments[0].id]
     assert lot_id is not None and dcm == row["total_dcm"]
 
     before = float((await MaterialService(db).repo.get_lot(lot["lot_id"])).on_hand)
     res = await ProductionService(db).log_batch(
         user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[garments[0].id],
         work_date=date.today(), screen=ScreenContext.LEATHER_CUT,
-        leather_lot_id=lot_id, consumption_qty=dcm,
+        leather_lot_id=lot_id, consumption_by_piece=by_piece,
         consumption_source="cutting_row", cutting_rows=approved)
 
     assert res["logged"] == [garments[0].code]
@@ -380,9 +376,9 @@ async def test_a_piece_with_no_approved_row_keeps_the_typed_path(
     """Nothing on the floor may change until a style is cut the new way."""
     from app.modules.production.router import _approved_cutting
     await _lot(db)
-    approved, lot_id, dcm, warns = await _approved_cutting(
+    approved, lot_id, by_piece, warns = await _approved_cutting(
         db, [garments[0].id], ScreenContext.LEATHER_CUT)
-    assert approved == {} and lot_id is None and dcm is None
+    assert approved == {} and lot_id is None and by_piece == {}
 
 
 async def test_a_lining_cut_never_reads_a_cutting_row(db, order_tree,
@@ -391,31 +387,108 @@ async def test_a_lining_cut_never_reads_a_cutting_row(db, order_tree,
     from app.modules.production.router import _approved_cutting
     await _lot(db)
     await _approved(db, order_tree, cutter)
-    approved, lot_id, dcm, _ = await _approved_cutting(
+    approved, lot_id, by_piece, _ = await _approved_cutting(
         db, [garments[0].id], ScreenContext.LINING_CUT)
-    assert (approved, lot_id, dcm) == ({}, None, None)
+    assert (approved, lot_id, by_piece) == ({}, None, {})
 
 
-async def test_garments_approved_with_different_totals_are_not_averaged(
-        db, order_tree, garments, cutter):
-    """One scan spends one number, and these two took different leather.
+async def test_each_garment_is_charged_what_its_own_row_measured(
+        db, order_tree, garments, cutter, operations, cutting_mgr):
+    """TWO JACKETS, TWO NUMBERS, ONE SCAN.
 
-    Averaging or picking one would charge a garment what another took — a wrong
-    number in the ledger the factory reconciles against, and invisible.
+    A cutting row is ONE GARMENT cut from 7-12 individually-measured hides, so
+    two jackets of the same size routinely land 40 dcm apart — recording that is
+    the whole point of the grid. This used to be a 409 that refused the scan
+    ("approved with different leather totals — scan them separately"), which the
+    floor read as the system rejecting a garment that took more than its target.
+
+    What must never happen is AVERAGING, or charging both what the first one
+    took. So: each event carries its own dcm, and the single stock decrement is
+    their SUM.
     """
-    from fastapi import HTTPException
     from app.modules.production.router import _approved_cutting
+    from app.modules.production.service import ProductionService
+    from sqlalchemy import select
+    from app.modules.production.models import ProductionEvent
+    lot = await _lot(db)
+    svc = CuttingService(db)
+    gen = await svc.generate(GenerateRequest(
+        style_id=order_tree["style"].id, colour="PINE GREEN"))
+    # Force the two rows apart, which is what the floor does by hand anyway.
+    await svc.add_sheet(gen["rows"][0]["row_id"], SheetAdd(dcm=60))
+    for r in gen["rows"]:
+        await svc.approve(r["row_id"], actor_user_id=None,
+                          cutter_employee_id=cutter[0].id)
+
+    approved, lot_id, by_piece, warns = await _approved_cutting(
+        db, [g.id for g in garments], ScreenContext.LEATHER_CUT)
+    assert len(set(by_piece.values())) == 2, "the two rows must differ"
+    assert any("different amounts" in w for w in warns),         "the spread is said out loud, as a warning and not a refusal"
+
+    before = float((await MaterialService(db).repo.get_lot(lot["lot_id"])).on_hand)
+    res = await ProductionService(db).log_batch(
+        user=cutting_mgr, employee_id=cutter[0].id,
+        piece_ids=[g.id for g in garments], work_date=date.today(),
+        screen=ScreenContext.LEATHER_CUT, leather_lot_id=lot_id,
+        consumption_by_piece=by_piece, consumption_source="cutting_row",
+        cutting_rows=approved)
+
+    assert sorted(res["logged"]) == sorted(g.code for g in garments)
+    after = float((await MaterialService(db).repo.get_lot(lot["lot_id"])).on_hand)
+    assert after == pytest.approx(before - sum(by_piece.values())),         "the decrement is the SUM of what each garment took, not qty x count"
+    # There is no single per-piece number for a mixed batch, and saying one
+    # would be one garment's figure presented as everybody's.
+    assert res["consumption_recorded"]["dcm_per_piece"] is None
+
+    rows = (await db.execute(
+        select(ProductionEvent.piece_id, ProductionEvent.consumption_qty)
+        .where(ProductionEvent.piece_id.in_([g.id for g in garments])))).all()
+    assert {pid: float(q) for pid, q in rows} ==         {pid: float(v) for pid, v in by_piece.items()}
+
+
+# ══════════════════════════════════ the target is an ESTIMATE, never a ceiling
+#
+# `target_dcm` comes from core/leather_norms: the style's confirmed spec when
+# there is one, otherwise the size ladder (S = 370, M = 400, L = 430 …). It
+# exists so the allocator knows roughly how many hides to put on the row, and
+# core/leather_norms says in its own header that it is MEANT to be wrong. A
+# garment that takes more than it is what the cutter reports back.
+async def test_a_garment_may_take_far_more_than_its_target(db, order_tree,
+                                                           garments, cutter):
+    """Over-target is a WARNING on the row, never a refusal.
+
+    Hides vary, a skin tears, a size runs large. The jacket is physically on the
+    table and already cut; refusing the record to protect an estimate would lose
+    the production record and teach the floor to work around the system.
+    """
     await _lot(db)
     svc = CuttingService(db)
     gen = await svc.generate(GenerateRequest(
-        style_id=order_tree["style"].id, colour="PINE GREEN",
-        cutter_employee_id=cutter[0].id))
-    for r in gen["rows"]:
-        await svc.approve(r["row_id"], actor_user_id=None)
-    totals = {r["total_dcm"] for r in gen["rows"]}
-    if len(totals) == 1:
-        pytest.skip("both rows happened to take the same dcm")
-    with pytest.raises(HTTPException) as exc:
-        await _approved_cutting(db, [g.id for g in garments],
-                                ScreenContext.LEATHER_CUT)
-    assert exc.value.status_code == 409
+        style_id=order_tree["style"].id, colour="PINE GREEN"))
+    row = gen["rows"][0]
+    piled = await svc.add_sheet(row["row_id"], SheetAdd(dcm=500))
+    assert piled["total_dcm"] > piled["target_dcm"] * 2
+
+    out = await svc.approve(row["row_id"], actor_user_id=None,
+                            cutter_employee_id=cutter[0].id)
+    assert out["row"]["status"] == CuttingRowStatus.APPROVED.value
+    assert out["row"]["total_dcm"] == piled["total_dcm"], \
+        "the row is frozen at what it ACTUALLY took, not at its target"
+    assert any("over by" in w for w in out["row"]["warnings"]), \
+        "it is said out loud — a silent overshoot is how the ledger drifts"
+
+
+async def test_the_target_is_the_size_baseline_when_no_spec_says_otherwise(db):
+    """Where 370 comes from, and why it is not a number anybody typed.
+
+    S=370, M=400, L=430 — core/leather_norms._ALPHA_DCM, anchored on M=400 with
+    ±30 per alpha step. A style whose material spec carries a real measured
+    dcm/piece overrides it; every style without one falls here.
+    """
+    from app.core.leather_norms import leather_target_dcm
+    assert leather_target_dcm(size="S", spec_dcm_per_piece=None) == (370.0,
+                                                                     "size_baseline")
+    assert leather_target_dcm(size="48", spec_dcm_per_piece=None) == (370.0,
+                                                                      "size_baseline")
+    assert leather_target_dcm(size="S", spec_dcm_per_piece=412.5) == (412.5,
+                                                                      "style_spec")

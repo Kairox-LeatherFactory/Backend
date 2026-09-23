@@ -51,7 +51,7 @@
             }
           ]
         },
-        "description": "WHERE IS THIS GARMENT \u2014 bug #15, and now a one-line answer.\n\nUnder the drawer flow this meant looking up which numbered box held it. There\nis no box: the garment's own record says what it is holding and what it is\nwaiting for."
+        "description": "WHERE IS THIS GARMENT, and what is it still owed \u2014 bug #15.\n\nUnder the drawer flow this meant looking up which numbered box held it. There\nis no box: the garment's own record says what it is holding and what it is\nwaiting for.\n\nIT CARRIES THE ACCESSORY CHECKLIST LINE BY LINE. `accessories_in` is a\nroll-up over every declared line, so on its own it cannot tell an operator\nwhether the zip is missing or the buttons are. `accessories[]` names each\nline with what has been issued against it and what is still owed \u2014 which is\nhow you verify a kit without issuing anything."
       },
       "response": []
     },
@@ -86,13 +86,48 @@
             },
             {
               "key": "limit",
-              "value": "200",
+              "value": "50",
               "description": "",
-              "disabled": true
+              "disabled": false
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
+              "disabled": false
             }
           ]
         },
-        "description": ""
+        "description": "What is in the store right now, one page at a time.\n\n`offset` and `total` are what make this pageable: a `limit` on its own is a\ncap, and a busy store holds far more than one page of garments."
+      },
+      "response": []
+    },
+    {
+      "name": "Piece Materials",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/store/pieces/{{piece_code}}/materials",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "store",
+            "pieces",
+            "{{piece_code}}",
+            "materials"
+          ],
+          "variable": [
+            {
+              "key": "piece_code",
+              "value": ""
+            }
+          ]
+        },
+        "description": "WHAT IS MERGED INTO THIS GARMENT \u2014 the whole picture, in one read.\n\n`applies`        the recipe for THIS colourway at THIS size \u2014 leather,\n                 lining, and every accessory line with `issued_qty` and\n                 `outstanding`.\n`not_applicable` the style's OTHER lines, each saying why it is not this\n                 garment's: `other_sku` (scoped to another colourway),\n                 `other_size` (an L zip is not an S zip), or `zeroed` (this\n                 colourway declares it takes none).\n`issued`         the ledger \u2014 what physically went in, from which lot, when\n                 and through whose card, MANUAL corrections included.\n`consumed`       the leather actually recorded at the cut. It lives on the\n                 production event, not the issue ledger, and is merged here\n                 so a screen never has to know there were two writes.\n\n`not_applicable` is the field to read when a kit scan says there is nothing\nto issue while `/material-spec/requirement` shows a full recipe: that view\nis STYLE-WIDE and a kit is issued PER GARMENT."
       },
       "response": []
     },

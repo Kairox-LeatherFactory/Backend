@@ -210,13 +210,13 @@
               "key": "limit",
               "value": "50",
               "description": "",
-              "disabled": true
+              "disabled": false
             },
             {
               "key": "offset",
               "value": "0",
               "description": "",
-              "disabled": true
+              "disabled": false
             }
           ]
         },

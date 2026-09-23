@@ -29,10 +29,12 @@ def upgrade() -> None:
     op.add_column(
         "pom_dictionary",
         sa.Column("status", sa.String(20), nullable=False, server_default="confirmed"),
+        if_not_exists=True,
     )
     op.add_column(
         "pom_dictionary",
         sa.Column("confidence", sa.Numeric(5, 4), nullable=True),
+        if_not_exists=True,
     )
 
 

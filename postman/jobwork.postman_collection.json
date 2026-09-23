@@ -133,13 +133,19 @@
             },
             {
               "key": "limit",
-              "value": "200",
+              "value": "50",
               "description": "",
-              "disabled": true
+              "disabled": false
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
+              "disabled": false
             }
           ]
         },
-        "description": "What is out, what it will cost, and what is late back."
+        "description": "What is out, what it will cost, and what is late back.\n\n`offset` is here because a `limit` on its own is a CAP, not a pager. Note\nthat `overdue=true` filters the PAGE (the rule is computed per job, not in\nSQL), so an overdue page can be shorter than `limit`."
       },
       "response": []
     },

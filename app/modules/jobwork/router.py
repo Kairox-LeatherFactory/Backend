@@ -175,10 +175,17 @@ async def list_jobs(
     vendor_id: uuid.UUID | None = Query(default=None),
     overdue: bool = Query(default=False),
     limit: int = Query(default=200, le=1000),
+    offset: int = Query(default=0, ge=0,
+                        description="Rows to skip before returning `limit` rows."),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(_READERS),
 ):
-    """What is out, what it will cost, and what is late back."""
+    """What is out, what it will cost, and what is late back.
+
+    `offset` is here because a `limit` on its own is a CAP, not a pager. Note
+    that `overdue=true` filters the PAGE (the rule is computed per job, not in
+    SQL), so an overdue page can be shorter than `limit`.
+    """
     return await JobWorkService(db).list_jobs(
         status_filter=status_filter, vendor_id=vendor_id,
-        overdue_only=overdue, limit=limit)
+        overdue_only=overdue, limit=limit, offset=offset)

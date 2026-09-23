@@ -95,6 +95,15 @@ class ClientService:
                 status.HTTP_409_CONFLICT,
                 f"Client code '{new_code}' is already used by another client.")
 
+    async def deletion_blockers(self, client_id: uuid.UUID) -> list[dict]:
+        """What stands between this client and a hard delete. [] = nothing does.
+
+        Read by GET /clients/{id}/deletable and by delete_client itself, so the
+        preflight and the refusal can never disagree about the rule.
+        """
+        await self.get_client(client_id)          # 404 for an unknown client
+        return await self.repo.deletion_blockers(client_id)
+
     async def delete_client(self, client_id: uuid.UUID) -> None:
         """Hard-delete a client that has produced NOTHING.
 
@@ -119,33 +128,46 @@ class ClientService:
         delete the scannable code, never the record — so it stays a 409 and the
         answer stays `PATCH /clients/{id} {"is_active": false}`.
 
-        THE PIECE COUNT IS NOT THE WHOLE STORY, which is why the IntegrityError
-        arm exists. wage_style_rate, supplier_po_line and the cutting tables all
-        reference `style.id` with plain FKs, so a client with no pieces but with
-        (say) a style rate card still cannot be cascaded away. The database is
-        the real authority; this turns its refusal into a 409 a user can act on
-        instead of a 500.
+        THE PIECE COUNT IS NOT THE WHOLE STORY. `rate`, `style_operation`,
+        `wage_line_detail` and `production_tracking` all reference `style.id`
+        with plain FKs, so a client with no pieces but with (say) a style rate
+        card still cannot be cascaded away.
+
+        SO THE BLOCKERS ARE COUNTED AND NAMED (repo.deletion_blockers) rather
+        than guessed at. The old refusal said "other records (a style rate, a
+        supplier PO, a cutting entry) still reference their styles" — three
+        guesses, none of them confirmed, and nothing the DM could act on. The
+        message now says which table and how many rows. The IntegrityError arm
+        stays as the backstop for anything the list has not learned about yet;
+        the database is still the real authority.
+
+        AN ORDER IS NOT A BLOCKER, and a STYLE on its own is not either. `POST
+        /clients` mints the client's first order in the same call, and a
+        breakdown upload adds styles and SKUs that nothing has been made from
+        yet — those cascade away with the client. Only rows that record real
+        work stop the delete.
         """
         client = await self.get_client(client_id)
-        pieces = await self.repo.count_pieces_for_client(client_id)
-        if pieces:
+        blockers = await self.repo.deletion_blockers(client_id)
+        if blockers:
             orders = await self.repo.count_orders_for_client(client_id)
+            detail = "; ".join(f"{b['count']} {b['what']}" for b in blockers)
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
-                f"'{client.name}' has {pieces} garment(s) in production across "
-                f"{orders} order(s) and cannot be deleted — their barcodes are "
-                f"printed and their production and wage history hangs off them. "
-                f"Deactivate instead: "
+                f"'{client.name}' has traded and cannot be deleted — {detail} "
+                f"(across {orders} order(s)). That history is what production, "
+                f"inspections and wages hang off, so it is never removed with "
+                f"the customer. Deactivate instead: "
                 f'PATCH /clients/{client_id} {{"is_active": false}}.')
         try:
             await self.repo.delete_client(client)
-        except IntegrityError:
+        except IntegrityError as exc:
             await self.db.rollback()
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
-                f"'{client.name}' has no garments in production, but other "
-                f"records (a style rate, a supplier PO, a cutting entry) still "
-                f"reference their styles, so the row cannot be removed. "
+                f"'{client.name}' has no garments in production, but the "
+                f"database still holds a row referencing one of their styles, "
+                f"so the customer cannot be removed ({str(exc.orig)[:180]}). "
                 f"Deactivate instead: "
                 f'PATCH /clients/{client_id} {{"is_active": false}}.')
 

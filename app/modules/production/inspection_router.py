@@ -96,12 +96,19 @@ async def decline(
 async def list_inspections(
     status_filter: str | None = Query(default=None, alias="status"),
     limit: int = Query(default=200, le=1000),
+    offset: int = Query(default=0, ge=0,
+                        description="Rows to skip before returning `limit` rows."),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(_RAISERS),
 ):
-    """Open rejections by default — the DM's queue."""
+    """Open rejections by default — the DM's queue.
+
+    `offset` is here because a `limit` on its own is a CAP, not a pager: without
+    it a caller can ask for the first 200 rows and has no way to ask for the
+    next 200.
+    """
     return await InspectionService(db).list_open(status_filter=status_filter,
-                                                 limit=limit)
+                                                 limit=limit, offset=offset)
 
 
 @router.get("/responsibility", response_model=list[ResponsibilityRow])

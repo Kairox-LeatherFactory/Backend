@@ -195,8 +195,8 @@ _NULLABLE_FKS = [
     # ── order_style ───────────────────────────────────────────
     ("order_style", "bom_id", "bom", "fk_order_style_bom_id_bom"),
     ("order_style", "client_id", "client", "fk_order_style_client_id_client"),
-    ("order_style", "pattern_reference_id", "pattern_reference",
-     "fk_order_style_pattern_reference_id_pattern_reference"),
+    # pattern_reference_id: moved to _NULLABLE_FKS_BORN_WITH_RULE — it now
+    # points at pattern_extraction (20260911_order_style_fk).
     ("order_style", "spec_document_id", "document",
      "fk_order_style_spec_document_id_document"),
     # ── pattern_extraction ────────────────────────────────────
@@ -401,6 +401,10 @@ _NULLABLE_FKS_BORN_WITH_RULE = [
     # stage has no employee.
     ("production_event", "employee_id", "employee",
      "fk_production_event_employee_id_employee"),
+    # 20260911_order_style_fk repointed this at pattern_extraction, re-created
+    # with ON DELETE SET NULL inline.
+    ("order_style", "pattern_reference_id", "pattern_extraction",
+     "fk_order_style_pattern_reference_id_pattern_extraction"),
 ]
 
 

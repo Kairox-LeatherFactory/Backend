@@ -54,6 +54,22 @@ class Settings(BaseSettings):
     # production default. Configured once in app.main._configure_logging().
     log_level: str = "INFO"             # DEBUG | INFO | WARNING | ERROR
 
+    # ── Interactive API docs (/docs, /redoc) ─────────────────────────────────
+    # ON EVERYWHERE BY DEFAULT (Hamthan, 2026-09-23). These used to be killed
+    # automatically outside a dev box, which meant the two frontend devs and
+    # anyone testing staging lost the one page that shows every route, payload
+    # and role — for a factory-internal API that trade was not worth it.
+    #
+    # What you are accepting: /docs is a public *map* of the API. It does not
+    # grant access — every route still enforces its JWT and role gate — but it
+    # does tell a stranger which routes exist and what they take. The mitigation
+    # is network-level (keep the API off the open internet, or put the docs
+    # path behind the load balancer's auth), not a hidden page.
+    #
+    # Set DOCS_ENABLED=false for a single deploy if you ever want them dark;
+    # no code change needed.
+    docs_enabled: bool = True
+
     # ── Database ─────────────────────────────────────────────────────────────
     # Sync URL drives Alembic migrations and the seed script (simpler, blocking).
     database_url: str = "postgresql+psycopg2://factory:factory@localhost:5432/factory"
@@ -309,22 +325,48 @@ class Settings(BaseSettings):
     # preview, a staging host, the production domain — meant editing source and
     # redeploying the API. Comma-separated, e.g.
     #   CORS_ORIGINS=https://app.example.com,https://staging.example.com
-    # Empty in local/dev falls back to the usual localhost dev servers.
+    # Empty falls back to _DEFAULT_CORS_ORIGINS below, in EVERY environment.
     cors_origins: str = ""
+
+    # THE FRONTENDS THIS API IS FOR. Used whenever CORS_ORIGINS is unset —
+    # production included (Hamthan, 2026-09-23). This replaces the previous
+    # "fail closed with an empty list in production", which meant a deploy that
+    # forgot CORS_ORIGINS came up serving no browser at all: every request from
+    # the real frontend died as a CORS error that looks nothing like a missing
+    # config. A known-good list is the safer failure mode here — it is still a
+    # fixed allow-list, never "*".
+    #
+    # NO TRAILING SLASHES. A browser sends `Origin: https://host` with no path
+    # and no slash; "https://host/" would never match anything.
+    _DEFAULT_CORS_ORIGINS = (
+        "https://frontend-rust-pi-23.vercel.app",
+        "https://stagingpte.vercel.app",
+        "http://localhost:3005",
+        "http://localhost:3012",
+    )
+    # Added on top of the above on a dev box only (the Next.js / Expo defaults).
+    _DEV_CORS_ORIGINS = (
+        "http://localhost:3000",
+        "http://localhost:8081",
+        "http://localhost:19006",
+    )
+
+    @staticmethod
+    def _normalise_origin(origin: str) -> str:
+        """Trim whitespace and any trailing slash pasted in from a browser bar."""
+        return origin.strip().rstrip("/")
 
     @property
     def cors_origin_list(self) -> list[str]:
-        explicit = [o.strip() for o in (self.cors_origins or "").split(",")
-                    if o.strip()]
+        explicit = [self._normalise_origin(o)
+                    for o in (self.cors_origins or "").split(",")
+                    if self._normalise_origin(o)]
         if explicit:
             return explicit
-        if self.is_production:
-            # Fail CLOSED. An unconfigured production deployment should refuse
-            # browser origins outright rather than quietly trusting a developer's
-            # laptop hostnames.
-            return []
-        return ["http://localhost:3000", "http://localhost:8081",
-                "http://localhost:19006"]
+        origins = list(self._DEFAULT_CORS_ORIGINS)
+        if not self.is_production:
+            origins += [o for o in self._DEV_CORS_ORIGINS if o not in origins]
+        return origins
 
     @property
     def is_production(self) -> bool:
@@ -347,25 +389,28 @@ class Settings(BaseSettings):
     _MIN_SECRET_LEN = 32
 
     @model_validator(mode="after")
-    def _reject_default_secret_outside_local(self) -> "Settings":
-        """A missing/misconfigured SECRET_KEY must FAIL a non-local boot, not
-        silently sign forgeable JWTs. The dev default survives only when BOTH
-        environment == 'local' AND debug is on — either one alone is not a
-        statement that this is a developer's machine.
-        """
-        env = (self.environment or "").strip().lower()
-        key = (self.secret_key or "").strip()
-        is_local_dev = (env == "local" and bool(self.debug))
-        if is_local_dev:
-            return self
+    def _reject_default_secret(self) -> "Settings":
+        """A missing/misconfigured SECRET_KEY must FAIL the boot, not silently
+        sign forgeable JWTs.
 
+        NO ENVIRONMENT IS EXEMPT (Hamthan, 2026-09-23). This used to let the
+        shipped placeholder through whenever environment == 'local' AND debug
+        was on — which is the default configuration, so the one machine that
+        never got checked was every developer's, and a token minted there is
+        just as forgeable as one minted in production. A real key costs one
+        command; there is no case for a second, weaker class of key:
+
+            python -c "import secrets;print(secrets.token_urlsafe(48))"
+        """
+        key = (self.secret_key or "").strip()
         low = key.lower()
         if any(low.startswith(p) for p in self._INSECURE_SECRET_PREFIXES):
             raise RuntimeError(
-                "SECRET_KEY is still a well-known placeholder while "
-                f"ENVIRONMENT={self.environment!r} DEBUG={self.debug!r}. "
-                "Set a real SECRET_KEY. Refusing to boot with a publicly-known "
-                "signing key."
+                f"SECRET_KEY starts with a well-known placeholder ({key[:12]!r}...) "
+                f"— ENVIRONMENT={self.environment!r} DEBUG={self.debug!r}. "
+                "Refusing to boot with a publicly-known signing key. Generate "
+                "one with `python -c \"import secrets;print(secrets.token_urlsafe(48))\"` "
+                "and put it in .env as SECRET_KEY."
             )
         if len(key) < self._MIN_SECRET_LEN:
             raise RuntimeError(

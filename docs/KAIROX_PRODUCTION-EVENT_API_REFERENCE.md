@@ -220,6 +220,21 @@ this style — show the number plainly. `"size_baseline"` means the system
 estimated it from the garment size — show it greyed or with a hint, because the
 manager is *expected* to correct it.
 
+**`target_dcm` IS AN ESTIMATE, NEVER A CEILING.** With no confirmed style spec
+it comes from the size ladder in `core/leather_norms.py` — XS 340 · **S 370** ·
+M 400 · L 430 · XL 465 · XXL 500, anchored on M = 400 with ±30 per alpha step,
+and EU sizes mapped onto the same rungs (48 → S, 50 → M, 52 → L …). So a size-S
+row opening at **370** is that table and nothing else: nobody typed it, and no
+spec exists for the style. The moment a DM enters a leather line on
+`PUT /styles/{id}/material-spec`, `qty_per_piece` wins and `target_source`
+becomes `"style_spec"`.
+
+A row may go **far over** its target. That is a `warnings[]` entry on the row
+("Sheets total 938 dcm against a target of 400 dcm (over by 538)") and never a
+refusal — the garment is physically on the table and already cut, and refusing
+the record to protect an estimate would lose the record. Approve, log and stock
+decrement all proceed; the shortfall/overshoot is reported, not blocked.
+
 **`present_cutters` is the whole cutter dropdown.** Do not offer anyone else:
 production refuses to log an absent worker, so a row assigned to someone who did
 not clock in collects the leather and then fails at the scan.
@@ -227,8 +242,8 @@ not clock in collects the leather and then fails at the scan.
 ### `POST /cutting/rows/generate`
 
 ```jsonc
-// request
-{"style_id": "…", "colour": "NAVY", "cutter_employee_id": "…",
+// request  — NOTE: no cutter. See below.
+{"style_id": "…", "colour": "NAVY",
  "material_lot_id": null,    // omit → resolved from the style's article+colour
  "limit": null, "work_date": null, "allocate": true}
 
@@ -238,6 +253,22 @@ not clock in collects the leather and then fails at the scan.
 ```
 
 Safe to press twice — rows are only created for pieces that have none.
+
+**THE CUTTER IS NOT SET HERE — it is set per garment.** `generate` mints one row
+per un-cut piece of the whole style+colour, routinely 40+, so a cutter on this
+body was a cutter on *every* row: one person recorded as having cut forty
+jackets. `cutter_employee_id` is what a piece-rate wage line is paid from, so
+that paid one worker for everybody's work. Name the cutter per row instead:
+
+| Call | Body | Use |
+|---|---|---|
+| `POST /cutting/rows/{id}/approve` | `{"cutter_employee_id": "…"}` | the primary path — say who cut *this* garment as you freeze it |
+| `POST /cutting/rows/assign` | `{"assignments": [{"row_id": "…", "cutter_employee_id": "…"}, …]}` | the grid's cutter column, a screenful at once; partial accept |
+| `PATCH /cutting/rows/{id}` | `{"cutter_employee_id": "…"}` | editing one cell |
+
+Sending `cutter_employee_id` to `generate` is a **422** naming those routes —
+deliberately, rather than being silently dropped, because a dropped cutter is a
+whole style that then cannot be approved.
 
 **409** when several leather lots match the style's article+colour. Send
 `material_lot_id` to disambiguate; the system will not guess which hides to spend.
@@ -261,9 +292,19 @@ sheeted and the hide has to be created now.
 ### `POST /cutting/rows/{id}/approve`
 
 ```jsonc
+// request (optional body) — WHO CUT THIS GARMENT
+{"cutter_employee_id": "…"}
+
+// response
 {"row": { …RowRead, "status": "APPROVED"… },
  "message": "Approved: 10 sheet(s), 438 dcm. Scan the piece on the cutting screen to log it."}
 ```
+
+`cutter_employee_id` is set HERE, one garment at a time — approval is the one
+moment the manager is looking at a single jacket and the hides that went into
+it. Omit it only when the row already carries a cutter (set by PATCH or
+`/cutting/rows/assign`). The employee must exist and be **active**: a retired
+card on a wage line is a payment to somebody who is not there.
 
 Approving freezes the row and moves its hides to `ISSUED`. After that every edit
 returns **409** — use `POST /cutting/rows/{id}/reopen?reason=…` (audited).
@@ -271,7 +312,8 @@ returns **409** — use `POST /cutting/rows/{id}/reopen?reason=…` (audited).
 Re-approving is a **no-op, not an error** — a manager who is unsure whether the
 first tap landed will press it again, and they should not be punished for it.
 
-**409 before approve** if: no sheets on the row, or no cutter assigned.
+**409 before approve** if: no sheets on the row, or no cutter — on the body or
+already on the row. **404** if `cutter_employee_id` names no employee.
 
 > **Screen design.** Build this as a real spreadsheet, not a form-per-row: one
 > table, sticky style/colour header, sheet DCMs as editable cells across the row,
@@ -326,6 +368,149 @@ on the scan result. `awaiting` is the same information as chips if you want both
 the lining is the person best placed to fetch the buttons too, and they will not
 open a second screen to find out they are owed.
 
+#### How accessories are actually checked — NOT as one boolean
+
+A style's accessories are **named lines** on its material spec (`PUT
+/styles/{id}/material-spec`), one per article: *4 × BTN-4H BLACK 18L*, *1 ×
+ZIP-YKK BLACK 60cm*, *200 mtrs THREAD*. An `ACCESSORY` scan walks those lines and
+for each one issues `outstanding = qty_per_piece − already_issued`, decrements
+that line's own lot, and writes one `piece_material_issue` row per **(piece,
+spec line)**. So the merge is per line and always has been:
+
+- `kit.issued_now` / `already_issued` / `outstanding` / `unresolved` — the lines,
+  individually. `unresolved` is a line whose article matches no active lot (or
+  matches several); it holds the kit at `PARTIAL` and keeps the garment
+  unsendable, because reporting ISSUED there would let an unkitted jacket onto
+  the line.
+- `kit.status` — `NOT_REQUIRED` (the style declares none) · `PENDING` ·
+  `PARTIAL` · `ISSUED`.
+- `piece.accessories_in` — the **roll-up**: true only when every line is fully
+  issued and none is unresolved. It is the right thing to gate `/store/send` on
+  and the wrong thing to show an operator, because it cannot say *which* line is
+  missing.
+
+A second tap of the gun computes `outstanding = 0` on every line, spends nothing
+and returns 200 with `issued_now: []` — the same re-tap-is-a-no-op rule as
+attendance check-in.
+
+#### `GET /store/pieces/{piece_code}/materials` · `GET /barcode/pieces/{code}/materials`
+
+**EVERYTHING merged into one garment, and everything that is not.** Same service
+call behind both doors, so the store screen and the scan gun cannot answer this
+differently.
+
+```jsonc
+{
+  "piece_code": "2222-…-NAVY-S-004", "sku_label": "NAVY · S", "garment_size": "S",
+  "kit_required": true, "kit_status": "PENDING", "summary_line": "4 pcs BTN-4H NAVY 18L · …",
+
+  // THIS garment's recipe — this colourway, this size.
+  "applies": {
+    "leather": {"article": "GOAT_SUEDE", "qty_per_piece": 1.25, "consumed": 438.0, …},
+    "lining":  {"article": "KNIT", "qty_per_piece": 1.5, …},
+    "accessories": [{"article": "BTN-4H", "qty_per_piece": 4,
+                     "issued_qty": 0, "outstanding": 4, "resolution": "MATCHED", …}]
+  },
+
+  // THE OTHER HALF — the style's lines that are NOT this garment's, each with why.
+  "not_applicable": [
+    {"article": "THREAD", "scope": "SKU", "reason": "other_sku",
+     "reason_note": "Scoped to PINE GREEN · M; this garment is NAVY · S."}
+  ],
+
+  // THE LEDGER — what physically went in the bag.
+  "issued": [{"article": "BTN-4H", "qty": 4.0, "uom": "pcs",
+              "material_lot_id": "…", "source": "STORE_KIT",
+              "issued_by_employee_id": "…", "entered_by": "STORE", "issued_at": "…"}],
+
+  "consumed": 438.0,
+  "store": {"state": "holding_both", "leather_in": true, "lining_in": true,
+            "accessories_in": false}
+}
+```
+
+**`not_applicable` is the field to read** when a kit scan reports nothing to
+issue while `/material-spec/requirement` shows a full recipe. `reason` is one of:
+
+| `reason` | Means | Fix |
+|---|---|---|
+| `other_sku` | the line is pinned to a different colourway | add the line for this SKU, or clear `sku_id` to make it style-wide |
+| `other_size` | the line is for another garment size — an L zip is not an S zip | add the line for this size, or clear `garment_size` |
+| `zeroed` | a per-SKU override says this colourway takes none of it | nothing to fix; that is the spec working as written |
+
+`source: "MANUAL"` on an issued row is an off-spec correction
+(`POST /materials/issues`): really issued to the garment, and deliberately NOT
+counted against the checklist.
+
+**A lighter read:** `GET /store/pieces/{piece_code}` carries `accessories[]` with
+`issued_qty` / `outstanding` / `resolution` but no `not_applicable`;
+`GET /barcode/resolve?code=PC-…` carries a compact `material_requirement` for the
+scan toast.
+
+#### Which garments a line is for — SKU scope and garment size
+
+Two INDEPENDENT narrowings, and a line has to pass both to reach a garment.
+
+**`sku_id` — the colourway.** NULL means every colourway of the style. Set, it
+means that one only, and it is never issued to another: the PINE GREEN knit does
+not go in the NAVY jacket. A per-SKU line with `qty_per_piece: 0` is how a
+colourway says it takes *none* of a style-wide material.
+
+**`garment_size` — the size.** NULL means every size. This is **not** the same
+column as `size`, and conflating them is the trap the pair exists to avoid:
+
+| Column | Means | Example |
+|---|---|---|
+| `size` | the MATERIAL's own size | a **60cm** zip, an **18L** button |
+| `garment_size` | which GARMENTS the line is for | the zip for an **L** jacket |
+
+`garment_size` is auto-filled from `size` when `size` reads as a garment size
+(`S`, `L`, `XXL`, `48`, `XXL/54`) — because in this factory a size-specific
+accessory is labelled with the garment's size, and that default lets the DM keep
+entering what they always entered. `60cm` and `18L` do **not** read as garment
+sizes and stay NULL = every size. Matching is done through the same size
+normaliser the cutting grid uses, so **`52` and `L` are the same garment** on the
+Italian ladder.
+
+So: leather L pairs with zip L because both lines carry `garment_size: "L"` and
+the piece's SKU is a size L — `applies_to_size` in
+`materials/style_spec_service.py`. The effective recipe is keyed on
+`(category, subtype, article, garment_size)`, so Thread S / M / L are three
+independent lines and one garment gets exactly one of them.
+
+**To verify a kit without issuing anything:** the `/materials` read above.
+
+#### Why `no_accessories` lives on `/styles/{id}/material-spec/confirm`
+
+It is a **style-level declaration**, not a per-garment scan answer, and it exists
+for the release gate. An empty accessory list is ambiguous on its own: the
+garment may genuinely take none, or nobody has entered the buttons yet.
+Releasing the second kind silently is how a whole order reaches the store with
+no kit. So release requires either accessory lines **or** an explicit
+`no_accessories: true`; NULL (nobody asked) does not pass. Confirming
+`no_accessories: true` while accessory lines exist is a **422** — the two
+statements contradict each other and guessing which one the DM meant is how a
+kit gets skipped for a whole order.
+
+Release itself (`POST /imports/breakdown/{order_number}/release`) does **not**
+define accessories. It only refuses to mint pieces for a style whose spec is not
+confirmed — see `release_blockers` in `core/kit_rules.py`.
+
+#### "…has no accessory spec" on a style that plainly has one
+
+The scan is **per garment**; `/material-spec/requirement` is **style-wide**. If
+every accessory line on the style is scoped to one colourway (`scope: "SKU"`) and
+you scan a garment of a different one, the requirement view shows a full recipe
+and the kit scan correctly finds nothing to issue. The 409 now says which case it
+is and names the colourway that owns the lines:
+
+> CLERMONT has 3 accessory line(s) (BTN-4H, THREAD, ZIP-YKK), but none of them is
+> for JP-CLERMONT-NAVY-S-004. 3 of them are scoped to other colourways
+> (PINE GREEN · M) and this garment is NAVY · S. […] Either add the lines for
+> this SKU, or make them style-wide by clearing `sku_id`.
+
+`GET /store/pieces/{code}/materials` → `not_applicable` shows it directly.
+
 ### `POST /store/send`
 
 ```jsonc
@@ -344,11 +529,20 @@ open a second screen to find out they are owed.
 with it. Render `sent` and `not_ready` as two lists — do not treat a non-empty
 `not_ready` as a failed request.
 
-### `GET /store/pieces?state=&style_id=&limit=` · `GET /store/pieces/{piece_code}`
+### `GET /store/pieces?state=&style_id=&limit=&offset=` · `GET /store/pieces/{piece_code}`
 
 The lookup is deliberately open to **every floor role and HR**. The DM assigns
 somebody to place garments who has no DM login; under the old routes they could
 not look a barcode up at all and had to go and find the DM.
+
+The list is **paged**: `limit` + `offset`, and the body carries `count` (this
+page), `total` (the whole match) and `has_more` alongside `pieces`. It used to
+take a `limit` with no `offset`, which is a cap and not a pager.
+
+Each row now also carries `kit_required`, `kit_status`, `accessories_outstanding`
+and `awaiting[]`. The single-garment read adds `accessories[]` — every declared
+line with what has been issued against it — plus `summary_line` and
+`spec_confirmed`.
 
 > **Screen design.** The store screen is now a *list of garments*, not a grid of
 > boxes. Group by `store_state`, and lead each row with `holding` and
@@ -965,6 +1159,35 @@ is a contract to maintain for nothing.
 | Production | `GET /production/events` · `GET /production/skus` · `GET /production/skus/{id}/pieces` |
 | Wages | `GET /wages/orders` · `GET /wages/styles` · `GET /wages/runs` · `GET /wages/runs/{id}/pieces` · `GET /wages/ledger` |
 | Analytics | `GET /analytics/styles/{id}/detail` |
+
+#### "Pagination is not working anywhere" — the three things that were actually wrong
+
+Worth reading before filing it again, because none of the three was the paging
+code and one of them was not the backend at all.
+
+1. **The Postman collections shipped every optional query param DISABLED.** A
+   disabled param in Postman is *not sent*. So `limit` and `offset` were sitting
+   right there in every list request, greyed out, and pressing **Send** returned
+   an unpaged response — because nothing had been asked for. Fixed in
+   `scripts/make_postman_collection.py`; re-import from `postman/` and the paging
+   boxes are ticked, at `limit=50, offset=0`.
+
+2. **Three routes took a `limit` with no `offset`.** A limit on its own is a
+   *cap*, not a pager: you can ask for the first 200 rows and have no way to ask
+   for the next 200. `GET /inspections`, `GET /jobwork` and `GET /store/pieces`
+   now take `offset`, and `/store/pieces` also returns `total` / `has_more`
+   beside its existing `count` and `pieces`.
+
+3. **Some routes page correctly but return a bare array.** `GET /wages/runs`,
+   `GET /inspections` and `GET /jobwork` honour `limit`/`offset` but carry no
+   `total`, so a client cannot tell a full page from the last one — which reads
+   as broken paging even though the slicing works. Page until you get fewer rows
+   than you asked for. These shapes are published and a working frontend reads
+   them, so they are not being retrofitted under you (see `core/pagination.py`);
+   they move to `Page` when their consumer is ready.
+
+`tests/system/test_pagination_contract.py` now walks every paged route and
+asserts page 1 and page 2 return different rows, so #2 cannot come back quietly.
 
 Two Phase-2 routes also take `limit`/`offset` and are **not** covered by any of
 the above: `GET /procurement/suppliers` and `GET /procurement/inventory/items`.

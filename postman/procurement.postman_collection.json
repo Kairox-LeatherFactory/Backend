@@ -1297,15 +1297,15 @@
                 },
                 {
                   "key": "limit",
-                  "value": "100",
+                  "value": "50",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },
@@ -1742,15 +1742,15 @@
                 },
                 {
                   "key": "limit",
-                  "value": "100",
+                  "value": "50",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },

@@ -54,7 +54,22 @@ def upgrade() -> None:
     bind = op.get_bind()
     is_pg = bind.dialect.name == "postgresql"
 
-    # ── 1. the alias flag ────────────────────────────────────────────────────
+    # ── 1. the new role label — MUST BE FIRST ────────────────────────────────
+    # ORDERING IS LOAD-BEARING, do not move this below the ALTER TABLEs.
+    # autocommit_block() COMMITS the open transaction, and Alembic writes the new
+    # alembic_version row only AFTER upgrade() returns. So any DDL emitted before
+    # this block gets committed WITHOUT its version bump: if a later revision then
+    # fails, the schema is permanently ahead of alembic_version and the next
+    # `upgrade head` replays this revision into DuplicateColumn. Running the
+    # autocommit block first means nothing durable precedes the commit point, so
+    # the revision stays all-or-nothing.
+    # Guarded so it is a no-op on SQLite, which has no native enum type.
+    if is_pg:
+        with op.get_context().autocommit_block():
+            op.execute(
+                "ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'STORE_MANAGER'")
+
+    # ── 2. the alias flag ────────────────────────────────────────────────────
     # server_default is required: the table is populated, and the column is NOT
     # NULL. Dropped again afterwards on Postgres so the application default (and
     # only the application default) governs new rows — SQLite cannot ALTER a
@@ -63,23 +78,19 @@ def upgrade() -> None:
         "barcode_registry",
         sa.Column("is_alias", sa.Boolean(), nullable=False,
                   server_default=sa.false()),
+        # if_not_exists: the pre-fix ordering of this revision could commit
+        # is_alias WITHOUT the version bump; a rerun must finish, not die.
+        if_not_exists=True,
     )
     op.create_index("ix_barcode_registry_is_alias", "barcode_registry",
-                    ["is_alias"])
+                    ["is_alias"], if_not_exists=True)
     if is_pg:
         op.alter_column("barcode_registry", "is_alias", server_default=None)
 
-    # ── 2. drawer routing ────────────────────────────────────────────────────
+    # ── 3. drawer routing ────────────────────────────────────────────────────
     op.add_column("drawer", sa.Column("sent_to", sa.String(length=20),
-                                      nullable=True))
-    op.create_index("ix_drawer_sent_to", "drawer", ["sent_to"])
-
-    # ── 3. the new role label ────────────────────────────────────────────────
-    # Guarded so it is a no-op on SQLite, which has no native enum type.
-    if is_pg:
-        with op.get_context().autocommit_block():
-            op.execute(
-                "ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'STORE_MANAGER'")
+                                      nullable=True), if_not_exists=True)
+    op.create_index("ix_drawer_sent_to", "drawer", ["sent_to"], if_not_exists=True)
 
 
 def downgrade() -> None:

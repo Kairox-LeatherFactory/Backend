@@ -1,7 +1,8 @@
 """HTTP shapes for the store. One scan fewer than the drawer flow had."""
 import uuid
+from datetime import datetime
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class KitLineRequest(BaseModel):
@@ -94,14 +95,142 @@ class StorePieceRow(BaseModel):
     holding: str
     leather_in: bool
     lining_in: bool
+    # THE ROLL-UP, not the whole answer. True means every accessory line this
+    # style declares has been issued IN FULL against this garment. It cannot say
+    # which line is missing — that is what the three fields below are for, and
+    # what StorePieceDetail.accessories spells out line by line.
     accessories_in: bool
+    kit_required: bool = False
+    # NOT_REQUIRED (the style declares none) | PENDING | PARTIAL | ISSUED.
+    # NOT_REQUIRED is not "nothing issued" — it tells the screen to hide the
+    # accessory panel rather than render one that can never be satisfied.
+    kit_status: str | None = None
+    accessories_outstanding: float = 0.0
     needs_lining: bool
+    # LEATHER / LINING / ACCESSORIES — what this garment is still owed, spelled
+    # exactly as the scan response spells it so the two screens cannot disagree.
+    awaiting: list[str] = Field(default_factory=list)
     complete: bool
     style_name: str | None = None
     colour: str | None = None
     size: str | None = None
 
 
+class StorePieceDetail(StorePieceRow):
+    """One garment WITH its accessory checklist, line by line.
+
+    `accessories` is the answer to "how do I verify they took the accessories?".
+    Each declared line — every button, every zip, the thread — comes back with
+    `qty_per_piece`, `issued_qty`, `outstanding` and whether its lot even
+    resolves, so the operator verifies a LIST and not a boolean.
+    """
+    accessories: list[dict] = Field(default_factory=list)
+    summary_line: str | None = None
+    spec_confirmed: bool = False
+
+
+class PieceMaterialLine(BaseModel):
+    """One recipe line as it stands against ONE garment.
+
+    Loose on purpose: the line payload is assembled by StyleSpecService and
+    carries different keys for a leather line (which gains `consumed`) than for
+    an accessory (which gains `issued_qty` / `outstanding`). Pinning every field
+    here would be a second copy of that shape to keep in step.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    line_id: str | None = None
+    scope: str | None = None            # STYLE | SKU
+    category: str | None = None
+    subtype: str | None = None
+    article: str | None = None
+    colour: str | None = None
+    size: str | None = None             # the MATERIAL's size — a 60cm zip
+    garment_size: str | None = None     # which GARMENTS it is for — an L jacket
+    qty_per_piece: float | None = None
+    uom: str | None = None
+    # Only on a line that does NOT reach this garment:
+    # other_sku | other_size | zeroed, plus a sentence saying which.
+    reason: str | None = None
+    reason_note: str | None = None
+
+
+class PieceMaterialsApplies(BaseModel):
+    """The recipe for THIS colourway at THIS size."""
+    leather: PieceMaterialLine | None = None
+    lining: PieceMaterialLine | None = None
+    accessories: list[PieceMaterialLine] = Field(default_factory=list)
+
+
+class PieceMaterialIssueRow(BaseModel):
+    """One material actually issued to this garment — the ledger row."""
+    model_config = ConfigDict(extra="allow")
+
+    issue_id: str
+    spec_line_id: str | None = None
+    category: str | None = None
+    subtype: str | None = None
+    article: str | None = None
+    colour: str | None = None
+    qty: float
+    uom: str | None = None
+    material_lot_id: str | None = None
+    # STORE_KIT (against a recipe line) | MANUAL (an off-spec correction, really
+    # issued and deliberately not counted against the checklist).
+    source: str | None = None
+    issued_by_employee_id: str | None = None
+    entered_by: str | None = None
+    issued_at: datetime | None = None
+
+
+class PieceMaterials(BaseModel):
+    """EVERYTHING merged into one garment — and everything that is not.
+
+    THE TWO HALVES ARE THE POINT. `applies` is this garment's own recipe;
+    `not_applicable` is every other line on the style with the reason it does
+    not reach here. Without the second half a style-wide requirement view and a
+    per-garment kit scan look like they contradict each other: the view lists
+    three accessories, the scan says there is nothing to issue, and both are
+    telling the truth about different questions.
+    """
+    piece_id: str
+    piece_code: str
+    sku_id: str | None = None
+    sku_label: str | None = None        # "NAVY · S" — what a person calls it
+    style_id: str | None = None
+    style_name: str | None = None
+    garment_size: str | None = None
+    colour: str | None = None
+
+    spec_confirmed: bool = False
+    no_accessories_declared: bool | None = None
+    kit_required: bool = False
+    kit_status: str | None = None
+    summary_line: str | None = None
+
+    applies: PieceMaterialsApplies = Field(default_factory=PieceMaterialsApplies)
+    not_applicable: list[PieceMaterialLine] = Field(default_factory=list)
+    issued: list[PieceMaterialIssueRow] = Field(default_factory=list)
+    # The dcm recorded at the cut. It lives on the production EVENT, not in the
+    # issue ledger (CLAUDE.md §8), and is merged here so a screen never has to
+    # know there were two write paths.
+    consumed: float | None = None
+    store: dict | None = None
+    needs_lining: bool | None = None
+    lining_reason: str | None = None
+
+
 class StoreList(BaseModel):
+    """One page of the store. ADDITIVE on the old {count, pieces} shape.
+
+    `count` is the rows in THIS page and keeps its old meaning; `total` is how
+    many match the filter. A `limit` with no `offset` was a cap, not a pager —
+    you could ask for the first 200 garments and had no way to ask for the next
+    200 — so both are here now.
+    """
     count: int
+    total: int = 0
+    limit: int = 200
+    offset: int = 0
+    has_more: bool = False
     pieces: list[StorePieceRow] = Field(default_factory=list)

@@ -1,7 +1,7 @@
 """Repoint order_style.pattern_reference_id at pattern_extraction, not pattern_reference
 
 Revision ID: 20260911_order_style_fk
-Revises: 20260908_material_lot_used
+Revises: 20260910_bom_intake_tables
 Create Date: 2026-09-11
 
 UPDATED 2026-09-11 (Hamthan): order_style.pattern_reference_id backs the "DXF
@@ -34,16 +34,18 @@ renamed the file to match.
 from alembic import op
 
 revision = "20260911_order_style_fk"
-down_revision = "20260908_material_lot_used"
+down_revision = "20260910_bom_intake_tables"
 branch_labels = None
 depends_on = None
 
 
 def upgrade() -> None:
-    op.drop_constraint(
-        "fk_order_style_pattern_reference_id_pattern_reference",
-        "order_style", type_="foreignkey",
-    )
+    # IF EXISTS on both: a database whose order_style came from create_all already
+    # carries the NEW constraint and never had the old one.
+    op.execute("ALTER TABLE order_style DROP CONSTRAINT IF EXISTS "
+               "fk_order_style_pattern_reference_id_pattern_reference")
+    op.execute("ALTER TABLE order_style DROP CONSTRAINT IF EXISTS "
+               "fk_order_style_pattern_reference_id_pattern_extraction")
     op.create_foreign_key(
         "fk_order_style_pattern_reference_id_pattern_extraction",
         "order_style", "pattern_extraction",

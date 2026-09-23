@@ -335,13 +335,13 @@
                   "key": "limit",
                   "value": "50",
                   "description": "Rows to return (1-200).",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "Rows to skip before returning `limit` rows.",
-                  "disabled": true
+                  "disabled": false
                 }
               ],
               "variable": [
@@ -974,13 +974,13 @@
                   "key": "limit",
                   "value": "50",
                   "description": "Rows to return (1-200).",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "Rows to skip before returning `limit` rows.",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },
@@ -1050,13 +1050,13 @@
                   "key": "limit",
                   "value": "50",
                   "description": "Rows to return (1-200).",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "Rows to skip before returning `limit` rows.",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },
@@ -1152,13 +1152,13 @@
                   "key": "page",
                   "value": "1",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "page_size",
                   "value": "50",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 }
               ],
               "variable": [
@@ -1169,6 +1169,35 @@
               ]
             },
             "description": "The history table: order \u2192 style \u2192 piece, filterable by SKU, style, or\nstyle+size, plus status and generated-date range. Paginated (JP ~= 1,273)."
+          },
+          "response": []
+        },
+        {
+          "name": "Piece Materials",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/barcode/pieces/{{code}}/materials",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "barcode",
+                "pieces",
+                "{{code}}",
+                "materials"
+              ],
+              "variable": [
+                {
+                  "key": "code",
+                  "value": ""
+                }
+              ]
+            },
+            "description": "Scan a garment: WHAT GOES INTO IT, and what does not.\n\nTHE SCAN-GUN DOOR onto the same answer GET /store/pieces/{code}/materials\ngives, and it is the same service call \u2014 so the store screen and the gun\ncannot disagree about what is in a garment. `/resolve` carries a compact\n`material_requirement` for the scan toast; this is the full record:\n\n  `applies`        leather, lining and every accessory line that reaches\n                   THIS colourway at THIS size, with issued / outstanding\n  `not_applicable` the style's other lines and why each one is not this\n                   garment's \u2014 `other_sku`, `other_size`, `zeroed`\n  `issued`         the ledger: lot, quantity, time, card, MANUAL included\n  `consumed`       the dcm actually recorded at the cut\n\nRead `not_applicable` when a kit scan reports nothing to issue while the\nstyle's `/material-spec/requirement` shows a full recipe \u2014 that view is\nstyle-wide, a kit is per garment."
           },
           "response": []
         },
@@ -1408,13 +1437,13 @@
                   "key": "limit",
                   "value": "50",
                   "description": "Rows to return (1-200).",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "Rows to skip before returning `limit` rows.",
-                  "disabled": true
+                  "disabled": false
                 }
               ],
               "variable": [
@@ -1463,6 +1492,34 @@
           "response": []
         },
         {
+          "name": "Deletable",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clients/{{client_id}}/deletable",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clients",
+                "{{client_id}}",
+                "deletable"
+              ],
+              "variable": [
+                {
+                  "key": "client_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "CAN this client be deleted, and if not, what exactly is in the way?\n\nThe same check DELETE runs, without doing anything \u2014 so a screen can grey\nthe button out and say why, instead of offering it and then explaining a\n409. `blockers` is [{table, count, what}]; empty means the delete will go\nthrough."
+          },
+          "response": []
+        },
+        {
           "name": "Delete Client",
           "request": {
             "method": "DELETE",
@@ -1485,7 +1542,7 @@
                 }
               ]
             },
-            "description": "Delete a client that has produced NOTHING \u2014 a mistyped or duplicate row.\n\nCreating a client also creates its first order (order_number is required on\nPOST /clients), so \"has an order\" was never a sign the client had traded and\nis no longer what this refuses on. The test is whether any PIECE exists: no\npieces, and the cascade removes an empty order shell; one piece, and the\nbarcodes are printed, so it is a 409 and the client is deactivated instead\n(PATCH above). The error names the exact call to make.\n\nDM only, matching client creation. MD passes as superuser."
+            "description": "Delete a client that has produced NOTHING \u2014 a mistyped or duplicate row.\n\nNEITHER AN ORDER NOR A STYLE IS A REASON TO REFUSE. Creating a client also\ncreates its first order (order_number is required on POST /clients), and a\nbreakdown upload adds styles and SKUs that may never have been made from;\nall of those cascade away with the customer. What refuses the delete is a\nrow recording real WORK \u2014 a minted garment, a logged production event, a\nwage rate or a paid wage line \u2014 and the 409 now names which and how many,\nrather than guessing at \"a style rate, a supplier PO, a cutting entry\".\n\nAsk GET /clients/{id}/deletable first if you want to know before pressing it.\n\nDM only, matching client creation. MD passes as superuser."
           },
           "response": []
         },
@@ -1542,13 +1599,13 @@
                   "key": "limit",
                   "value": "50",
                   "description": "Rows to return (1-200).",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "Rows to skip before returning `limit` rows.",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },
@@ -1589,13 +1646,13 @@
                   "key": "limit",
                   "value": "50",
                   "description": "Rows to return (1-200).",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "Rows to skip before returning `limit` rows.",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },
@@ -2485,13 +2542,13 @@
                   "key": "limit",
                   "value": "50",
                   "description": "Rows to return (1-200).",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "Rows to skip before returning `limit` rows.",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },
@@ -2769,13 +2826,13 @@
                   "key": "limit",
                   "value": "50",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },
@@ -3213,13 +3270,13 @@
                   "key": "limit",
                   "value": "50",
                   "description": "Rows to return (1-200).",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "Rows to skip before returning `limit` rows.",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },
@@ -4868,15 +4925,15 @@
                 },
                 {
                   "key": "limit",
-                  "value": "100",
+                  "value": "50",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },
@@ -5313,15 +5370,15 @@
                 },
                 {
                   "key": "limit",
-                  "value": "100",
+                  "value": "50",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },
@@ -5979,13 +6036,13 @@
                   "key": "limit",
                   "value": "50",
                   "description": "Rows to return (1-200).",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "Rows to skip before returning `limit` rows.",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },
@@ -6043,13 +6100,13 @@
                   "key": "limit",
                   "value": "50",
                   "description": "Rows to return (1-200).",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "Rows to skip before returning `limit` rows.",
-                  "disabled": true
+                  "disabled": false
                 }
               ],
               "variable": [
@@ -6096,13 +6153,13 @@
                   "key": "limit",
                   "value": "50",
                   "description": "Rows to return (1-200).",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "Rows to skip before returning `limit` rows.",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },
@@ -6686,13 +6743,13 @@
                   "key": "limit",
                   "value": "50",
                   "description": "Rows to return (1-200).",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "Rows to skip before returning `limit` rows.",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },
@@ -6888,15 +6945,15 @@
                 },
                 {
                   "key": "limit",
-                  "value": "10",
+                  "value": "50",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },
@@ -6937,13 +6994,13 @@
                   "key": "limit",
                   "value": "50",
                   "description": "Rows to return (1-200).",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "Rows to skip before returning `limit` rows.",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },
@@ -7008,13 +7065,13 @@
                   "key": "limit",
                   "value": "50",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },
@@ -7067,13 +7124,13 @@
                   "key": "limit",
                   "value": "50",
                   "description": "Rows to return (1-200).",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "Rows to skip before returning `limit` rows.",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },
@@ -7293,15 +7350,15 @@
                 },
                 {
                   "key": "limit",
-                  "value": "500",
+                  "value": "50",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
                 }
               ],
               "variable": [
@@ -7438,7 +7495,12 @@
           "name": "Approve",
           "request": {
             "method": "POST",
-            "header": [],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "url": {
               "raw": "{{base_url}}/api/v1/cutting/rows/{{row_id}}/approve",
               "host": [
@@ -7459,7 +7521,52 @@
                 }
               ]
             },
-            "description": "Freeze the row: these hides, this total, this cutter.\n\n`user.id` is an app_user id \u2014 the LOGIN \u2014 which is what AuditLog.actor_user_id\nrequires. The WORKER is the row's cutter_employee_id and is a different\nperson in a different table."
+            "description": "Freeze the row: these hides, this total, THIS cutter.\n\n`cutter_employee_id` is named HERE, one garment at a time \u2014 `generate` takes\nno cutter, because one id there put the same worker on every row of the\nstyle and the cutting row is what a piece rate is paid from.\n\n`user.id` is an app_user id \u2014 the LOGIN \u2014 which is what AuditLog.actor_user_id\nrequires. The WORKER is the row's cutter_employee_id and is a different\nperson in a different table.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cutter_employee_id\": \"00000000-0000-0000-0000-000000000000\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Assign Cutters",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cutting/rows/assign",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "cutting",
+                "rows",
+                "assign"
+              ]
+            },
+            "description": "Save the grid's cutter column \u2014 a different worker per garment.\n\nThe bulk form of PATCH /cutting/rows/{id}. Partial accept: a frozen row comes\nback in `rejected` and never loses the rows that did assign.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"assignments\": [\n    {\n      \"row_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"cutter_employee_id\": \"00000000-0000-0000-0000-000000000000\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": []
         },
@@ -7836,13 +7943,19 @@
                 },
                 {
                   "key": "limit",
-                  "value": "200",
+                  "value": "50",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
+                  "disabled": false
                 }
               ]
             },
-            "description": "Open rejections by default \u2014 the DM's queue."
+            "description": "Open rejections by default \u2014 the DM's queue.\n\n`offset` is here because a `limit` on its own is a CAP, not a pager: without\nit a caller can ask for the first 200 rows and has no way to ask for the\nnext 200."
           },
           "response": []
         },
@@ -8020,13 +8133,19 @@
                 },
                 {
                   "key": "limit",
-                  "value": "200",
+                  "value": "50",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
+                  "disabled": false
                 }
               ]
             },
-            "description": "What is out, what it will cost, and what is late back."
+            "description": "What is out, what it will cost, and what is late back.\n\n`offset` is here because a `limit` on its own is a CAP, not a pager. Note\nthat `overdue=true` filters the PAGE (the rule is computed per job, not in\nSQL), so an overdue page can be shorter than `limit`."
           },
           "response": []
         },
@@ -8130,7 +8249,7 @@
                 }
               ]
             },
-            "description": "WHERE IS THIS GARMENT \u2014 bug #15, and now a one-line answer.\n\nUnder the drawer flow this meant looking up which numbered box held it. There\nis no box: the garment's own record says what it is holding and what it is\nwaiting for."
+            "description": "WHERE IS THIS GARMENT, and what is it still owed \u2014 bug #15.\n\nUnder the drawer flow this meant looking up which numbered box held it. There\nis no box: the garment's own record says what it is holding and what it is\nwaiting for.\n\nIT CARRIES THE ACCESSORY CHECKLIST LINE BY LINE. `accessories_in` is a\nroll-up over every declared line, so on its own it cannot tell an operator\nwhether the zip is missing or the buttons are. `accessories[]` names each\nline with what has been issued against it and what is still owed \u2014 which is\nhow you verify a kit without issuing anything."
           },
           "response": []
         },
@@ -8165,13 +8284,48 @@
                 },
                 {
                   "key": "limit",
-                  "value": "200",
+                  "value": "50",
                   "description": "",
-                  "disabled": true
+                  "disabled": false
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Rows to skip before returning `limit` rows.",
+                  "disabled": false
                 }
               ]
             },
-            "description": ""
+            "description": "What is in the store right now, one page at a time.\n\n`offset` and `total` are what make this pageable: a `limit` on its own is a\ncap, and a busy store holds far more than one page of garments."
+          },
+          "response": []
+        },
+        {
+          "name": "Piece Materials",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/store/pieces/{{piece_code}}/materials",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "store",
+                "pieces",
+                "{{piece_code}}",
+                "materials"
+              ],
+              "variable": [
+                {
+                  "key": "piece_code",
+                  "value": ""
+                }
+              ]
+            },
+            "description": "WHAT IS MERGED INTO THIS GARMENT \u2014 the whole picture, in one read.\n\n`applies`        the recipe for THIS colourway at THIS size \u2014 leather,\n                 lining, and every accessory line with `issued_qty` and\n                 `outstanding`.\n`not_applicable` the style's OTHER lines, each saying why it is not this\n                 garment's: `other_sku` (scoped to another colourway),\n                 `other_size` (an L zip is not an S zip), or `zeroed` (this\n                 colourway declares it takes none).\n`issued`         the ledger \u2014 what physically went in, from which lot, when\n                 and through whose card, MANUAL corrections included.\n`consumed`       the leather actually recorded at the cut. It lives on the\n                 production event, not the issue ledger, and is merged here\n                 so a screen never has to know there were two writes.\n\n`not_applicable` is the field to read when a kit scan says there is nothing\nto issue while `/material-spec/requirement` shows a full recipe: that view\nis STYLE-WIDE and a kit is issued PER GARMENT."
           },
           "response": []
         },

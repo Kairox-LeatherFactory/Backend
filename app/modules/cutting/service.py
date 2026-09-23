@@ -191,6 +191,17 @@ class CuttingService:
         style = await self.repo.get_style(body.style_id)
         if style is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Style not found.")
+        # A client still sending the removed field is told where the cutter went
+        # rather than having it silently ignored — a silently-dropped cutter is
+        # how a whole style gets approved with nobody named on it.
+        if getattr(body, "cutter_employee_id", None) is not None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "A cutter cannot be set on generate — it would put one worker on "
+                "every garment of this style, and the cutting row is what their "
+                "piece rate is paid from. Name the cutter per garment: "
+                "POST /cutting/rows/{row_id}/approve "
+                '{"cutter_employee_id": "…"}, or PATCH /cutting/rows/{row_id}.')
 
         candidates = await self.repo.uncut_pieces(
             body.style_id, colour=body.colour, limit=body.limit)
@@ -221,7 +232,11 @@ class CuttingService:
                 article=(lot.article if lot else style.article),
                 colour=(lot.colour if lot else (sku.color_name or sku.color_code)),
                 size=sku.size, rc_no=None,
-                cutter_employee_id=body.cutter_employee_id,
+                # NO CUTTER. One id on the generate body meant one worker on
+                # every row of the style — see GenerateRequest. The cutter is
+                # named per garment at approve (or PATCH), which is where the
+                # manager is actually looking at one jacket and its hides.
+                cutter_employee_id=None,
                 work_date=body.work_date or date.today(),
                 status=CuttingRowStatus.DRAFT.value,
                 target_dcm=Decimal(str(target)), target_source=source,
@@ -494,12 +509,80 @@ class CuttingService:
         return await self.get_row_payload(row_id)
 
     # ══════════════════════════════════════════════════════════ approval
-    async def approve(self, row_id: uuid.UUID, *, actor_user_id, actor_name=None):
+    async def assign_cutter(self, row_id: uuid.UUID, employee_id) -> None:
+        """Put a named worker on ONE row. Validates, does not commit.
+
+        THE CUTTER IS A PER-GARMENT FACT. It is what the piece-rate wage line is
+        paid from, so it is checked here the way the grid checks it: the employee
+        must exist and must still be active. A retired card on a wage line is a
+        payment to somebody who is not there.
+
+        Absence today is NOT checked, deliberately. The grid only OFFERS present
+        workers (see _present_cutters), and the production log refuses an absent
+        one at the scan — but a row approved this evening for a cut that happened
+        this morning is a real correction, and blocking it here would push it
+        into a database edit.
+        """
+        if employee_id is None:
+            return
+        from app.modules.employees.models import Employee
+        emp = await self.db.get(Employee, employee_id)
+        if emp is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                "No employee carries that id — the cutter must "
+                                "be an employee record, not a login.")
+        if not emp.is_active:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"{emp.name} is no longer active, so no new work can be booked "
+                f"to them. Their past rows and wages are untouched.")
+        row = await self._require_row(row_id)
+        await self._editable(row)
+        row.cutter_employee_id = employee_id
+
+    async def bulk_assign(self, assignments: list) -> dict:
+        """The cutter COLUMN of the grid, saved in one call. Partial accept.
+
+        Forty PATCHes is forty chances to lose half of them, and the manager
+        genuinely does fill this column a screenful at a time — each garment to
+        the person who cut it, which is exactly what generate could never express.
+        """
+        rows, rejected = [], []
+        for item in assignments or []:
+            row_id = getattr(item, "row_id", None) or item["row_id"]
+            emp_id = (getattr(item, "cutter_employee_id", None)
+                      if not isinstance(item, dict)
+                      else item.get("cutter_employee_id"))
+            try:
+                if emp_id is None:
+                    # An explicit null CLEARS the cutter — the manager assigned
+                    # the wrong person and is taking them off, which must not
+                    # need a different endpoint.
+                    row = await self._require_row(row_id)
+                    await self._editable(row)
+                    row.cutter_employee_id = None
+                else:
+                    await self.assign_cutter(row_id, emp_id)
+                rows.append(row_id)
+            except HTTPException as exc:
+                rejected.append({"row_id": str(row_id), "reason": str(exc.detail)})
+        await self.db.commit()
+        payloads = [await self.get_row_payload(rid) for rid in rows]
+        return {"assigned": len(payloads), "rows": payloads, "rejected": rejected}
+
+    async def approve(self, row_id: uuid.UUID, *, actor_user_id, actor_name=None,
+                      cutter_employee_id=None):
         """Freeze the row. A hard, audited transition (CLAUDE.md §15).
 
         WHAT APPROVAL MEANS: the cutter has confirmed the hides, the manager has
         seen them, and from here these numbers are what the production log will
         spend and what this garment's leather cost is computed from.
+
+        `cutter_employee_id` IS WHERE THE CUTTER IS NAMED. Approval is the one
+        moment the manager is looking at a single garment and the hides that went
+        into it, so it is the honest place to say who cut it. The old answer —
+        one id on the generate call — put the same worker on every row of the
+        style and therefore paid one person for everybody's work.
 
         STOCK DOES NOT MOVE HERE. The hides go ISSUED — out of the shelf's reach
         — but `lot.on_hand` is untouched, because consumption still happens at the
@@ -519,6 +602,10 @@ class CuttingService:
                 status.HTTP_409_CONFLICT,
                 f"Only a DRAFT row can be approved; this one is {row.status}.")
 
+        # BEFORE the freeze, so the cutter named on this call is the one the row
+        # is frozen with and the one the audit row records.
+        await self.assign_cutter(row_id, cutter_employee_id)
+
         mats = self._materials()
         sheets = await mats.repo.sheets_for_row(row.id)
         if not sheets:
@@ -529,9 +616,10 @@ class CuttingService:
         if row.cutter_employee_id is None:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
-                "Assign the cutter before approving — the cutting log is what "
-                "their wage is paid from, and it cannot be filled in later "
-                "without rewriting a signed-off row.")
+                "Name the cutter for this garment — send `cutter_employee_id` on "
+                "this approve call (or PATCH the row first). The cutting row is "
+                "what their piece rate is paid from, and it cannot be filled in "
+                "later without rewriting a signed-off row.")
 
         total = sum((Decimal(str(s.dcm or 0)) for s in sheets), Decimal(0))
         now = datetime.now(timezone.utc)

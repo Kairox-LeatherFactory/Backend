@@ -401,3 +401,76 @@ async def test_a_lining_cut_outranks_a_declared_no(
     await _log(db, operations, piece, lining_cutter[0].id, "LINING_CUTTING")
     needs, reason = await StoreService(db).needs_lining(piece)
     assert needs is True, "a logged lining cut settles the question outright"
+
+
+# ══════════════════════════════════ the accessory answer is a LIST, not a flag
+#
+# `piece.accessories_in` is a ROLL-UP: true only when every accessory line the
+# style declares has been issued in full. It is the right thing to gate a SEND
+# on and the wrong thing to show an operator, because it cannot say whether the
+# zip is missing or the buttons are. These pin the per-line read the store
+# screens use to verify a kit without issuing anything.
+async def test_the_store_lookup_names_every_accessory_line(
+        db, operations, pieces, cutter, paster):
+    """Four buttons and one zip come back as two lines, each with what is owed."""
+    from app.modules.barcode.models import MaterialLot, StyleMaterialSpec
+    from app.modules.clients.models import SKU
+    piece = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
+    sku = await db.get(SKU, piece.sku_id)
+    for kw in (dict(subtype="BUTTON", article="BTN-4H", size="18L",
+                    qty=4, on_hand=1000),
+               dict(subtype="ZIP", article="ZIP-YKK", size="60cm",
+                    qty=1, on_hand=500)):
+        db.add(MaterialLot(category="ACCESSORY", subtype=kw["subtype"],
+                           article=kw["article"], colour="BLACK",
+                           size=kw["size"], uom="pcs", on_hand=kw["on_hand"],
+                           is_active=True))
+        db.add(StyleMaterialSpec(
+            style_id=sku.style_id, category="ACCESSORY", subtype=kw["subtype"],
+            article=kw["article"], colour="BLACK", size=kw["size"],
+            qty_per_piece=kw["qty"], uom="pcs"))
+    await db.commit()
+
+    svc = StoreService(db)
+    detail = await svc.piece_detail(piece)
+
+    assert detail["kit_required"] is True
+    assert detail["accessories_in"] is False
+    # THE POINT: two named lines, not one boolean.
+    assert {a["article"] for a in detail["accessories"]} == {"BTN-4H", "ZIP-YKK"}
+    assert {a["outstanding"] for a in detail["accessories"]} == {4.0, 1.0}
+    assert "ACCESSORIES" in detail["awaiting"]
+    assert detail["kit_status"] == "PENDING"
+
+
+async def test_a_style_with_no_accessories_hides_the_checklist(
+        db, operations, pieces, cutter, paster):
+    """NOT_REQUIRED is not 'nothing issued'.
+
+    Every style released before the material spec declares no accessories, and
+    rendering them an empty panel they can never satisfy is how the store learns
+    to ignore the column.
+    """
+    piece = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
+    detail = await StoreService(db).piece_detail(piece)
+    assert detail["kit_required"] is False
+    assert detail["kit_status"] == "NOT_REQUIRED"
+    assert detail["accessories"] == []
+    assert "ACCESSORIES" not in detail["awaiting"]
+
+
+async def test_a_no_accessory_style_is_not_permanently_owed_a_kit(
+        db, operations, pieces, cutter, paster):
+    """`kit.complete` means NOTHING IS OWED, and that is true of a style with
+    no accessory lines.
+
+    It used to require kit_required, so every garment released before the
+    material spec came back `complete: false` on a kit it could never be given,
+    and the store screen carried an outstanding chip forever. The write path has
+    always read kit_rules.kit_satisfied; this is the read path saying the same.
+    """
+    from app.modules.materials.style_spec_service import StyleSpecService
+    piece = pieces[0][0] if isinstance(pieces[0], tuple) else pieces[0]
+    view = await StyleSpecService(db).kit_view(piece.id)
+    assert view["status"] == "NOT_REQUIRED"
+    assert view["complete"] is True

@@ -197,3 +197,24 @@ class StyleSpecRepository:
                 PieceMaterialIssue.piece_id == piece_id,
                 PieceMaterialIssue.spec_line_id == spec_id).limit(1)
         )).scalar_one_or_none()
+
+    async def issue_rows_for_piece(self, piece_id):
+        """Every material actually issued to one garment, newest last.
+
+        THE LEDGER ITSELF, not the {line_id: sum} the idempotency read needs.
+        `issued_by_piece` answers "how much of this line is done"; this answers
+        "what is physically in the bag and where it came from" — which is the
+        question an operator asks when they open a garment's record, and the one
+        nothing could answer before.
+
+        MANUAL rows are INCLUDED here and excluded from `issued_by_piece`, and
+        the difference is the point: an off-spec correction is not something the
+        checklist reconciles against, but it absolutely is something that was
+        given to this garment.
+        """
+        from app.modules.barcode.models import PieceMaterialIssue
+        res = await self.db.execute(
+            select(PieceMaterialIssue)
+            .where(PieceMaterialIssue.piece_id == piece_id)
+            .order_by(PieceMaterialIssue.issued_at.asc()))
+        return list(res.scalars())

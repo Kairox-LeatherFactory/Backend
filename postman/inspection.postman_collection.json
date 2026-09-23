@@ -163,13 +163,19 @@
             },
             {
               "key": "limit",
-              "value": "200",
+              "value": "50",
               "description": "",
-              "disabled": true
+              "disabled": false
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
+              "disabled": false
             }
           ]
         },
-        "description": "Open rejections by default \u2014 the DM's queue."
+        "description": "Open rejections by default \u2014 the DM's queue.\n\n`offset` is here because a `limit` on its own is a CAP, not a pager: without\nit a caller can ask for the first 200 rows and has no way to ask for the\nnext 200."
       },
       "response": []
     },

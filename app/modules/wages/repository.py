@@ -390,22 +390,50 @@ class WageRepository:
         if status:
             conds.append(WageRun.status == RunStatus(status.strip().lower()))
 
-        grouped = (
-            WageRun.id, WageRun.period_start, WageRun.period_end, WageRun.status,
-            WageRun.run_kind, WageRun.scope_is_label,
-            WageRun.scope_order_number, WageRun.scope_style_code,
-            WageRun.unrated_snapshot,
-            WageRun.recompute_count, WageRun.reopen_count, WageRun.created_at,
+        # ── AGGREGATE IN A SUBQUERY, DO NOT GROUP BY THE RUN'S COLUMNS ───────
+        # `wage_run.unrated_snapshot` is a **json** column, and PostgreSQL gives
+        # the `json` type no equality operator — there is no way to tell two json
+        # values apart, so it cannot appear in a GROUP BY at all:
+        #
+        #     asyncpg.exceptions.UndefinedFunctionError:
+        #     could not identify an equality operator for type json
+        #
+        # The old query selected twelve run columns beside three aggregates and
+        # therefore had to group by all twelve, snapshot included. That is a hard
+        # 500 on every call to GET /wages/runs on Postgres — and it did not show
+        # up in the tests, because SQLite is permissive about both GROUP BY and
+        # json equality, so the statement ran there exactly as written.
+        #
+        # Summing the lines per run FIRST and left-joining the result means the
+        # run's own columns are never grouped: one row per run comes out of
+        # `wage_run` itself. It is also the cheaper plan — the aggregate is over
+        # `wage_line` alone, which is the big table.
+        #
+        # (`jsonb` would have an equality operator, but changing the column type
+        # is a migration on a live money table to work around a query that should
+        # not have been grouping by it in the first place.)
+        totals = (
+            select(
+                WageLine.wage_run_id.label("run_id"),
+                func.coalesce(func.sum(WageLine.amount), 0).label("amount"),
+                func.coalesce(func.sum(WageLine.pieces), 0).label("pieces"),
+                func.count(WageLine.id).label("employees"),
+            )
+            .group_by(WageLine.wage_run_id)
+            .subquery()
         )
         stmt = (
             select(
-                *grouped,
-                func.coalesce(func.sum(WageLine.amount), 0),
-                func.coalesce(func.sum(WageLine.pieces), 0),
-                func.count(WageLine.id),
+                WageRun.id, WageRun.period_start, WageRun.period_end,
+                WageRun.status, WageRun.run_kind, WageRun.scope_is_label,
+                WageRun.scope_order_number, WageRun.scope_style_code,
+                WageRun.unrated_snapshot,
+                WageRun.recompute_count, WageRun.reopen_count, WageRun.created_at,
+                func.coalesce(totals.c.amount, 0),
+                func.coalesce(totals.c.pieces, 0),
+                func.coalesce(totals.c.employees, 0),
             )
-            .outerjoin(WageLine, WageLine.wage_run_id == WageRun.id)
-            .group_by(*grouped)
+            .outerjoin(totals, totals.c.run_id == WageRun.id)
             .order_by(WageRun.created_at.desc(), WageRun.period_end.desc())
             .limit(limit)
             .offset(offset)

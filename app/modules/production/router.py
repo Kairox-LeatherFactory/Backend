@@ -267,18 +267,28 @@ async def _approved_cutting(db, piece_ids: list, screen: ScreenContext):
     LEATHER ONLY. A cutting row is a list of hides; lining is cut by the metre and
     has no sheet-level record to retrieve.
 
-    Returns (rows_by_piece, lot_id, dcm_per_piece, warnings). Any of the last
-    three may be None, in which case the caller falls straight back to the typed
-    path — a piece with no approved row must behave exactly as it does today.
+    Returns (rows_by_piece, lot_id, dcm_by_piece, warnings). Any of the last
+    three may be empty/None, in which case the caller falls straight back to the
+    typed path — a piece with no approved row must behave exactly as it does
+    today.
 
-    A BATCH THAT DISAGREES IS NOT AVERAGED. Two garments approved against
-    different lots are two different spends, and the single per-batch decrement
-    cannot express that; guessing one would charge the wrong leather. So it
-    declines and lets the manager scan them separately, rather than silently
-    picking one — the same rule _spec_dcm already follows.
+    TWO GARMENTS MAY TAKE DIFFERENT AMOUNTS, AND THAT IS THE NORMAL CASE.
+    A cutting row is ONE GARMENT cut from 7-12 individually-measured hides, so
+    two jackets of the same size routinely land 40 dcm apart; the grid exists to
+    record exactly that. This used to 409 the whole scan ("approved with
+    different leather totals — scan them separately"), which read to the floor as
+    "the system refuses a garment that took more than the target" and sent the
+    manager back to scanning one piece at a time. Each piece now carries its OWN
+    measured dcm into its own event, and the batch decrement is their sum — so
+    nothing is averaged, nothing is guessed, and nobody is charged what another
+    garment took.
+
+    THE LOT IS STILL ONE PER SCAN, and that 409 stays. A single decrement can
+    only come off a single lot, so two garments approved against different
+    leather really are two different spends.
     """
     if screen is not ScreenContext.LEATHER_CUT or not piece_ids:
-        return {}, None, None, []
+        return {}, None, {}, []
 
     from app.core.enums import CuttingRowStatus
     from app.modules.cutting.service import CuttingService
@@ -288,16 +298,16 @@ async def _approved_cutting(db, piece_ids: list, screen: ScreenContext):
     approved = {pid: r for pid, r in rows.items()
                 if r.status == CuttingRowStatus.APPROVED.value}
     if not approved:
-        return {}, None, None, []
+        return {}, None, {}, []
 
     mats = MaterialService(db)
-    lot_ids, dcms, warnings = set(), set(), []
+    lot_ids, dcm_by_piece, warnings = set(), {}, []
     for pid, row in approved.items():
         sheets = await mats.repo.sheets_for_row(row.id)
         if not sheets:
             continue
         lot_ids.add(sheets[0].material_lot_id)
-        dcms.add(Decimal(str(row.total_dcm or 0)))
+        dcm_by_piece[pid] = float(Decimal(str(row.total_dcm or 0)))
 
     if len(lot_ids) > 1:
         raise HTTPException(
@@ -305,19 +315,22 @@ async def _approved_cutting(db, piece_ids: list, screen: ScreenContext):
             f"These garments were approved against {len(lot_ids)} different "
             f"leather lots, and one scan can only spend one. Scan each lot's "
             f"pieces separately.")
-    if len(dcms) > 1:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            f"These garments were approved with different leather totals "
-            f"({', '.join(f'{float(d):g}' for d in sorted(dcms))} dcm). Scan "
-            f"them separately so each is charged what it actually took.")
+
+    distinct = {round(v, 3) for v in dcm_by_piece.values()}
+    if len(distinct) > 1:
+        # NOT AN ERROR — a fact about the batch, said out loud. Each garment is
+        # charged its own number below; the warning is here so the manager sees
+        # the spread rather than discovering it in the ledger.
+        warnings.append(
+            f"These garments took different amounts of leather "
+            f"({', '.join(f'{v:g}' for v in sorted(distinct))} dcm). Each is "
+            f"charged what its own approved row measured.")
 
     if len(approved) != len(piece_ids):
         warnings.append(
             f"{len(approved)} of {len(piece_ids)} scanned garments have an "
             f"approved cutting row; the rest fall back to typed consumption.")
-    return (approved, next(iter(lot_ids), None),
-            float(next(iter(dcms))) if dcms else None, warnings)
+    return approved, next(iter(lot_ids), None), dcm_by_piece, warnings
 
 
 async def _resolve_cut_lot(
@@ -444,8 +457,8 @@ async def log_batch(
     # manager correcting a row at the gun is making a deliberate choice, and
     # overriding him from a stored plan would be the system arguing with the
     # person holding the leather.
-    approved_rows, row_lot_id, row_dcm, cut_warnings = await _approved_cutting(
-        db, piece_ids, screen)
+    approved_rows, row_lot_id, row_dcm_by_piece, cut_warnings = \
+        await _approved_cutting(db, piece_ids, screen)
 
     leather_lot_id, lining_lot_id = await _resolve_cut_lot(db, cons, screen)
     if leather_lot_id is None and row_lot_id is not None:
@@ -461,17 +474,32 @@ async def log_batch(
     # other way round: /production/piece-state returns `suggested_dcm_per_piece`
     # and the screen prefills the field, so the operator still confirms the
     # number that reaches the ledger.
+    #
+    # PER PIECE WHEN THE GRID MEASURED IT PER PIECE. `consumption_by_piece` is
+    # the approved rows' own totals, one per garment, and it is what makes a
+    # mixed batch loggable: a jacket that took 412 dcm and one that took 370 are
+    # both true, and neither should be charged the other's number. A typed `dcm`
+    # still overrides everything — the manager at the gun is making a deliberate
+    # choice — and a batch with no rows behaves exactly as it always did.
     dcm, source = cons.dcm, ("typed" if cons.dcm is not None else None)
-    if dcm is None and row_dcm is not None:
-        dcm, source = row_dcm, "cutting_row"
-    if dcm is None and cons.use_style_spec and screen in SCREEN_TO_STAGE:
+    by_piece = None
+    if dcm is None and row_dcm_by_piece:
+        by_piece = row_dcm_by_piece
+        source = "cutting_row"
+        # The single number stays populated for the uniform case so every
+        # existing consumer of `dcm_per_piece` reads what it always read.
+        distinct = {round(v, 3) for v in row_dcm_by_piece.values()}
+        dcm = next(iter(distinct)) if len(distinct) == 1 else None
+    if dcm is None and by_piece is None and cons.use_style_spec \
+            and screen in SCREEN_TO_STAGE:
         dcm, source = await _spec_dcm(db, piece_ids, screen)
 
     result = await svc.log_batch(
         user=user, employee_id=employee_id, piece_ids=piece_ids,
         work_date=body.work_date, screen=screen,
         leather_lot_id=leather_lot_id, lining_lot_id=lining_lot_id,
-        consumption_qty=dcm, consumption_source=source, preview=body.preview,
+        consumption_qty=dcm, consumption_by_piece=by_piece,
+        consumption_source=source, preview=body.preview,
         cutting_rows=approved_rows)
     if cut_warnings:
         result["cutting_warnings"] = cut_warnings

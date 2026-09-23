@@ -119,13 +119,13 @@
               "key": "limit",
               "value": "50",
               "description": "Rows to return (1-200).",
-              "disabled": true
+              "disabled": false
             },
             {
               "key": "offset",
               "value": "0",
               "description": "Rows to skip before returning `limit` rows.",
-              "disabled": true
+              "disabled": false
             }
           ]
         },
@@ -195,13 +195,13 @@
               "key": "limit",
               "value": "50",
               "description": "Rows to return (1-200).",
-              "disabled": true
+              "disabled": false
             },
             {
               "key": "offset",
               "value": "0",
               "description": "Rows to skip before returning `limit` rows.",
-              "disabled": true
+              "disabled": false
             }
           ]
         },
@@ -297,13 +297,13 @@
               "key": "page",
               "value": "1",
               "description": "",
-              "disabled": true
+              "disabled": false
             },
             {
               "key": "page_size",
               "value": "50",
               "description": "",
-              "disabled": true
+              "disabled": false
             }
           ],
           "variable": [
@@ -314,6 +314,35 @@
           ]
         },
         "description": "The history table: order \u2192 style \u2192 piece, filterable by SKU, style, or\nstyle+size, plus status and generated-date range. Paginated (JP ~= 1,273)."
+      },
+      "response": []
+    },
+    {
+      "name": "Piece Materials",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/barcode/pieces/{{code}}/materials",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "barcode",
+            "pieces",
+            "{{code}}",
+            "materials"
+          ],
+          "variable": [
+            {
+              "key": "code",
+              "value": ""
+            }
+          ]
+        },
+        "description": "Scan a garment: WHAT GOES INTO IT, and what does not.\n\nTHE SCAN-GUN DOOR onto the same answer GET /store/pieces/{code}/materials\ngives, and it is the same service call \u2014 so the store screen and the gun\ncannot disagree about what is in a garment. `/resolve` carries a compact\n`material_requirement` for the scan toast; this is the full record:\n\n  `applies`        leather, lining and every accessory line that reaches\n                   THIS colourway at THIS size, with issued / outstanding\n  `not_applicable` the style's other lines and why each one is not this\n                   garment's \u2014 `other_sku`, `other_size`, `zeroed`\n  `issued`         the ledger: lot, quantity, time, card, MANUAL included\n  `consumed`       the dcm actually recorded at the cut\n\nRead `not_applicable` when a kit scan reports nothing to issue while the\nstyle's `/material-spec/requirement` shows a full recipe \u2014 that view is\nstyle-wide, a kit is per garment."
       },
       "response": []
     },

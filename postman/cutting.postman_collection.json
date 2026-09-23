@@ -74,7 +74,12 @@
       "name": "Approve",
       "request": {
         "method": "POST",
-        "header": [],
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
         "url": {
           "raw": "{{base_url}}/api/v1/cutting/rows/{{row_id}}/approve",
           "host": [
@@ -95,7 +100,52 @@
             }
           ]
         },
-        "description": "Freeze the row: these hides, this total, this cutter.\n\n`user.id` is an app_user id \u2014 the LOGIN \u2014 which is what AuditLog.actor_user_id\nrequires. The WORKER is the row's cutter_employee_id and is a different\nperson in a different table."
+        "description": "Freeze the row: these hides, this total, THIS cutter.\n\n`cutter_employee_id` is named HERE, one garment at a time \u2014 `generate` takes\nno cutter, because one id there put the same worker on every row of the\nstyle and the cutting row is what a piece rate is paid from.\n\n`user.id` is an app_user id \u2014 the LOGIN \u2014 which is what AuditLog.actor_user_id\nrequires. The WORKER is the row's cutter_employee_id and is a different\nperson in a different table.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"cutter_employee_id\": \"00000000-0000-0000-0000-000000000000\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Assign Cutters",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/cutting/rows/assign",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "cutting",
+            "rows",
+            "assign"
+          ]
+        },
+        "description": "Save the grid's cutter column \u2014 a different worker per garment.\n\nThe bulk form of PATCH /cutting/rows/{id}. Partial accept: a frozen row comes\nback in `rejected` and never loses the rows that did assign.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"assignments\": [\n    {\n      \"row_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"cutter_employee_id\": \"00000000-0000-0000-0000-000000000000\"\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
       },
       "response": []
     },

@@ -116,8 +116,7 @@ async def test_flow1_leather_delivery_to_a_cut_garment(
     # ── 2 · the grid ────────────────────────────────────────────────────────
     as_role(UserRole.CUTTING_MANAGER)
     gen = _ok(await api_client.post(f"{API}/cutting/rows/generate", json={
-        "style_id": str(style.id), "colour": "PINE GREEN",
-        "cutter_employee_id": str(cutter[0].id)}))
+        "style_id": str(style.id), "colour": "PINE GREEN"}))
     assert gen["created"] >= 1
     row = gen["rows"][0]
     assert row["status"] == "DRAFT"
@@ -152,7 +151,11 @@ async def test_flow1_leather_delivery_to_a_cut_garment(
                                json={"rc_no": "1072"}))
 
     # ── 4 · approve, and the row freezes ────────────────────────────────────
-    appr = _ok(await api_client.post(f"{API}/cutting/rows/{row['row_id']}/approve"))
+    # THE CUTTER IS NAMED HERE, per garment — generate takes none, because one
+    # id there put the same worker on every row of the style.
+    appr = _ok(await api_client.post(
+        f"{API}/cutting/rows/{row['row_id']}/approve",
+        json={"cutter_employee_id": str(cutter[0].id)}))
     assert appr["row"]["status"] == "APPROVED"
     assert {s["status"] for s in appr["row"]["sheets"]} == {"ISSUED"}
 

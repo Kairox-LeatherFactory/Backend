@@ -62,12 +62,13 @@ by ARN — never inline in the task definition, which is readable by anyone with
 
 | Variable | Value | Notes |
 |---|---|---|
-| `ENVIRONMENT` | `production` | Turns off `/docs`, makes CORS fail closed |
+| `ENVIRONMENT` | `production` | Drops the extra localhost CORS origins |
 | `DEBUG` | `false` | `true` would run `create_all` at boot — schema drift |
-| `SECRET_KEY` | *secret* | Boot FAILS on a placeholder outside local dev |
+| `DOCS_ENABLED` | `true` | `/docs` + `/redoc` stay ON by design (2026-09-23) |
+| `SECRET_KEY` | *secret* | Boot FAILS on a placeholder — in EVERY environment |
 | `DATABASE_URL` | *secret* | via RDS Proxy endpoint, `postgresql+psycopg2://` |
 | `ASYNC_DATABASE_URL` | *secret* | same host, `postgresql+asyncpg://` |
-| `CORS_ORIGINS` | `https://frontend-rust-pi-23.vercel.app,https://stagingpte.vercel.app` | Unset in production = every frontend request blocked |
+| `CORS_ORIGINS` | `https://frontend-rust-pi-23.vercel.app,https://stagingpte.vercel.app,http://localhost:3005,http://localhost:3012` | Unset falls back to exactly this list (`config.py:_DEFAULT_CORS_ORIGINS`) |
 | `TRUSTED_HOSTS` | TODO: your domain(s) | Blank answers to any Host header |
 | `CELERY_BROKER_URL` | *secret* | ElastiCache, `rediss://` for TLS |
 | `CACHE_ENABLED` | `true` | Dashboard cache; busted on write, not on a timer |

@@ -326,6 +326,35 @@ class StyleSpecService:
                 if (l.qty_per_piece or 0) > 0
                 and StyleSpecService.applies_to_size(l, garment_size)]
 
+    @staticmethod
+    def line_not_applicable_reason(line, sku_id, garment_size: str | None):
+        """Why does this style's line NOT reach this garment? None = it does.
+
+        WHY A NAMED REASON AND NOT A SILENT FILTER. `merge_lines` drops a line by
+        returning a shorter list, and every caller downstream then sees a recipe
+        that simply does not mention the buttons. That is correct behaviour and
+        an awful diagnosis: the DM opens `/material-spec/requirement`, sees three
+        accessory lines, scans the garment, and is told the style "has no
+        accessory spec". Both statements are true — the requirement view is
+        STYLE-WIDE and the scan is PER GARMENT — and nothing on either screen
+        says so. This turns the drop into a sentence.
+
+        THE TWO REASONS A LINE IS DROPPED, and neither is a bug:
+          · it is scoped to a DIFFERENT colourway (`sku_id`), so a NAVY jacket
+            does not get the PINE GREEN knit. Issuing it anyway would put the
+            wrong colour in the bag.
+          · it is for a different GARMENT SIZE — the L zip is not the S zip.
+        A zeroed override is the third, and it is a deliberate statement that
+        this colourway takes none of that material.
+        """
+        if line.sku_id is not None and line.sku_id != sku_id:
+            return "other_sku"
+        if (line.qty_per_piece or 0) <= 0:
+            return "zeroed"
+        if not StyleSpecService.applies_to_size(line, garment_size):
+            return "other_size"
+        return None
+
     async def effective_lines(self, style_id: uuid.UUID,
                               sku_id: uuid.UUID | None,
                               garment_size: str | None = None) -> list:
@@ -1001,6 +1030,200 @@ class StyleSpecService:
         return float(val) if val is not None else None
 
     # ══════════════════════════════════════════════ THE KIT (the money path)
+    async def piece_materials(self, piece_id) -> dict:
+        """EVERYTHING that is or should be merged into ONE garment.
+
+        THE QUESTION NOTHING COULD ANSWER. `material_requirement_block` shows
+        what this garment's recipe asks for, and `/material-spec/requirement`
+        shows the style's whole line set — but between them sat the case that
+        actually bites: a line that EXISTS on the style and does not reach this
+        garment. The DM saw three accessory lines on one screen, scanned the
+        piece, and was told the style had no accessory spec. Both screens were
+        telling the truth about different questions.
+
+        So this returns BOTH halves, side by side and each with its reason:
+
+          `applies`        — the recipe for THIS colourway at THIS size: the
+                             leather, the lining and every accessory line, with
+                             what has been issued against it and what is owed.
+          `not_applicable` — the style's other lines, each saying why it is not
+                             this garment's: scoped to another colourway, for
+                             another garment size, or zeroed for this one.
+          `issued`         — the LEDGER. What physically went into the bag, from
+                             which lot, when, and through whose card. Includes
+                             MANUAL off-spec corrections, which the checklist
+                             deliberately ignores but the garment really got.
+          `consumed`       — leather/lining, which live on the cutting EVENT and
+                             not in the issue ledger (CLAUDE.md §8). Merged here
+                             so a screen never has to know there were two writes.
+
+        ONE READ, BOTH DOORS. The store screen and the barcode scan both call
+        this, so "what is in this garment" cannot mean two different things
+        depending on which gun you picked up.
+        """
+        piece, sku, style = await self._piece_context(piece_id)
+        empty = {
+            "piece_id": str(piece.id), "piece_code": piece.code,
+            "sku_id": str(sku.id) if sku else None,
+            "sku_label": await self._sku_label(sku.id) if sku else None,
+            "style_id": str(style.id) if style else None,
+            "style_name": getattr(style, "name", None),
+            "garment_size": getattr(sku, "size", None),
+            "colour": (getattr(sku, "color_name", None)
+                       or getattr(sku, "color_code", None)),
+            "spec_confirmed": False, "no_accessories_declared": None,
+            "kit_required": False, "kit_status": KitStatus.NOT_REQUIRED.value,
+            "summary_line": None,
+            "applies": {"leather": None, "lining": None, "accessories": []},
+            "not_applicable": [], "issued": [], "consumed": None,
+            "store": None,
+        }
+        if style is None:
+            return empty
+
+        size = getattr(sku, "size", None)
+        all_lines = await self.repo.lines_for_style(style.id)
+        block = await self.material_requirement_block(piece.id)
+
+        # THE OTHER HALF — the lines this garment is NOT on, each with its reason.
+        not_applicable = []
+        for line in all_lines:
+            reason = self.line_not_applicable_reason(
+                line, sku.id if sku else None, size)
+            if reason is None:
+                continue
+            payload = await self._line_payload(line, with_lot=False)
+            payload["reason"] = reason
+            payload["reason_note"] = {
+                "other_sku": (
+                    f"Scoped to {await self._sku_label(line.sku_id)}; this "
+                    f"garment is {await self._sku_label(sku.id) if sku else 'unassigned'}."),
+                "other_size": (
+                    f"For garment size {getattr(line, 'garment_size', None)}; "
+                    f"this garment is {size or 'of unknown size'}."),
+                "zeroed": (
+                    "Set to qty_per_piece 0 for this colourway — the spec says "
+                    "this one does not take it."),
+            }.get(reason, reason)
+            not_applicable.append(payload)
+
+        issued = []
+        for row in await self.repo.issue_rows_for_piece(piece.id):
+            issued.append({
+                "issue_id": str(row.id),
+                "spec_line_id": str(row.spec_line_id) if row.spec_line_id else None,
+                "category": row.category, "subtype": row.subtype,
+                "article": row.article, "colour": row.colour,
+                "qty": float(row.qty), "uom": row.uom,
+                "material_lot_id": (str(row.material_lot_id)
+                                    if row.material_lot_id else None),
+                # MANUAL means an off-spec correction: really issued, and
+                # deliberately not counted against the checklist.
+                "source": row.source,
+                "issued_by_employee_id": (str(row.issued_by_employee_id)
+                                          if row.issued_by_employee_id else None),
+                "entered_by": row.entered_by,
+                "issued_at": row.issued_at,
+            })
+
+        return dict(
+            empty,
+            spec_confirmed=bool(block.get("spec_confirmed")),
+            no_accessories_declared=style.material_spec_no_accessories,
+            kit_required=bool(block.get("kit_required")),
+            kit_status=block.get("kit_status"),
+            summary_line=block.get("summary_line"),
+            applies={
+                "leather": block.get("leather"),
+                "lining": block.get("lining"),
+                "accessories": block.get("accessories") or [],
+            },
+            not_applicable=not_applicable,
+            issued=issued,
+            consumed=((block.get("leather") or {}).get("consumed")
+                      if block.get("leather") else None),
+            store={
+                "state": piece.store_state,
+                "leather_in": bool(piece.leather_in),
+                "lining_in": bool(piece.lining_in),
+                "accessories_in": bool(piece.accessories_in),
+            },
+        )
+
+    async def _sku_label(self, sku_id) -> str:
+        """'NAVY · S' for a SKU id — what a person calls that colourway."""
+        if sku_id is None:
+            return "style-wide"
+        sku = await self.db.get(SKU, sku_id)
+        if sku is None:
+            return str(sku_id)
+        colour = getattr(sku, "color_name", None) or getattr(sku, "color_code", None)
+        return " · ".join(p for p in (colour, getattr(sku, "size", None)) if p) \
+            or str(sku_id)
+
+    async def _no_kit_reason(self, style, sku, piece) -> str:
+        """The sentence behind a kit scan that found nothing to issue.
+
+        It reads the style's WHOLE line set and says which of the three things
+        happened, naming the rows — so the DM can act on it instead of being
+        told to add a spec that is already there. See the call site in
+        issue_kit_nocommit for why one message could not cover all three.
+        """
+        all_lines = await self.repo.lines_for_style(style.id)
+        acc = [l for l in all_lines
+               if l.category == MaterialCategory.ACCESSORY.value]
+        if not acc:
+            return (
+                f"{style.name} has no accessory spec — there is nothing to kit "
+                f"for {piece.code}. If this style does take accessories, add "
+                f"them to its material spec first "
+                f"(PUT /styles/{style.id}/material-spec).")
+
+        size = getattr(sku, "size", None)
+        by_reason: dict = {}
+        for line in acc:
+            reason = self.line_not_applicable_reason(
+                line, sku.id if sku else None, size)
+            by_reason.setdefault(reason, []).append(line)
+
+        mine = await self._sku_label(sku.id) if sku else "no colourway"
+        if by_reason.get("other_sku"):
+            blocked = by_reason["other_sku"]
+            owners = sorted({await self._sku_label(l.sku_id) for l in blocked})
+            return (
+                f"{style.name} has {len(acc)} accessory line(s) "
+                f"({', '.join(sorted({l.article for l in acc}))}), but none of "
+                f"them is for {piece.code}. {len(blocked)} of them are scoped to "
+                f"other colourways ({', '.join(owners)}) and this garment is "
+                f"{mine}. A per-SKU "
+                f"line is deliberately not issued to another colourway — that "
+                f"would put the wrong colour in the bag. Either add the lines "
+                f"for this SKU, or make them style-wide by clearing `sku_id` "
+                f"(PUT /styles/{style.id}/material-spec). "
+                f"GET /store/pieces/{piece.code}/materials shows exactly which "
+                f"lines reach this garment and which do not.")
+        if by_reason.get("other_size"):
+            blocked = by_reason["other_size"]
+            sizes = sorted({str(getattr(l, "garment_size", "")) for l in blocked})
+            return (
+                f"{style.name}'s {len(blocked)} accessory line(s) are for "
+                f"garment size(s) {', '.join(s for s in sizes if s)}, and "
+                f"{piece.code} is a {size or 'garment of unknown size'}. A sized "
+                f"line is not issued to another size — an L zip is not an S zip. "
+                f"Add the line for this size, or clear `garment_size` to make it "
+                f"apply to every size.")
+        if by_reason.get("zeroed"):
+            return (
+                f"{style.name} declares that {mine} takes none of its "
+                f"{len(acc)} accessory line(s) — every one of them is set to "
+                f"qty_per_piece 0 for this colourway, which is how a per-SKU "
+                f"override says 'not this one'. There is nothing to kit for "
+                f"{piece.code}, and that is the spec working as written.")
+        return (
+            f"{style.name} has {len(acc)} accessory line(s) but none resolves "
+            f"for {piece.code}. See "
+            f"GET /store/pieces/{piece.code}/materials.")
+
     async def issue_kit_nocommit(self, *, piece, drawer, requested_lines=None,
                                  employee_id=None, entered_by: str | None = None,
                                  materials_service=None) -> dict:
@@ -1043,11 +1266,20 @@ class StyleSpecService:
             # LOUD, NOT SILENT. An operator who scans a kit and gets a cheerful
             # 200 back will believe the accessories were issued. They were not,
             # and nobody would find out until the garment reached finishing.
+            #
+            # AND IT MUST SAY WHICH "NO". "No accessory spec" was one message
+            # covering two completely different situations, and it sent the DM
+            # to add lines that were already there:
+            #   · the style genuinely declares none          → add them
+            #   · the style declares several, but every one is scoped to another
+            #     colourway or another garment size          → the lines exist;
+            #     this GARMENT is not on any of them
+            # The second is what `/material-spec/requirement` shows as a healthy
+            # three-line recipe, because that view is STYLE-WIDE while a kit is
+            # issued PER GARMENT.
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
-                f"{style.name} has no accessory spec — there is nothing to kit "
-                f"for {piece.code}. If this style does take accessories, add "
-                f"them to its material spec first.")
+                await self._no_kit_reason(style, sku, piece))
 
         # An explicit line list means a partial or substituted issue: the operator
         # is short of one article and is issuing the rest, or swapping a lot.
@@ -1185,8 +1417,16 @@ class StyleSpecService:
                            if a["resolution"] in (RESOLUTION_NONE,
                                                   RESOLUTION_AMBIGUOUS)],
             "stock_warnings": [],
-            "complete": block["kit_required"] and all(
-                a["outstanding"] <= 0 for a in block["accessories"]),
+            # NOTHING IS OWED — which is TRUE for a style that declares no
+            # accessories at all. This used to require kit_required, so every
+            # garment of every style released before the material spec came back
+            # `complete: false` on a kit it could never be given, and the store
+            # screen showed a permanent outstanding chip on it. The write path
+            # has always used kit_rules.kit_satisfied (`accessories_in or not
+            # kit_required`); this is the same sentence, said on the read path.
+            "complete": (not block["kit_required"]
+                         or all(a["outstanding"] <= 0
+                                for a in block["accessories"])),
         }
 
     async def issue_manual(self, *, piece_id, material_lot_id, qty: float,

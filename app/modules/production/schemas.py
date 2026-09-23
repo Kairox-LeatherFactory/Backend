@@ -267,10 +267,17 @@ class LogResult(BaseModel):
     # "kit still owed" chip and link through to the drawer. `kit_status` is
     # NOT_REQUIRED for every style with no accessory spec.
     kit_by_piece: dict[str, dict] = Field(default_factory=dict)
-    # Where the cut quantity came from: "typed" (the operator entered it) or
-    # "style_spec" (taken from the recipe because consumption.use_style_spec was
-    # set and no dcm was sent). Null when nothing was consumed.
+    # Where the cut quantity came from: "typed" (the operator entered it),
+    # "cutting_row" (each garment's own approved row) or "style_spec" (taken from
+    # the recipe because consumption.use_style_spec was set and no dcm was sent).
+    # Null when nothing was consumed.
     consumption_source: str | None = None
+    # What the approved cutting rows had to say about this batch — a garment with
+    # no row, or a batch whose garments took different amounts (which is normal:
+    # each is charged its own measured dcm). The router has always set these; the
+    # field was missing, so the response model silently dropped them and the
+    # floor never saw a warning it was told it would get.
+    cutting_warnings: list[str] = Field(default_factory=list)
 
 
 # ── the scan-time state read (bugs #4, #6, #8, #12) ─────────────────────────

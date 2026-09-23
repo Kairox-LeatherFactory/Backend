@@ -290,13 +290,26 @@ class JobWorkService:
                     and job.expected_back < date.today())
 
     async def list_jobs(self, *, status_filter=None, vendor_id=None,
-                        overdue_only: bool = False, limit: int = 200) -> list:
+                        overdue_only: bool = False, limit: int = 200,
+                        offset: int = 0) -> list:
+        """What is out at a vendor. PAGED — `limit` alone could not page it.
+
+        A limit with no offset is a CAP, not a pager: ask for the first 200 and
+        there is no way to ask for the next 200.
+
+        `overdue_only` FILTERS THE PAGE, not the table — it is computed per job
+        in `payload()`, not in SQL, so an overdue-only page can come back shorter
+        than `limit` while more overdue jobs wait on the next one. That is a
+        known limit of this route, not a paging bug; it moves into SQL when the
+        due-date rule does.
+        """
         stmt = select(JobWork)
         if status_filter:
             stmt = stmt.where(JobWork.status == status_filter.upper())
         if vendor_id:
             stmt = stmt.where(JobWork.vendor_id == vendor_id)
-        stmt = stmt.order_by(JobWork.dispatched_at.desc()).limit(limit)
+        stmt = (stmt.order_by(JobWork.dispatched_at.desc())
+                .limit(limit).offset(offset))
         jobs = (await self.db.execute(stmt)).scalars().all()
         out = [await self.payload(j) for j in jobs]
         return [j for j in out if j["overdue"]] if overdue_only else out

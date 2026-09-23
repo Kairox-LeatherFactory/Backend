@@ -222,13 +222,13 @@
                   "key": "limit",
                   "value": "50",
                   "description": "Rows to return (1-200).",
-                  "disabled": true
+                  "disabled": false
                 },
                 {
                   "key": "offset",
                   "value": "0",
                   "description": "Rows to skip before returning `limit` rows.",
-                  "disabled": true
+                  "disabled": false
                 }
               ]
             },

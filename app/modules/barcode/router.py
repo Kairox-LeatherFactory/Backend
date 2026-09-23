@@ -22,6 +22,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette import status
 
 from app.core.database import get_db
+# ONE SHAPE FOR BOTH DOORS. The store screen and the scan gun answer "what is in
+# this garment" from the same service call, so they must publish the same
+# contract — a second copy here is a second copy to keep in step.
+from app.modules.store.schemas import PieceMaterials as StorePieceMaterials
 from app.core.pagination import Page, PageParams
 from app.core.enums import UserRole
 from app.modules.barcode import schemas
@@ -174,6 +178,37 @@ async def barcode_detail(
     """Full detail for one barcode (click-through from the history list). Same
     rich payload as /resolve, tenancy-scoped for CLIENT logins."""
     return await BarcodeService(db).barcode_detail(code)
+
+@router.get("/pieces/{code}/materials",
+            response_model=StorePieceMaterials)
+async def piece_materials(
+    code: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_SCREEN_READERS),
+):
+    """Scan a garment: WHAT GOES INTO IT, and what does not.
+
+    THE SCAN-GUN DOOR onto the same answer GET /store/pieces/{code}/materials
+    gives, and it is the same service call — so the store screen and the gun
+    cannot disagree about what is in a garment. `/resolve` carries a compact
+    `material_requirement` for the scan toast; this is the full record:
+
+      `applies`        leather, lining and every accessory line that reaches
+                       THIS colourway at THIS size, with issued / outstanding
+      `not_applicable` the style's other lines and why each one is not this
+                       garment's — `other_sku`, `other_size`, `zeroed`
+      `issued`         the ledger: lot, quantity, time, card, MANUAL included
+      `consumed`       the dcm actually recorded at the cut
+
+    Read `not_applicable` when a kit scan reports nothing to issue while the
+    style's `/material-spec/requirement` shows a full recipe — that view is
+    style-wide, a kit is per garment.
+    """
+    from app.modules.materials.style_spec_service import StyleSpecService
+    svc = BarcodeService(db)
+    piece_id = await svc.resolve_piece_id(code)
+    return await StyleSpecService(db).piece_materials(piece_id)
+
 
 @router.get("/orders/by-number/{order_number}", response_model=schemas.OrderPickerRow)
 async def resolve_order_by_number(

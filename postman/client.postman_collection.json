@@ -91,13 +91,13 @@
               "key": "limit",
               "value": "50",
               "description": "Rows to return (1-200).",
-              "disabled": true
+              "disabled": false
             },
             {
               "key": "offset",
               "value": "0",
               "description": "Rows to skip before returning `limit` rows.",
-              "disabled": true
+              "disabled": false
             }
           ],
           "variable": [
@@ -146,6 +146,34 @@
       "response": []
     },
     {
+      "name": "Deletable",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/clients/{{client_id}}/deletable",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "clients",
+            "{{client_id}}",
+            "deletable"
+          ],
+          "variable": [
+            {
+              "key": "client_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "CAN this client be deleted, and if not, what exactly is in the way?\n\nThe same check DELETE runs, without doing anything \u2014 so a screen can grey\nthe button out and say why, instead of offering it and then explaining a\n409. `blockers` is [{table, count, what}]; empty means the delete will go\nthrough."
+      },
+      "response": []
+    },
+    {
       "name": "Delete Client",
       "request": {
         "method": "DELETE",
@@ -168,7 +196,7 @@
             }
           ]
         },
-        "description": "Delete a client that has produced NOTHING \u2014 a mistyped or duplicate row.\n\nCreating a client also creates its first order (order_number is required on\nPOST /clients), so \"has an order\" was never a sign the client had traded and\nis no longer what this refuses on. The test is whether any PIECE exists: no\npieces, and the cascade removes an empty order shell; one piece, and the\nbarcodes are printed, so it is a 409 and the client is deactivated instead\n(PATCH above). The error names the exact call to make.\n\nDM only, matching client creation. MD passes as superuser."
+        "description": "Delete a client that has produced NOTHING \u2014 a mistyped or duplicate row.\n\nNEITHER AN ORDER NOR A STYLE IS A REASON TO REFUSE. Creating a client also\ncreates its first order (order_number is required on POST /clients), and a\nbreakdown upload adds styles and SKUs that may never have been made from;\nall of those cascade away with the customer. What refuses the delete is a\nrow recording real WORK \u2014 a minted garment, a logged production event, a\nwage rate or a paid wage line \u2014 and the 409 now names which and how many,\nrather than guessing at \"a style rate, a supplier PO, a cutting entry\".\n\nAsk GET /clients/{id}/deletable first if you want to know before pressing it.\n\nDM only, matching client creation. MD passes as superuser."
       },
       "response": []
     },
@@ -225,13 +253,13 @@
               "key": "limit",
               "value": "50",
               "description": "Rows to return (1-200).",
-              "disabled": true
+              "disabled": false
             },
             {
               "key": "offset",
               "value": "0",
               "description": "Rows to skip before returning `limit` rows.",
-              "disabled": true
+              "disabled": false
             }
           ]
         },
@@ -272,13 +300,13 @@
               "key": "limit",
               "value": "50",
               "description": "Rows to return (1-200).",
-              "disabled": true
+              "disabled": false
             },
             {
               "key": "offset",
               "value": "0",
               "description": "Rows to skip before returning `limit` rows.",
-              "disabled": true
+              "disabled": false
             }
           ]
         },
