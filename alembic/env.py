@@ -48,7 +48,18 @@ def run_migrations_online():
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.", poolclass=pool.NullPool)
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+        # transaction_per_migration=True is NOT optional here — see the note on
+        # autocommit_block below. Without it Alembic wraps the WHOLE `upgrade head`
+        # run in ONE transaction, so a failure in revision N rolls back revisions
+        # 1..N-1 too. That is survivable on its own, but this chain contains
+        # `autocommit_block()` (the ALTER TYPE ... ADD VALUE migrations), and an
+        # autocommit block COMMITS everything done so far. A later failure then
+        # cannot roll back past that commit point, leaving the schema AHEAD of
+        # alembic_version — the next run replays already-applied DDL and dies with
+        # DuplicateColumn. One transaction per migration keeps each revision's DDL
+        # and its alembic_version bump atomic, so a failure loses only that one.
+        context.configure(connection=connection, target_metadata=target_metadata,
+                          compare_type=True, transaction_per_migration=True)
         with context.begin_transaction():
             context.run_migrations()
 

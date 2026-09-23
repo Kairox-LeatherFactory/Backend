@@ -60,9 +60,10 @@ import app.modules.bom.models               # noqa: F401
 import app.modules.inventory.models         # noqa: F401
 
 from app.core.enums import (
-    BarcodeStatus, BarcodeType, DrawerState, ProductionStage, UserRole, WageType,
+    StoreState,
+    BarcodeStatus, BarcodeType, ProductionStage, UserRole, WageType,
 )
-from app.modules.barcode.models import BarcodeRegistry, Drawer, MaterialLot, MaterialSupplier
+from app.modules.barcode.models import BarcodeRegistry, MaterialLot, MaterialSupplier
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
 from app.modules.employees.models import Employee
 from app.modules.production.models import Operation, OperationAccess, Piece
@@ -180,7 +181,7 @@ async def _make_employee(db, name, designation, wage_type=WageType.PIECE_RATE,
 
 
 # ── put a piece in the state the STORE actually accepts ──────────────────────
-# The store is the merge point of the two cut paths, and DrawerService now
+# The store is the merge point of the two cut paths, and StoreService now
 # enforces that at the WRITE (core/store_display.STORE_ENTRY_STAGE):
 #
 #     leather may enter a drawer only after PASTING
@@ -203,7 +204,7 @@ async def _log_stage(db, operations, piece, employee_id, code):
 
 async def _ready_for_store(db, operations, piece, employee_id, *,
                            leather=True, lining=True):
-    """Log the cut-side stages that let `piece` be scanned into its drawer.
+    """Log the cut-side stages that let `piece` be scanned into the store.
 
     leather=True  → LEATHER_CUTTING, FUSING, PASTING (the whole leather side, so
                     the piece's history is realistic and not just the one stage
@@ -232,16 +233,56 @@ async def ready_for_store(db, operations, cutter):
 
 
 @pytest_asyncio.fixture
+async def in_store(db, operations, cutter):
+    """`await in_store(piece)` → both parts scanned in, garment complete.
+
+    The store replaced the drawer, so the prerequisite for a merge-gate test is
+    no longer "put it in a box" but "scan its parts in". This runs the real
+    StoreService so the test exercises the same path the floor does.
+    """
+    from app.modules.store.service import StoreService
+
+    async def _f(piece, *, leather=True, lining=True):
+        svc = StoreService(db)
+        await _ready_for_store(db, operations, piece, cutter[0].id,
+                               leather=leather, lining=lining)
+        from app.core.enums import StorePart
+        if leather:
+            await svc.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                                 part=StorePart.LEATHER.value)
+        if lining:
+            await svc.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                                 part=StorePart.LINING.value)
+        await db.refresh(piece)
+        return piece
+    return _f
+
+
+@pytest_asyncio.fixture
+async def sent_from_store(db, in_store, dm):
+    """`await sent_from_store(piece)` → complete AND released, so the merge gate
+    is open. Completeness and release are different things; this does both."""
+    from app.modules.store.service import StoreService
+
+    async def _f(piece):
+        await in_store(piece)
+        await StoreService(db).send(piece_ids=[piece.id], actor_user_id=dm.id)
+        await db.refresh(piece)
+        return piece
+    return _f
+
+
+@pytest_asyncio.fixture
 async def cut_pieces(db, operations, cutter, pieces):
     """`pieces`, but every one of them already through BOTH cut paths.
 
     The drawer/store tests are asserting what a drawer does with parts that
     arrive; they are not asserting how a piece gets to the store. This is that
     prerequisite as a fixture, so those tests read `cut_pieces` and stay about
-    drawers. Tests that are specifically probing the store-entry gate should take
+    the store. Tests that are specifically probing the store-entry gate should take
     `pieces` + `ready_for_store` instead and control each side themselves.
     """
-    for piece, _drawer in pieces:
+    for piece in pieces:
         await _ready_for_store(db, operations, piece, cutter[0].id)
     return pieces
 
@@ -319,34 +360,32 @@ def stitching_mgr():
 # ── helper: mint pieces the way premint does (for tests that need pieces) ────
 @pytest_asyncio.fixture
 async def pieces(db, order_tree):
-    """5 pieces of the SKU, each merged to a drawer, needs_lining=True — the
-    state after breakdown upload, before any cutting."""
+    """5 pieces of the SKU, needs_lining=True — the state after breakdown upload.
+
+    A LIST OF PIECES, not a list of (piece, drawer) tuples. The fixture used to
+    mint a vestigial drawer per piece purely to keep that tuple shape alive for
+    the call sites that unpacked it; the drawer module is gone, so the scaffolding
+    went with it. A freshly minted piece is WAITING — not in the store yet —
+    which is exactly what premint writes.
+    """
     sku = order_tree["sku"]
     out = []
     for seq in range(1, 6):
-        drawer = Drawer(code=f"DRW-{seq:04d}", seq=seq, state=DrawerState.MERGED.value)
-        db.add(drawer)
-        await db.flush()
         p = Piece(code=f"JP-CLERMONT-PINE-M-{seq:03d}", seq=seq, sku_id=sku.id,
                   current_operation_id=None)
         if hasattr(p, "needs_lining"):
             p.needs_lining = True
-        if hasattr(p, "drawer_id"):
-            p.drawer_id = drawer.id
+        if hasattr(p, "store_state"):
+            p.store_state = StoreState.WAITING.value
         db.add(p)
         await db.flush()
-        drawer.current_piece_id = p.id
         db.add(BarcodeRegistry(code=p.code, type=BarcodeType.PIECE.value,
                                status=BarcodeStatus.ACTIVE.value, piece_id=p.id,
                                caption=p.code))
-        db.add(BarcodeRegistry(code=drawer.code, type=BarcodeType.DRAWER.value,
-                               status=BarcodeStatus.ACTIVE.value, drawer_id=drawer.id,
-                               caption=drawer.code))
-        out.append((p, drawer))
+        out.append(p)
     await db.commit()
-    for p, d in out:
+    for p in out:
         await db.refresh(p)
-        await db.refresh(d)
     return out
 
 
@@ -496,3 +535,154 @@ async def seed_min(db, operations):
         "client": client, "order": order, "style": style, "sku": sku,
         "employee": emp, "operations": operations,
     }
+
+# ══════════════════════════════════════════════════════════════════════════════
+# REAL LOGINS AND REAL TOKENS
+# ══════════════════════════════════════════════════════════════════════════════
+# Most tests here override `get_current_user` (see `as_role`) because they are
+# about AUTHORIZATION, not about signing. A handful are not: they drive
+# /attendance/proxy/* and /employees over HTTP with a real `Authorization: Bearer`
+# header, because the thing under test IS the operator gate as the router sees it.
+#
+# Those tests referenced `client`, `security_user`, `hr_token`, `md_token`,
+# `dm_token`, `employee_token`, `security_token`, `emp_id`, `other_emp_id`,
+# `monthly_emp` and `monthly_card` — none of which existed. Every one of them
+# errored at COLLECTION, so ten tests covering attendance integrity and employee
+# RBAC silently never ran. They are the tests that should have caught the payroll
+# and proxy-attendance holes. Fixtures below; do not let this rot again.
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest_asyncio.fixture
+async def client(db):
+    """Alias of `api_client`.
+
+    Kept as its own name because the HTTP tests in tests/system/ each define a
+    local `client`, and a local fixture shadows this one — so adding it here is
+    additive and changes nothing that already worked.
+    """
+    from httpx import ASGITransport, AsyncClient
+    from app.core.database import get_db
+    from app.main import app
+
+    async def _db():
+        yield db
+
+    app.dependency_overrides[get_db] = _db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+async def _make_login(db, role, name, phone, employee_id=None):
+    """A real app_user row — `get_current_user` does a live lookup and requires
+    is_active, so a signed token alone is not enough."""
+    from app.core.security import get_password_hash
+    from app.modules.users.models import User
+
+    user = User(name=name, phone=phone, email=f"{phone}@test.local",
+                password_hash=get_password_hash("test-password-123"),
+                role=role, is_active=True, must_change_password=False,
+                employee_id=employee_id)
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+def _token_for(user):
+    from app.core.security import create_access_token
+    return create_access_token(user_id=user.id, role=user.role, name=user.name)
+
+
+async def _make_worker(db, name, wage_type, designation="CUTTER"):
+    from app.core.enums import WageType
+    from app.modules.employees.models import Employee
+
+    emp = Employee(name=name, designation=designation,
+                   wage_type=wage_type, monthly_salary=0, is_active=True)
+    db.add(emp)
+    await db.commit()
+    await db.refresh(emp)
+    return emp
+
+
+# ── operator logins (the four roles that may record attendance) ──────────────
+@pytest_asyncio.fixture
+async def security_user(db):
+    return await _make_login(db, UserRole.SECURITY, "GATE ONE", "9700000001")
+
+
+@pytest_asyncio.fixture
+async def hr_token(db):
+    return _token_for(await _make_login(db, UserRole.HR, "HR ONE", "9700000002"))
+
+
+@pytest_asyncio.fixture
+async def md_token(db):
+    return _token_for(
+        await _make_login(db, UserRole.MANAGING_DIRECTOR, "MD ONE", "9700000003"))
+
+
+@pytest_asyncio.fixture
+async def dm_token(db):
+    return _token_for(
+        await _make_login(db, UserRole.DIRECT_MANAGER, "DM ONE", "9700000004"))
+
+
+@pytest_asyncio.fixture
+async def security_token(security_user):
+    return _token_for(security_user)
+
+
+@pytest_asyncio.fixture
+async def cutting_mgr_token(db):
+    return _token_for(
+        await _make_login(db, UserRole.CUTTING_MANAGER, "CUT ONE", "9700000005"))
+
+
+@pytest_asyncio.fixture
+async def employee_token(db):
+    """A LEGACY `employee` login.
+
+    Workers get no login (CLAUDE.md s3), so this role is never minted any more —
+    but `app_user.role` is a native PG enum and pre-change rows may still carry
+    it, which is exactly what `block_employees` still guards. This fixture exists
+    to prove that guard, so it deliberately mints the role nothing else mints.
+    """
+    return _token_for(
+        await _make_login(db, UserRole.EMPLOYEE, "LEGACY ONE", "9700000006"))
+
+
+# ── workers being recorded (no logins — they are scanned, not users) ─────────
+@pytest_asyncio.fixture
+async def monthly_emp(db):
+    from app.core.enums import WageType
+    return await _make_worker(db, "MONTHLY WORKER", WageType.MONTHLY, "TAILOR")
+
+
+@pytest_asyncio.fixture
+async def monthly_card(db, monthly_emp):
+    """The monthly worker's employee barcode — how the gate identifies them."""
+    from app.core.enums import BarcodeType
+    from app.modules.barcode.models import BarcodeRegistry
+
+    card = BarcodeRegistry(code=f"EMP-{str(monthly_emp.id)[:8].upper()}",
+                           type=BarcodeType.EMPLOYEE, status="ACTIVE",
+                           employee_id=monthly_emp.id)
+    db.add(card)
+    await db.commit()
+    await db.refresh(card)
+    return card
+
+
+@pytest_asyncio.fixture
+async def emp_id(db):
+    from app.core.enums import WageType
+    return (await _make_worker(db, "PIECE WORKER A", WageType.PIECE_RATE)).id
+
+
+@pytest_asyncio.fixture
+async def other_emp_id(db):
+    from app.core.enums import WageType
+    return (await _make_worker(db, "PIECE WORKER B", WageType.PIECE_RATE)).id

@@ -3,7 +3,7 @@ FUNCTIONAL · one garment, breakdown to export, through the real services.
 
 This is the capability the whole Phase-1 system exists to deliver: a single
 jacket carries one barcode from upload to the shipping box, every stage is
-logged against it, and the drawer that held it is returned to the pool for the
+logged against it, and it leaves the store for the
 next garment.
 
 The layer above (`tests/functional/test_uat_scenarios.py`) covers the seven
@@ -29,11 +29,12 @@ import pytest
 from sqlalchemy import func, select
 
 from app.core.enums import (
-    DrawerPart, DrawerState, ProductionStage, ScreenContext, WageType,
+    StorePart, StoreState, 
+    ProductionStage, ScreenContext, WageType,
 )
 from app.modules.barcode.models import Drawer, MaterialLot
 from app.modules.barcode.service import BarcodeService
-from app.modules.drawers.service import DrawerService
+from app.modules.store.service import StoreService
 from app.modules.employees.models import Employee
 from app.modules.production.models import ProductionEvent
 from app.modules.production.service import ProductionService
@@ -66,18 +67,20 @@ async def lining_lot(db):
 
 
 @pytest.mark.asyncio
-async def test_one_lined_jacket_walks_the_whole_chain_and_recycles_its_drawer(
+async def test_one_lined_jacket_walks_the_whole_chain_and_leaves_the_store(
         db, operations, pieces, leather_lot, lining_lot,
         cutter, lining_cutter, paster, tailor, finisher,
         cutting_mgr, lining_mgr, stitching_mgr, dm):
-    piece, drawer = pieces[0]
-    piece_code, drawer_code, drawer_id = piece.code, drawer.code, drawer.id
+    piece = pieces[0]
+    piece_code = piece.code
     svc = ProductionService(db)
-    drawers = DrawerService(db)
+    store = StoreService(db)
 
     # ── 0 · the state breakdown upload left behind ───────────────────────────
     assert piece.needs_lining is True
-    assert drawer.state == DrawerState.MERGED.value
+    # WAITING, not MERGED: a freshly minted garment is not in the store, and
+    # nothing pre-assigns it a place there. It enters when a part is scanned in.
+    assert piece.store_state == StoreState.WAITING.value
     resolved = await BarcodeService(db).resolve(piece_code)
     assert resolved["type"] == "PIECE"
     assert resolved["piece"]["current_stage"] is None, "a piece is uncut at upload"
@@ -119,16 +122,16 @@ async def test_one_lined_jacket_walks_the_whole_chain_and_recycles_its_drawer(
     assert r["stage"] == "PASTING" and r["count_logged"] == 1
 
     # ── 3 · storage: drawer first, then each part ────────────────────────────
-    s = await drawers.store_scan(drawer_id=drawer_id, piece_id=piece.id,
-                                 part=DrawerPart.LEATHER)
-    assert s["state"] == DrawerState.HOLDING_LEATHER.value
+    s = await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                                 part=StorePart.LEATHER)
+    assert s["store_state"] == StoreState.HOLDING_LEATHER.value
     assert s["ready_for_received"] is False
 
-    s = await drawers.store_scan(drawer_id=drawer_id, piece_id=piece.id,
-                                 part=DrawerPart.LINING)
+    s = await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                                 part=StorePart.LINING)
     # Complete → the drawer receives itself (bug #13). Its CONTENTS are both.
     assert s["holding"] == "HOLDING BOTH"
-    assert s["state"] == DrawerState.RECEIVED.value
+    assert s["store_state"] == StoreState.RECEIVED.value
     assert s["ready_for_received"] is True
     assert s["sent"] is False        # bug #15: still in the store
 
@@ -144,10 +147,11 @@ async def test_one_lined_jacket_walks_the_whole_chain_and_recycles_its_drawer(
     # ── 5 · the DM's send: the one hard transition that is still a decision ──
     # RECEIVED is now automatic (it only ever restated what the last scan made
     # true). SEND is the judgement, and it is what opens the merge gate.
-    out = await drawers.send_batch(drawer_ids=[drawer_id], actor_id=dm.id)
+    out = await store.send(piece_ids=[piece.id], actor_user_id=dm.id)
     assert out["count_sent"] == 1
-    assert out["sent"][0]["state"] == "sended"
-    assert out["pieces_released"] == [piece.code]
+    # `sent` is a list of piece CODES: what is released is the garment itself,
+    # and there is no box row left to report a state for.
+    assert out["sent"] == [piece.code]
 
     # ── 6 · the rest of the chain, now unblocked ────────────────────────────
     for expected, actor, user in [
@@ -170,25 +174,23 @@ async def test_one_lined_jacket_walks_the_whole_chain_and_recycles_its_drawer(
                                .where(ProductionEvent.piece_id == piece.id))
     assert n_events == 9, f"expected 9 stage events for one garment, got {n_events}"
 
-    # ── 8 · the drawer recycled itself when the piece shipped ───────────────
-    await db.refresh(drawer)
-    assert drawer.state == DrawerState.WAITING.value, (
-        "the drawer did not return to the pool after PACKAGE_EXPORT")
-    assert drawer.current_piece_id is None
-    assert drawer.leather_in is False and drawer.lining_in is False
-
-    # F11: BOTH sides of the link are cleared, or the barcode payload and the
-    # piece life story disagree permanently.
+    # ── 8 · the garment left the store when it shipped ──────────────────────
+    # A DRAWER recycled because the box was reused for the next garment. A
+    # garment ships once, so PACKAGE_EXPORT simply empties it out of the store
+    # and its three buckets go with it.
     await db.refresh(piece)
-    assert piece.drawer_id is None
+    assert piece.store_state == StoreState.WAITING.value, (
+        "the garment did not leave the store after PACKAGE_EXPORT")
+    assert piece.leather_in is False and piece.lining_in is False
+    assert piece.accessories_in is False
 
-    # ── 9 · the codes still resolve — shipping does not retire a garment ────
+    # ── 9 · the code still resolves — shipping does not retire a garment ────
     after = await BarcodeService(db).resolve(piece_code)
     assert after["piece"]["current_stage"] == "PACKAGE_EXPORT"
     assert after["piece"]["leather_consumption_dcm"] == pytest.approx(14.0)
-
-    drawer_now = await BarcodeService(db).resolve(drawer_code)
-    assert drawer_now["drawer"]["state"] == DrawerState.WAITING.value
+    # …and it reports that it has left the store, on the payload every screen
+    # already reads.
+    assert after["piece"]["store_state"] == StoreState.WAITING.value
 
 
 @pytest.mark.asyncio
@@ -202,12 +204,12 @@ async def test_a_leather_only_garment_never_waits_for_a_lining(
     H9's regression made every piece need a lining, which stranded exactly this
     garment forever — the drawer waited for a lining nobody would ever cut.
     """
-    piece, drawer = pieces[1]
+    piece = pieces[1]
     piece.needs_lining = False
     await db.commit()
 
     svc = ProductionService(db)
-    drawers = DrawerService(db)
+    store = StoreService(db)
 
     await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
                         piece_ids=[piece.id], work_date=TODAY,
@@ -224,13 +226,10 @@ async def test_a_leather_only_garment_never_waits_for_a_lining(
                         piece_ids=[piece.id], work_date=TODAY,
                         screen=ScreenContext.PIPELINE)          # PASTING
 
-    s = await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                                 part=DrawerPart.LEATHER)
+    s = await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id, part=StorePart.LEATHER)
     assert s["ready_for_received"] is True, "a leather-only piece is complete on leather"
     assert s["awaiting"] == [], f"still waiting on {s['awaiting']} for an unlined piece"
-
-    await drawers.transition(drawer.id, "RECEIVED", dm.id)
-    await drawers.transition(drawer.id, "SENDED", dm.id)
+    await store.send(piece_ids=[piece.id], actor_user_id=dm.id)
 
     r = await svc.log_batch(user=stitching_mgr, employee_id=tailor[0].id,
                             piece_ids=[piece.id], work_date=TODAY,
@@ -251,7 +250,7 @@ async def test_a_piece_cannot_skip_from_cutting_straight_to_inspection(
     structurally impossible, not merely refused. That is the stronger property
     and it is what this asserts.
     """
-    piece, _ = pieces[2]
+    piece = pieces[2]
     svc = ProductionService(db)
     await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
                         piece_ids=[piece.id], work_date=TODAY,

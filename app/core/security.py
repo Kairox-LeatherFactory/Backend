@@ -94,8 +94,11 @@ def get_password_hash(password: str) -> str:
     pw = password.encode("utf-8")[:72]
     return bcrypt.hashpw(pw, bcrypt.gensalt()).decode("utf-8")
 
-passw = get_password_hash("9884227592")
-print(passw)  # F41: dummy hash for unknown-user path
+# NOTE: the unknown-user timing equalizer lives in users/service.py::_dummy_hash
+# (lazy + cached). There used to be a module-level `passw = get_password_hash(...)`
+# here with a `print(passw)`: it was never read, it burned a full bcrypt round on
+# every process start, and it wrote a credential hash to stdout — i.e. to the log
+# aggregator — on every boot. Do not reintroduce it.
 
 # ══════════════════════════════════════════════════════════════════════════
 # JWT helpers

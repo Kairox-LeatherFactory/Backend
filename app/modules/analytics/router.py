@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.pagination import PageParams
 from app.core.enums import UserRole
 from app.modules.analytics.service import AnalyticsService
 from app.modules.users.deps import get_current_user, require_roles
@@ -65,14 +66,26 @@ async def overview(_: User = Depends(get_current_user)):
 @router.get("/explorer")
 async def explorer(
     include_pieces: bool = Query(True),
+    pieces_per_style: int = Query(
+        100, ge=1, le=500,
+        description="Cap on piece leaves per style. The style's true piece_count "
+                    "is always reported; pieces_truncated says when leaves were cut."),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """Left-panel nav tree: Client -> Order -> Style -> Piece, scoped to the
-    signed-in user. CLIENT-role users see only their own client."""
+    signed-in user. CLIENT-role users see only their own client.
+
+    THE LEAVES ARE CAPPED. `include_pieces` defaults to True and there was no
+    bound, so the ordinary call built a tree of every garment the factory has
+    ever made — a single live style runs to 1,425 pieces. Each style now carries
+    at most `pieces_per_style` leaves, its real `piece_count`, and a
+    `pieces_truncated` flag. Pass include_pieces=false for the skeleton alone.
+    """
     client_id = user.client_id if user.role == UserRole.CLIENT else None
     return await AnalyticsService(db).explorer_tree(
-        client_id=client_id, include_pieces=include_pieces
+        client_id=client_id, include_pieces=include_pieces,
+        pieces_per_style=pieces_per_style,
     )
 
 @router.get("/orders/{order_id}/tree")
@@ -88,11 +101,19 @@ async def order_tree(
 @router.get("/styles/{style_id}/detail")
 async def style_detail(
     style_id: uuid.UUID,
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     scope: uuid.UUID | None = Depends(client_scope),
 ):
-    """One style: every piece with its full stage history (employee + date/time)."""
-    return await AnalyticsService(db).style_detail(style_id, client_scope=scope)
+    """One style: its pieces, each with its full stage history.
+
+    PAGED. This was the heaviest read here — every piece of the style AND every
+    production event belonging to them, nested in Python. A real order is 1,425
+    pieces and ~11,400 events in one response. The events are now fetched only
+    for the pieces on the page; `totals`, `stages` and `store` stay whole-style.
+    """
+    return await AnalyticsService(db).style_detail(
+        style_id, client_scope=scope, params=params)
 
 @router.get("/pieces/detail")
 async def piece_detail(

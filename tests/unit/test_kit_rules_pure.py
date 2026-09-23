@@ -14,8 +14,8 @@ import itertools
 import pytest
 
 from app.core.enums import KitStatus
-from app.core.kit_rules import (auto_receive_ready, drawer_complete, kit_status,
-                                kit_satisfied, release_blockers)
+from app.core.kit_rules import (auto_receive_ready, kit_status, kit_satisfied,
+                                piece_complete, release_blockers)
 
 BOOLS = (False, True)
 
@@ -26,7 +26,7 @@ BOOLS = (False, True)
 def test_with_no_accessory_spec_completeness_is_the_old_two_clause_rule(
         leather, lining, accessories, needs_lining):
     old_rule = leather and (lining or not needs_lining)
-    assert drawer_complete(
+    assert piece_complete(
         leather_in=leather, lining_in=lining, accessories_in=accessories,
         needs_lining=needs_lining, kit_required=False) is old_rule
 
@@ -44,15 +44,15 @@ def test_with_no_accessory_spec_auto_receive_is_the_old_both_parts_rule(
 def test_a_kit_required_drawer_is_incomplete_until_it_is_kitted():
     args = dict(leather_in=True, lining_in=True, needs_lining=True,
                 kit_required=True)
-    assert drawer_complete(accessories_in=False, **args) is False
-    assert drawer_complete(accessories_in=True, **args) is True
+    assert piece_complete(accessories_in=False, **args) is False
+    assert piece_complete(accessories_in=True, **args) is True
 
 
 def test_auto_receive_is_stricter_than_completeness():
     """A leather-only piece is COMPLETE on leather alone, but a drawer never
     receives itself on one part — the flag that would decide it (needs_lining) is
     wrong for 925 of 1,425 pieces in one live order, so a human confirms."""
-    assert drawer_complete(leather_in=True, lining_in=False, accessories_in=True,
+    assert piece_complete(leather_in=True, lining_in=False, accessories_in=True,
                            needs_lining=False, kit_required=True) is True
     assert auto_receive_ready(leather_in=True, lining_in=False,
                               accessories_in=True, kit_required=True) is False

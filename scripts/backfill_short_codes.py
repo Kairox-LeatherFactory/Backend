@@ -59,6 +59,27 @@ from app.modules.barcode.repository import (
     SHORT_CODE_PREFIX, decode_short, encode_short,
 )
 
+# EVERY model module must be imported before the first ORM operation, not just
+# the one table this script writes (CLAUDE.md §11). SQLAlchemy resolves
+# relationships by CLASS NAME at configure_mappers() time, which fires on the
+# first query — so a half-registered registry fails with
+#   InvalidRequestError: When initializing mapper Mapper[Document(document)],
+#   expression 'Submission' failed to locate a name ('Submission')
+# on the very first SELECT, which mentions neither Document nor Submission and
+# reads like a broken model rather than a missing import. Same block as
+# scripts/bootstrap_drawers.py and scripts/seed_employees.py; keep them in step.
+from app.core import models as _core_models            # noqa: F401,E402
+from app.modules.clients import models as _clients     # noqa: F401,E402
+from app.modules.employees import models as _emp       # noqa: F401,E402
+from app.modules.users import models as _users         # noqa: F401,E402
+from app.modules.production import models as _prod     # noqa: F401,E402
+from app.modules.wages import models as _wages         # noqa: F401,E402
+from app.modules.attendance import models as _att      # noqa: F401,E402
+from app.modules.procurement import models as _proc    # noqa: F401,E402
+from app.modules.bom import models as _bom             # noqa: F401,E402
+from app.modules.inventory import models as _inv       # noqa: F401,E402
+from app.modules.supplier_po import models as _spo     # noqa: F401,E402
+
 
 def _max_short_counter(db: Session) -> int:
     """Highest short-code counter already issued. One row transferred — the

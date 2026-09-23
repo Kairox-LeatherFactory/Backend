@@ -1,0 +1,3490 @@
+{
+  "info": {
+    "name": "Inventory",
+    "description": "Inventory — Stage 4 — inventory master + per-BOM stock check.\n\nRequest-level test cases for the Stage-4 inventory API: the stock master sync (dry-run preview and idempotent commit), the stock list, and the per-BOM inventory check that reserves stock and produces the shortfall lines Stage 5 turns into supplier POs.\n\nFolders: **Positive / Negative / Boundary / Business Logic**; inside each, one sub-folder per endpoint group.\nRequest names start with the case ID so they map 1:1 to `docs/testcases/inventory_test_cases.md`.\n\nSETUP\n1. Set `base_url`.\n2. Run **Setup — Tokens**; each login stores its own token variable.\n3. Fill the id variables from seed data or from an earlier response.\n\nNOTES\n- MD and DM bypass every `require_roles` gate (`SUPERUSER_ROLES` in `app/modules/users/deps.py`). Use the Cutting Manager or Office Viewer for wrong-role cases on the mutating routes; the Office Viewer is *inside* the read gate, so use the Cutting Manager for wrong-role reads.\n- Two error shapes: `{\"detail\": \"...\"}` for 404s, role 403s and the 413 upload cap; `{\"error\": \"...\", \"message\": \"...\"}` for the service's own refusals (`bom_not_approved`).\n- The check runs only on an approved, locked or exported BOM — `_APPROVED_STATES`. A draft or ready-for-review BOM is refused.\n- Only stockable categories are checked: main material, sub material, lining, interlining, thread, accessory, packaging. Anything else (labour, overhead, …) is carried as `excluded` rather than being matched.\n- A re-run first releases that BOM's previous reservations (reason `recheck`), then re-claims — so re-running never double-counts the BOM against itself, but reservations held by *other* BOMs do reduce what this one can see.\n- A fuzzy match is only ever a suggestion: flags carry `suggestion` + `unmatched` and `matched_method` stays null. Only an exact normalized key or a curated alias binds automatically.\n- There is no endpoint to release a reservation, confirm a suggestion or set a manual match — everything here is driven by re-running the check. Treat that as a coverage gap, not a missing test.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{dm_token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "md_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "dm_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "cm_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "other_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "viewer_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "hr_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "expired_token",
+      "value": "expired.or.garbage.token",
+      "type": "string"
+    },
+    {
+      "key": "bom_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "check_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "order_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "client_id",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Setup — Tokens",
+      "description": "Run these first. Demo accounts use phone = password; each login stores its bearer token in the matching collection variable.",
+      "item": [
+        {
+          "name": "Login · Managing Director → md_token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Login succeeded\", function () { pm.response.to.have.status(200); });",
+                  "try {",
+                  "    const body = pm.response.json();",
+                  "    const token = body.access_token || body.token;",
+                  "    if (token) pm.collectionVariables.set(\"md_token\", token);",
+                  "} catch (e) { /* non-JSON response */ }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Managing Director — demo account, phone = password.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"9000000000\",\n  \"password\": \"9000000000\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login · Direct Manager → dm_token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Login succeeded\", function () { pm.response.to.have.status(200); });",
+                  "try {",
+                  "    const body = pm.response.json();",
+                  "    const token = body.access_token || body.token;",
+                  "    if (token) pm.collectionVariables.set(\"dm_token\", token);",
+                  "} catch (e) { /* non-JSON response */ }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Direct Manager — demo account, phone = password.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"9000000001\",\n  \"password\": \"9000000001\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login · Cutting Manager → cm_token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Login succeeded\", function () { pm.response.to.have.status(200); });",
+                  "try {",
+                  "    const body = pm.response.json();",
+                  "    const token = body.access_token || body.token;",
+                  "    if (token) pm.collectionVariables.set(\"cm_token\", token);",
+                  "} catch (e) { /* non-JSON response */ }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Cutting Manager — demo account, phone = password.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"9000000002\",\n  \"password\": \"9000000002\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login · Stitching Manager → other_token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Login succeeded\", function () { pm.response.to.have.status(200); });",
+                  "try {",
+                  "    const body = pm.response.json();",
+                  "    const token = body.access_token || body.token;",
+                  "    if (token) pm.collectionVariables.set(\"other_token\", token);",
+                  "} catch (e) { /* non-JSON response */ }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Stitching Manager — demo account, phone = password.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"9000000003\",\n  \"password\": \"9000000003\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login · Office Viewer → viewer_token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Login succeeded\", function () { pm.response.to.have.status(200); });",
+                  "try {",
+                  "    const body = pm.response.json();",
+                  "    const token = body.access_token || body.token;",
+                  "    if (token) pm.collectionVariables.set(\"viewer_token\", token);",
+                  "} catch (e) { /* non-JSON response */ }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Office Viewer — demo account, phone = password.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"9000000004\",\n  \"password\": \"9000000004\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login · HR / Accounts → hr_token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Login succeeded\", function () { pm.response.to.have.status(200); });",
+                  "try {",
+                  "    const body = pm.response.json();",
+                  "    const token = body.access_token || body.token;",
+                  "    if (token) pm.collectionVariables.set(\"hr_token\", token);",
+                  "} catch (e) { /* non-JSON response */ }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "HR / Accounts — demo account, phone = password.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"9000000005\",\n  \"password\": \"9000000005\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Positive",
+      "item": [
+        {
+          "name": "A · Stock master sync",
+          "description": "POST /inventory/preview · POST /inventory/commit\n\nRole gate: DM / MD",
+          "item": [
+            {
+              "name": "A-P1 · Preview a stock workbook",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-P1 — Preview a stock workbook",
+                      "// Expected: 200 with the preview block — parsed row count, warnings and samples. Nothing is written: a follow-up GET /inventory/items is unchanged.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory/preview",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory",
+                    "preview"
+                  ]
+                },
+                "description": "**A-P1 — Preview a stock workbook**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | A · Stock master sync |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/inventory/preview\n- multipart body: file = <the stock master workbook>\n\n**Expected result**\n\n200 with the preview block — parsed row count, warnings and samples. Nothing is written: a follow-up GET /inventory/items is unchanged.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": "",
+                      "description": "Select the fixture: inventory_master.xlsx"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-P2 · Commit the stock workbook",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-P2 — Commit the stock workbook",
+                      "// Expected: 200 with the preview block plus committed: N and deactivated: M. Items are upserted on normalized_key with description, uom, qty_on_hand, rate and color.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory/commit",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory",
+                    "commit"
+                  ]
+                },
+                "description": "**A-P2 — Commit the stock workbook**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | A · Stock master sync |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/inventory/commit\n- multipart body: file = <the same workbook>\n\n**Expected result**\n\n200 with the preview block plus committed: N and deactivated: M. Items are upserted on normalized_key with description, uom, qty_on_hand, rate and color.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": "",
+                      "description": "Select the fixture: inventory_master.xlsx"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "B · Stock list",
+          "description": "GET /inventory/items\n\nRole gate: DM / MD / Viewer",
+          "item": [
+            {
+              "name": "B-P1 · List stock items",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// B-P1 — List stock items",
+                      "// Expected: 200 {\"items\":[{id,normalized_key,description,uom,qty_on_hand,rate,color,…}], \"count\": N}.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory/items",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory",
+                    "items"
+                  ]
+                },
+                "description": "**B-P1 — List stock items**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | B · Stock list |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/inventory/items\n\n**Expected result**\n\n200 {\"items\":[{id,normalized_key,description,uom,qty_on_hand,rate,color,…}], \"count\": N}.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "B-P2 · Search the master",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// B-P2 — Search the master",
+                      "// Expected: 200; every row matches the search term. `count` is this page's length, not the total.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory/items?search=cowhide&limit=25&offset=0",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory",
+                    "items"
+                  ],
+                  "query": [
+                    {
+                      "key": "search",
+                      "value": "cowhide"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "25"
+                    },
+                    {
+                      "key": "offset",
+                      "value": "0"
+                    }
+                  ]
+                },
+                "description": "**B-P2 — Search the master**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | B · Stock list |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/inventory/items?search=cowhide&limit=25&offset=0\n\n**Expected result**\n\n200; every row matches the search term. `count` is this page's length, not the total.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "B-P3 · Office Viewer can read stock",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// B-P3 — Office Viewer can read stock",
+                      "// Expected: 200 — VIEWER is inside the _VIEW gate.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory/items",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory",
+                    "items"
+                  ]
+                },
+                "description": "**B-P3 — Office Viewer can read stock**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | Medium |\n| Role | Office Viewer (9000000004) |\n| Endpoint group | B · Stock list |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/inventory/items\n\n**Expected result**\n\n200 — VIEWER is inside the _VIEW gate.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{viewer_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "C · Run the inventory check",
+          "description": "POST /boms/{bom_id}/inventory-check\n\nRole gate: DM / MD",
+          "item": [
+            {
+              "name": "C-P1 · Check an approved BOM",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// C-P1 — Check an approved BOM",
+                      "// Expected: 200 with the check: a header plus one line per stockable BOM item carrying required_qty, on_hand_qty, shortfall_qty, status (sufficient / partial / out_of_stock), matched_method and flags. Active reservations are created",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "boms",
+                    "{{bom_id}}",
+                    "inventory-check"
+                  ]
+                },
+                "description": "**C-P1 — Check an approved BOM**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check (BOM status approved)\n\n**Expected result**\n\n200 with the check: a header plus one line per stockable BOM item carrying required_qty, on_hand_qty, shortfall_qty, status (sufficient / partial / out_of_stock), matched_method and flags. Active reservations are created for whatever could be claimed.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "C-P2 · Check a locked or exported BOM",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// C-P2 — Check a locked or exported BOM",
+                      "// Expected: 200 both times — _APPROVED_STATES covers approved, locked and exported.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "boms",
+                    "{{bom_id}}",
+                    "inventory-check"
+                  ]
+                },
+                "description": "**C-P2 — Check a locked or exported BOM**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check on a BOM whose status is locked, then on one that is exported\n\n**Expected result**\n\n200 both times — _APPROVED_STATES covers approved, locked and exported.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "C-P3 · Re-run the check",
+              "description": "**C-P3 — Re-run the check**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check\n- Commit a stock file that raises the on-hand quantity\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check again\n\n**Expected result**\n\n200; the second check reflects the new stock and the BOM's own earlier reservations do not count against it — they are released with reason `recheck` before re-claiming.",
+              "item": [
+                {
+                  "name": "C-P3.1 · step 1 · POST /api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "event": [
+                    {
+                      "listen": "test",
+                      "script": {
+                        "type": "text/javascript",
+                        "exec": [
+                          "// C-P3.1 — Re-run the check",
+                          "// No single deterministic status for this case — verify by hand.",
+                          "pm.test(\"Response received (inspect manually)\", function () {",
+                          "    pm.expect(pm.response.code).to.be.a(\"number\");",
+                          "});",
+                          "",
+                          "// carry ids forward for the chained requests",
+                          "try {",
+                          "    const body = pm.response.json();",
+                          "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                          "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                          "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                          "} catch (e) { /* non-JSON response */ }"
+                        ]
+                      }
+                    }
+                  ],
+                  "request": {
+                    "method": "POST",
+                    "header": [],
+                    "url": {
+                      "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                      "host": [
+                        "{{base_url}}"
+                      ],
+                      "path": [
+                        "api",
+                        "v1",
+                        "procurement",
+                        "boms",
+                        "{{bom_id}}",
+                        "inventory-check"
+                      ]
+                    },
+                    "description": "**C-P3 · step 1 — Re-run the check**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check\n- Commit a stock file that raises the on-hand quantity\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check again\n\n**Expected result**\n\n200; the second check reflects the new stock and the BOM's own earlier reservations do not count against it — they are released with reason `recheck` before re-claiming.",
+                    "auth": {
+                      "type": "bearer",
+                      "bearer": [
+                        {
+                          "key": "token",
+                          "value": "{{dm_token}}",
+                          "type": "string"
+                        }
+                      ]
+                    }
+                  },
+                  "response": []
+                },
+                {
+                  "name": "C-P3.2 · step 2 · POST /api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "event": [
+                    {
+                      "listen": "test",
+                      "script": {
+                        "type": "text/javascript",
+                        "exec": [
+                          "// C-P3.2 — Re-run the check",
+                          "// Expected: 200; the second check reflects the new stock and the BOM's own earlier reservations do not count against it — they are released with reason `recheck` before re-claiming.",
+                          "pm.test(\"Status is 200\", function () {",
+                          "    pm.response.to.have.status(200);",
+                          "});",
+                          "",
+                          "// carry ids forward for the chained requests",
+                          "try {",
+                          "    const body = pm.response.json();",
+                          "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                          "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                          "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                          "} catch (e) { /* non-JSON response */ }"
+                        ]
+                      }
+                    }
+                  ],
+                  "request": {
+                    "method": "POST",
+                    "header": [],
+                    "url": {
+                      "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                      "host": [
+                        "{{base_url}}"
+                      ],
+                      "path": [
+                        "api",
+                        "v1",
+                        "procurement",
+                        "boms",
+                        "{{bom_id}}",
+                        "inventory-check"
+                      ]
+                    },
+                    "description": "**C-P3 · step 2 — Re-run the check**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check\n- Commit a stock file that raises the on-hand quantity\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check again\n\n**Expected result**\n\n200; the second check reflects the new stock and the BOM's own earlier reservations do not count against it — they are released with reason `recheck` before re-claiming.",
+                    "auth": {
+                      "type": "bearer",
+                      "bearer": [
+                        {
+                          "key": "token",
+                          "value": "{{dm_token}}",
+                          "type": "string"
+                        }
+                      ]
+                    }
+                  },
+                  "response": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "D · Read checks",
+          "description": "GET /inventory-checks/{check_id} · GET /inventory-checks · GET /boms/{bom_id}/inventory-check\n\nRole gate: DM / MD / Viewer",
+          "item": [
+            {
+              "name": "D-P1 · Read one check by id",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// D-P1 — Read one check by id",
+                      "// Expected: 200 — the rebuilt check view with every line, its status, flags and matched item.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory-checks/{{check_id}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory-checks",
+                    "{{check_id}}"
+                  ]
+                },
+                "description": "**D-P1 — Read one check by id**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | D · Read checks |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/inventory-checks/{check_id}\n\n**Expected result**\n\n200 — the rebuilt check view with every line, its status, flags and matched item.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "D-P2 · The dashboard",
+              "description": "**D-P2 — The dashboard**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | D · Read checks |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/inventory-checks\n- GET /api/v1/procurement/inventory-checks?order_id={order_id}\n\n**Expected result**\n\n200 — the latest check per BOM, grouped with client and order identity; the filtered call narrows to one order.",
+              "item": [
+                {
+                  "name": "D-P2.1 · step 1 · GET /api/v1/procurement/inventory-checks",
+                  "event": [
+                    {
+                      "listen": "test",
+                      "script": {
+                        "type": "text/javascript",
+                        "exec": [
+                          "// D-P2.1 — The dashboard",
+                          "// No single deterministic status for this case — verify by hand.",
+                          "pm.test(\"Response received (inspect manually)\", function () {",
+                          "    pm.expect(pm.response.code).to.be.a(\"number\");",
+                          "});",
+                          "",
+                          "// carry ids forward for the chained requests",
+                          "try {",
+                          "    const body = pm.response.json();",
+                          "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                          "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                          "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                          "} catch (e) { /* non-JSON response */ }"
+                        ]
+                      }
+                    }
+                  ],
+                  "request": {
+                    "method": "GET",
+                    "header": [],
+                    "url": {
+                      "raw": "{{base_url}}/api/v1/procurement/inventory-checks",
+                      "host": [
+                        "{{base_url}}"
+                      ],
+                      "path": [
+                        "api",
+                        "v1",
+                        "procurement",
+                        "inventory-checks"
+                      ]
+                    },
+                    "description": "**D-P2 · step 1 — The dashboard**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | D · Read checks |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/inventory-checks\n- GET /api/v1/procurement/inventory-checks?order_id={order_id}\n\n**Expected result**\n\n200 — the latest check per BOM, grouped with client and order identity; the filtered call narrows to one order.",
+                    "auth": {
+                      "type": "bearer",
+                      "bearer": [
+                        {
+                          "key": "token",
+                          "value": "{{dm_token}}",
+                          "type": "string"
+                        }
+                      ]
+                    }
+                  },
+                  "response": []
+                },
+                {
+                  "name": "D-P2.2 · step 2 · GET /api/v1/procurement/inventory-checks?order_id={{order_id}}",
+                  "event": [
+                    {
+                      "listen": "test",
+                      "script": {
+                        "type": "text/javascript",
+                        "exec": [
+                          "// D-P2.2 — The dashboard",
+                          "// Expected: 200 — the latest check per BOM, grouped with client and order identity; the filtered call narrows to one order.",
+                          "pm.test(\"Status is 200\", function () {",
+                          "    pm.response.to.have.status(200);",
+                          "});",
+                          "",
+                          "// carry ids forward for the chained requests",
+                          "try {",
+                          "    const body = pm.response.json();",
+                          "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                          "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                          "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                          "} catch (e) { /* non-JSON response */ }"
+                        ]
+                      }
+                    }
+                  ],
+                  "request": {
+                    "method": "GET",
+                    "header": [],
+                    "url": {
+                      "raw": "{{base_url}}/api/v1/procurement/inventory-checks?order_id={{order_id}}",
+                      "host": [
+                        "{{base_url}}"
+                      ],
+                      "path": [
+                        "api",
+                        "v1",
+                        "procurement",
+                        "inventory-checks"
+                      ],
+                      "query": [
+                        {
+                          "key": "order_id",
+                          "value": "{{order_id}}"
+                        }
+                      ]
+                    },
+                    "description": "**D-P2 · step 2 — The dashboard**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | D · Read checks |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/inventory-checks\n- GET /api/v1/procurement/inventory-checks?order_id={order_id}\n\n**Expected result**\n\n200 — the latest check per BOM, grouped with client and order identity; the filtered call narrows to one order.",
+                    "auth": {
+                      "type": "bearer",
+                      "bearer": [
+                        {
+                          "key": "token",
+                          "value": "{{dm_token}}",
+                          "type": "string"
+                        }
+                      ]
+                    }
+                  },
+                  "response": []
+                }
+              ]
+            },
+            {
+              "name": "D-P3 · Latest check for a BOM",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// D-P3 — Latest check for a BOM",
+                      "// Expected: 200 — the same view as D-P1 for that BOM's most recent check.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "boms",
+                    "{{bom_id}}",
+                    "inventory-check"
+                  ]
+                },
+                "description": "**D-P3 — Latest check for a BOM**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | D · Read checks |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/boms/{bom_id}/inventory-check\n\n**Expected result**\n\n200 — the same view as D-P1 for that BOM's most recent check.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "D-P4 · Office Viewer can read checks",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// D-P4 — Office Viewer can read checks",
+                      "// Expected: 200 — reads are open to VIEWER across this module.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory-checks",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory-checks"
+                  ]
+                },
+                "description": "**D-P4 — Office Viewer can read checks**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | Low |\n| Role | Office Viewer (9000000004) |\n| Endpoint group | D · Read checks |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/inventory-checks\n\n**Expected result**\n\n200 — reads are open to VIEWER across this module.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{viewer_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Negative",
+      "item": [
+        {
+          "name": "A · Stock master sync",
+          "description": "POST /inventory/preview · POST /inventory/commit\n\nRole gate: DM / MD",
+          "item": [
+            {
+              "name": "A-N1 · Wrong role commits",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-N1 — Wrong role commits",
+                      "// Expected: 403 role-not-permitted — the sync is DM/MD only.",
+                      "pm.test(\"Status is 403\", function () {",
+                      "    pm.response.to.have.status(403);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory/commit",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory",
+                    "commit"
+                  ]
+                },
+                "description": "**A-N1 — Wrong role commits**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | High |\n| Role | Cutting Manager |\n| Endpoint group | A · Stock master sync |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/inventory/commit — multipart body: file = <workbook>\n\n**Expected result**\n\n403 role-not-permitted — the sync is DM/MD only.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{cm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": "",
+                      "description": "Select the fixture: inventory_master.xlsx"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-N2 · A viewer cannot commit",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-N2 — A viewer cannot commit",
+                      "// Expected: 403 — the Office Viewer can read the stock list (B-P3) but is outside the mutating gate. This pair is the clearest read/write split in the module.",
+                      "pm.test(\"Status is 403\", function () {",
+                      "    pm.response.to.have.status(403);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory/commit",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory",
+                    "commit"
+                  ]
+                },
+                "description": "**A-N2 — A viewer cannot commit**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | Medium |\n| Role | Office Viewer (9000000004) |\n| Endpoint group | A · Stock master sync |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/inventory/commit — multipart body: file = <workbook>\n\n**Expected result**\n\n403 — the Office Viewer can read the stock list (B-P3) but is outside the mutating gate. This pair is the clearest read/write split in the module.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{viewer_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": "",
+                      "description": "Select the fixture: inventory_master.xlsx"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-N3 · No file part",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-N3 — No file part",
+                      "// Expected: 422 — File(...) is required.",
+                      "pm.test(\"Status is 422\", function () {",
+                      "    pm.response.to.have.status(422);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory/preview",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory",
+                    "preview"
+                  ]
+                },
+                "description": "**A-N3 — No file part**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | A · Stock master sync |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/inventory/preview with an empty body\n\n**Expected result**\n\n422 — File(...) is required.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": "",
+                      "description": "Select the fixture: inventory_master.xlsx"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "B · Stock list",
+          "description": "GET /inventory/items\n\nRole gate: DM / MD / Viewer",
+          "item": [
+            {
+              "name": "B-N1 · Role outside the read gate",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// B-N1 — Role outside the read gate",
+                      "// Expected: 403 role-not-permitted — worth noting that the manager who consumes the stock cannot query it here.",
+                      "pm.test(\"Status is 403\", function () {",
+                      "    pm.response.to.have.status(403);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory/items",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory",
+                    "items"
+                  ]
+                },
+                "description": "**B-N1 — Role outside the read gate**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | Medium |\n| Role | Cutting Manager |\n| Endpoint group | B · Stock list |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/inventory/items\n\n**Expected result**\n\n403 role-not-permitted — worth noting that the manager who consumes the stock cannot query it here.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{cm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "B-N2 · No token",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// B-N2 — No token",
+                      "// Expected: 401 — unlike the supplier-PO tracking routes, nothing in this module is anonymous.",
+                      "pm.test(\"Status is 401\", function () {",
+                      "    pm.response.to.have.status(401);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory/items",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory",
+                    "items"
+                  ]
+                },
+                "description": "**B-N2 — No token**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | Low |\n| Role | Unauthenticated |\n| Endpoint group | B · Stock list |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/inventory/items with no Authorization header\n\n**Expected result**\n\n401 — unlike the supplier-PO tracking routes, nothing in this module is anonymous.",
+                "auth": {
+                  "type": "noauth"
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "C · Run the inventory check",
+          "description": "POST /boms/{bom_id}/inventory-check\n\nRole gate: DM / MD",
+          "item": [
+            {
+              "name": "C-N1 · Check an unapproved BOM",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// C-N1 — Check an unapproved BOM",
+                      "// Expected: 409 {\"error\":\"bom_not_approved\",\"message\":\"Inventory check runs only on an approved/locked BOM.\"}",
+                      "pm.test(\"Status is 409\", function () {",
+                      "    pm.response.to.have.status(409);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "boms",
+                    "{{bom_id}}",
+                    "inventory-check"
+                  ]
+                },
+                "description": "**C-N1 — Check an unapproved BOM**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check on a BOM in draft or ready_for_review\n\n**Expected result**\n\n409 {\"error\":\"bom_not_approved\",\"message\":\"Inventory check runs only on an approved/locked BOM.\"}",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "C-N2 · Check a rejected BOM",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// C-N2 — Check a rejected BOM",
+                      "// Expected: 409 bom_not_approved — rejected is not in _APPROVED_STATES either.",
+                      "pm.test(\"Status is 409\", function () {",
+                      "    pm.response.to.have.status(409);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "boms",
+                    "{{bom_id}}",
+                    "inventory-check"
+                  ]
+                },
+                "description": "**C-N2 — Check a rejected BOM**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check on a rejected BOM\n\n**Expected result**\n\n409 bom_not_approved — rejected is not in _APPROVED_STATES either.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "C-N3 · Unknown BOM",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// C-N3 — Unknown BOM",
+                      "// Expected: 404 {\"detail\":\"BOM not found.\"}",
+                      "pm.test(\"Status is 404\", function () {",
+                      "    pm.response.to.have.status(404);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/boms/00000000-0000-0000-0000-000000000000/inventory-check",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "boms",
+                    "00000000-0000-0000-0000-000000000000",
+                    "inventory-check"
+                  ]
+                },
+                "description": "**C-N3 — Unknown BOM**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/boms/{a made-up uuid}/inventory-check\n\n**Expected result**\n\n404 {\"detail\":\"BOM not found.\"}",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "C-N4 · Wrong role runs the check",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// C-N4 — Wrong role runs the check",
+                      "// Expected: 403 — running a check writes reservations, so it sits behind the mutating gate.",
+                      "pm.test(\"Status is 403\", function () {",
+                      "    pm.response.to.have.status(403);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "boms",
+                    "{{bom_id}}",
+                    "inventory-check"
+                  ]
+                },
+                "description": "**C-N4 — Wrong role runs the check**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | Medium |\n| Role | Office Viewer |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check\n\n**Expected result**\n\n403 — running a check writes reservations, so it sits behind the mutating gate.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{viewer_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "D · Read checks",
+          "description": "GET /inventory-checks/{check_id} · GET /inventory-checks · GET /boms/{bom_id}/inventory-check\n\nRole gate: DM / MD / Viewer",
+          "item": [
+            {
+              "name": "D-N1 · Unknown check id",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// D-N1 — Unknown check id",
+                      "// Expected: 404 {\"detail\":\"Inventory check not found.\"}",
+                      "pm.test(\"Status is 404\", function () {",
+                      "    pm.response.to.have.status(404);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory-checks/00000000-0000-0000-0000-000000000000",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory-checks",
+                    "00000000-0000-0000-0000-000000000000"
+                  ]
+                },
+                "description": "**D-N1 — Unknown check id**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | D · Read checks |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/inventory-checks/{a made-up uuid}\n\n**Expected result**\n\n404 {\"detail\":\"Inventory check not found.\"}",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "D-N2 · A BOM that was never checked",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// D-N2 — A BOM that was never checked",
+                      "// Expected: 404 {\"detail\":\"No inventory check for this BOM yet.\"} — a distinct message from D-N1, and the signal a UI should read as \"run the check\" rather than \"something broke\".",
+                      "pm.test(\"Status is 404\", function () {",
+                      "    pm.response.to.have.status(404);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "boms",
+                    "{{bom_id}}",
+                    "inventory-check"
+                  ]
+                },
+                "description": "**D-N2 — A BOM that was never checked**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | D · Read checks |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/boms/{bom_id}/inventory-check on a BOM with no check\n\n**Expected result**\n\n404 {\"detail\":\"No inventory check for this BOM yet.\"} — a distinct message from D-N1, and the signal a UI should read as \"run the check\" rather than \"something broke\".",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "D-N3 · Malformed id",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// D-N3 — Malformed id",
+                      "// Expected: 422 from FastAPI's path parsing, before the handler runs.",
+                      "pm.test(\"Status is 422\", function () {",
+                      "    pm.response.to.have.status(422);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory-checks/not-a-uuid",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory-checks",
+                    "not-a-uuid"
+                  ]
+                },
+                "description": "**D-N3 — Malformed id**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | D · Read checks |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/inventory-checks/not-a-uuid\n\n**Expected result**\n\n422 from FastAPI's path parsing, before the handler runs.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "D-N4 · Wrong role reads a check",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// D-N4 — Wrong role reads a check",
+                      "// Expected: 403 role-not-permitted.",
+                      "pm.test(\"Status is 403\", function () {",
+                      "    pm.response.to.have.status(403);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory-checks",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory-checks"
+                  ]
+                },
+                "description": "**D-N4 — Wrong role reads a check**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | Medium |\n| Role | Cutting Manager |\n| Endpoint group | D · Read checks |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/inventory-checks\n\n**Expected result**\n\n403 role-not-permitted.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{cm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Boundary",
+      "item": [
+        {
+          "name": "A · Stock master sync",
+          "description": "POST /inventory/preview · POST /inventory/commit\n\nRole gate: DM / MD",
+          "item": [
+            {
+              "name": "A-B1 · Upload over the cap",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-B1 — Upload over the cap",
+                      "// Expected: 413 {\"detail\":\"File exceeds the 25 MB limit.\"} — raised while streaming by this module's own _read_capped, independent of the Stage-1 upload machinery.",
+                      "pm.test(\"Status is 413\", function () {",
+                      "    pm.response.to.have.status(413);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory/preview",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory",
+                    "preview"
+                  ]
+                },
+                "description": "**A-B1 — Upload over the cap**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | A · Stock master sync |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/inventory/preview — file = <larger than MAX_UPLOAD_MB (25 MB default)>\n\n**Expected result**\n\n413 {\"detail\":\"File exceeds the 25 MB limit.\"} — raised while streaming by this module's own _read_capped, independent of the Stage-1 upload machinery.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": "",
+                      "description": "Select the fixture: inventory_master.xlsx"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-B2 · Empty or unparseable workbook",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-B2 — Empty or unparseable workbook",
+                      "// Expected: Expect a clean 4xx or a preview with warnings and zero rows — NOT a 500. There is no content-type check on this route, so the parser is the only guard; record what actually happens.",
+                      "// No single deterministic status for this case — verify by hand.",
+                      "pm.test(\"Response received (inspect manually)\", function () {",
+                      "    pm.expect(pm.response.code).to.be.a(\"number\");",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory/preview",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory",
+                    "preview"
+                  ]
+                },
+                "description": "**A-B2 — Empty or unparseable workbook**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | A · Stock master sync |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/inventory/preview — file = <0 bytes>\n- then file = <a .txt renamed .xlsx>\n\n**Expected result**\n\nExpect a clean 4xx or a preview with warnings and zero rows — NOT a 500. There is no content-type check on this route, so the parser is the only guard; record what actually happens.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": "",
+                      "description": "Select the fixture: inventory_master.xlsx"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-B3 · Commit an empty but valid workbook",
+              "description": "**A-B3 — Commit an empty but valid workbook**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | A · Stock master sync |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/inventory/commit with a structurally valid workbook containing NO data rows\n- GET /api/v1/procurement/inventory/items\n\n**Expected result**\n\ncommitted: 0 and deactivated: <every previously active key> — because `deactivate_keys_not_in(keep)` runs with an empty keep-set. One wrong file can retire the entire stock master. Confirm and flag loudly; this is the highest-blast-radius call in the module.",
+              "item": [
+                {
+                  "name": "A-B3.1 · step 1 · POST /api/v1/procurement/inventory/commit",
+                  "event": [
+                    {
+                      "listen": "test",
+                      "script": {
+                        "type": "text/javascript",
+                        "exec": [
+                          "// A-B3.1 — Commit an empty but valid workbook",
+                          "// No single deterministic status for this case — verify by hand.",
+                          "pm.test(\"Response received (inspect manually)\", function () {",
+                          "    pm.expect(pm.response.code).to.be.a(\"number\");",
+                          "});",
+                          "",
+                          "// carry ids forward for the chained requests",
+                          "try {",
+                          "    const body = pm.response.json();",
+                          "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                          "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                          "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                          "} catch (e) { /* non-JSON response */ }"
+                        ]
+                      }
+                    }
+                  ],
+                  "request": {
+                    "method": "POST",
+                    "header": [],
+                    "url": {
+                      "raw": "{{base_url}}/api/v1/procurement/inventory/commit",
+                      "host": [
+                        "{{base_url}}"
+                      ],
+                      "path": [
+                        "api",
+                        "v1",
+                        "procurement",
+                        "inventory",
+                        "commit"
+                      ]
+                    },
+                    "description": "**A-B3 · step 1 — Commit an empty but valid workbook**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | A · Stock master sync |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/inventory/commit with a structurally valid workbook containing NO data rows\n- GET /api/v1/procurement/inventory/items\n\n**Expected result**\n\ncommitted: 0 and deactivated: <every previously active key> — because `deactivate_keys_not_in(keep)` runs with an empty keep-set. One wrong file can retire the entire stock master. Confirm and flag loudly; this is the highest-blast-radius call in the module.",
+                    "auth": {
+                      "type": "bearer",
+                      "bearer": [
+                        {
+                          "key": "token",
+                          "value": "{{dm_token}}",
+                          "type": "string"
+                        }
+                      ]
+                    },
+                    "body": {
+                      "mode": "formdata",
+                      "formdata": [
+                        {
+                          "key": "file",
+                          "type": "file",
+                          "src": "",
+                          "description": "Select the fixture: inventory_master.xlsx"
+                        }
+                      ]
+                    }
+                  },
+                  "response": []
+                },
+                {
+                  "name": "A-B3.2 · step 2 · GET /api/v1/procurement/inventory/items",
+                  "event": [
+                    {
+                      "listen": "test",
+                      "script": {
+                        "type": "text/javascript",
+                        "exec": [
+                          "// A-B3.2 — Commit an empty but valid workbook",
+                          "// Expected: committed: 0 and deactivated: <every previously active key> — because `deactivate_keys_not_in(keep)` runs with an empty keep-set. One wrong file can retire the entire stock master. Confirm and flag loudly; this is the hi",
+                          "pm.test(\"Status is 200\", function () {",
+                          "    pm.response.to.have.status(200);",
+                          "});",
+                          "",
+                          "// carry ids forward for the chained requests",
+                          "try {",
+                          "    const body = pm.response.json();",
+                          "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                          "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                          "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                          "} catch (e) { /* non-JSON response */ }"
+                        ]
+                      }
+                    }
+                  ],
+                  "request": {
+                    "method": "GET",
+                    "header": [],
+                    "url": {
+                      "raw": "{{base_url}}/api/v1/procurement/inventory/items",
+                      "host": [
+                        "{{base_url}}"
+                      ],
+                      "path": [
+                        "api",
+                        "v1",
+                        "procurement",
+                        "inventory",
+                        "items"
+                      ]
+                    },
+                    "description": "**A-B3 · step 2 — Commit an empty but valid workbook**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | A · Stock master sync |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/inventory/commit with a structurally valid workbook containing NO data rows\n- GET /api/v1/procurement/inventory/items\n\n**Expected result**\n\ncommitted: 0 and deactivated: <every previously active key> — because `deactivate_keys_not_in(keep)` runs with an empty keep-set. One wrong file can retire the entire stock master. Confirm and flag loudly; this is the highest-blast-radius call in the module.",
+                    "auth": {
+                      "type": "bearer",
+                      "bearer": [
+                        {
+                          "key": "token",
+                          "value": "{{dm_token}}",
+                          "type": "string"
+                        }
+                      ]
+                    }
+                  },
+                  "response": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "B · Stock list",
+          "description": "GET /inventory/items\n\nRole gate: DM / MD / Viewer",
+          "item": [
+            {
+              "name": "B-B1 · limit=0 and a far offset",
+              "description": "**B-B1 — limit=0 and a far offset**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | B · Stock list |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/inventory/items?limit=0\n- GET /api/v1/procurement/inventory/items?offset=999999\n\n**Expected result**\n\n200 with an empty list both times — limit and offset have no bounds or validation.",
+              "item": [
+                {
+                  "name": "B-B1.1 · step 1 · GET /api/v1/procurement/inventory/items?limit=0",
+                  "event": [
+                    {
+                      "listen": "test",
+                      "script": {
+                        "type": "text/javascript",
+                        "exec": [
+                          "// B-B1.1 — limit=0 and a far offset",
+                          "// No single deterministic status for this case — verify by hand.",
+                          "pm.test(\"Response received (inspect manually)\", function () {",
+                          "    pm.expect(pm.response.code).to.be.a(\"number\");",
+                          "});",
+                          "",
+                          "// carry ids forward for the chained requests",
+                          "try {",
+                          "    const body = pm.response.json();",
+                          "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                          "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                          "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                          "} catch (e) { /* non-JSON response */ }"
+                        ]
+                      }
+                    }
+                  ],
+                  "request": {
+                    "method": "GET",
+                    "header": [],
+                    "url": {
+                      "raw": "{{base_url}}/api/v1/procurement/inventory/items?limit=0",
+                      "host": [
+                        "{{base_url}}"
+                      ],
+                      "path": [
+                        "api",
+                        "v1",
+                        "procurement",
+                        "inventory",
+                        "items"
+                      ],
+                      "query": [
+                        {
+                          "key": "limit",
+                          "value": "0"
+                        }
+                      ]
+                    },
+                    "description": "**B-B1 · step 1 — limit=0 and a far offset**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | B · Stock list |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/inventory/items?limit=0\n- GET /api/v1/procurement/inventory/items?offset=999999\n\n**Expected result**\n\n200 with an empty list both times — limit and offset have no bounds or validation.",
+                    "auth": {
+                      "type": "bearer",
+                      "bearer": [
+                        {
+                          "key": "token",
+                          "value": "{{dm_token}}",
+                          "type": "string"
+                        }
+                      ]
+                    }
+                  },
+                  "response": []
+                },
+                {
+                  "name": "B-B1.2 · step 2 · GET /api/v1/procurement/inventory/items?offset=999999",
+                  "event": [
+                    {
+                      "listen": "test",
+                      "script": {
+                        "type": "text/javascript",
+                        "exec": [
+                          "// B-B1.2 — limit=0 and a far offset",
+                          "// Expected: 200 with an empty list both times — limit and offset have no bounds or validation.",
+                          "pm.test(\"Status is 200\", function () {",
+                          "    pm.response.to.have.status(200);",
+                          "});",
+                          "",
+                          "// carry ids forward for the chained requests",
+                          "try {",
+                          "    const body = pm.response.json();",
+                          "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                          "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                          "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                          "} catch (e) { /* non-JSON response */ }"
+                        ]
+                      }
+                    }
+                  ],
+                  "request": {
+                    "method": "GET",
+                    "header": [],
+                    "url": {
+                      "raw": "{{base_url}}/api/v1/procurement/inventory/items?offset=999999",
+                      "host": [
+                        "{{base_url}}"
+                      ],
+                      "path": [
+                        "api",
+                        "v1",
+                        "procurement",
+                        "inventory",
+                        "items"
+                      ],
+                      "query": [
+                        {
+                          "key": "offset",
+                          "value": "999999"
+                        }
+                      ]
+                    },
+                    "description": "**B-B1 · step 2 — limit=0 and a far offset**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | B · Stock list |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/inventory/items?limit=0\n- GET /api/v1/procurement/inventory/items?offset=999999\n\n**Expected result**\n\n200 with an empty list both times — limit and offset have no bounds or validation.",
+                    "auth": {
+                      "type": "bearer",
+                      "bearer": [
+                        {
+                          "key": "token",
+                          "value": "{{dm_token}}",
+                          "type": "string"
+                        }
+                      ]
+                    }
+                  },
+                  "response": []
+                }
+              ]
+            },
+            {
+              "name": "B-B2 · Unbounded limit",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// B-B2 — Unbounded limit",
+                      "// Expected: 200, accepted — no server-side ceiling. Flag as a perf gap on a large master.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory/items?limit=1000000",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory",
+                    "items"
+                  ],
+                  "query": [
+                    {
+                      "key": "limit",
+                      "value": "1000000"
+                    }
+                  ]
+                },
+                "description": "**B-B2 — Unbounded limit**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | Low |\n| Role | Direct Manager |\n| Endpoint group | B · Stock list |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- GET /api/v1/procurement/inventory/items?limit=1000000\n\n**Expected result**\n\n200, accepted — no server-side ceiling. Flag as a perf gap on a large master.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "C · Run the inventory check",
+          "description": "POST /boms/{bom_id}/inventory-check\n\nRole gate: DM / MD",
+          "item": [
+            {
+              "name": "C-B1 · A BOM with no stockable lines",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// C-B1 — A BOM with no stockable lines",
+                      "// Expected: 200 with no checked lines and everything reported as excluded — no error, and generate-pos on it should then yield an empty PO list.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "boms",
+                    "{{bom_id}}",
+                    "inventory-check"
+                  ]
+                },
+                "description": "**C-B1 — A BOM with no stockable lines**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check on a BOM whose lines are all non-stockable categories\n\n**Expected result**\n\n200 with no checked lines and everything reported as excluded — no error, and generate-pos on it should then yield an empty PO list.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "C-B2 · A line whose required quantity is 0",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// C-B2 — A line whose required quantity is 0",
+                      "// Expected: That line cannot be `sufficient` — the sufficiency test requires required > 0 — so a zero-requirement line lands on out_of_stock (or partial) with shortfall 0. Confirm, and flag it: a 0-qty line reads as a stock problem ",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "boms",
+                    "{{bom_id}}",
+                    "inventory-check"
+                  ]
+                },
+                "description": "**C-B2 — A line whose required quantity is 0**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- Leave a stockable BOM line at qty_per_garment 0\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check\n\n**Expected result**\n\nThat line cannot be `sufficient` — the sufficiency test requires required > 0 — so a zero-requirement line lands on out_of_stock (or partial) with shortfall 0. Confirm, and flag it: a 0-qty line reads as a stock problem when it is really an unfilled BOM cell.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "C-B3 · UOM mismatch with no conversion",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// C-B3 — UOM mismatch with no conversion",
+                      "// Expected: The line carries flags containing `uom_mismatch`, on_hand_qty 0 and status out_of_stock — an unconvertible lot is treated as no stock rather than silently compared. Verify no reservation was made against that lot.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "boms",
+                    "{{bom_id}}",
+                    "inventory-check"
+                  ]
+                },
+                "description": "**C-B3 — UOM mismatch with no conversion**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- Have a BOM line in a UOM that has no conversion to the matched stock item's UOM (e.g. sqft vs. metres)\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check\n\n**Expected result**\n\nThe line carries flags containing `uom_mismatch`, on_hand_qty 0 and status out_of_stock — an unconvertible lot is treated as no stock rather than silently compared. Verify no reservation was made against that lot.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "C-B4 · Exactly enough stock",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// C-B4 — Exactly enough stock",
+                      "// Expected: status sufficient with shortfall_qty 0 — the comparison is available >= required, so the exact boundary passes rather than falling to partial.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "boms",
+                    "{{bom_id}}",
+                    "inventory-check"
+                  ]
+                },
+                "description": "**C-B4 — Exactly enough stock**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- Set a stock item's qty_on_hand exactly equal to the BOM line's requirement\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check\n\n**Expected result**\n\nstatus sufficient with shortfall_qty 0 — the comparison is available >= required, so the exact boundary passes rather than falling to partial.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Business Logic",
+      "item": [
+        {
+          "name": "A · Stock master sync",
+          "description": "POST /inventory/preview · POST /inventory/commit\n\nRole gate: DM / MD",
+          "item": [
+            {
+              "name": "A-L1 · Commit is idempotent",
+              "description": "**A-L1 — Commit is idempotent**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | A · Stock master sync |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/inventory/commit twice with the identical file\n- GET /api/v1/procurement/inventory/items?limit=1000\n\n**Expected result**\n\nThe second commit reports the same `committed` count and deactivated: 0; no duplicate items appear — the upsert keys on normalized_key.",
+              "item": [
+                {
+                  "name": "A-L1.1 · step 1 · POST /api/v1/procurement/inventory/commit",
+                  "event": [
+                    {
+                      "listen": "test",
+                      "script": {
+                        "type": "text/javascript",
+                        "exec": [
+                          "// A-L1.1 — Commit is idempotent",
+                          "// No single deterministic status for this case — verify by hand.",
+                          "pm.test(\"Response received (inspect manually)\", function () {",
+                          "    pm.expect(pm.response.code).to.be.a(\"number\");",
+                          "});",
+                          "",
+                          "// carry ids forward for the chained requests",
+                          "try {",
+                          "    const body = pm.response.json();",
+                          "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                          "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                          "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                          "} catch (e) { /* non-JSON response */ }"
+                        ]
+                      }
+                    }
+                  ],
+                  "request": {
+                    "method": "POST",
+                    "header": [],
+                    "url": {
+                      "raw": "{{base_url}}/api/v1/procurement/inventory/commit",
+                      "host": [
+                        "{{base_url}}"
+                      ],
+                      "path": [
+                        "api",
+                        "v1",
+                        "procurement",
+                        "inventory",
+                        "commit"
+                      ]
+                    },
+                    "description": "**A-L1 · step 1 — Commit is idempotent**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | A · Stock master sync |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/inventory/commit twice with the identical file\n- GET /api/v1/procurement/inventory/items?limit=1000\n\n**Expected result**\n\nThe second commit reports the same `committed` count and deactivated: 0; no duplicate items appear — the upsert keys on normalized_key.",
+                    "auth": {
+                      "type": "bearer",
+                      "bearer": [
+                        {
+                          "key": "token",
+                          "value": "{{dm_token}}",
+                          "type": "string"
+                        }
+                      ]
+                    },
+                    "body": {
+                      "mode": "formdata",
+                      "formdata": [
+                        {
+                          "key": "file",
+                          "type": "file",
+                          "src": "",
+                          "description": "Select the fixture: inventory_master.xlsx"
+                        }
+                      ]
+                    }
+                  },
+                  "response": []
+                },
+                {
+                  "name": "A-L1.2 · step 2 · GET /api/v1/procurement/inventory/items?limit=1000",
+                  "event": [
+                    {
+                      "listen": "test",
+                      "script": {
+                        "type": "text/javascript",
+                        "exec": [
+                          "// A-L1.2 — Commit is idempotent",
+                          "// Expected: The second commit reports the same `committed` count and deactivated: 0; no duplicate items appear — the upsert keys on normalized_key.",
+                          "pm.test(\"Status is 200\", function () {",
+                          "    pm.response.to.have.status(200);",
+                          "});",
+                          "",
+                          "// carry ids forward for the chained requests",
+                          "try {",
+                          "    const body = pm.response.json();",
+                          "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                          "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                          "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                          "} catch (e) { /* non-JSON response */ }"
+                        ]
+                      }
+                    }
+                  ],
+                  "request": {
+                    "method": "GET",
+                    "header": [],
+                    "url": {
+                      "raw": "{{base_url}}/api/v1/procurement/inventory/items?limit=1000",
+                      "host": [
+                        "{{base_url}}"
+                      ],
+                      "path": [
+                        "api",
+                        "v1",
+                        "procurement",
+                        "inventory",
+                        "items"
+                      ],
+                      "query": [
+                        {
+                          "key": "limit",
+                          "value": "1000"
+                        }
+                      ]
+                    },
+                    "description": "**A-L1 · step 2 — Commit is idempotent**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | A · Stock master sync |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /api/v1/procurement/inventory/commit twice with the identical file\n- GET /api/v1/procurement/inventory/items?limit=1000\n\n**Expected result**\n\nThe second commit reports the same `committed` count and deactivated: 0; no duplicate items appear — the upsert keys on normalized_key.",
+                    "auth": {
+                      "type": "bearer",
+                      "bearer": [
+                        {
+                          "key": "token",
+                          "value": "{{dm_token}}",
+                          "type": "string"
+                        }
+                      ]
+                    }
+                  },
+                  "response": []
+                }
+              ]
+            },
+            {
+              "name": "A-L2 · Missing keys are deactivated, not deleted",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-L2 — Missing keys are deactivated, not deleted",
+                      "// Expected: `deactivated` counts it and the row still exists (inactive) — history and any reservations against it survive. Confirm whether the list endpoint hides inactive items by default.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory/items?search={{search_term}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory",
+                    "items"
+                  ],
+                  "query": [
+                    {
+                      "key": "search",
+                      "value": "{{search_term}}"
+                    }
+                  ]
+                },
+                "description": "**A-L2 — Missing keys are deactivated, not deleted**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | A · Stock master sync |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- Commit workbook v1\n- Commit workbook v2 which omits one previously present item\n- GET /api/v1/procurement/inventory/items?search=<that item>\n\n**Expected result**\n\n`deactivated` counts it and the row still exists (inactive) — history and any reservations against it survive. Confirm whether the list endpoint hides inactive items by default.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-L3 · Preview and commit agree",
+              "description": "**A-L3 — Preview and commit agree**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | A · Stock master sync |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /inventory/preview with a file and note the row count and warnings\n- POST /inventory/commit with the same file\n\n**Expected result**\n\ncommit's preview block matches preview's exactly, and `committed` equals the previewed row count — the dry run is trustworthy as a go/no-go.",
+              "item": [
+                {
+                  "name": "A-L3.1 · step 1 · POST /inventory/preview",
+                  "event": [
+                    {
+                      "listen": "test",
+                      "script": {
+                        "type": "text/javascript",
+                        "exec": [
+                          "// A-L3.1 — Preview and commit agree",
+                          "// No single deterministic status for this case — verify by hand.",
+                          "pm.test(\"Response received (inspect manually)\", function () {",
+                          "    pm.expect(pm.response.code).to.be.a(\"number\");",
+                          "});",
+                          "",
+                          "// carry ids forward for the chained requests",
+                          "try {",
+                          "    const body = pm.response.json();",
+                          "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                          "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                          "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                          "} catch (e) { /* non-JSON response */ }"
+                        ]
+                      }
+                    }
+                  ],
+                  "request": {
+                    "method": "POST",
+                    "header": [],
+                    "url": {
+                      "raw": "{{base_url}}/api/v1/procurement/inventory/preview",
+                      "host": [
+                        "{{base_url}}"
+                      ],
+                      "path": [
+                        "api",
+                        "v1",
+                        "procurement",
+                        "inventory",
+                        "preview"
+                      ]
+                    },
+                    "description": "**A-L3 · step 1 — Preview and commit agree**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | A · Stock master sync |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /inventory/preview with a file and note the row count and warnings\n- POST /inventory/commit with the same file\n\n**Expected result**\n\ncommit's preview block matches preview's exactly, and `committed` equals the previewed row count — the dry run is trustworthy as a go/no-go.",
+                    "auth": {
+                      "type": "bearer",
+                      "bearer": [
+                        {
+                          "key": "token",
+                          "value": "{{dm_token}}",
+                          "type": "string"
+                        }
+                      ]
+                    },
+                    "body": {
+                      "mode": "formdata",
+                      "formdata": [
+                        {
+                          "key": "file",
+                          "type": "file",
+                          "src": "",
+                          "description": "Select the fixture: inventory_master.xlsx"
+                        }
+                      ]
+                    }
+                  },
+                  "response": []
+                },
+                {
+                  "name": "A-L3.2 · step 2 · POST /inventory/commit",
+                  "event": [
+                    {
+                      "listen": "test",
+                      "script": {
+                        "type": "text/javascript",
+                        "exec": [
+                          "// A-L3.2 — Preview and commit agree",
+                          "// Expected: commit's preview block matches preview's exactly, and `committed` equals the previewed row count — the dry run is trustworthy as a go/no-go.",
+                          "pm.test(\"Status is 200\", function () {",
+                          "    pm.response.to.have.status(200);",
+                          "});",
+                          "",
+                          "// carry ids forward for the chained requests",
+                          "try {",
+                          "    const body = pm.response.json();",
+                          "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                          "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                          "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                          "} catch (e) { /* non-JSON response */ }"
+                        ]
+                      }
+                    }
+                  ],
+                  "request": {
+                    "method": "POST",
+                    "header": [],
+                    "url": {
+                      "raw": "{{base_url}}/api/v1/procurement/inventory/commit",
+                      "host": [
+                        "{{base_url}}"
+                      ],
+                      "path": [
+                        "api",
+                        "v1",
+                        "procurement",
+                        "inventory",
+                        "commit"
+                      ]
+                    },
+                    "description": "**A-L3 · step 2 — Preview and commit agree**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | A · Stock master sync |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- POST /inventory/preview with a file and note the row count and warnings\n- POST /inventory/commit with the same file\n\n**Expected result**\n\ncommit's preview block matches preview's exactly, and `committed` equals the previewed row count — the dry run is trustworthy as a go/no-go.",
+                    "auth": {
+                      "type": "bearer",
+                      "bearer": [
+                        {
+                          "key": "token",
+                          "value": "{{dm_token}}",
+                          "type": "string"
+                        }
+                      ]
+                    },
+                    "body": {
+                      "mode": "formdata",
+                      "formdata": [
+                        {
+                          "key": "file",
+                          "type": "file",
+                          "src": "",
+                          "description": "Select the fixture: inventory_master.xlsx"
+                        }
+                      ]
+                    }
+                  },
+                  "response": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "B · Stock list",
+          "description": "GET /inventory/items\n\nRole gate: DM / MD / Viewer",
+          "item": [
+            {
+              "name": "B-L1 · Are deactivated items listed?",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// B-L1 — Are deactivated items listed?",
+                      "// Expected: Determine from the response whether inactive rows are included — there is no `active` filter on this endpoint, unlike GET /suppliers. If they are listed with no status flag, a picker cannot tell live stock from retired s",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory/items?search={{search_term}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory",
+                    "items"
+                  ],
+                  "query": [
+                    {
+                      "key": "search",
+                      "value": "{{search_term}}"
+                    }
+                  ]
+                },
+                "description": "**B-L1 — Are deactivated items listed?**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | B · Stock list |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- Commit a workbook that drops an item (A-L2)\n- GET /api/v1/procurement/inventory/items?search=<that item>\n\n**Expected result**\n\nDetermine from the response whether inactive rows are included — there is no `active` filter on this endpoint, unlike GET /suppliers. If they are listed with no status flag, a picker cannot tell live stock from retired stock; file that.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "C · Run the inventory check",
+          "description": "POST /boms/{bom_id}/inventory-check\n\nRole gate: DM / MD",
+          "item": [
+            {
+              "name": "C-L1 · Another BOM's reservation reduces what you can claim",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// C-L1 — Another BOM's reservation reduces what you can claim",
+                      "// Expected: BOM B sees the lot's on-hand but an `available` reduced by A's active reservation, so it reports partial or out_of_stock with a real shortfall. This is the whole point of soft reservations — two BOMs cannot both spend th",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "boms",
+                    "{{bom_id}}",
+                    "inventory-check"
+                  ]
+                },
+                "description": "**C-L1 — Another BOM's reservation reduces what you can claim**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- Run the check on BOM A so it reserves most of a lot\n- Run the check on BOM B, which needs the same material\n- Compare BOM B's on_hand_qty with its available/shortfall\n\n**Expected result**\n\nBOM B sees the lot's on-hand but an `available` reduced by A's active reservation, so it reports partial or out_of_stock with a real shortfall. This is the whole point of soft reservations — two BOMs cannot both spend the same leather.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "C-L2 · A fuzzy candidate never auto-binds",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// C-L2 — A fuzzy candidate never auto-binds",
+                      "// Expected: flags contain `suggestion` and `unmatched`, the suggestion payload names the candidate, matched_method is null and no stock is claimed. A human must curate an alias before it counts — verify the line is short (not silent",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "boms",
+                    "{{bom_id}}",
+                    "inventory-check"
+                  ]
+                },
+                "description": "**C-L2 — A fuzzy candidate never auto-binds**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- Have a BOM line whose name only loosely resembles a stock description (no exact key, no alias)\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check\n\n**Expected result**\n\nflags contain `suggestion` and `unmatched`, the suggestion payload names the candidate, matched_method is null and no stock is claimed. A human must curate an alias before it counts — verify the line is short (not silently satisfied).",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "C-L3 · An alias binds where the raw key does not",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// C-L3 — An alias binds where the raw key does not",
+                      "// Expected: matched_method becomes `alias`, the line matches the lot and stock is reserved — the documented path from an unmatched line to a satisfied one.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "boms",
+                    "{{bom_id}}",
+                    "inventory-check"
+                  ]
+                },
+                "description": "**C-L3 — An alias binds where the raw key does not**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- Note a line that comes back unmatched\n- Add a curated alias mapping that BOM term to the stock key\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check again\n\n**Expected result**\n\nmatched_method becomes `alias`, the line matches the lot and stock is reserved — the documented path from an unmatched line to a satisfied one.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "C-L4 · The check is Stage 5's precondition",
+              "description": "**C-L4 — The check is Stage 5's precondition**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- On a freshly approved BOM, POST /api/v1/procurement/boms/{bom_id}/generate-pos → 409 no_inventory_check\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check\n- POST /api/v1/procurement/boms/{bom_id}/generate-pos again\n\n**Expected result**\n\nThe PO generation that was refused now succeeds and buys exactly the lines this check marked short. This is the seam between Stage 4 and Stage 5 — run it end to end at least once.",
+              "item": [
+                {
+                  "name": "C-L4.1 · step 1 · POST /api/v1/procurement/boms/{{bom_id}}/generate-pos",
+                  "event": [
+                    {
+                      "listen": "test",
+                      "script": {
+                        "type": "text/javascript",
+                        "exec": [
+                          "// C-L4.1 — The check is Stage 5's precondition",
+                          "// No single deterministic status for this case — verify by hand.",
+                          "pm.test(\"Response received (inspect manually)\", function () {",
+                          "    pm.expect(pm.response.code).to.be.a(\"number\");",
+                          "});",
+                          "",
+                          "// carry ids forward for the chained requests",
+                          "try {",
+                          "    const body = pm.response.json();",
+                          "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                          "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                          "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                          "} catch (e) { /* non-JSON response */ }"
+                        ]
+                      }
+                    }
+                  ],
+                  "request": {
+                    "method": "POST",
+                    "header": [],
+                    "url": {
+                      "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/generate-pos",
+                      "host": [
+                        "{{base_url}}"
+                      ],
+                      "path": [
+                        "api",
+                        "v1",
+                        "procurement",
+                        "boms",
+                        "{{bom_id}}",
+                        "generate-pos"
+                      ]
+                    },
+                    "description": "**C-L4 · step 1 — The check is Stage 5's precondition**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- On a freshly approved BOM, POST /api/v1/procurement/boms/{bom_id}/generate-pos → 409 no_inventory_check\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check\n- POST /api/v1/procurement/boms/{bom_id}/generate-pos again\n\n**Expected result**\n\nThe PO generation that was refused now succeeds and buys exactly the lines this check marked short. This is the seam between Stage 4 and Stage 5 — run it end to end at least once.",
+                    "auth": {
+                      "type": "bearer",
+                      "bearer": [
+                        {
+                          "key": "token",
+                          "value": "{{dm_token}}",
+                          "type": "string"
+                        }
+                      ]
+                    }
+                  },
+                  "response": []
+                },
+                {
+                  "name": "C-L4.2 · step 2 · POST /api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "event": [
+                    {
+                      "listen": "test",
+                      "script": {
+                        "type": "text/javascript",
+                        "exec": [
+                          "// C-L4.2 — The check is Stage 5's precondition",
+                          "// No single deterministic status for this case — verify by hand.",
+                          "pm.test(\"Response received (inspect manually)\", function () {",
+                          "    pm.expect(pm.response.code).to.be.a(\"number\");",
+                          "});",
+                          "",
+                          "// carry ids forward for the chained requests",
+                          "try {",
+                          "    const body = pm.response.json();",
+                          "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                          "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                          "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                          "} catch (e) { /* non-JSON response */ }"
+                        ]
+                      }
+                    }
+                  ],
+                  "request": {
+                    "method": "POST",
+                    "header": [],
+                    "url": {
+                      "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                      "host": [
+                        "{{base_url}}"
+                      ],
+                      "path": [
+                        "api",
+                        "v1",
+                        "procurement",
+                        "boms",
+                        "{{bom_id}}",
+                        "inventory-check"
+                      ]
+                    },
+                    "description": "**C-L4 · step 2 — The check is Stage 5's precondition**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- On a freshly approved BOM, POST /api/v1/procurement/boms/{bom_id}/generate-pos → 409 no_inventory_check\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check\n- POST /api/v1/procurement/boms/{bom_id}/generate-pos again\n\n**Expected result**\n\nThe PO generation that was refused now succeeds and buys exactly the lines this check marked short. This is the seam between Stage 4 and Stage 5 — run it end to end at least once.",
+                    "auth": {
+                      "type": "bearer",
+                      "bearer": [
+                        {
+                          "key": "token",
+                          "value": "{{dm_token}}",
+                          "type": "string"
+                        }
+                      ]
+                    }
+                  },
+                  "response": []
+                },
+                {
+                  "name": "C-L4.3 · step 3 · POST /api/v1/procurement/boms/{{bom_id}}/generate-pos",
+                  "event": [
+                    {
+                      "listen": "test",
+                      "script": {
+                        "type": "text/javascript",
+                        "exec": [
+                          "// C-L4.3 — The check is Stage 5's precondition",
+                          "// Expected: The PO generation that was refused now succeeds and buys exactly the lines this check marked short. This is the seam between Stage 4 and Stage 5 — run it end to end at least once.",
+                          "pm.test(\"Status is 200\", function () {",
+                          "    pm.response.to.have.status(200);",
+                          "});",
+                          "",
+                          "// carry ids forward for the chained requests",
+                          "try {",
+                          "    const body = pm.response.json();",
+                          "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                          "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                          "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                          "} catch (e) { /* non-JSON response */ }"
+                        ]
+                      }
+                    }
+                  ],
+                  "request": {
+                    "method": "POST",
+                    "header": [],
+                    "url": {
+                      "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/generate-pos",
+                      "host": [
+                        "{{base_url}}"
+                      ],
+                      "path": [
+                        "api",
+                        "v1",
+                        "procurement",
+                        "boms",
+                        "{{bom_id}}",
+                        "generate-pos"
+                      ]
+                    },
+                    "description": "**C-L4 · step 3 — The check is Stage 5's precondition**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | C · Run the inventory check |\n| Role gate | DM / MD |\n\n**Request / steps**\n\n- On a freshly approved BOM, POST /api/v1/procurement/boms/{bom_id}/generate-pos → 409 no_inventory_check\n- POST /api/v1/procurement/boms/{bom_id}/inventory-check\n- POST /api/v1/procurement/boms/{bom_id}/generate-pos again\n\n**Expected result**\n\nThe PO generation that was refused now succeeds and buys exactly the lines this check marked short. This is the seam between Stage 4 and Stage 5 — run it end to end at least once.",
+                    "auth": {
+                      "type": "bearer",
+                      "bearer": [
+                        {
+                          "key": "token",
+                          "value": "{{dm_token}}",
+                          "type": "string"
+                        }
+                      ]
+                    }
+                  },
+                  "response": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "D · Read checks",
+          "description": "GET /inventory-checks/{check_id} · GET /inventory-checks · GET /boms/{bom_id}/inventory-check\n\nRole gate: DM / MD / Viewer",
+          "item": [
+            {
+              "name": "D-L1 · \"Latest\" really is the latest",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// D-L1 — \"Latest\" really is the latest",
+                      "// Expected: The returned check id is the SECOND run's, not the first — and the older check is still readable by id via D-P1, so the history of what was decided is preserved.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/inventory-check",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "boms",
+                    "{{bom_id}}",
+                    "inventory-check"
+                  ]
+                },
+                "description": "**D-L1 — \"Latest\" really is the latest**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | High |\n| Role | Direct Manager |\n| Endpoint group | D · Read checks |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- Run a check, note its id from the response\n- Run the check again\n- GET /api/v1/procurement/boms/{bom_id}/inventory-check\n\n**Expected result**\n\nThe returned check id is the SECOND run's, not the first — and the older check is still readable by id via D-P1, so the history of what was decided is preserved.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "D-L2 · The dashboard shows one row per BOM",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// D-L2 — The dashboard shows one row per BOM",
+                      "// Expected: Exactly one row per BOM, carrying the latest run — the board is a current-state view, not a log.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/procurement/inventory-checks",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "procurement",
+                    "inventory-checks"
+                  ]
+                },
+                "description": "**D-L2 — The dashboard shows one row per BOM**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | Medium |\n| Role | Direct Manager |\n| Endpoint group | D · Read checks |\n| Role gate | DM / MD / Viewer |\n\n**Request / steps**\n\n- Run checks on several BOMs, re-running one of them twice\n- GET /api/v1/procurement/inventory-checks\n\n**Expected result**\n\nExactly one row per BOM, carrying the latest run — the board is a current-state view, not a log.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

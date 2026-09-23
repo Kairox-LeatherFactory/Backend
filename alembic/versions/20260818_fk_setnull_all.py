@@ -195,8 +195,8 @@ _NULLABLE_FKS = [
     # ── order_style ───────────────────────────────────────────
     ("order_style", "bom_id", "bom", "fk_order_style_bom_id_bom"),
     ("order_style", "client_id", "client", "fk_order_style_client_id_client"),
-    ("order_style", "pattern_reference_id", "pattern_reference",
-     "fk_order_style_pattern_reference_id_pattern_reference"),
+    # pattern_reference_id: moved to _NULLABLE_FKS_BORN_WITH_RULE — it now
+    # points at pattern_extraction (20260911_order_style_fk).
     ("order_style", "spec_document_id", "document",
      "fk_order_style_spec_document_id_document"),
     # ── pattern_extraction ────────────────────────────────────
@@ -348,6 +348,69 @@ def _repoint(table: str, column: str, referred: str, fallback_name: str,
         existing[0] if existing else fallback_name,
         table, referred, [column], ["id"], ondelete=ondelete,
     )
+
+
+# ── FKs BORN WITH THEIR DELETE RULE, IN A LATER MIGRATION ────────────────────
+# These are NOT applied by this file's upgrade() and must never be added to
+# _NULLABLE_FKS above: the loop below runs at THIS point in the chain, where
+# their tables do not exist yet, so an entry there would break `alembic upgrade
+# head` on a fresh database.
+#
+# They are listed because this module is the schema-wide REGISTRY of nullable
+# foreign keys — tests/unit/test_fk_delete_rules.py reads it and fails when the
+# models declare a nullable FK the registry has never heard of. That test is the
+# schema-drift guard, and it is worth more than the tidiness of one list. A
+# nullable FK created later with `ondelete="SET NULL"` inline already HAS the
+# rule; what it still needs is to be accounted for here.
+#
+# 20260901_cutting_v2 — per-hide leather tracking + the sheet-wise cutting record
+_NULLABLE_FKS_BORN_WITH_RULE = [
+    ("cutting_row", "piece_id", "piece",
+     "fk_cutting_row_piece_id_piece"),
+    ("cutting_row", "style_id", "style",
+     "fk_cutting_row_style_id_style"),
+    ("cutting_row", "sku_id", "sku",
+     "fk_cutting_row_sku_id_sku"),
+    ("cutting_row", "cutter_employee_id", "employee",
+     "fk_cutting_row_cutter_employee_id_employee"),
+    ("cutting_row", "approved_by", "app_user",
+     "fk_cutting_row_approved_by_app_user"),
+    ("material_sheet", "cutting_row_id", "cutting_row",
+     "fk_material_sheet_cutting_row_id_cutting_row"),
+    ("barcode_registry", "material_sheet_id", "material_sheet",
+     "fk_barcode_registry_material_sheet_id_material_sheet"),
+    # 20260904_inspection — stage-wise reject & rework
+    ("piece_inspection", "piece_id", "piece",
+     "fk_piece_inspection_piece_id_piece"),
+    ("piece_inspection", "responsible_employee_id", "employee",
+     "fk_piece_inspection_responsible_employee_id_employee"),
+    ("piece_inspection", "raised_by", "app_user",
+     "fk_piece_inspection_raised_by_app_user"),
+    ("piece_inspection", "decided_by", "app_user",
+     "fk_piece_inspection_decided_by_app_user"),
+    # 20260905_job_work — work sent outside the factory
+    ("job_work", "vendor_id", "vendor", "fk_job_work_vendor_id_vendor"),
+    ("job_work", "dispatched_by", "app_user",
+     "fk_job_work_dispatched_by_app_user"),
+    ("job_work", "received_by", "app_user",
+     "fk_job_work_received_by_app_user"),
+    ("job_work_piece", "piece_id", "piece", "fk_job_work_piece_piece_id_piece"),
+    ("production_event", "vendor_id", "vendor",
+     "fk_production_event_vendor_id_vendor"),
+    # employee_id became nullable in the same migration: a vendor-performed
+    # stage has no employee.
+    ("production_event", "employee_id", "employee",
+     "fk_production_event_employee_id_employee"),
+    # 20260911_order_style_fk repointed this at pattern_extraction, re-created
+    # with ON DELETE SET NULL inline.
+    ("order_style", "pattern_reference_id", "pattern_extraction",
+     "fk_order_style_pattern_reference_id_pattern_extraction"),
+    # 20260923_material_arrival — who finished entering a staged delivery. The
+    # login can be deactivated and deleted; the delivery it recorded is a fact
+    # about material that physically arrived and must outlive them.
+    ("material_receipt", "completed_by", "app_user",
+     "fk_material_receipt_completed_by_app_user"),
+]
 
 
 def upgrade() -> None:

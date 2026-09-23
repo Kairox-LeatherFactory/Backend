@@ -218,6 +218,18 @@ class LogResult(BaseModel):
     sequence_blocked: list[str]
     skill_blocked: list[str]
     merge_blocked: list[str]
+    # GATE 5 — the piece's approved cutting row names a DIFFERENT cutter. The
+    # employee barcode is the verification half of the two-scan cutting flow;
+    # this bucket is what makes it verification rather than decoration.
+    assignment_blocked: list[str] = []
+    # GATE 6 — a rejection on this garment is waiting for the DM, so it does not
+    # move. The defect must not travel further down the line while the decision
+    # is outstanding.
+    rejected_blocked: list[str] = []
+    # GATE 7 — the garment was dispatched to an outside factory and is not in the
+    # building. Its stage is logged when it is booked back in, against the
+    # vendor rather than an employee.
+    offsite_blocked: list[str] = []
     # Pieces whose inferred stage this role may not log, in a MIXED batch where
     # other stages WERE permitted. An all-denied batch is still a 403.
     role_blocked: list[str] = Field(default_factory=list)
@@ -240,9 +252,11 @@ class LogResult(BaseModel):
     # has always returned these; without the field the response model dropped
     # them, so the floor never saw the warning it was told it would get.
     skill_warnings: list[dict] = Field(default_factory=list)
-    # BUG #12 — {piece_code: {drawer_id, code, state, holding, leather_in,
-    # lining_in}} for every scanned piece that has a drawer.
-    drawer_by_piece: dict[str, dict] = Field(default_factory=dict)
+    # BUG #12 — {piece_code: {state, holding, leather_in, lining_in,
+    # accessories_in}} for every scanned piece. It used to be `drawer_by_piece`
+    # and name a numbered box, which meant a garment no box was claiming had no
+    # entry at all; every piece has a store standing.
+    store_by_piece: dict[str, dict] = Field(default_factory=dict)
     # BUG #8 — {sku_id, stage, total, done, remaining, closed} for the stage just
     # logged. `closed: true` means every piece of the SKU is done here and the
     # style must stop being offered for scanning. Null on a preview or a MIXED
@@ -252,13 +266,20 @@ class LogResult(BaseModel):
     # {piece_code: {kit_required, kit_status, outstanding}}. DELIBERATELY LEAN:
     # a 40-piece batch carrying the full requirement block would dwarf the rest
     # of the response, and three fields is all the scan screen needs to show a
-    # "kit still owed" chip and link through to the drawer. `kit_status` is
+    # "kit still owed" chip and link through to the garment. `kit_status` is
     # NOT_REQUIRED for every style with no accessory spec.
     kit_by_piece: dict[str, dict] = Field(default_factory=dict)
-    # Where the cut quantity came from: "typed" (the operator entered it) or
-    # "style_spec" (taken from the recipe because consumption.use_style_spec was
-    # set and no dcm was sent). Null when nothing was consumed.
+    # Where the cut quantity came from: "typed" (the operator entered it),
+    # "cutting_row" (each garment's own approved row) or "style_spec" (taken from
+    # the recipe because consumption.use_style_spec was set and no dcm was sent).
+    # Null when nothing was consumed.
     consumption_source: str | None = None
+    # What the approved cutting rows had to say about this batch — a garment with
+    # no row, or a batch whose garments took different amounts (which is normal:
+    # each is charged its own measured dcm). The router has always set these; the
+    # field was missing, so the response model silently dropped them and the
+    # floor never saw a warning it was told it would get.
+    cutting_warnings: list[str] = Field(default_factory=list)
 
 
 # ── the scan-time state read (bugs #4, #6, #8, #12) ─────────────────────────
@@ -288,10 +309,13 @@ class PieceState(BaseModel):
     operator's hand.
     """
     piece: dict                      # the full barcode piece card (article, serial…)
-    drawer: dict | None = None       # bug #12
+    # BUG #12 — where the garment stands in the store: what it holds, what it is
+    # still owed. Was `drawer`, which named a box and was null for any piece the
+    # 200-slot pool had no room for.
+    store: dict | None = None
     completed_stages: list[str] = Field(default_factory=list)
     # WHERE THE PIECE IS NOW — the real, event-backed stage. Distinct from
-    # `display_stage`, which may read STORE (a drawer state, not an event).
+    # `display_stage`, which may read STORE (a store state, not an event).
     current_stage: str | None = None
     current_stage_label: str | None = None
     next_stage: str | None = None    # bug #4 — inferred, never chosen by the user
@@ -326,3 +350,26 @@ class PieceState(BaseModel):
     #   null  → no employee was supplied, so the question is unanswered (which is
     #           not the same as "blocked", and must not be rendered as one)
     ready_to_log: bool | None = None
+
+class EventReassignResult(BaseModel):
+    """An event moved to the worker who actually did it.
+
+    The stage and what it consumed are echoed back BECAUSE they must not change:
+    reassigning is a correction to WHO, never to what happened or what it cost.
+    """
+    event_id: uuid.UUID
+    piece_code: str | None = None
+    operation: str | None = None
+    employee_id: uuid.UUID | None = None
+    work_date: date | None = None
+    is_rework: bool
+    consumption_qty: float | None = None
+    note: str | None = None
+
+
+class EventDeleteResult(BaseModel):
+    """A record that should never have existed, and the stock it gave back."""
+    event_id: uuid.UUID
+    deleted: bool
+    stock_returned: float | None = None
+    message: str

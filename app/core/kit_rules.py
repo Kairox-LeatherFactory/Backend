@@ -13,7 +13,7 @@ CORE IMPORTS NOTHING FROM app.modules. Everything here takes plain values, so
 the whole file is testable with no database and is mirrored in
 verify/run_logic_checks.py, which runs with no dependencies at all.
 
-THE ONE RULE THAT MATTERS MOST is `drawer_complete`. Every style that predates
+THE ONE RULE THAT MATTERS MOST is `piece_complete`. Every style that predates
 the material spec has no accessory lines, so `kit_required` is False for it, so
 the new term collapses to True and the predicate computes exactly what it
 computed before this feature existed. That is not luck — it is the reason the
@@ -26,9 +26,15 @@ from __future__ import annotations
 from app.core.enums import KitStatus
 
 
-def drawer_complete(*, leather_in: bool, lining_in: bool, accessories_in: bool,
-                    needs_lining: bool, kit_required: bool) -> bool:
-    """Does this drawer hold everything the garment in it is ever going to get?
+def piece_complete(*, leather_in: bool, lining_in: bool, accessories_in: bool,
+                   needs_lining: bool, kit_required: bool) -> bool:
+    """Does the store hold everything this garment is ever going to get?
+
+    THIS FUNCTION NEVER WAS ABOUT DRAWERS. Every argument is a fact about the
+    GARMENT — its leather arrived, its lining arrived, its kit was issued, it
+    takes a lining at all, it declares accessories at all. The drawer was only
+    where those facts happened to be written down, which is exactly why removing
+    the drawer cost this predicate a rename and nothing else.
 
     COMPLETENESS IS NOT THE SAME QUESTION AS THE DRAWER'S STATE. `state` names
     what is physically in there (HOLDING_LEATHER, HOLDING_BOTH); this says
@@ -36,7 +42,7 @@ def drawer_complete(*, leather_in: bool, lining_in: bool, accessories_in: bool,
     alone, and a style with no accessory spec is complete without a kit.
 
     This is the predicate behind RECEIVED and behind send_batch — an unkitted
-    drawer must not leave the store — so all of its callers must use THIS
+    garment must not leave the store — so all of its callers must use THIS
     function rather than re-spelling the three clauses.
     """
     return (bool(leather_in)
@@ -59,7 +65,7 @@ def auto_receive_ready(*, leather_in: bool, lining_in: bool,
                        accessories_in: bool, kit_required: bool) -> bool:
     """May the drawer advance to RECEIVED by itself, with no human confirming?
 
-    STRICTER THAN `drawer_complete`, DELIBERATELY, and the difference is scar
+    STRICTER THAN `piece_complete`, DELIBERATELY, and the difference is scar
     tissue. Auto-receive first fired on completeness, which let a piece flagged
     needs_lining=False jump to RECEIVED the moment its leather was stored — over
     an empty lining side, on the strength of a flag known to be wrong for 925 of
@@ -86,7 +92,7 @@ def kit_status(*, kit_required: bool, required_total: float, issued_total: float
 
     An UNRESOLVED line (its article matches no lot) holds the piece at PARTIAL
     even when everything resolvable was issued: the kit is not complete, the
-    drawer must not be sendable, and reporting ISSUED there would be a lie that
+    garment must not be sendable, and reporting ISSUED there would be a lie that
     lets an unkitted garment onto the line.
     """
     if not kit_required:
@@ -106,7 +112,7 @@ def release_blockers(*, style_name: str, confirmed_at, no_accessories,
     """Why this style may NOT be released yet. Empty list = it may.
 
     THE GATE EXISTS BECAUSE RELEASE IS THE LAST MOMENT ANYONE CAN BE ASKED. After
-    it the style has barcoded garments in drawers and its recipe is frozen and
+    it the style has barcoded garments on the floor and its recipe is frozen and
     being spent; before it the sheet is still a spreadsheet row. So "what does one
     of these take?" is asked here, exactly where "does this take a lining?"
     already is.
@@ -142,3 +148,14 @@ def release_blockers(*, style_name: str, confirmed_at, no_accessories,
             f"that it needs none. Add the accessory lines, or confirm the spec "
             f"with no_accessories: true.")
     return out
+
+
+# ── COMPATIBILITY ────────────────────────────────────────────────────────────
+# `drawer_complete` WAS this function's name while the store was a drawer, kept
+# as an alias so the drawers module could keep calling something real while it
+# was being retired. That module is deleted, so the alias goes with it, exactly
+# as the note here always said it would. Nothing in app/ calls it.
+#
+# (Leaving the old text below for the one line of history it carries:
+# keeps importing something real during the changeover. New code calls
+# piece_complete; when the drawer module goes, this goes with it.)
