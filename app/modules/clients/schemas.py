@@ -127,6 +127,34 @@ class StyleCreate(BaseModel):
     article: str | None = None
     thickness: str | None = None
     
+class DeletionBlocker(BaseModel):
+    """One reason a client cannot be hard-deleted, counted rather than guessed.
+
+    `table` is the row that blocks, `count` how many there are, `what` the
+    sentence to show. See ClientRepository.deletion_blockers for why these
+    particular tables: they are the FKs into the client's styles and SKUs that
+    carry no `ondelete`, so the database refuses the parent delete while one
+    exists.
+    """
+    table: str
+    count: int
+    what: str
+
+
+class ClientDeletable(BaseModel):
+    """GET /clients/{id}/deletable — the DELETE check, without doing it.
+
+    A screen asks this to grey the button out and say why, instead of offering
+    a delete and then explaining a 409. `blockers` empty means it will go
+    through.
+    """
+    client_id: uuid.UUID
+    deletable: bool
+    blockers: list[DeletionBlocker] = []
+    # The call to make instead, ready to show. Null when nothing blocks.
+    alternative: str | None = None
+
+
 class StyleOption(BaseModel):
     style_id: uuid.UUID
     style_name: str

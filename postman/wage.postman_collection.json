@@ -1,0 +1,712 @@
+{
+  "info": {
+    "name": "KairoX \u00b7 Wage",
+    "description": "Rates, runs and the ledger. A CLOSED run is a frozen snapshot and is never recomputed. Visible to HR, DM and MD only.\n\nSETUP\n  1. Import the whole folder and SELECT the KairoX environment\n     (top-right). That is what shares one token across every\n     collection \u2014 a collection variable is visible only to the\n     collection that set it.\n  2. Run `user` \u2192 Login. Its test script stores `access_token` for\n     you; there is nothing to copy and paste.\n  3. Every request here inherits bearer auth from that token.\n\n`base_url` defaults to http://127.0.0.1:8000.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. File uploads are real form-data rows \u2014 click Select Files on\nthe `file` row. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Close Run",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/wages/runs/{{run_id}}/close",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "wages",
+            "runs",
+            "{{run_id}}",
+            "close"
+          ],
+          "variable": [
+            {
+              "key": "run_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "COMMAND. FREEZE a draft run. From here it is the document of record.\n\nIdempotent \u2014 closing an already-closed run returns it unchanged, because\nthat is what a double-click is and it changed nothing. Refuses to freeze a\nrun with no lines: locking a window in which nobody is paid is never what\nwas meant."
+      },
+      "response": []
+    },
+    {
+      "name": "Compute Run",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/wages/runs",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "wages",
+            "runs"
+          ]
+        },
+        "description": "COMMAND. Computes ONE payroll for the window the manager typed.\n\n`run_kind` IS THE FIRST FIELD, and it is not a filter \u2014 it selects which of\ntwo incompatible pricing rules applies:\n\n  \u2022 **piece** (default) \u2014 pays PIECE_RATE workers. **`style_code` or\n    `order_number` is REQUIRED**; a request with only dates is a 422. A piece\n    wage is earned on a specific garment, so the style IS the run. This is\n    the restriction that stops a manager typing two dates, pressing compute,\n    and paying every garment in the factory for that window.\n\n  \u2022 **monthly** \u2014 pays salaried staff, priced from the calendar alone. No\n    scope required. It MAY carry `order_number` / `style_code` as a **label**\n    for the payroll screen; the response echoes it with\n    `scope_is_label: true` to say it did not narrow anything. Two monthly\n    runs over one window still collide however they are labelled.\n\nA PIECE RUN AND A MONTHLY RUN OVER THE SAME WINDOW DO NOT CONFLICT. Their\nemployee populations are disjoint, so the pair is one complete payroll for\nthat fortnight \u2014 compute both.\n\n`freeze` (default true): send `false` for a DRAFT (OPEN) you can recompute\nfreely, then POST /runs/{id}/close. Recomputing a FROZEN run needs an\nexplicit reopen; see POST /runs/{id}/reopen.\n\nSide-effecting and non-idempotent. Two runs that would pay the same money\ntwice is a 409 naming the run that blocks you and what to do about it. Check\n`unrated_operations` and `gap_days` before paying anyone.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"period_start\": \"2026-08-01\",\n  \"period_end\": \"2026-08-01\",\n  \"freeze\": true,\n  \"run_kind\": \"piece\",\n  \"order_number\": \"\",\n  \"style_code\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Delete Run",
+      "request": {
+        "method": "DELETE",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/wages/runs/{{run_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "wages",
+            "runs",
+            "{{run_id}}"
+          ],
+          "variable": [
+            {
+              "key": "run_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "COMMAND. Delete a run and its lines outright.\n\nTHE ESCAPE HATCH THE 409 HAS ALWAYS NAMED. The overlap guard tells a blocked\nmanager to \"delete that run if it is wreckage from a failed compute\" \u2014 and\nuntil now no route could. `create_run` commits an OPEN run BEFORE any line is\nwritten, so a compute that died halfway left a committed, empty run\npermanently occupying that window, blocking every later run over those dates,\nwith no way to clear it.\n\nREFUSES A CLOSED RUN unless `confirm_closed: true`. A frozen run is the\ndocument the cash was counted against; deleting it destroys the record of a\npayment that actually happened. To CHANGE a frozen run, reopen and recompute\ninstead \u2014 that keeps the audit trail. Deleting is for runs that should never\nhave existed.\n\nDM/MD only, like recompute and reopen: HR reads payroll, DM/MD authorise\nchanges to it.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"confirm_closed\": false\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Get Run",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/wages/runs/{{run_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "wages",
+            "runs",
+            "{{run_id}}"
+          ],
+          "variable": [
+            {
+              "key": "run_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "QUERY. Re-reads a frozen run \u2014 payslip detail, no recomputation."
+      },
+      "response": []
+    },
+    {
+      "name": "Ledger",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/wages/ledger",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "wages",
+            "ledger"
+          ],
+          "query": [
+            {
+              "key": "order_number",
+              "value": "",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "style_code",
+              "value": "",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "date_from",
+              "value": "2026-08-01",
+              "description": "Runs whose window ends on/after.",
+              "disabled": true
+            },
+            {
+              "key": "date_to",
+              "value": "2026-08-01",
+              "description": "Runs whose window starts on/before.",
+              "disabled": true
+            },
+            {
+              "key": "status",
+              "value": "",
+              "description": "open | closed",
+              "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "",
+              "disabled": false
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "",
+              "disabled": false
+            }
+          ]
+        },
+        "description": "QUERY. THE LEDGER \u2014 every computed run, LATEST COMPUTED FIRST, searchable\nby order, style, window and status.\n\nOrdered by when it was computed, not by its period: the question the ledger\nanswers is \"what did we just run\". Each row carries `recompute_count` and\n`reopen_count` so a run that has been rebuilt or unfrozen since is visibly\ndifferent from one that has not.\n\nReads the FROZEN rows only. Nothing here is re-derived."
+      },
+      "response": []
+    },
+    {
+      "name": "List Orders",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/wages/orders",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "wages",
+            "orders"
+          ],
+          "query": [
+            {
+              "key": "on",
+              "value": "2026-08-01",
+              "description": "Coverage as of this date. Default today.",
+              "disabled": true
+            },
+            {
+              "key": "unpriced_only",
+              "value": "False",
+              "description": "Only orders with unpriced styles.",
+              "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "Rows to return (1-200).",
+              "disabled": false
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
+              "disabled": false
+            }
+          ]
+        },
+        "description": "ORDER CARDS \u2014 the payroll landing screen (change-list item 3).\nThe screen is order \u2192 style \u2192 rate sheet. It used to open straight onto\nhundreds of style cards from every order at once, with nothing on the card\nsaying which order it belonged to. Click an order here, then call\nGET /wages/styles?order_number=... for its style cards.\n\n`styles_priced / styles` is the card's badge, the same \"n of m priced\" idea as\nthe style card one level up."
+      },
+      "response": []
+    },
+    {
+      "name": "List Runs",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/wages/runs",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "wages",
+            "runs"
+          ],
+          "query": [
+            {
+              "key": "run_kind",
+              "value": "",
+              "description": "piece | monthly | combined (legacy).",
+              "disabled": true
+            },
+            {
+              "key": "order_number",
+              "value": "",
+              "description": "Runs whose scope names this order.",
+              "disabled": true
+            },
+            {
+              "key": "style_code",
+              "value": "",
+              "description": "Runs whose scope names this style.",
+              "disabled": true
+            },
+            {
+              "key": "date_from",
+              "value": "2026-08-01",
+              "description": "Runs whose window ends on/after this date.",
+              "disabled": true
+            },
+            {
+              "key": "date_to",
+              "value": "2026-08-01",
+              "description": "Runs whose window starts on/before this date.",
+              "disabled": true
+            },
+            {
+              "key": "status",
+              "value": "",
+              "description": "open | closed",
+              "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "",
+              "disabled": false
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "",
+              "disabled": false
+            }
+          ]
+        },
+        "description": "QUERY. RUN HISTORY \u2014 newest COMPUTED first, and the route back to a run_id.\n\nEVERY ROW NOW CARRIES WHAT THE RUN PAID FOR: `run_kind`, `scope_order_number`,\n`scope_style_code`, `scope_is_label`, `computed_at`, `recompute_count`,\n`reopen_count` and the frozen `unrated_operations`. The query used not to\nselect the scope columns at all, so every row came back with both nulls \u2014\nincluding runs that were scoped \u2014 which made the list a wall of\nindistinguishable rows and the run_id effectively unreachable.\n\nTHE RECOMPUTE WORKFLOW this exists for: filter by `style_code` (or\n`order_number`) plus `date_from`/`date_to`, read the id off the matching row,\nthen POST /wages/runs/{id}/recompute. The filters overlap-match on dates, so\na fortnight that straddles the month boundary still comes back.\n\n`scope_is_label: true` means the order/style on that row is DECORATION \u2014 the\nrow is a MONTHLY run that was tagged for readability and paid every salaried\nperson in the window, not just that style's people. Render it differently\nfrom a genuine narrowing."
+      },
+      "response": []
+    },
+    {
+      "name": "List Styles",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/wages/styles",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "wages",
+            "styles"
+          ],
+          "query": [
+            {
+              "key": "order_number",
+              "value": "",
+              "description": "Filter to one order.",
+              "disabled": true
+            },
+            {
+              "key": "client_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "Filter to one client.",
+              "disabled": true
+            },
+            {
+              "key": "unpriced_only",
+              "value": "False",
+              "description": "Only styles with at least one unpriced operation.",
+              "disabled": true
+            },
+            {
+              "key": "on",
+              "value": "2026-08-01",
+              "description": "Coverage as of this date. Default today.",
+              "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "Rows to return (1-200).",
+              "disabled": false
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
+              "disabled": false
+            }
+          ]
+        },
+        "description": "The wages landing screen. Call this first \u2014 it is what the manager clicks.\n\nReturns style codes ('JP-CLERMONT_VEST'), never style ids. Each row carries\nrated_operations/total_operations so unpriced styles are visible before payroll\nruns and silently pays zero for them."
+      },
+      "response": []
+    },
+    {
+      "name": "Rate History",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/wages/rate-history",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "wages",
+            "rate-history"
+          ],
+          "query": [
+            {
+              "key": "style_code",
+              "value": "",
+              "description": "e.g. JP-CLERMONT_VEST",
+              "disabled": false
+            },
+            {
+              "key": "operation_code",
+              "value": "",
+              "description": "e.g. CUTTING",
+              "disabled": false
+            }
+          ]
+        },
+        "description": "Every rate ever set for one style x operation, newest first."
+      },
+      "response": []
+    },
+    {
+      "name": "Rate Sheet",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/wages/rate-sheet",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "wages",
+            "rate-sheet"
+          ],
+          "query": [
+            {
+              "key": "style_code",
+              "value": "",
+              "description": "e.g. JP-CLERMONT_VEST",
+              "disabled": false
+            },
+            {
+              "key": "on",
+              "value": "2026-08-01",
+              "description": "Rates in force on this date. Default today.",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "Every operation of a style with its current rate. The rate-setting screen."
+      },
+      "response": []
+    },
+    {
+      "name": "Recompute Run",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/wages/runs/{{run_id}}/recompute",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "wages",
+            "runs",
+            "{{run_id}}",
+            "recompute"
+          ],
+          "variable": [
+            {
+              "key": "run_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "COMMAND. Discards a run's lines and rebuilds them from current production\nevents and rates, for the SAME window and the SAME scope.\n\nFREE ON A DRAFT (status OPEN). On a CLOSED run this 409s and tells you to\nreopen it first \u2014 a frozen run is the document the cash was counted against,\nand unfreezing it should capture a reason. `confirm_closed: true` is the\none-call escape hatch; it works, it stamps the recompute, and it records no\nreason, which is why the reopen door exists.\n\nThe run keeps its id, window and scope; recompute_count increments and the\nactor is stamped, so a payslip reprinted afterwards is identifiably a\ndifferent document from the one paid against.\n\nHR is deliberately NOT permitted: HR reads payroll, DM/MD authorise changes.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"confirm_closed\": false\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Reopen Run",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/wages/runs/{{run_id}}/reopen",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "wages",
+            "runs",
+            "{{run_id}}",
+            "reopen"
+          ],
+          "variable": [
+            {
+              "key": "run_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "COMMAND. UNFREEZE a CLOSED run so it can be recomputed. DM/MD only.\n\nThe only door out of CLOSED, and deliberately a separate call from the\nrecompute: a manager who must press reopen, type why, then press recompute\ncannot rewrite a paid payslip by mistyping a run id. The reason is stored and\nbelongs on every reissued payslip for that period.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"reason\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Run Breakdown",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/wages/runs/{{run_id}}/breakdown",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "wages",
+            "runs",
+            "{{run_id}}",
+            "breakdown"
+          ],
+          "variable": [
+            {
+              "key": "run_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "QUERY. One frozen run folded three ways: per STYLE (with its stages and\nworkers nested), per STAGE factory-wide, and per EMPLOYEE.\n\nThis is the Run Engine result screen. All three folds come off the same\nfrozen row set, so the three tabs cannot disagree with each other or with the\nrun total \u2014 which they will if the frontend sums them itself."
+      },
+      "response": []
+    },
+    {
+      "name": "Run Pieces",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/wages/runs/{{run_id}}/pieces",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "wages",
+            "runs",
+            "{{run_id}}",
+            "pieces"
+          ],
+          "query": [
+            {
+              "key": "style_code",
+              "value": "",
+              "description": "Narrow to one style.",
+              "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "",
+              "disabled": false
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "",
+              "disabled": false
+            }
+          ],
+          "variable": [
+            {
+              "key": "run_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "QUERY. PER-PIECE payroll detail: which garment, which stage, which worker,\ntheir EMPLOYEE BARCODE, and what that one piece paid.\n\nAmounts come from the run's FROZEN rate for that (employee, style, stage)\ncell \u2014 nothing is re-priced, so a rate corrected after the run closed does\nnot change what this says the run paid. A row with `amount: null` carries a\n`note` explaining why (monthly worker, or the stage was unrated at run time);\nit is deliberately not a zero, which would read as work worth nothing."
+      },
+      "response": []
+    },
+    {
+      "name": "Set Rate",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/wages/rates",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "wages",
+            "rates"
+          ]
+        },
+        "description": "Single-cell save. Prefer /rates/bulk when saving a whole sheet.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"style_code\": \"\",\n  \"operation_code\": \"\",\n  \"rate\": 0,\n  \"effective_from\": \"2026-08-01\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Set Rates Bulk",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/wages/rates/bulk",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "wages",
+            "rates",
+            "bulk"
+          ]
+        },
+        "description": "Save an edited rate sheet in one transaction. All codes resolved first.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"style_code\": \"\",\n  \"effective_from\": \"2026-08-01\",\n  \"lines\": [\n    {\n      \"operation_code\": \"\",\n      \"rate\": 0\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    }
+  ]
+}

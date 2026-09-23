@@ -309,11 +309,26 @@ class Designation(str, enum.Enum):
 
 
 # Which designations may work which stage.
+#
+# THE FLOOR IS CROSS-TRAINED, and this matrix says so (Hamthan, 2026-09-20).
+# A CUTTER also works FUSING and the LINING cut; a TAILOR also pastes. Those
+# three pairs used to be absent, so every time a cutter fused a garment the log
+# carried a skill warning that was not an anomaly at all — and a warning that
+# fires on normal work is one nobody reads, which costs the gate its whole
+# value.
+#
+# THIS GATE WARNS, IT DOES NOT BLOCK (production/service.py, GATE 2: the piece
+# is logged either way, with no `continue`). So an entry here is not permission
+# to do the work — anyone can be recorded at any stage — it is a statement about
+# which pairings are ORDINARY. Add a designation when the floor genuinely
+# cross-trains it, not to silence a warning somebody found annoying.
 STAGE_DESIGNATIONS: dict[ProductionStage, set[str]] = {
     ProductionStage.LEATHER_CUTTING:  {"CUTTER"},
-    ProductionStage.LINING_CUTTING:   {"LINING_CUTTER"},
-    ProductionStage.FUSING:           {"FUSER"},
-    ProductionStage.PASTING:          {"PASTER"},
+    # A cutter cuts both sides: leather and lining are parallel entries to the
+    # pipeline, and the same person often does both.
+    ProductionStage.LINING_CUTTING:   {"LINING_CUTTER", "CUTTER"},
+    ProductionStage.FUSING:           {"FUSER", "CUTTER"},
+    ProductionStage.PASTING:          {"PASTER", "TAILOR"},
     ProductionStage.LINE_STITCHING:   {"LINE_TAILOR", "TAILOR"},
     ProductionStage.SHELL_STITCHING:  {"SHELL_TAILOR", "TAILOR"},
     ProductionStage.FINAL_FINISH:     {"FINISHER", "TAILOR"},
@@ -333,8 +348,84 @@ class BarcodeType(str, enum.Enum):
     LEATHER_LOT = "LEATHER_LOT"     # child 1
     LINING_LOT = "LINING_LOT"       # child 2
     ACCESSORY_LOT = "ACCESSORY_LOT"  # buttons / zips / thread / other
+    LEATHER_SHEET = "LEATHER_SHEET"  # ONE physical hide — see below
     EMPLOYEE = "EMPLOYEE"           # editable / reassignable / retirable
     DRAWER = "DRAWER"               # static, recycling
+
+
+# WHY A SHEET GETS ITS OWN CODE AND A BUTTON DOES NOT.
+#
+#   A LOT barcode names a SPEC — "SUEDE-A32 · NAVY · 1.2mm" — and the quantity
+#   behind it is fungible: one metre of that lining is any other metre, and one
+#   button out of a 5,000-button packet is any other button. One code for the
+#   packet, and a count that goes down, says everything true about it.
+#
+#   A LEATHER SHEET IS NOT FUNGIBLE. It is one hide, individually measured
+#   (43, 47, 40 dcm — no two alike), individually expensive, and it is issued to
+#   ONE named cutter for ONE garment. "How much leather did this jacket take" is
+#   not answerable from a lot-level number; it is the sum of the specific hides
+#   that went into it. So the sheet is the unit that carries the code.
+#
+#   That is also why there is no ACCESSORY_UNIT here and there must not be: it
+#   would mean printing five thousand labels to learn nothing the packet count
+#   does not already say.
+class SheetStatus(str, enum.Enum):
+    """One hide's life. It does NOT recycle — a cut sheet is gone.
+
+        IN_STOCK    received and measured, nothing has claimed it
+        ALLOCATED   put on a DRAFT cutting row; no longer offerable to another row
+        ISSUED      the row was approved and the hide handed to the cutter
+        CONSUMED    the cutting event was logged; its dcm is spent
+        RETURNED    the cutter did not need it — back to IN_STOCK's pool
+        SCRAPPED    damaged/unusable; leaves stock without ever being cut
+
+    ALLOCATED EXISTS TO STOP TWO ROWS CLAIMING ONE HIDE. Without it the allocator
+    would hand the same 47-dcm sheet to two garments the moment two rows are
+    generated in one session, and only the second cutter would find out.
+    """
+    IN_STOCK = "IN_STOCK"
+    ALLOCATED = "ALLOCATED"
+    ISSUED = "ISSUED"
+    CONSUMED = "CONSUMED"
+    RETURNED = "RETURNED"
+    SCRAPPED = "SCRAPPED"
+
+
+class CuttingRowStatus(str, enum.Enum):
+    """One cutting row's life. APPROVED is the freeze line.
+
+        DRAFT      the manager is still editing; sheets may be added or removed
+                   freely and nothing has been promised to anyone
+        APPROVED   the cutter has confirmed the hides and the manager signed off;
+                   the numbers are now what the Production Logger will spend
+        LOGGED     the LEATHER_CUTTING event exists; the hides are consumed
+        CANCELLED  abandoned; its hides went back to stock
+
+    WHY NOT A BOOLEAN `is_approved`. Approval here moves stock and decides what a
+    garment cost, so it needs a state name, a timestamp, an actor and an audit_log
+    row — the same rule the drawer RECEIVED/SENDED and the breakdown release
+    already follow (CLAUDE.md §15).
+    """
+    DRAFT = "DRAFT"
+    APPROVED = "APPROVED"
+    LOGGED = "LOGGED"
+    CANCELLED = "CANCELLED"
+
+
+# A row whose hides are spoken for. Used to decide whether deleting/reopening a
+# row has to hand sheets back.
+CUTTING_ROW_HOLDS_SHEETS = frozenset({
+    CuttingRowStatus.DRAFT.value, CuttingRowStatus.APPROVED.value})
+
+
+# The statuses that still count as physically in the store. RETURNED is here
+# because a returned hide is back on the shelf; the status is kept distinct from
+# IN_STOCK only so the row's history reads honestly.
+SHEET_IN_STORE = frozenset({SheetStatus.IN_STOCK.value, SheetStatus.RETURNED.value})
+
+# The statuses a sheet can be allocated FROM. Deliberately not SHEET_IN_STORE +
+# ALLOCATED: re-allocating an already-allocated hide is the double-claim bug.
+SHEET_ALLOCATABLE = SHEET_IN_STORE
 
 
 class BarcodeStatus(str, enum.Enum):
@@ -472,6 +563,29 @@ class ReceiptStatus(str, enum.Enum):
     REJECTED = "rejected"
 
 
+class IntakeStatus(str, enum.Enum):
+    """How far a DELIVERY has been entered. Not what the verdict was.
+
+    A different question from ReceiptStatus above, which is about the material
+    (approved or rejected). This is about the PAPERWORK, and it exists because
+    the two halves of a delivery are entered at two different moments:
+
+        PENDING     the van came, somebody typed article + colour + total, and
+                    the material is in the building and cuttable. The approved /
+                    rejected split and the per-hide measurements are not in yet.
+        COMPLETED   the QC split is entered and, for leather, the hides are
+                    measured. on_hand has been corrected to the approved figure.
+
+    UPPERCASE VALUES, unlike ReceiptStatus. Both are plain String columns rather
+    than native PG enums, but this one is written by the arrival flow and read
+    back by a query filter, so the value and the member name are kept identical —
+    the mismatch between the two is exactly what CLAUDE.md §13 documents going
+    wrong on the native enums.
+    """
+    PENDING = "PENDING"
+    COMPLETED = "COMPLETED"
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # SUPPLIER ORDERS  (manual, two-state)
 # ══════════════════════════════════════════════════════════════════════════
@@ -503,11 +617,173 @@ class DrawerState(str, enum.Enum):
     SENDED = "sended"
 
 
+class JobWorkStatus(str, enum.Enum):
+    """One dispatch's life.
+
+        OUT       the garments are at the vendor
+        PARTIAL   some have come back, some have not
+        RETURNED  every piece is accounted for
+        CANCELLED the dispatch was abandoned; the pieces came straight back
+    """
+    OUT = "OUT"
+    PARTIAL = "PARTIAL"
+    RETURNED = "RETURNED"
+    CANCELLED = "CANCELLED"
+
+
+class JobWorkPieceStatus(str, enum.Enum):
+    """One garment on one dispatch.
+
+    SHORT and REJECTED are separate on purpose: a piece that never came back is
+    a loss to chase with the vendor, and a piece that came back badly done is a
+    quality matter. Collapsing them would hide which conversation to have — and
+    neither is paid for.
+    """
+    OUT = "OUT"
+    BACK = "BACK"
+    SHORT = "SHORT"
+    REJECTED = "REJECTED"
+
+
+# The statuses in which a garment is still physically outside the factory.
+JOBWORK_PIECE_AWAY = frozenset({JobWorkPieceStatus.OUT.value})
+
+
+class InspectionVerdict(str, enum.Enum):
+    """Did this garment pass at the stage it was inspected at?"""
+    PASS = "PASS"
+    REJECT = "REJECT"
+
+
+class ReworkAction(str, enum.Enum):
+    """What a rejected garment needs.
+
+        FIX   repaired in place. The piece does not move: whoever can mend it
+              does so at the stage it is already at, no earlier stage is redone
+              and no new material is cut.
+        REDO  an EARLIER stage is performed again. The piece goes back to the
+              stage named on the rejection and walks forward from there.
+
+    The difference is not cosmetic: a FIX leaves the chain intact, while a REDO
+    re-opens a stage the sequence gate already considers complete.
+    """
+    FIX = "FIX"
+    REDO = "REDO"
+
+
+class DefectType(str, enum.Enum):
+    """Whose fault is this, and it is asked because the factory asks it.
+
+        PRODUCT_DAMAGE  the material itself was bad — a flaw in the hide, a
+                        fault that arrived with the delivery. Nobody on the
+                        floor is answerable for it.
+        WORKMANSHIP     a stage was not done properly. The worker who did THAT
+                        stage is answerable for this piece.
+
+    WHY THE DISTINCTION IS STORED RATHER THAN LEFT IN THE REASON TEXT. "That
+    employee is responsible for that piece" is a fact somebody will be asked to
+    produce later — for a wage conversation, for a supplier claim, for a pattern
+    across a month. A sentence in a free-text box cannot be counted; a column
+    can. And the two point at different remedies: workmanship is a training or
+    pay matter, product damage is a supplier matter.
+    """
+    PRODUCT_DAMAGE = "PRODUCT_DAMAGE"
+    WORKMANSHIP = "WORKMANSHIP"
+
+
+class InspectionStatus(str, enum.Enum):
+    """A rejection is RAISED by the floor and APPROVED by the DM.
+
+    Any manager or HR can raise one — they are the people who see the defect —
+    but sending a garment backwards re-opens a completed stage, re-orders work
+    and may cost material, so the DM signs it off before the piece actually
+    moves. Until then the rejection is a report, not a movement.
+
+        PENDING   raised, waiting on the DM
+        APPROVED  the DM agreed; the piece has moved back (or is being fixed)
+        DECLINED  the DM disagreed; the piece stays where it was
+        RESOLVED  the rework is done and the piece has been re-logged forward
+    """
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    DECLINED = "DECLINED"
+    RESOLVED = "RESOLVED"
+
+
+# Who may RAISE a rejection: everyone who stands at a stage and can see a defect.
+# Approval is narrower — see INSPECTION_APPROVER_ROLES.
+INSPECTION_RAISER_ROLES = frozenset({
+    "managing_director", "direct_manager", "hr", "cutting_manager",
+    "lining_manager", "stitching_manager", "store_manager", "supervisor",
+})
+# Who may SEND A GARMENT BACKWARDS. The DM, and the MD who outranks everyone.
+INSPECTION_APPROVER_ROLES = frozenset({"direct_manager", "managing_director"})
+
+
+class StoreState(str, enum.Enum):
+    """Where a garment stands IN THE STORE. Lives on the PIECE, not on a drawer.
+
+    WHY THE DRAWER WENT AWAY. There were 200 physical drawers. A style releases
+    100+ garments, stalls mid-chain, and the next 50 have nowhere to go; the DM
+    then had to re-allocate by hand, which is complicated enough that it did not
+    happen. So the drawer was a BOTTLENECK that recorded nothing the piece could
+    not record itself: every fact the old DrawerState carried — leather in,
+    lining in, kit issued, received, sent — is a fact about the GARMENT.
+
+        WAITING          not in the store yet (still on the cut side)
+        MERGED           expected in the store; nothing has arrived
+        HOLDING_LEATHER  leather part stored
+        HOLDING_LINING   lining stored, leather not yet
+        HOLDING_BOTH     both parts stored
+        RECEIVED         confirmed complete (leather + lining + kit as required)
+        SENDED           released to line-stitching
+
+    THE VALUES ARE THE OLD DrawerState VALUES, DELIBERATELY. The migration copies
+    drawer.state straight across, so a garment mid-store keeps its exact position
+    and every label table, dashboard filter and analytics bucket keeps working
+    without a translation layer nobody would maintain.
+
+    IT NO LONGER RECYCLES. A drawer went back to WAITING for the next garment
+    because the drawer was reused; a piece ships once, so PACKAGE_EXPORT simply
+    clears its store flags and the piece leaves the store for good.
+    """
+    WAITING = "waiting"
+    MERGED = "merged"
+    HOLDING_LEATHER = "holding_leather"
+    HOLDING_LINING = "holding_lining"
+    HOLDING_BOTH = "holding_both"
+    RECEIVED = "received"
+    SENDED = "sended"
+
+
+# The states in which a garment is physically parked in the store. Drives the
+# STORE display overlay and the store dashboard's buckets.
+STORE_HOLDING_STATES = frozenset({
+    StoreState.HOLDING_LEATHER.value, StoreState.HOLDING_LINING.value,
+    StoreState.HOLDING_BOTH.value, StoreState.RECEIVED.value,
+    StoreState.SENDED.value,
+})
+
+
+class StorePart(str, enum.Enum):
+    """What is being scanned into the store — the old DrawerPart, unchanged.
+
+    ACCESSORY IS NEVER INFERRED, AND THAT IS A SAFETY RULE, NOT A CONVENIENCE.
+    Inferring LEATHER vs LINING from a piece's history can at worst set the wrong
+    boolean, which a human can undo. An inferred ACCESSORY would SPEND STOCK —
+    it decrements every accessory lot on the style's spec — so a mis-inference
+    would move money nothing on the floor asked to move.
+    """
+    LEATHER = "LEATHER"
+    LINING = "LINING"
+    ACCESSORY = "ACCESSORY"
+
+
 class DrawerPart(str, enum.Enum):
     """What is being scanned into a drawer.
 
     ACCESSORY IS NEVER INFERRED, AND THAT IS A SAFETY RULE, NOT A CONVENIENCE ONE.
-        `DrawerService.infer_part` reads a piece's history to decide whether a
+        `StoreService.infer_part` reads a piece's history to decide whether a
         scan is the leather or the lining arriving. The worst a wrong guess can
         do there is set the wrong boolean, which a human can undo. An inferred
         ACCESSORY would *spend stock* — it decrements every accessory lot on the
@@ -566,6 +842,20 @@ class BarcodeAuditAction(str, enum.Enum):
     # they confirmed has to be recoverable months later.
     STYLE_MATERIAL_SPEC_CONFIRMED = "STYLE_MATERIAL_SPEC_CONFIRMED"
     STYLE_MATERIAL_SPEC_AMENDED = "STYLE_MATERIAL_SPEC_AMENDED"
+    # Cutting V2 — the approval that turns an editable grid into a spend.
+    CUTTING_ROW_APPROVED = "CUTTING_ROW_APPROVED"
+    CUTTING_ROW_REOPENED = "CUTTING_ROW_REOPENED"
+    CUTTING_SHEET_RETURNED = "CUTTING_SHEET_RETURNED"
+    # Stage-wise reject & rework.
+    PIECE_REJECTED = "PIECE_REJECTED"
+    PIECE_REWORK_APPROVED = "PIECE_REWORK_APPROVED"
+    PIECE_REWORK_DECLINED = "PIECE_REWORK_DECLINED"
+    # Work sent outside the factory.
+    JOB_WORK_DISPATCHED = "JOB_WORK_DISPATCHED"
+    JOB_WORK_RETURNED = "JOB_WORK_RETURNED"
+
+
+
 
 
 # ══════════════════════════════════════════════════════════════════════════

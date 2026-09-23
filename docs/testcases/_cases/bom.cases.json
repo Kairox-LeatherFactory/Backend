@@ -1,0 +1,2035 @@
+{
+  "service": "BOM",
+  "slug": "bom",
+  "doc_only": true,
+  "module": "app/modules/bom",
+  "stage": "Stage 2/3 — BOM generation, review and approval",
+  "prefix": "/api/v1/procurement",
+  "intro": "API test cases in the order the process actually runs — intake breakdown → style attachment & pattern → BOM generation → the BOM review/approval lifecycle → notifications → admin setup → full regression. Ready-made requests: bom.postman_collection.json.",
+  "notes": [
+    "No list/search-BOMs endpoint exists — every BOM case needs a `bom_id` you already have (from seed data or a prior response).",
+    "There is no \"Pattern Maker\" role in the codebase. For wrong-role cases use any seeded role outside cutting_manager / direct_manager / managing_director — e.g. Lining Manager or Office Viewer.",
+    "`direct_manager` currently bypasses every MD-only gate (approve/reject/export/reopen, and every `/admin/*` route) via the superuser policy.",
+    "**Error shapes are inconsistent**: role checks, 401s and most router-level pre-checks return `{\"detail\": \"...\"}`; most lifecycle errors raised in the service layer return `{\"error\": \"...\", \"message\"?: \"...\"}`. Check both.",
+    "A non-UUID path parameter returns a generic 422 from FastAPI's path parsing, before any handler runs — distinct from a 404 for a well-formed but nonexistent id.",
+    "`base_revision` is `ge=1`; always substitute the BOM's real current revision from a fresh GET (the old checked-in example shipped 0, which always fails).",
+    "**D-L2 / E-L1:** approve only checks that `cutting_confirmed_at` is set — it never re-checks status, and reject never clears it. Approving a rejected-but-previously-confirmed BOM is expected to return 200 today; confirm and flag.",
+    "**Q-B1:** a check rule with a single-element `range` array passes schema validation then crashes the handler with an unhandled IndexError → HTTP 500. Confirmed defect.",
+    "**R-L1:** an unrecognized `garment_type_code` is not rejected — it silently falls back to \"applies to any garment type\".",
+    "The admin cost-catalog and checks GETs read a process-local cache that is not refreshed on a TTL despite the comments — under multiple workers, PUT-then-GET can appear not to have taken effect."
+  ],
+  "sections": [
+    {
+      "code": "A",
+      "title": "Open & view a BOM",
+      "sub": "GET /boms/{bom_id}",
+      "gate": "",
+      "cases": [
+        {
+          "id": "A-P1",
+          "cat": "POS",
+          "prio": "High",
+          "status": "200",
+          "title": "Cutting Manager opens a Draft BOM",
+          "role": "Cutting Manager (9000000002)",
+          "steps": [
+            "GET /api/v1/procurement/boms/{bom_id}"
+          ],
+          "expected": "Full BOM view JSON: {id, status:\"draft\", revision, garment_fob_price, bulk_total, items:[...]}. (cf. GB-P1)"
+        },
+        {
+          "id": "A-P2",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "MD opens the same BOM",
+          "role": "Managing Director (9000000000)",
+          "steps": [
+            "GET /api/v1/procurement/boms/{bom_id}"
+          ],
+          "expected": "Same 200 view — MD is a superuser and bypasses the cutting_manager role gate."
+        },
+        {
+          "id": "A-P3",
+          "cat": "POS",
+          "prio": "Low",
+          "status": "200",
+          "title": "Direct Manager opens the BOM",
+          "role": "Direct Manager (9000000001)",
+          "steps": [
+            "GET /api/v1/procurement/boms/{bom_id}"
+          ],
+          "expected": "Same 200 view — DM is also in the superuser bypass set."
+        },
+        {
+          "id": "A-N1",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "404",
+          "title": "Open a BOM that no longer exists",
+          "role": "Any allowed role",
+          "steps": [
+            "GET /api/v1/procurement/boms/{a made-up or deleted uuid}"
+          ],
+          "expected": "{\"detail\":\"BOM not found.\"}"
+        },
+        {
+          "id": "A-N2",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "403",
+          "title": "Wrong role tries to open a BOM",
+          "role": "Lining Manager (9000000006) or Office Viewer (9000000004)",
+          "steps": [
+            "GET /api/v1/procurement/boms/{bom_id}"
+          ],
+          "expected": "{\"detail\":\"Role 'lining_manager' is not permitted for this action\"}"
+        },
+        {
+          "id": "A-N3",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "401",
+          "title": "Session expired",
+          "role": "Any role, expired/invalid token",
+          "steps": [
+            "GET /api/v1/procurement/boms/{bom_id} — Authorization: Bearer {expired or malformed token}"
+          ],
+          "expected": "401 Unauthorized. Verify the exact detail text against get_current_user in app/modules/users/deps.py before asserting it literally."
+        },
+        {
+          "id": "A-B1",
+          "cat": "BND",
+          "prio": "Medium",
+          "status": "200",
+          "title": "BOM with zero line items",
+          "role": "Cutting Manager",
+          "steps": [
+            "GET /api/v1/procurement/boms/{bom_id} (a BOM whose spec extraction produced no material lines)"
+          ],
+          "expected": "200 with items:[]; garment_fob_price and bulk_total are 0, not null/NaN."
+        },
+        {
+          "id": "A-L1",
+          "cat": "LGC",
+          "prio": "Low",
+          "status": "200",
+          "title": "Exported BOM still fully viewable",
+          "role": "Cutting Manager / MD / DM",
+          "steps": [
+            "GET /api/v1/procurement/boms/{bom_id} (status = exported)"
+          ],
+          "expected": "200 with status:\"exported\", export_document_id and exported_at populated."
+        },
+        {
+          "id": "A-L2",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Rejected BOM shows the reason",
+          "role": "Cutting Manager / MD / DM",
+          "steps": [
+            "GET /api/v1/procurement/boms/{bom_id} (status = rejected)"
+          ],
+          "expected": "200 with status:\"rejected\" and rejection_reason populated with the MD's text."
+        }
+      ]
+    },
+    {
+      "code": "B",
+      "title": "Edit line items in the grid",
+      "sub": "PATCH /boms/{bom_id}/items",
+      "gate": "",
+      "cases": [
+        {
+          "id": "B-P1",
+          "cat": "POS",
+          "prio": "High",
+          "status": "200",
+          "title": "Edit Unit Price on a Draft BOM",
+          "role": "Cutting Manager",
+          "steps": [
+            "PATCH /api/v1/procurement/boms/{bom_id}/items",
+            "Body: {\"base_revision\": <current revision from GET>, \"edits\":[{\"bom_item_id\":\"<uuid>\",\"field\":\"unit_price\",\"value\":12.50}]}"
+          ],
+          "expected": "{\"revision\": base_revision+1, \"recomputed\": {...}, \"reconfirm_required\": false} (cf. EI-P1)"
+        },
+        {
+          "id": "B-P2",
+          "cat": "POS",
+          "prio": "High",
+          "status": "200",
+          "title": "Edit DCM on a leather line",
+          "role": "Cutting Manager",
+          "steps": [
+            "PATCH .../items — edits:[{\"bom_item_id\":\"<main-material line>\",\"field\":\"dcm\",\"value\":<n>}]"
+          ],
+          "expected": "200; recomputed.items[].dcm_source flips to \"manual\" for that line."
+        },
+        {
+          "id": "B-P3",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Edit several cells, save once",
+          "role": "Cutting Manager",
+          "steps": [
+            "PATCH .../items — edits array with 3 entries (different bom_item_id/field/value) in one call"
+          ],
+          "expected": "200, single call; recomputed reflects all 3 changes together."
+        },
+        {
+          "id": "B-P4",
+          "cat": "POS",
+          "prio": "Low",
+          "status": "200",
+          "title": "Edit a BOM that's Ready for Review but not yet confirmed",
+          "role": "Cutting Manager",
+          "steps": [
+            "PATCH .../items on a BOM with status = ready_for_review"
+          ],
+          "expected": "200 — _EDITABLE_STATES includes both draft and ready_for_review."
+        },
+        {
+          "id": "B-P5",
+          "cat": "POS",
+          "prio": "Low",
+          "status": "200",
+          "title": "Edit the DCM cell specifically (not the Qty alias)",
+          "role": "Cutting Manager",
+          "steps": [
+            "PATCH .../items — field:\"dcm\" instead of \"qty_per_garment\""
+          ],
+          "expected": "200, identical effect — the service writes both fields to the same qty_per_garment column."
+        },
+        {
+          "id": "B-N1",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "422",
+          "title": "Leave Unit Price blank",
+          "role": "Cutting Manager",
+          "steps": [
+            "PATCH .../items — edits:[{\"bom_item_id\":\"...\",\"field\":\"unit_price\"}] with \"value\" omitted or null"
+          ],
+          "expected": "422 Pydantic validation error — \"value\" is a required field on each edit."
+        },
+        {
+          "id": "B-N2",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "422",
+          "title": "Negative quantity",
+          "role": "Cutting Manager",
+          "steps": [
+            "PATCH .../items — {\"field\":\"qty_per_garment\",\"value\":-5}"
+          ],
+          "expected": "{\"error\":\"negative_value\",\"bom_item_id\":...,\"field\":\"qty_per_garment\",\"value\":-5} (cf. EI-N7)"
+        },
+        {
+          "id": "B-N3",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "422",
+          "title": "Non-numeric text in a numeric cell",
+          "role": "Cutting Manager",
+          "steps": [
+            "PATCH .../items — {\"field\":\"unit_price\",\"value\":\"abc\"}"
+          ],
+          "expected": "422 — fails FastAPI's float coercion before it reaches the service layer (generic Pydantic error shape, not the custom invalid_value error)."
+        },
+        {
+          "id": "B-N4",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "409",
+          "title": "Two testers edit the same BOM at once",
+          "role": "Cutting Manager (two sessions)",
+          "steps": [
+            "Both GET the BOM, note revision N",
+            "Session A: PATCH .../items {\"base_revision\":N,...} → succeeds",
+            "Session B: PATCH .../items {\"base_revision\":N,...} on a different line → sent after A"
+          ],
+          "expected": "Session A: 200. Session B: {\"error\":\"stale_revision\",\"current_revision\":N+1} — enforced twice (pre-check and an atomic claim_revision at commit). (cf. EI-N8/N12)"
+        },
+        {
+          "id": "B-N5",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "409",
+          "title": "Try to edit an Approved/Locked/Exported BOM",
+          "role": "Cutting Manager",
+          "steps": [
+            "PATCH .../items on a BOM with status in {approved, locked, exported}"
+          ],
+          "expected": "{\"error\":\"bom_locked\",\"message\":\"A locked/approved BOM rejects all edits.\"}"
+        },
+        {
+          "id": "B-N6",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "409",
+          "title": "Try to edit a Rejected BOM",
+          "role": "Cutting Manager",
+          "steps": [
+            "PATCH .../items on a BOM with status = rejected"
+          ],
+          "expected": "{\"error\":\"bom_rejected\",\"message\":\"Reopen the rejected BOM before editing.\"}"
+        },
+        {
+          "id": "B-N7",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "403",
+          "title": "Wrong role reaches the edit screen",
+          "role": "Lining Manager / Office Viewer",
+          "steps": [
+            "PATCH /api/v1/procurement/boms/{bom_id}/items"
+          ],
+          "expected": "403 role-not-permitted, same shape as A-N2."
+        },
+        {
+          "id": "B-B1",
+          "cat": "BND",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Qty set to exactly 0",
+          "role": "Cutting Manager",
+          "steps": [
+            "PATCH .../items — {\"field\":\"qty_per_garment\",\"value\":0}"
+          ],
+          "expected": "200 — 0 is the legal floor, only negative values are rejected."
+        },
+        {
+          "id": "B-B2",
+          "cat": "BND",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Unreasonably large price",
+          "role": "Cutting Manager",
+          "steps": [
+            "PATCH .../items — {\"field\":\"unit_price\",\"value\":999999999}"
+          ],
+          "expected": "200, accepted with no ceiling — flag as a possible missing sanity check server-side too."
+        },
+        {
+          "id": "B-B3",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "200",
+          "title": "Smallest possible edit",
+          "role": "Cutting Manager",
+          "steps": [
+            "PATCH .../items — edits array with exactly one entry"
+          ],
+          "expected": "200 — a single-item batch is a valid request."
+        },
+        {
+          "id": "B-B4",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "n/a",
+          "title": "Change the same cell twice before saving",
+          "role": "Cutting Manager",
+          "steps": [
+            "Not separately API-testable — the client only ever sends the final chosen value in one PATCH call; there is no server-side \"history\" of unsent edits to probe."
+          ],
+          "expected": "Confirm only that a single PATCH with value:15 stores 15 — nothing else to assert at the API layer."
+        },
+        {
+          "id": "B-B5",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "200",
+          "title": "High-precision price",
+          "role": "Cutting Manager",
+          "steps": [
+            "PATCH .../items — {\"field\":\"unit_price\",\"value\":12.123456789}",
+            "GET /api/v1/procurement/boms/{bom_id}"
+          ],
+          "expected": "PATCH → 200. Follow-up GET → unit_price still shows full precision, not rounded."
+        },
+        {
+          "id": "B-L1",
+          "cat": "LGC",
+          "prio": "Low",
+          "status": "200",
+          "title": "Non-material lines don't get the \"Manual\" stamp",
+          "role": "Cutting Manager",
+          "steps": [
+            "PATCH .../items — edit a Thread or Accessory category line's qty_per_garment"
+          ],
+          "expected": "200; that line's dcm_source is untouched — the manual stamp only applies to main/sub-material, lining and interlining categories."
+        },
+        {
+          "id": "B-L2",
+          "cat": "LGC",
+          "prio": "High",
+          "status": "200",
+          "title": "Editing DCM after Confirm Cutting re-opens the gate",
+          "role": "Cutting Manager",
+          "steps": [
+            "POST .../confirm-cutting (status → ready_for_review)",
+            "PATCH .../items — edit \"dcm\" or \"qty_per_garment\" on a material line"
+          ],
+          "expected": "200; response has \"reconfirm_required\": true, recomputed.status:\"draft\", cutting_confirmed_at cleared. (cf. EI-L2)"
+        },
+        {
+          "id": "B-L3",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "200",
+          "title": "A price-only edit does NOT re-open the gate",
+          "role": "Cutting Manager",
+          "steps": [
+            "On the same confirmed BOM, PATCH .../items — edit only \"unit_price\""
+          ],
+          "expected": "200; \"reconfirm_required\": false, status stays ready_for_review."
+        },
+        {
+          "id": "B-L4",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Totals stay in sync with edits",
+          "role": "Cutting Manager",
+          "steps": [
+            "PATCH .../items — raise \"qty_per_garment\" on one line"
+          ],
+          "expected": "200; recomputed.garment_fob_price and recomputed.bulk_total both reflect the change in the same response."
+        },
+        {
+          "id": "B-L5",
+          "cat": "LGC",
+          "prio": "Low",
+          "status": "200",
+          "title": "Revision counter never skips",
+          "role": "Cutting Manager",
+          "steps": [
+            "PATCH .../items three times in a row, each time using the \"revision\" returned by the previous call as the next base_revision"
+          ],
+          "expected": "Each response's \"revision\" is exactly +1 over the last — no skips, no repeats."
+        }
+      ]
+    },
+    {
+      "code": "C",
+      "title": "Confirm Cutting",
+      "sub": "POST /boms/{bom_id}/confirm-cutting",
+      "gate": "",
+      "cases": [
+        {
+          "id": "C-P1",
+          "cat": "POS",
+          "prio": "High",
+          "status": "200",
+          "title": "Confirm a Draft BOM",
+          "role": "Cutting Manager",
+          "steps": [
+            "POST /api/v1/procurement/boms/{bom_id}/confirm-cutting (status = draft, material lines filled)"
+          ],
+          "expected": "{\"bom_id\":..., \"status\":\"ready_for_review\", \"cutting_confirmed_at\":..., \"templates_backfilled\":N, \"notifications_created\":N} (cf. CC-P1)"
+        },
+        {
+          "id": "C-P2",
+          "cat": "POS",
+          "prio": "Low",
+          "status": "200",
+          "title": "Re-click Confirm Cutting on an already-confirmed BOM",
+          "role": "Cutting Manager",
+          "steps": [
+            "POST .../confirm-cutting again (status already = ready_for_review)"
+          ],
+          "expected": "200 again — draft and ready_for_review are both allowed states; cutting_confirmed_at is refreshed."
+        },
+        {
+          "id": "C-N1",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "409",
+          "title": "Try on an Approved/Locked/Exported BOM",
+          "role": "Cutting Manager",
+          "steps": [
+            "POST .../confirm-cutting on status in {approved, locked, exported}"
+          ],
+          "expected": "{\"error\":\"invalid_state_for_confirmation\",\"current_status\":...,\"message\":\"Cutting confirmation is only allowed on a draft BOM.\"}"
+        },
+        {
+          "id": "C-N2",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "409",
+          "title": "Try on a Rejected BOM",
+          "role": "Cutting Manager",
+          "steps": [
+            "POST .../confirm-cutting on status = rejected"
+          ],
+          "expected": "Same invalid_state_for_confirmation error, current_status:\"rejected\"."
+        },
+        {
+          "id": "C-N3",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "403",
+          "title": "Wrong role",
+          "role": "Lining Manager / Office Viewer",
+          "steps": [
+            "POST /api/v1/procurement/boms/{bom_id}/confirm-cutting"
+          ],
+          "expected": "403 role-not-permitted."
+        },
+        {
+          "id": "C-B1",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "200",
+          "title": "BOM with only non-material lines",
+          "role": "Cutting Manager",
+          "steps": [
+            "POST .../confirm-cutting on a BOM with only thread/accessory/packaging lines"
+          ],
+          "expected": "200, \"templates_backfilled\": 0 — nothing to remember, but no error."
+        },
+        {
+          "id": "C-B2",
+          "cat": "BND",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Confirm while a material line's DCM is still 0",
+          "role": "Cutting Manager",
+          "steps": [
+            "Leave a material line's qty_per_garment at 0",
+            "POST .../confirm-cutting anyway"
+          ],
+          "expected": "200 — the endpoint doesn't block on a provisional 0; worth flagging as a possible product-level gap."
+        },
+        {
+          "id": "C-L1",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "multi",
+          "title": "Confirmed values become the \"remembered\" template",
+          "role": "Cutting Manager",
+          "steps": [
+            "POST .../confirm-cutting, note the confirmed qty_per_garment for a style/size",
+            "Generate a new BOM for the same style/size (endpoint not confirmed by source read — likely under a /specs or /styles route; locate it before testing)"
+          ],
+          "expected": "New BOM's matching material line pre-fills from the confirmed value instead of starting blank."
+        },
+        {
+          "id": "C-L2",
+          "cat": "LGC",
+          "prio": "Low",
+          "status": "multi",
+          "title": "Reviewer notification carries the right context",
+          "role": "Cutting Manager then MD",
+          "steps": [
+            "POST .../confirm-cutting on a named style/order",
+            "Fetch the MD's notification (endpoint not covered by this report — check /api/v1 for a notifications route)"
+          ],
+          "expected": "Notification text names the correct style and order number, not a generic message."
+        }
+      ]
+    },
+    {
+      "code": "D",
+      "title": "MD Review Panel — Approve",
+      "sub": "POST /boms/{bom_id}/approve",
+      "gate": "",
+      "cases": [
+        {
+          "id": "D-P1",
+          "cat": "POS",
+          "prio": "High",
+          "status": "200",
+          "title": "Approve a confirmed BOM",
+          "role": "Managing Director",
+          "steps": [
+            "POST /api/v1/procurement/boms/{bom_id}/approve — body {} (status = ready_for_review, cutting_confirmed_at set)"
+          ],
+          "expected": "{\"bom_id\":..., \"status\":\"approved\", \"inventory_check_id\":...} (cf. AP-P1)"
+        },
+        {
+          "id": "D-P2",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Approve and Lock",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../approve — body {\"lock\": true}"
+          ],
+          "expected": "{\"status\":\"locked\", ...} instead of \"approved\"."
+        },
+        {
+          "id": "D-P3",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Direct Manager approves",
+          "role": "Direct Manager",
+          "steps": [
+            "POST .../approve — body {}"
+          ],
+          "expected": "200 — DM is in the superuser bypass set, so this succeeds even though the endpoint is nominally MD-only. (cf. AP-L5)"
+        },
+        {
+          "id": "D-N1",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "409",
+          "title": "Try to Approve before cutting is confirmed",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../approve on a BOM where cutting_confirmed_at is null"
+          ],
+          "expected": "{\"error\":\"cutting_confirmation_required\",\"message\":\"The cutting manager must confirm the BOM before approval.\"}"
+        },
+        {
+          "id": "D-N2",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "403",
+          "title": "Cutting Manager tries to reach the review panel",
+          "role": "Cutting Manager",
+          "steps": [
+            "POST /api/v1/procurement/boms/{bom_id}/approve"
+          ],
+          "expected": "403 — cutting_manager isn't in the MD-or-DM gate and has no bypass here."
+        },
+        {
+          "id": "D-B1",
+          "cat": "BND",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Double-click / re-approve an already-Approved BOM",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../approve again on a BOM already status = approved"
+          ],
+          "expected": "200 again — approve_bom only checks cutting_confirmed_at, not current status, so a repeat call succeeds without error."
+        },
+        {
+          "id": "D-L1",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Approve still completes if the inventory check fails behind the scenes",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../approve on a BOM likely to trip an inventory-check edge case"
+          ],
+          "expected": "200 \"approved\" regardless — the inventory check runs best-effort and its failure is swallowed/logged, not surfaced as a request error; inventory_check_id may come back null."
+        },
+        {
+          "id": "D-L2",
+          "cat": "LGC",
+          "prio": "High",
+          "status": "200",
+          "title": "[Verify] Approve shouldn't be reachable on a Rejected BOM",
+          "role": "Managing Director",
+          "steps": [
+            "Get a BOM to status = rejected that was cutting-confirmed beforehand (cutting_confirmed_at is not cleared by reject)",
+            "POST /api/v1/procurement/boms/{bom_id}/approve"
+          ],
+          "expected": "Per source: approve_bom() never re-checks bom.status — only cutting_confirmed_at. Expect 200 \"approved\" even though status is \"rejected\". This is a real backend gap, not UI-only — confirm and report as a finding regardless of what any UI does to hide the button."
+        }
+      ]
+    },
+    {
+      "code": "E",
+      "title": "MD Review Panel — Reject",
+      "sub": "POST /boms/{bom_id}/reject",
+      "gate": "",
+      "cases": [
+        {
+          "id": "E-P1",
+          "cat": "POS",
+          "prio": "High",
+          "status": "200",
+          "title": "Reject with a reason",
+          "role": "Managing Director",
+          "steps": [
+            "POST /api/v1/procurement/boms/{bom_id}/reject — {\"reason\":\"Leather grade mismatch vs. spec\"} (status = ready_for_review)"
+          ],
+          "expected": "{\"bom_id\":..., \"status\":\"rejected\", \"rejection_reason\":\"Leather grade mismatch vs. spec\"} (cf. RJ-P1)"
+        },
+        {
+          "id": "E-P2",
+          "cat": "POS",
+          "prio": "Low",
+          "status": "200",
+          "title": "Direct Manager rejects",
+          "role": "Direct Manager",
+          "steps": [
+            "POST .../reject — {\"reason\":\"...\"}"
+          ],
+          "expected": "200 — DM bypass, same as MD."
+        },
+        {
+          "id": "E-N1",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "422",
+          "title": "Try to confirm with no reason",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../reject — {\"reason\":\"\"} or the \"reason\" key omitted entirely"
+          ],
+          "expected": "422 — Pydantic's min_length=1 rejects an empty string / missing field."
+        },
+        {
+          "id": "E-N2",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "422",
+          "title": "Reason is only spaces",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../reject — {\"reason\":\"   \"}"
+          ],
+          "expected": "Passes Pydantic (3 chars, non-empty) but caught server-side: {\"error\":\"reason_required\",\"message\":\"A rejection reason is required.\"}"
+        },
+        {
+          "id": "E-N3",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "409",
+          "title": "Try to Reject a Draft BOM",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../reject on status = draft"
+          ],
+          "expected": "{\"error\":\"not_ready_for_review\",\"current_status\":\"draft\"} — reject is only valid from ready_for_review."
+        },
+        {
+          "id": "E-N4",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "409",
+          "title": "Try to Reject an Approved/Locked/Exported BOM",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../reject on status in {approved, locked, exported}"
+          ],
+          "expected": "{\"error\":\"bom_locked\",\"message\":\"An approved BOM cannot be rejected.\"}"
+        },
+        {
+          "id": "E-N5",
+          "cat": "NEG",
+          "prio": "Low",
+          "status": "409",
+          "title": "Try to Reject a BOM that's already Rejected",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../reject on status = rejected"
+          ],
+          "expected": "{\"error\":\"not_ready_for_review\",\"current_status\":\"rejected\"}"
+        },
+        {
+          "id": "E-N6",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "403",
+          "title": "Cutting Manager tries to Reject",
+          "role": "Cutting Manager",
+          "steps": [
+            "POST /api/v1/procurement/boms/{bom_id}/reject"
+          ],
+          "expected": "403 role-not-permitted."
+        },
+        {
+          "id": "E-B1",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "200",
+          "title": "1-character reason",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../reject — {\"reason\":\"x\"}"
+          ],
+          "expected": "200, accepted."
+        },
+        {
+          "id": "E-B2",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "200",
+          "title": "Reason with extra spaces",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../reject — {\"reason\":\" wrong color \"}",
+            "GET /api/v1/procurement/boms/{bom_id}"
+          ],
+          "expected": "POST → 200. GET's rejection_reason should read \"wrong color\" trimmed — the source read confirmed reject_bom checks reason.strip() for emptiness but did not confirm whether the stored value itself is trimmed or raw; verify this directly against the GET response."
+        },
+        {
+          "id": "E-B3",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "200",
+          "title": "Very long reason",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../reject — {\"reason\":\"<several paragraphs>\"}",
+            "GET /api/v1/procurement/boms/{bom_id}"
+          ],
+          "expected": "Both calls 200; GET's rejection_reason returns the full text, not truncated."
+        },
+        {
+          "id": "E-L1",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Cutting-confirmed state silently survives a rejection",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../reject on a BOM that had already passed confirm-cutting",
+            "GET /api/v1/procurement/boms/{bom_id}"
+          ],
+          "expected": "POST → 200 rejected. GET afterward: cutting_confirmed_at is still populated — reject_bom does not clear it. This is the same underlying fact that makes D-L2 possible; confirm both together."
+        }
+      ]
+    },
+    {
+      "code": "F",
+      "title": "MD Review Panel — Reopen",
+      "sub": "POST /boms/{bom_id}/reopen",
+      "gate": "",
+      "cases": [
+        {
+          "id": "F-P1",
+          "cat": "POS",
+          "prio": "High",
+          "status": "200",
+          "title": "Reopen a Rejected BOM",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "POST /api/v1/procurement/boms/{bom_id}/reopen (status = rejected)"
+          ],
+          "expected": "{\"bom_id\":..., \"status\":\"draft\", \"revision\": <previous+1>} (cf. RO-P1)"
+        },
+        {
+          "id": "F-N1",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "409",
+          "title": "Try to Reopen a BOM that isn't Rejected",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "POST .../reopen on status in {draft, ready_for_review, approved, locked, exported}"
+          ],
+          "expected": "{\"error\":\"not_rejected\",\"current_status\":...}"
+        },
+        {
+          "id": "F-N2",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "403",
+          "title": "Cutting Manager tries to Reopen",
+          "role": "Cutting Manager",
+          "steps": [
+            "POST /api/v1/procurement/boms/{bom_id}/reopen"
+          ],
+          "expected": "403 — cutting_manager has no bypass on this gate (only direct_manager/managing_director are allowed)."
+        },
+        {
+          "id": "F-B1",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "200",
+          "title": "Double-click Reopen",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "POST .../reopen",
+            "POST .../reopen again immediately"
+          ],
+          "expected": "First call: 200 → draft. Second call: 409 {\"error\":\"not_rejected\",\"current_status\":\"draft\"} — sequential calls fail safely rather than double-incrementing; true simultaneous requests may race, worth trying both ways."
+        },
+        {
+          "id": "F-L1",
+          "cat": "LGC",
+          "prio": "High",
+          "status": "409",
+          "title": "Approve is correctly re-blocked after Reopen",
+          "role": "Direct Manager/MD then MD",
+          "steps": [
+            "POST .../reopen",
+            "POST .../approve on the same bom_id, without re-running confirm-cutting"
+          ],
+          "expected": "Reopen clears cutting_confirmed_at, so approve returns {\"error\":\"cutting_confirmation_required\",...} — the D-L2 loophole is closed once reopen actually runs."
+        },
+        {
+          "id": "F-L2",
+          "cat": "LGC",
+          "prio": "Low",
+          "status": "200",
+          "title": "Grid is fully editable immediately after Reopen",
+          "role": "Direct Manager/MD then Cutting Manager",
+          "steps": [
+            "POST .../reopen",
+            "PATCH .../items immediately after"
+          ],
+          "expected": "200 — draft is an editable state, no residual lock from the prior rejected status."
+        }
+      ]
+    },
+    {
+      "code": "G",
+      "title": "MD Review Panel — Export",
+      "sub": "POST /boms/{bom_id}/export",
+      "gate": "",
+      "cases": [
+        {
+          "id": "G-P1",
+          "cat": "POS",
+          "prio": "High",
+          "status": "200",
+          "title": "Export an Approved BOM",
+          "role": "Managing Director",
+          "steps": [
+            "POST /api/v1/procurement/boms/{bom_id}/export (status = approved)"
+          ],
+          "expected": "{\"bom_id\":..., \"status\":\"exported\", \"export_document_id\":..., \"sha256\":..., \"mime\":..., \"storage_url\":...} (cf. EX-P1)"
+        },
+        {
+          "id": "G-P2",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Export a Locked BOM",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../export (status = locked)"
+          ],
+          "expected": "Same result — status → \"exported\"."
+        },
+        {
+          "id": "G-P3",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Re-export an already-Exported BOM",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../export again (status already = exported)"
+          ],
+          "expected": "200 with the same export_document_id and sha256 — idempotent short-circuit, no regeneration."
+        },
+        {
+          "id": "G-P4",
+          "cat": "POS",
+          "prio": "Low",
+          "status": "200",
+          "title": "Direct Manager exports",
+          "role": "Direct Manager",
+          "steps": [
+            "POST .../export"
+          ],
+          "expected": "200 — DM bypass, same as MD."
+        },
+        {
+          "id": "G-N1",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "409",
+          "title": "Try to Export a Draft/Ready-for-Review/Rejected BOM",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../export on status in {draft, ready_for_review, rejected}"
+          ],
+          "expected": "{\"error\":\"not_approved\",\"message\":\"Export is only allowed from an approved/locked BOM.\"}"
+        },
+        {
+          "id": "G-N2",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "403",
+          "title": "Cutting Manager tries to Export",
+          "role": "Cutting Manager",
+          "steps": [
+            "POST /api/v1/procurement/boms/{bom_id}/export"
+          ],
+          "expected": "403 role-not-permitted."
+        },
+        {
+          "id": "G-B1",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "200",
+          "title": "Two BOMs that export to an identical document",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../export on BOM #1",
+            "POST .../export on BOM #2 (same underlying content)"
+          ],
+          "expected": "Both 200; the \"sha256\" values match and the export dedupes to the same stored file."
+        },
+        {
+          "id": "G-L1",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "multi",
+          "title": "Exported PDF carries the right approval details",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../export",
+            "GET the \"storage_url\" from the response and download the PDF"
+          ],
+          "expected": "The PDF itself (not the JSON) shows the approver's name, approval date, style name and order number — this needs a binary fetch + manual/PDF-text check, not just a JSON assertion."
+        },
+        {
+          "id": "G-L2",
+          "cat": "LGC",
+          "prio": "Low",
+          "status": "multi",
+          "title": "\"Exported at\" doesn't move on a repeat export",
+          "role": "Managing Director",
+          "steps": [
+            "POST .../export, then GET /api/v1/procurement/boms/{bom_id} and note exported_at",
+            "POST .../export again later, GET the BOM again"
+          ],
+          "expected": "exported_at is identical across both GETs — the idempotent re-export path doesn't touch the timestamp."
+        }
+      ]
+    },
+    {
+      "code": "H",
+      "title": "Full-flow regression scenarios",
+      "sub": "Chained calls across the endpoints above.",
+      "gate": "",
+      "cases": [
+        {
+          "id": "H-1",
+          "cat": "LGC",
+          "prio": "High",
+          "status": "multi",
+          "title": "Happy path, start to finish",
+          "role": "Cutting Manager → MD",
+          "steps": [
+            "Login Cutting Manager → GET /boms/{bom_id} → PATCH /boms/{bom_id}/items",
+            "POST /boms/{bom_id}/confirm-cutting",
+            "Login MD → POST /boms/{bom_id}/approve",
+            "POST /boms/{bom_id}/export → GET the storage_url"
+          ],
+          "expected": "Status walks draft → ready_for_review → approved → exported with a 200 (or the expected success shape) at every step and no 4xx along the golden path."
+        },
+        {
+          "id": "H-2",
+          "cat": "LGC",
+          "prio": "High",
+          "status": "multi",
+          "title": "Reject → Reopen → resubmit",
+          "role": "MD → DM → Cutting Manager → MD",
+          "steps": [
+            "Login MD → POST /boms/{bom_id}/reject {\"reason\":\"...\"} (status must be ready_for_review)",
+            "Login DM → POST /boms/{bom_id}/reopen",
+            "Login Cutting Manager → PATCH /boms/{bom_id}/items → POST /boms/{bom_id}/confirm-cutting",
+            "Login MD → POST /boms/{bom_id}/approve"
+          ],
+          "expected": "Every call 200 in sequence; the BOM is fully re-usable after one rejection cycle — no 409 anywhere in this chain if done in order."
+        },
+        {
+          "id": "H-3",
+          "cat": "LGC",
+          "prio": "High",
+          "status": "multi",
+          "title": "Two testers, same BOM, same moment",
+          "role": "Cutting Manager (two sessions)",
+          "steps": [
+            "Both sessions GET /boms/{bom_id}, note the same revision N",
+            "Fire both PATCH /boms/{bom_id}/items calls (different bom_item_id/field) with base_revision:N within a few seconds of each other"
+          ],
+          "expected": "Exactly one PATCH returns 200; the other returns 409 stale_revision. Neither edit is silently dropped or silently merged."
+        }
+      ]
+    },
+    {
+      "code": "I",
+      "title": "Order Breakdown (Stage 2 intake)",
+      "sub": "POST + GET /submissions/{submission_id}/order-breakdown",
+      "gate": "",
+      "cases": [
+        {
+          "id": "I-P1",
+          "cat": "POS",
+          "prio": "High",
+          "status": "202",
+          "title": "Claim a COMPLETE submission for breakdown",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST /api/v1/procurement/submissions/{submission_id}/order-breakdown (submission status = COMPLETE, no OrderStyle rows yet)"
+          ],
+          "expected": "{\"submission_id\":..., \"status\":\"queued\", \"task_id\":...} — claims the submission (status → CONSUMED) and enqueues bom.build_order_breakdown_for_submission."
+        },
+        {
+          "id": "I-P2",
+          "cat": "POS",
+          "prio": "High",
+          "status": "200",
+          "title": "Read the breakdown once it's ready",
+          "role": "Any authenticated role",
+          "steps": [
+            "GET /api/v1/procurement/submissions/{submission_id}/order-breakdown (after the Celery task has completed)"
+          ],
+          "expected": "{\"status\":\"ready\", \"styles\":[{style_signature, style_name, qty, per_size_qty, colors[], spec_match_status, dxf_match_status, ...}]}"
+        },
+        {
+          "id": "I-P3",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Poll while the breakdown is still processing",
+          "role": "Any authenticated role",
+          "steps": [
+            "Immediately after I-P1's POST, GET the same submission's order-breakdown before the worker finishes"
+          ],
+          "expected": "{\"status\":\"processing\", \"styles\":[]} — submission status is already CONSUMED but no OrderStyle rows exist yet."
+        },
+        {
+          "id": "I-N1",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "409",
+          "title": "Claim a submission that isn't COMPLETE",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST .../order-breakdown on a submission still OPEN/QUEUED/REJECTED (order or spec doc not yet accepted)"
+          ],
+          "expected": "Plain-string detail (not the {\"error\",\"message\"} dict shape): {\"detail\":\"submission not ready: order document not accepted, or already claimed\"}"
+        },
+        {
+          "id": "I-N2",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "409",
+          "title": "Claim a nonexistent submission_id",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST /api/v1/procurement/submissions/{a made-up uuid}/order-breakdown"
+          ],
+          "expected": "Same 409 as I-N1, not a 404 — breakdown_state() treats a missing row the same as \"not_started\", so a bogus id and a genuinely-not-ready submission are indistinguishable from this response alone. Confirm and note as a gap."
+        },
+        {
+          "id": "I-N3",
+          "cat": "NEG",
+          "prio": "Low",
+          "status": "200",
+          "title": "Read the breakdown for a nonexistent submission_id",
+          "role": "Any authenticated role",
+          "steps": [
+            "GET /api/v1/procurement/submissions/{a made-up uuid}/order-breakdown"
+          ],
+          "expected": "200 {\"status\":\"not_started\",\"styles\":[]} — no 404 for a bad id on the GET side either."
+        },
+        {
+          "id": "I-B1",
+          "cat": "BND",
+          "prio": "Medium",
+          "status": "202",
+          "title": "Re-POST while a claim is already processing",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST .../order-breakdown a second time on a submission already claimed (status CONSUMED, no styles yet)"
+          ],
+          "expected": "{\"status\":\"already_processing\"} — still 202, no second Celery task enqueued."
+        },
+        {
+          "id": "I-B2",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "202",
+          "title": "Re-POST once styles already exist",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST .../order-breakdown once OrderStyle rows already exist for this submission"
+          ],
+          "expected": "{\"status\":\"already_ready\"} — still HTTP 202 even though nothing new happens, which reads oddly for an \"already done\" reply; worth a UX note if you're also reviewing the contract."
+        },
+        {
+          "id": "I-L1",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "multi",
+          "title": "Idempotent replay doesn't re-extract",
+          "role": "Any authenticated role",
+          "steps": [
+            "If the breakdown task is somehow re-triggered on a submission that already has OrderStyle rows, it short-circuits"
+          ],
+          "expected": "Existing rows are replayed with warnings:[\"replayed\"] instead of a fresh Gemini extraction — hard to trigger via HTTP alone; treat as a code-read confirmation rather than a black-box test."
+        },
+        {
+          "id": "I-L2",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Spec/DXF auto-suggestion by name match",
+          "role": "Any authenticated role",
+          "steps": [
+            "GET .../order-breakdown for a submission whose style name unambiguously matches one existing accepted spec document for that client"
+          ],
+          "expected": "That style's spec_match_status = \"suggested\" with spec_document_id populated. A style with 2+ ambiguous name matches instead has spec_match_status = \"none\" (falls back to manual)."
+        }
+      ]
+    },
+    {
+      "code": "J",
+      "title": "Order Style Attachments",
+      "sub": "POST /order-styles/{order_style_id}/attachments",
+      "gate": "",
+      "cases": [
+        {
+          "id": "J-P1",
+          "cat": "POS",
+          "prio": "High",
+          "status": "200",
+          "title": "Confirm an explicit spec document",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST /api/v1/procurement/order-styles/{order_style_id}/attachments",
+            "Body: {\"spec_document_id\": \"<uuid>\"}"
+          ],
+          "expected": "200 OrderStyleOut with spec_document_id set and spec_match_status = \"confirmed\"."
+        },
+        {
+          "id": "J-P2",
+          "cat": "POS",
+          "prio": "High",
+          "status": "200",
+          "title": "Confirm an explicit DXF pattern",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST .../attachments — Body: {\"pattern_reference_id\": \"<uuid>\"}"
+          ],
+          "expected": "200; dxf_match_status = \"confirmed\"."
+        },
+        {
+          "id": "J-P3",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Promote an existing suggestion with no explicit id",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST .../attachments — Body: {} on a style whose spec_match_status is already \"suggested\""
+          ],
+          "expected": "200; the previously-suggested spec_document_id is promoted to spec_match_status = \"confirmed\" without you having to resend the id."
+        },
+        {
+          "id": "J-N1",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "404",
+          "title": "Nonexistent order_style_id",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST /api/v1/procurement/order-styles/{a made-up uuid}/attachments"
+          ],
+          "expected": "{\"error\":\"order_style_not_found\",\"order_style_id\":...} — dict shape, distinct from the plain-string 404 used by generate-bom (K-N1)."
+        },
+        {
+          "id": "J-N2",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "422",
+          "title": "clear_spec and spec_document_id together",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST .../attachments — Body: {\"clear_spec\": true, \"spec_document_id\": \"<uuid>\"}"
+          ],
+          "expected": "422 Pydantic validation error — \"clear_spec and spec_document_id are mutually exclusive\"."
+        },
+        {
+          "id": "J-N3",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "422",
+          "title": "clear_dxf and pattern_reference_id together",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST .../attachments — Body: {\"clear_dxf\": true, \"pattern_reference_id\": \"<uuid>\"}"
+          ],
+          "expected": "422, same mutual-exclusion validator for the DXF pair."
+        },
+        {
+          "id": "J-B1",
+          "cat": "BND",
+          "prio": "High",
+          "status": "200",
+          "title": "Explicit id that doesn't actually exist",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST .../attachments — Body: {\"spec_document_id\": \"<a syntactically valid but nonexistent uuid>\"}"
+          ],
+          "expected": "200, accepted with no validation — despite the endpoint's own docstring claiming ids are \"validated to exist (and to belong to the same client)\", the service assigns it blindly. The failure only surfaces later, inside generate-bom, as spec_bytes_missing (see K-B1). Confirm and file as a finding against the docstring."
+        },
+        {
+          "id": "J-L1",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "200",
+          "title": "clear_spec detaches the link",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST .../attachments — Body: {\"clear_spec\": true}"
+          ],
+          "expected": "200; spec_document_id → null, spec_match_status → \"none\"."
+        },
+        {
+          "id": "J-L2",
+          "cat": "LGC",
+          "prio": "Low",
+          "status": "n/a",
+          "title": "No client ownership check on attachment ids",
+          "role": "Any authenticated role",
+          "steps": [
+            "Confirm a spec_document_id or pattern_reference_id that belongs to a different client than the order style"
+          ],
+          "expected": "Accepted with no error — there is no cross-client ownership check on this endpoint at all. Combine with J-B1 as one finding: neither existence nor ownership is validated here."
+        }
+      ]
+    },
+    {
+      "code": "K",
+      "title": "Generate BOM from Order Style",
+      "sub": "POST /order-styles/{order_style_id}/generate-bom",
+      "gate": "",
+      "cases": [
+        {
+          "id": "K-P1",
+          "cat": "POS",
+          "prio": "High",
+          "status": "202",
+          "title": "Generate a BOM for a style with no bom_id yet",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST /api/v1/procurement/order-styles/{order_style_id}/generate-bom (bom_id currently null; spec_match_status is \"confirmed\" or \"none\", never \"suggested\")"
+          ],
+          "expected": "202 StyleBomAccepted — the exact literal \"status\" value on this fresh-queue branch isn't nailed down by source alone; capture it from a real response and note it here."
+        },
+        {
+          "id": "K-P2",
+          "cat": "POS",
+          "prio": "High",
+          "status": "multi",
+          "title": "Generated BOM is reachable afterward",
+          "role": "Any authenticated role then Cutting Manager",
+          "steps": [
+            "Wait for the Celery task to finish (order_style.bom_id becomes non-null)",
+            "GET /api/v1/procurement/boms/{that bom_id}"
+          ],
+          "expected": "200 — the newly generated BOM view, status \"draft\"."
+        },
+        {
+          "id": "K-P3",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "202",
+          "title": "Re-POST once a BOM already exists for the style",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST .../generate-bom again on a style whose bom_id is already set"
+          ],
+          "expected": "{\"status\":\"already_generated\",\"bom_id\":...} — still 202, no duplicate BOM created."
+        },
+        {
+          "id": "K-N1",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "404",
+          "title": "Nonexistent order_style_id",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST /api/v1/procurement/order-styles/{a made-up uuid}/generate-bom"
+          ],
+          "expected": "{\"detail\":\"order style not found\"} — plain-string shape, unlike J-N1's dict shape for the same logical \"not found\" case on a sibling endpoint. Worth flagging as an inconsistency."
+        },
+        {
+          "id": "K-N2",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "422",
+          "title": "Unconfirmed spec suggestion blocks generation",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST .../generate-bom on a style whose spec_match_status is still \"suggested\" (never confirmed via J-P1/J-P3)"
+          ],
+          "expected": "{\"detail\":\"spec suggestion is unconfirmed — confirm or clear it before generating\"} — plain string, router-level pre-check."
+        },
+        {
+          "id": "K-B1",
+          "cat": "BND",
+          "prio": "High",
+          "status": "multi",
+          "title": "Confirmed spec has no stored bytes",
+          "role": "Any authenticated role",
+          "steps": [
+            "Confirm a spec_document_id that exists but has no retrievable bytes (or the garbage id from J-B1)",
+            "POST .../generate-bom"
+          ],
+          "expected": "The router's synchronous pre-checks pass, so you still get 202 — the spec_bytes_missing {\"error\":\"spec_bytes_missing\",\"message\":\"...\"} error only happens inside the async Celery task and is NOT visible in this HTTP response. You cannot assert this failure from a single request; you need to poll the order style / BOM afterward or watch the realtime channel."
+        },
+        {
+          "id": "K-L1",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "multi",
+          "title": "DXF pattern pre-fills the generated BOM",
+          "role": "Any authenticated role",
+          "steps": [
+            "Upload a current DXF pattern for the style's signature via POST /patterns (section M) first",
+            "POST .../generate-bom for that style"
+          ],
+          "expected": "The generated BOM's material lines carry DXF-derived quantities/consumption from the current PatternExtraction row. Without a prior pattern upload, the BOM falls back to bare line-seeds with no DXF-derived qty. Cross-check against C-L1 in the BOM section — this is the mechanism behind it."
+        },
+        {
+          "id": "K-L2",
+          "cat": "LGC",
+          "prio": "Low",
+          "status": "n/a",
+          "title": "Router vs. service error-shape inconsistency",
+          "role": "Any authenticated role",
+          "steps": [
+            "Compare K-N1/K-N2 (plain \"detail\" string, from router.py pre-checks) against the equivalent errors raised inside generate_bom_for_style() in the service layer (dict {\"error\",...} shape)"
+          ],
+          "expected": "Confirmed inconsistency in the same logical error family across the sync/async paths of the same endpoint — file as an API-contract finding, not a test failure."
+        }
+      ]
+    },
+    {
+      "code": "L",
+      "title": "Notifications",
+      "sub": "GET /notifications · GET /notifications/stream · POST /notifications/{id}/open",
+      "gate": "",
+      "cases": [
+        {
+          "id": "L-P1",
+          "cat": "POS",
+          "prio": "High",
+          "status": "200",
+          "title": "List notifications",
+          "role": "Any authenticated role",
+          "steps": [
+            "GET /api/v1/procurement/notifications"
+          ],
+          "expected": "{\"notifications\":[{id,type,channel,subject,body,entity_type,entity_id,status,scheduled_for,sent_at,opened_at}], \"unread\": N} — scoped to the caller, in-app channel only, newest-unread-first, hard limit 100."
+        },
+        {
+          "id": "L-P2",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Filter to unread only",
+          "role": "Any authenticated role",
+          "steps": [
+            "GET /api/v1/procurement/notifications?unread_only=true"
+          ],
+          "expected": "200; every returned item has opened_at: null."
+        },
+        {
+          "id": "L-P3",
+          "cat": "POS",
+          "prio": "High",
+          "status": "200",
+          "title": "Open a notification you own",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST /api/v1/procurement/notifications/{notification_id}/open (notification's recipient_user_id = caller)"
+          ],
+          "expected": "200; opened_at populated, status → \"opened\"."
+        },
+        {
+          "id": "L-P4",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "multi",
+          "title": "Consume the live SSE stream",
+          "role": "Any authenticated role",
+          "steps": [
+            "curl -N -H \"Authorization: Bearer {token}\" {base_url}/api/v1/procurement/notifications/stream"
+          ],
+          "expected": "text/event-stream response: one \"data: {...}\\n\\n\" frame per currently-unread notification immediately on connect (each flips PENDING→SENT), then \": keep-alive\\n\\n\" comment frames roughly every 10s, indefinitely, until the client disconnects. The -N flag is required or curl buffers the whole thing."
+        },
+        {
+          "id": "L-N1",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "404",
+          "title": "Open a nonexistent notification",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST /api/v1/procurement/notifications/{a made-up uuid}/open"
+          ],
+          "expected": "{\"detail\":\"Notification not found.\"}"
+        },
+        {
+          "id": "L-N2",
+          "cat": "NEG",
+          "prio": "High",
+          "status": "403",
+          "title": "Open someone else's notification",
+          "role": "Any two different authenticated roles",
+          "steps": [
+            "As user B, POST /api/v1/procurement/notifications/{a notification whose recipient is user A}/open"
+          ],
+          "expected": "{\"detail\":\"Not your notification.\"} — this is the one endpoint in the whole module with an actual per-row ownership check."
+        },
+        {
+          "id": "L-B1",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "200",
+          "title": "Open the same notification twice",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST .../open",
+            "POST .../open again on the same id"
+          ],
+          "expected": "First call: 200, opened_at stamped. Second call: 200, unchanged — no error, no re-stamp; genuinely idempotent."
+        },
+        {
+          "id": "L-B2",
+          "cat": "BND",
+          "prio": "Medium",
+          "status": "multi",
+          "title": "Second SSE connection doesn't replay already-sent items",
+          "role": "Any authenticated role",
+          "steps": [
+            "Open one SSE stream, let it drain the unread backlog (flips them PENDING→SENT)",
+            "Open a second SSE stream for the same user without opening those notifications first"
+          ],
+          "expected": "The second connection only emits genuinely new notifications, not the already-SENT-but-unopened backlog. Meanwhile GET /notifications?unread_only=true still lists them, since it filters on opened_at not status — the two views can transiently disagree. Document this rather than treating it as a bug in your test."
+        },
+        {
+          "id": "L-L1",
+          "cat": "LGC",
+          "prio": "Low",
+          "status": "n/a",
+          "title": "SSE needs a streaming-capable client",
+          "role": "n/a",
+          "steps": [
+            "Try GET .../notifications/stream with a plain Postman \"Send\" or a curl call without -N"
+          ],
+          "expected": "The request hangs / appears to buffer indefinitely rather than returning — this is a test-tooling requirement (use curl -N or Postman's streaming/SSE support), not an API defect."
+        },
+        {
+          "id": "L-L2",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "n/a",
+          "title": "2-hour escalation is currently broken end-to-end",
+          "role": "n/a",
+          "steps": [
+            "Do not build a test expecting an unopened notification to trigger an escalation email after 2 hours"
+          ],
+          "expected": "NotificationService.escalate_overdue() referenced by the Celery Beat task doesn't exist (AttributeError), and run_escalations() itself references undefined names (NameError) due to commented-out setup lines. The feature described in the module's own docstring does not currently work — confirm the Beat task fails rather than expecting it to succeed."
+        }
+      ]
+    },
+    {
+      "code": "M",
+      "title": "Pattern Upload",
+      "sub": "POST /patterns (multipart/form-data)",
+      "gate": "",
+      "cases": [
+        {
+          "id": "M-P1",
+          "cat": "POS",
+          "prio": "High",
+          "status": "202",
+          "title": "Upload a DXF pattern",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST /api/v1/procurement/patterns?style_signature=SP12345 — multipart body: file = <valid .dxf>"
+          ],
+          "expected": "{\"job_id\": \"<celery task id>\", \"channel\": \"pattern:SP12345\"} — 202, async DXF parse enqueued."
+        },
+        {
+          "id": "M-P2",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "multi",
+          "title": "Uploaded pattern feeds BOM generation",
+          "role": "Any authenticated role",
+          "steps": [
+            "Wait for the parse task to finish",
+            "POST /order-styles/{a style with the same style_signature}/generate-bom (section K)"
+          ],
+          "expected": "The generated BOM's material lines reflect this pattern's fabric matrix / DXF yields — cross-check with K-L1."
+        },
+        {
+          "id": "M-N1",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "202",
+          "title": "style_signature sent as a form field instead of a query param",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST /api/v1/procurement/patterns — multipart body: file=<.dxf> AND a form field named style_signature (no query string)"
+          ],
+          "expected": "Still 202, but style_signature is bound as a query parameter in the route signature (no Form(...) marker) — a form-field value is not picked up, so it resolves to None and \"channel\" comes back as the literal string \"pattern:None\". Confirm this exact behavior before relying on it."
+        },
+        {
+          "id": "M-N2",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "202",
+          "title": "Non-DXF file accepted at the HTTP layer",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST /api/v1/procurement/patterns?style_signature=SP1 — multipart body: file = <a .txt or .jpg>"
+          ],
+          "expected": "202, accepted with no content-type/extension check — it always names the stored object <uuid>.dxf regardless of actual content. Failure only happens later inside the async DXF parser, invisibly to this HTTP response."
+        },
+        {
+          "id": "M-B1",
+          "cat": "BND",
+          "prio": "Medium",
+          "status": "202",
+          "title": "No file-size cap on this endpoint",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST /api/v1/procurement/patterns with a very large file (tens of MB+)"
+          ],
+          "expected": "Accepted regardless of size at the HTTP/application layer — unlike the 25MB cap other upload endpoints in procurement/router.py enforce. Whatever limit you hit in practice is likely coming from infrastructure (reverse proxy / body-size limit), not this handler."
+        },
+        {
+          "id": "M-B2",
+          "cat": "BND",
+          "prio": "Medium",
+          "status": "multi",
+          "title": "Duplicate re-upload for the same style_signature",
+          "role": "Any authenticated role",
+          "steps": [
+            "POST /api/v1/procurement/patterns?style_signature=SP1 with identical file bytes twice in a row"
+          ],
+          "expected": "The repository code's own docstring claims a (style_signature, sha256) unique constraint turns a duplicate into a clean 409/no-op \"caught upstream\" — but no such catch exists anywhere in the module. Expect either an unhandled DB error surfacing as a generic Celery retry/failure, or a silent duplicate row, not the documented clean no-op. File the actual observed behavior as a finding."
+        },
+        {
+          "id": "M-L1",
+          "cat": "LGC",
+          "prio": "Medium",
+          "status": "multi",
+          "title": "New upload supersedes the prior current pattern",
+          "role": "Any authenticated role",
+          "steps": [
+            "Upload a DXF for style_signature SP1, wait for it to become current",
+            "Upload a second, different DXF for the same SP1 + same client",
+            "POST /order-styles/{a style with signature SP1}/generate-bom"
+          ],
+          "expected": "The second pattern becomes is_current=True and the first is superseded (is_current=False); the generated BOM should reflect the newer pattern's data, not the first upload's."
+        }
+      ]
+    },
+    {
+      "code": "N",
+      "title": "Admin — DXF Yields",
+      "sub": "PUT /admin/dxf-yields/{species}",
+      "gate": "",
+      "cases": [
+        {
+          "id": "N-P1",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Set a species' yield factor",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "PUT /api/v1/procurement/admin/dxf-yields/COWHIDE",
+            "Body: {\"factor\": 1.35, \"note\": \"updated per supplier spec\"}"
+          ],
+          "expected": "{\"species\":\"COWHIDE\",\"factor\":1.35}"
+        },
+        {
+          "id": "N-N1",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "422",
+          "title": "Zero factor",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "PUT .../admin/dxf-yields/COWHIDE — Body: {\"factor\": 0}"
+          ],
+          "expected": "422 — schema requires factor gt=0."
+        },
+        {
+          "id": "N-N2",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "422",
+          "title": "Negative factor",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "PUT .../admin/dxf-yields/COWHIDE — Body: {\"factor\": -2}"
+          ],
+          "expected": "422, same constraint."
+        },
+        {
+          "id": "N-N3",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "403",
+          "title": "Wrong role",
+          "role": "Cutting Manager",
+          "steps": [
+            "PUT /api/v1/procurement/admin/dxf-yields/COWHIDE — Body: {\"factor\": 1.2}"
+          ],
+          "expected": "403 — cutting_manager isn't in the DM/MD gate for any /admin/* route."
+        },
+        {
+          "id": "N-B1",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "200",
+          "title": "Unusual species string",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "PUT /api/v1/procurement/admin/dxf-yields/LEATHER-GRADE-A%2F2024 — Body: {\"factor\": 1.0}"
+          ],
+          "expected": "200, accepted — species is a raw path string with no enum/regex constraint; any value silently creates a new row. Worth flagging as a possible data-quality gap."
+        },
+        {
+          "id": "N-L1",
+          "cat": "LGC",
+          "prio": "Low",
+          "status": "200",
+          "title": "Repeat PUT upserts, doesn't duplicate",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "PUT .../admin/dxf-yields/COWHIDE twice with different factor values"
+          ],
+          "expected": "Second call updates the existing row in place. There's no GET for this resource to confirm directly — verify indirectly via a BOM generation that uses this species' yield, or a direct DB check."
+        }
+      ]
+    },
+    {
+      "code": "O",
+      "title": "Admin — Fabric Roles",
+      "sub": "POST /admin/fabric-roles",
+      "gate": "",
+      "cases": [
+        {
+          "id": "O-P1",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Upsert a fabric role",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "POST /api/v1/procurement/admin/fabric-roles",
+            "Body: {\"label\":\"Full-grain cowhide\",\"role\":\"main_material\",\"category\":\"leather\",\"is_leather\":true}"
+          ],
+          "expected": "200, echoes the input with status:\"confirmed\"."
+        },
+        {
+          "id": "O-N1",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "403",
+          "title": "Wrong role",
+          "role": "Cutting Manager",
+          "steps": [
+            "POST /api/v1/procurement/admin/fabric-roles"
+          ],
+          "expected": "403."
+        },
+        {
+          "id": "O-B1",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "200",
+          "title": "Arbitrary role/category strings",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "POST .../admin/fabric-roles — Body: {\"label\":\"Test\",\"role\":\"banana\",\"category\":\"unknown\"}"
+          ],
+          "expected": "200, accepted — no server-side vocabulary check on \"role\"/\"category\". Flag as a data-integrity gap if that's unintended."
+        },
+        {
+          "id": "O-L1",
+          "cat": "LGC",
+          "prio": "Low",
+          "status": "200",
+          "title": "Repeat POST with the same label upserts",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "POST .../admin/fabric-roles twice with the same \"label\" but different \"role\"/\"category\""
+          ],
+          "expected": "Second call updates the existing row keyed on \"label\" rather than creating a duplicate."
+        }
+      ]
+    },
+    {
+      "code": "P",
+      "title": "Admin — Cost Catalog",
+      "sub": "GET /admin/cost-catalog · PUT /admin/cost-catalog/{garment_code}",
+      "gate": "",
+      "cases": [
+        {
+          "id": "P-P1",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Read the cost catalog",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "GET /api/v1/procurement/admin/cost-catalog"
+          ],
+          "expected": "200 {\"<GARMENT_CODE>\":[{category,name,uom,unit_price,qty_per_garment}], \"_default\":[...]} — served from a process-local cache, not a live DB read."
+        },
+        {
+          "id": "P-P2",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Replace a garment code's cost lines",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "PUT /api/v1/procurement/admin/cost-catalog/SH100",
+            "Body: {\"lines\":[{\"category\":\"thread\",\"name\":\"Poly thread\",\"uom\":\"cone\",\"unit_price\":3.5,\"qty_per_garment\":2}]}"
+          ],
+          "expected": "{\"garment_code\":\"SH100\",\"lines\":1}"
+        },
+        {
+          "id": "P-N1",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "422",
+          "title": "Negative unit price",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "PUT .../admin/cost-catalog/SH100 — a line with \"unit_price\": -1"
+          ],
+          "expected": "422 — schema requires unit_price ge=0."
+        },
+        {
+          "id": "P-N2",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "422",
+          "title": "Zero qty_per_garment",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "PUT .../admin/cost-catalog/SH100 — a line with \"qty_per_garment\": 0"
+          ],
+          "expected": "422 — schema requires qty_per_garment gt=0 (default is 1, but an explicit 0 still fails)."
+        },
+        {
+          "id": "P-N3",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "403",
+          "title": "Wrong role on GET or PUT",
+          "role": "Cutting Manager",
+          "steps": [
+            "GET /api/v1/procurement/admin/cost-catalog",
+            "PUT /api/v1/procurement/admin/cost-catalog/SH100"
+          ],
+          "expected": "403 on both."
+        },
+        {
+          "id": "P-B1",
+          "cat": "BND",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Empty lines array doesn't restore defaults",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "PUT /api/v1/procurement/admin/cost-catalog/SH100 — Body: {\"lines\": []}",
+            "GET /api/v1/procurement/admin/cost-catalog"
+          ],
+          "expected": "PUT → 200. Follow-up GET shows SH100's entry as an empty array, not a fallback to \"_default\" — clearing is not the same as resetting, confirm this explicitly."
+        },
+        {
+          "id": "P-B2",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "200",
+          "title": "garment_code casing is normalized on write, not on read",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "PUT /api/v1/procurement/admin/cost-catalog/sh100 (lowercase)",
+            "GET /api/v1/procurement/admin/cost-catalog"
+          ],
+          "expected": "The server uppercases the code before storing (key becomes \"SH100\") — look for it under the uppercase key, not the lowercase one you sent."
+        },
+        {
+          "id": "P-L1",
+          "cat": "LGC",
+          "prio": "Low",
+          "status": "n/a",
+          "title": "Multi-worker cache staleness",
+          "role": "n/a",
+          "steps": [
+            "If your test environment runs multiple API worker processes, PUT on one request then immediately GET on another"
+          ],
+          "expected": "The documented TTL-based cache refresh is not actually implemented — a PUT served by one worker may not be visible via GET on another until that worker restarts. If GET-after-PUT flakes intermittently, this is why, not a bug in your test sequencing."
+        }
+      ]
+    },
+    {
+      "code": "Q",
+      "title": "Admin — BOM Checks",
+      "sub": "GET /admin/checks · PUT /admin/checks/{client_code}",
+      "gate": "",
+      "cases": [
+        {
+          "id": "Q-P1",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Read check rules",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "GET /api/v1/procurement/admin/checks"
+          ],
+          "expected": "200 [{\"client_code\":..., \"checks\":[...]}] — cached read."
+        },
+        {
+          "id": "Q-P2",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Replace a client's check rules",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "PUT /api/v1/procurement/admin/checks/CL01",
+            "Body: {\"rules\":[{\"id\":\"r1\",\"kind\":\"range\",\"severity\":\"warn\",\"field\":\"unit_price\",\"range\":[0,500]}]}"
+          ],
+          "expected": "200, rules replaced for that client_code."
+        },
+        {
+          "id": "Q-N1",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "403",
+          "title": "Wrong role",
+          "role": "Cutting Manager",
+          "steps": [
+            "GET or PUT /api/v1/procurement/admin/checks[...]"
+          ],
+          "expected": "403."
+        },
+        {
+          "id": "Q-B1",
+          "cat": "BND",
+          "prio": "High",
+          "status": "500",
+          "title": "Single-element range array crashes the handler",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "PUT /api/v1/procurement/admin/checks/CL01",
+            "Body: {\"rules\":[{\"id\":\"r1\",\"kind\":\"range\",\"field\":\"unit_price\",\"range\":[5.0]}]}"
+          ],
+          "expected": "Schema validation passes (list[float] has no length constraint) but the handler unconditionally indexes range[0] and range[1] — a one-element array raises an unhandled IndexError. Expect a raw 500, not a clean 4xx. This is a confirmed defect — reproduce it and file a bug, don't just log it as informational."
+        },
+        {
+          "id": "Q-B2",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "200",
+          "title": "range omitted entirely",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "PUT .../admin/checks/CL01 — a rule with no \"range\" key at all"
+          ],
+          "expected": "200, accepted — both range bounds stored as null, no crash (the IndexError in Q-B1 only fires when \"range\" is truthy but short, not when it's absent)."
+        },
+        {
+          "id": "Q-L1",
+          "cat": "LGC",
+          "prio": "Low",
+          "status": "multi",
+          "title": "client_code casing is NOT normalized (asymmetric with cost-catalog)",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "PUT /api/v1/procurement/admin/checks/cl01 — Body: {\"rules\":[...]}",
+            "PUT /api/v1/procurement/admin/checks/CL01 — Body: {\"rules\":[...]} (different rules)"
+          ],
+          "expected": "These create/update two distinct rows rather than colliding — unlike cost-catalog's garment_code (P-B2), this endpoint does not uppercase client_code. Confirm and flag the inconsistency between the two admin endpoints."
+        }
+      ]
+    },
+    {
+      "code": "R",
+      "title": "Admin — POM Dictionary",
+      "sub": "GET + POST /admin/pom-dictionary",
+      "gate": "",
+      "cases": [
+        {
+          "id": "R-P1",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Read the POM dictionary",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "GET /api/v1/procurement/admin/pom-dictionary"
+          ],
+          "expected": "200 [{\"source_term\":...,\"pom_code\":...,\"language\":...,\"garment_type_id\":...,\"weight\":...}], ordered by source_term — a live DB read, unlike cost-catalog/checks which are cached."
+        },
+        {
+          "id": "R-P2",
+          "cat": "POS",
+          "prio": "Medium",
+          "status": "200",
+          "title": "Add a term mapping",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "POST /api/v1/procurement/admin/pom-dictionary",
+            "Body: {\"source_term\":\"chest width\",\"pom_code\":\"CHW\",\"language\":\"en\",\"garment_type_code\":\"SHIRT\",\"weight\":2}"
+          ],
+          "expected": "200; note the request field is \"garment_type_code\" but the response field is \"garment_type_id\" — different names for related data, don't assume symmetry when asserting the response."
+        },
+        {
+          "id": "R-N1",
+          "cat": "NEG",
+          "prio": "Medium",
+          "status": "403",
+          "title": "Wrong role",
+          "role": "Cutting Manager",
+          "steps": [
+            "GET or POST /api/v1/procurement/admin/pom-dictionary"
+          ],
+          "expected": "403."
+        },
+        {
+          "id": "R-B1",
+          "cat": "BND",
+          "prio": "Low",
+          "status": "200",
+          "title": "Zero or negative weight",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "POST .../admin/pom-dictionary — Body: {\"source_term\":\"x\",\"pom_code\":\"X\",\"weight\":0}"
+          ],
+          "expected": "200, accepted — no ge/le bound on \"weight\" in the schema. Flag as a possible missing sanity check, same spirit as B-B2 in the BOM section."
+        },
+        {
+          "id": "R-L1",
+          "cat": "LGC",
+          "prio": "High",
+          "status": "200",
+          "title": "Unrecognized garment_type_code fails silently",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "POST .../admin/pom-dictionary — Body: {\"source_term\":\"y\",\"pom_code\":\"Y\",\"garment_type_code\":\"TYPO_CODE\"}"
+          ],
+          "expected": "200, accepted — a garment_type_code that doesn't resolve via a lookup does NOT error; it silently falls back to garment_type_id: null (\"applies to any garment type\"). An operator typo here is indistinguishable from a deliberate \"any garment type\" mapping. Confirmed gap — worth filing, since it silently broadens scope rather than failing loudly."
+        },
+        {
+          "id": "R-L2",
+          "cat": "LGC",
+          "prio": "Low",
+          "status": "200",
+          "title": "Repeat POST for the same key upserts",
+          "role": "Direct Manager or MD",
+          "steps": [
+            "POST .../admin/pom-dictionary twice with the same (language, source_term, garment_type_code) but a different \"weight\""
+          ],
+          "expected": "Second call updates the existing mapping in place (keyed on language + source_term + garment_type_id) rather than creating a duplicate."
+        }
+      ]
+    }
+  ]
+}

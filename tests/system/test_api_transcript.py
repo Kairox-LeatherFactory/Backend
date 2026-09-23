@@ -24,7 +24,9 @@ WHY NOT JUST POINT POSTMAN AT THE RUNNING APP
     a throwaway database instead.
 """
 import json
+import os
 import pathlib
+import tempfile
 from datetime import date, timedelta
 
 import pytest
@@ -35,7 +37,29 @@ from app.modules.employees import models as em
 from app.modules.production import models as pm
 from app.modules.wages.models import Rate
 
-TRANSCRIPT = pathlib.Path(__file__).resolve().parents[2] / "docs" / "api_transcript.md"
+# WHERE THE TRANSCRIPT IS WRITTEN.
+#
+# This test USED to write straight into docs/api_transcript.md on every ordinary
+# `pytest` run, so a clean checkout came back dirty from running the suite and CI
+# reported a modified file nobody had edited. A test that mutates the repository
+# as a side effect of passing makes `git status` useless for telling you what you
+# actually changed.
+#
+# It now writes to a temp directory by default, and only updates the committed
+# document when you ASK for it:
+#
+#     KAIROX_WRITE_TRANSCRIPT=1 pytest tests/system/test_api_transcript.py
+#
+# The test itself is unchanged either way — it still drives the flows and still
+# asserts the transcript was produced. Only the destination moves.
+_REPO_TRANSCRIPT = (pathlib.Path(__file__).resolve().parents[2]
+                    / "docs" / "api_transcript.md")
+
+if os.environ.get("KAIROX_WRITE_TRANSCRIPT"):
+    TRANSCRIPT = _REPO_TRANSCRIPT
+else:
+    TRANSCRIPT = (pathlib.Path(tempfile.gettempdir())
+                  / "kairox-api-transcript" / "api_transcript.md")
 
 END = date.today() - timedelta(days=1)
 START = END - timedelta(days=13)

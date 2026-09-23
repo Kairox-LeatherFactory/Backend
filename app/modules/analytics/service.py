@@ -22,8 +22,9 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+
 from app.core.config import settings
-from app.core.enums import DrawerState, ProductionStage, ShipMode
+from app.core.enums import ProductionStage, ShipMode, StoreState
 from app.core.store_display import display_stage, holding_label
 from app.modules.analytics.barcode_ext import BarcodeAnalyticsMixin
 from app.modules.clients.models import (
@@ -70,19 +71,18 @@ _PIPELINE_STAGES: list[str] = [
 ]
 _TERMINAL_STAGE = ProductionStage.PACKAGE_EXPORT.value
 
-# Drawer states, grouped as the store screen speaks about them. `no_drawer` is
-# not a drawer state at all — it is a piece with `drawer_id IS NULL`, i.e. one
-# minted while the pool was full. It belongs in this block because from the
-# floor's point of view "where is it in the store" and "it is not in the store,
-# and here is why" are the same question.
+# Store states, grouped as the store screen speaks about them. The values are
+# the drawer's old ones, unchanged — 20260902_store_on_piece copied drawer.state
+# onto piece.store_state as-is — so the buckets a report printed before the
+# drawer was removed are the buckets it prints now.
 _STORE_BUCKETS: list[tuple[str, str]] = [
-    (DrawerState.MERGED.value, "Assigned, nothing scanned in"),
-    (DrawerState.HOLDING_LEATHER.value, "Holding leather"),
-    (DrawerState.HOLDING_LINING.value, "Holding lining"),
-    (DrawerState.HOLDING_BOTH.value, "Holding both"),
-    (DrawerState.RECEIVED.value, "Received, ready to send"),
-    (DrawerState.SENDED.value, "Sent to line-stitching"),
-    (DrawerState.WAITING.value, "Drawer free (piece shipped)"),
+    (StoreState.MERGED.value, "In the store, nothing scanned in"),
+    (StoreState.HOLDING_LEATHER.value, "Holding leather"),
+    (StoreState.HOLDING_LINING.value, "Holding lining"),
+    (StoreState.HOLDING_BOTH.value, "Holding both"),
+    (StoreState.RECEIVED.value, "Received, ready to send"),
+    (StoreState.SENDED.value, "Sent to line-stitching"),
+    (StoreState.WAITING.value, "Not in the store (never entered, or shipped)"),
 ]
 
 
@@ -215,63 +215,54 @@ class AnalyticsService(BarcodeAnalyticsMixin):
 
     async def _store_block(self, *, order_id=None, style_id=None,
                            client_scope=None) -> dict:
-        """Where this scope's pieces are in the store, by drawer state.
+        """Where this scope's pieces are in the store, by store state.
 
         Answers "how many are holding leather / lining / both / sent" for an
         order or a style — the part of the drill-down that no existing endpoint
         served, and the one the floor asks about most, because a piece sitting in
-        a drawer is invisible on a stage funnel: it has cleared its cut and has
+        the store is invisible on a stage funnel: it has cleared its cut and has
         no new event until line-stitching, so a pure event view shows it parked
         at PASTING with no indication that it is actually waiting on its lining.
         """
-        from app.modules.barcode.models import Drawer
-
         stmt = (
-            select(Drawer.state, func.count(func.distinct(Piece.id)))
+            select(Piece.store_state, func.count(func.distinct(Piece.id)))
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
             .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
-            .join(Drawer, Drawer.id == Piece.drawer_id)
-            .group_by(Drawer.state)
+            .group_by(Piece.store_state)
         )
         rows = (await self.db.execute(self._apply_scope(
             stmt, order_id=order_id, style_id=style_id,
             client_scope=client_scope))).all()
         by_state = {(s or "").lower(): int(n or 0) for s, n in rows}
 
-        # Pieces with no drawer at all — minted while the pool was full. They
-        # have barcodes and cannot be stored, so they are stalled in a way no
-        # drawer state can express.
-        nod_stmt = (
-            select(func.count(func.distinct(Piece.id)))
-            .select_from(Piece)
-            .join(SKU, SKU.id == Piece.sku_id)
-            .join(Style, Style.id == SKU.style_id)
-            .where(style_in_production())
-            .join(ClientOrder, ClientOrder.id == Style.client_order_id)
-            .where(Piece.drawer_id.is_(None))
-        )
-        no_drawer = int(await self.db.scalar(self._apply_scope(
-            nod_stmt, order_id=order_id, style_id=style_id,
-            client_scope=client_scope)) or 0)
+        # `no_drawer` USED TO BE A REAL STALL and is now structurally impossible.
+        # It counted pieces minted while the 200-box pool was full: they had
+        # barcodes, could not be stored, and therefore could not pass the merge
+        # gate — a stall no drawer state could express. The store is a state on
+        # the garment and a state has no capacity, so the bucket is always 0. It
+        # is still REPORTED, as a zero, so a saved report or a dashboard reading
+        # the key does not break; it simply can never be anything else.
+        no_drawer = 0
 
         buckets = [{"state": state, "label": label,
                     "pieces": by_state.get(state, 0)}
                    for state, label in _STORE_BUCKETS]
-        holding = (by_state.get(DrawerState.HOLDING_LEATHER.value, 0)
-                   + by_state.get(DrawerState.HOLDING_LINING.value, 0)
-                   + by_state.get(DrawerState.HOLDING_BOTH.value, 0))
+        holding = (by_state.get(StoreState.HOLDING_LEATHER.value, 0)
+                   + by_state.get(StoreState.HOLDING_LINING.value, 0)
+                   + by_state.get(StoreState.HOLDING_BOTH.value, 0))
         return {
             "buckets": buckets,
-            "holding_leather": by_state.get(DrawerState.HOLDING_LEATHER.value, 0),
-            "holding_lining": by_state.get(DrawerState.HOLDING_LINING.value, 0),
-            "holding_both": by_state.get(DrawerState.HOLDING_BOTH.value, 0),
-            "received": by_state.get(DrawerState.RECEIVED.value, 0),
-            "sended": by_state.get(DrawerState.SENDED.value, 0),
-            "in_store": holding + by_state.get(DrawerState.RECEIVED.value, 0),
-            "awaiting_parts": by_state.get(DrawerState.MERGED.value, 0),
+            "holding_leather": by_state.get(StoreState.HOLDING_LEATHER.value, 0),
+            "holding_lining": by_state.get(StoreState.HOLDING_LINING.value, 0),
+            "holding_both": by_state.get(StoreState.HOLDING_BOTH.value, 0),
+            "received": by_state.get(StoreState.RECEIVED.value, 0),
+            "sended": by_state.get(StoreState.SENDED.value, 0),
+            "in_store": holding + by_state.get(StoreState.RECEIVED.value, 0),
+            "awaiting_parts": by_state.get(StoreState.MERGED.value, 0),
+            # Always 0 — see above. Kept so nothing reading the key breaks.
             "no_drawer": no_drawer,
         }
 
@@ -293,13 +284,31 @@ class AnalyticsService(BarcodeAnalyticsMixin):
         
     # =============================================== explorer navigation tree
     async def explorer_tree(self, *, client_id: uuid.UUID | None = None,
-                            include_pieces: bool = True) -> dict:
+                            include_pieces: bool = True,
+                            pieces_per_style: int = 100) -> dict:
         """Full Client -> Order -> Style -> Piece nav tree for the left explorer.
         Scoped to one client (CLIENT-role users) or all clients. Piece leaves are
         LIGHT — enough to render + click through to /pieces/detail; full history
         stays in the drill-downs. Built with 4 bounded queries, no N+1.
         Set include_pieces=False at scale to get the skeleton (styles + counts
-        only) and lazy-load pieces on style-expand."""
+        only) and lazy-load pieces on style-expand.
+
+        THE PIECE LEAVES ARE CAPPED at `pieces_per_style`. They were not, and
+        `include_pieces` defaults to True, so the ordinary call built a tree
+        containing EVERY GARMENT THE FACTORY HAS EVER MADE — one live order alone
+        runs to 1,425 pieces in a single style. An escape hatch that has to be
+        opted into does not help the caller who does not know it exists.
+
+        `piece_count` remains the TRUE total, from a COUNT rather than from
+        len(leaves), so the tree still shows "1,425" while carrying 100 of them;
+        `pieces_truncated` says so per style. That is the right shape for a
+        navigation tree: enough to render and click through, never the whole
+        table. Full detail stays in the drill-downs.
+        """
+        # A hard ceiling, not a suggestion: the parameter is reachable from the
+        # query string and a caller asking for 10,000 leaves per style is asking
+        # for the behaviour this cap exists to prevent.
+        pieces_per_style = max(1, min(int(pieces_per_style or 100), 500))
         cstmt = select(Client.id, Client.name).order_by(Client.name)
         if client_id:
             cstmt = cstmt.where(Client.id == client_id)
@@ -338,7 +347,10 @@ class AnalyticsService(BarcodeAnalyticsMixin):
                     .order_by(SKU.code, Piece.seq)
                 )).all()
                 for pid, sid, code, seq, cname, ccode, size, stage in rows:
-                    pieces_by_style.setdefault(sid, []).append({
+                    bucket = pieces_by_style.setdefault(sid, [])
+                    if len(bucket) >= pieces_per_style:
+                        continue          # cap the leaves, keep counting below
+                    bucket.append({
                         "piece_id": str(pid),
                         "piece_code": code,
                         "seq": seq,
@@ -346,7 +358,16 @@ class AnalyticsService(BarcodeAnalyticsMixin):
                         "size": size,
                         "current_stage": stage,
                     })
-                count_by_style = {sid: len(v) for sid, v in pieces_by_style.items()}
+                # COUNT IN SQL, not len() of the capped list — the tree must still
+                # report how many pieces a style really has.
+                crows = (await self.db.execute(
+                    select(SKU.style_id, func.count(Piece.id))
+                    .select_from(Piece)
+                    .join(SKU, SKU.id == Piece.sku_id)
+                    .where(SKU.style_id.in_(style_ids))
+                    .group_by(SKU.style_id)
+                )).all()
+                count_by_style = {sid: int(n) for sid, n in crows}
             else:
                 crows = (await self.db.execute(
                     select(SKU.style_id, func.count(Piece.id))
@@ -365,6 +386,8 @@ class AnalyticsService(BarcodeAnalyticsMixin):
                 "article": article,
                 "piece_count": count_by_style.get(sid, 0),
                 "pieces": pieces_by_style.get(sid, []),
+                "pieces_truncated": (
+                    len(pieces_by_style.get(sid, [])) < count_by_style.get(sid, 0)),
             })
 
         orders_by_client: dict[uuid.UUID, list[dict]] = {}
@@ -520,8 +543,21 @@ class AnalyticsService(BarcodeAnalyticsMixin):
 
     # ================================================================ LEVEL 2
     async def style_detail(self, style_id: uuid.UUID,
-                           *, client_scope: uuid.UUID | None = None) -> dict:
-        """One style with all its pieces, each carrying its full stage history."""
+                           *, client_scope: uuid.UUID | None = None,
+                           params=None) -> dict:
+        """One style with its pieces, each carrying its full stage history.
+
+        PAGED (`params`). This built TWO unbounded result sets: every piece of
+        the style, and every production event belonging to those pieces. On a
+        real order that is 1,425 pieces and roughly 11,400 events in one request,
+        assembled into a nested structure in Python — the single heaviest read in
+        the module.
+
+        The header (`totals`, `stages`, `store`) is computed by its own queries
+        and stays WHOLE-STYLE: those are the numbers a manager is actually
+        looking at, and they must not change because someone turned a page. Only
+        `pieces` pages, and `piece_count` remains the style's true total.
+        """
         stmt = (
             select(Style.name, Style.article, ClientOrder.order_number, Client.name,
                    Style.code, Style.production_status, Style.needs_lining,
@@ -538,36 +574,47 @@ class AnalyticsService(BarcodeAnalyticsMixin):
         (style_name, article, order_number, client_name, style_code,
          prod_status, needs_lining, order_id) = head
 
-        # The piece list carries its drawer, so a row can show STORE without a
-        # second call. OUTER join: a piece with no drawer (minted while the pool
-        # was full) must still appear — it is precisely the row someone is
-        # looking for when they ask why a style has stalled.
-        from app.modules.barcode.models import Drawer
-
-        pieces = (await self.db.execute(
+        # The piece list carries the garment's own store standing, so a row can
+        # show STORE without a second call — and without the outer join that used
+        # to be needed for a piece the drawer pool had no room for.
+        pieces_stmt = (
             select(Piece.id, Piece.code, Piece.seq, SKU.code,
                    SKU.color_name, SKU.color_code, SKU.size,
-                   Drawer.code, Drawer.state, Drawer.leather_in, Drawer.lining_in)
+                   Piece.store_state, Piece.leather_in, Piece.lining_in)
             .join(SKU, SKU.id == Piece.sku_id)
-            .outerjoin(Drawer, Drawer.id == Piece.drawer_id)
             .where(SKU.style_id == style_id)
-            .order_by(SKU.code, Piece.seq)
-        )).all()
+            .order_by(SKU.code, Piece.seq, Piece.id)
+        )
+        if params is not None:
+            from app.core.pagination import paginate_rows
+            pieces, style_piece_total = await paginate_rows(
+                self.db, pieces_stmt, params)
+        else:
+            pieces = (await self.db.execute(pieces_stmt)).all()
+            style_piece_total = len(pieces)
+        page_piece_ids = [row[0] for row in pieces]
 
-        # All events for this style's pieces in one query; group in Python.
-        events = (await self.db.execute(
-            select(ProductionEvent.piece_id, Operation.code, Operation.label,
-                   Operation.sequence, Employee.name, ProductionEvent.work_date,
-                   ProductionEvent.entered_by, ProductionEvent.created_at)
-            .select_from(ProductionEvent)
-            .join(Piece, Piece.id == ProductionEvent.piece_id)
-            .join(SKU, SKU.id == Piece.sku_id)
-            .join(Operation, Operation.id == ProductionEvent.operation_id)
-            .join(Employee, Employee.id == ProductionEvent.employee_id)
-            .where(SKU.style_id == style_id)
-            .order_by(ProductionEvent.piece_id, ProductionEvent.work_date,
-                      ProductionEvent.created_at)
-        )).all()
+        # Events for the pieces ON THIS PAGE, in one query; grouped in Python.
+        #
+        # Scoping to `page_piece_ids` rather than to the style is what makes the
+        # paging worth anything: the events are the bulk of this response — one
+        # row per piece per stage — so fetching all of them for a style and then
+        # using 50 pieces' worth would page the small half and leave the large
+        # half unbounded.
+        events = []
+        if page_piece_ids:
+            events = (await self.db.execute(
+                select(ProductionEvent.piece_id, Operation.code, Operation.label,
+                       Operation.sequence, Employee.name, ProductionEvent.work_date,
+                       ProductionEvent.entered_by, ProductionEvent.created_at)
+                .select_from(ProductionEvent)
+                .join(Piece, Piece.id == ProductionEvent.piece_id)
+                .join(Operation, Operation.id == ProductionEvent.operation_id)
+                .join(Employee, Employee.id == ProductionEvent.employee_id)
+                .where(ProductionEvent.piece_id.in_(page_piece_ids))
+                .order_by(ProductionEvent.piece_id, ProductionEvent.work_date,
+                          ProductionEvent.created_at)
+            )).all()
 
         stages_by_piece: dict[uuid.UUID, list[dict]] = {}
         seen_ops: dict[uuid.UUID, set] = {}
@@ -594,16 +641,16 @@ class AnalyticsService(BarcodeAnalyticsMixin):
 
         piece_rows = []
         for (pid, code, seq, sku_code, color_name, color_code, size,
-             drawer_code, drawer_state, leather_in, lining_in) in pieces:
+             store_state, leather_in, lining_in) in pieces:
             history = stages_by_piece.get(pid, [])
             event_stage = history[-1]["stage_code"] if history else None
             # The STORE overlay, same rule the production screens apply: a piece
-            # parked in a drawer shows STORE rather than the cut stage it last
+            # parked in the store shows STORE rather than the cut stage it last
             # logged, because "PASTING" on a garment that has been sitting in the
             # store for three days is a true statement that answers the wrong
             # question.
             disp = display_stage(current_event_stage=event_stage,
-                                 drawer_state=drawer_state,
+                                 store_state=store_state,
                                  needs_lining=bool(needs_lining)
                                  if needs_lining is not None else True)
             piece_rows.append({
@@ -623,11 +670,9 @@ class AnalyticsService(BarcodeAnalyticsMixin):
                 "display_label": disp["label"],
                 "in_store": disp["in_store"],
                 "store_status": disp["store_status"],
-                "drawer_code": drawer_code,
-                "drawer_state": drawer_state,
-                "holding": (holding_label(leather_in=leather_in,
-                                          lining_in=lining_in)
-                            if drawer_code else None),
+                "store_state": store_state,
+                "holding": holding_label(leather_in=leather_in,
+                                         lining_in=lining_in),
                 "completed": any(s["stage_code"] == _TERMINAL_STAGE
                                  for s in history),
                 "stages": history,
@@ -646,8 +691,15 @@ class AnalyticsService(BarcodeAnalyticsMixin):
             "totals": totals,
             "stages": stage_rows,
             "store": store,
-            "piece_count": len(piece_rows),
+            # The STYLE's piece count, not the page's — it is a fact about the
+            # style and a manager reads it as one.
+            "piece_count": style_piece_total,
             "pieces": piece_rows,
+            "limit": params.limit if params is not None else None,
+            "offset": params.offset if params is not None else None,
+            "count": len(piece_rows),
+            "has_more": ((params.offset + len(piece_rows)) < style_piece_total
+                         if params is not None else False),
         }
 
     # ================================================================ LEVEL 3
@@ -656,8 +708,6 @@ class AnalyticsService(BarcodeAnalyticsMixin):
                            seq: int | None = None,
                            client_scope: uuid.UUID | None = None) -> dict:
         """One piece by piece_code OR (sku_code + seq): header + stage history."""
-        from app.modules.barcode.models import Drawer
-
         q = (
             select(Piece.id, Piece.code, Piece.seq,
                    SKU.code, SKU.color_name, SKU.color_code, SKU.size,
@@ -665,15 +715,15 @@ class AnalyticsService(BarcodeAnalyticsMixin):
                    ClientOrder.order_number, Client.name,
                    Style.id, ClientOrder.id, Style.code, Style.needs_lining,
                    Piece.needs_lining,
-                   Drawer.code, Drawer.state, Drawer.leather_in, Drawer.lining_in,
-                   Drawer.received_at, Drawer.sended_at)
+                   Piece.store_state, Piece.leather_in, Piece.lining_in,
+                   Piece.accessories_in,
+                   Piece.store_received_at, Piece.store_sended_at)
             .select_from(Piece)
             .join(SKU, SKU.id == Piece.sku_id)
             .join(Style, Style.id == SKU.style_id)
             .where(style_in_production())
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .join(Client, Client.id == ClientOrder.client_id)
-            .outerjoin(Drawer, Drawer.id == Piece.drawer_id)
         )
         if piece_code:
             q = q.where(Piece.code == _norm(piece_code))
@@ -690,7 +740,7 @@ class AnalyticsService(BarcodeAnalyticsMixin):
         (pid, code, pseq, skucode, color_name, color_code, size,
          style_name, article, order_number, client_name,
          style_id, order_id, style_code, style_needs_lining, piece_needs_lining,
-         drawer_code, drawer_state, leather_in, lining_in,
+         store_state, leather_in, lining_in, accessories_in,
          received_at, sended_at) = row
 
         # WHO DID THE WORK, per stage — the employee_id as well as the name, so a
@@ -732,13 +782,21 @@ class AnalyticsService(BarcodeAnalyticsMixin):
         # `piece.needs_lining`, which is a copy taken at mint time. The piece page
         # is where somebody goes to find out why a garment has not moved, so it
         # must agree with the gate that is refusing to move it.
-        from app.modules.drawers.service import DrawerService
+        # StoreService. This read used to call the PRIVATE
+        # `DrawerService._needs_lining`, which was the last thing in application
+        # code keeping the drawers module alive — it has since been deleted
+        # outright. The store owns this question now, and
+        # the two resolvers were equivalent: both assemble the same kwargs for
+        # `lining_rules.lining_required`, and that function does
+        # `bool(stored_flag)`, so the one difference (None vs False) could not
+        # change an answer.
+        from app.modules.store.service import StoreService
         piece_obj = await self.db.get(Piece, pid)
-        needs_lining, lining_reason = await DrawerService(self.db)._needs_lining(
+        needs_lining, lining_reason = await StoreService(self.db).needs_lining(
             piece_obj)
 
         disp = display_stage(current_event_stage=event_stage,
-                             drawer_state=drawer_state,
+                             store_state=store_state,
                              needs_lining=needs_lining)
 
         # EVERY STAGE, NOT JUST THE LOGGED ONES. A history list alone cannot show
@@ -788,22 +846,25 @@ class AnalyticsService(BarcodeAnalyticsMixin):
             "lining_reason": lining_reason,
             "lining_declared_on_style": style_needs_lining,
             "completed": _TERMINAL_STAGE in done_codes,
-            # WHERE IT IS SITTING, on the piece page itself — the drawer is the
-            # thing nobody can see from anywhere except the store hub.
+            # WHERE IT STANDS IN THE STORE, on the piece page itself — the one
+            # thing that used to be visible only from the store hub.
+            #
+            # `drawer_code` / `drawer_state` are gone from this block. There is
+            # no box to name, and every field here now has an answer for EVERY
+            # garment: the old shape returned nulls for a piece the drawer pool
+            # had no room for, which read as "nothing is known about it".
             "store": {
-                "drawer_code": drawer_code,
-                "drawer_state": drawer_state,
-                "holding": (holding_label(leather_in=leather_in,
-                                          lining_in=lining_in)
-                            if drawer_code else None),
-                "leather_in": bool(leather_in) if drawer_code else None,
-                "lining_in": bool(lining_in) if drawer_code else None,
+                "state": store_state,
+                "holding": holding_label(leather_in=leather_in,
+                                         lining_in=lining_in),
+                "leather_in": bool(leather_in),
+                "lining_in": bool(lining_in),
+                "accessories_in": bool(accessories_in),
                 "received_at": received_at.isoformat() if received_at else None,
                 "sended_at": sended_at.isoformat() if sended_at else None,
                 "awaiting": [p for p, missing in
-                             (("LEATHER", drawer_code and not leather_in),
-                              ("LINING", drawer_code and needs_lining
-                               and not lining_in))
+                             (("LEATHER", not leather_in),
+                              ("LINING", needs_lining and not lining_in))
                              if missing],
             },
             "checklist": checklist,
@@ -1043,7 +1104,7 @@ class AnalyticsService(BarcodeAnalyticsMixin):
                 "lines": lines,
             })
         employees.sort(key=lambda e: -e["total_amount"])
-
+ 
         return {
             "start": start,
             "end": end,

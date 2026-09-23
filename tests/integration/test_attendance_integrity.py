@@ -347,18 +347,30 @@ async def test_a_proxy_scan_needs_no_position_either(db, supervisor):
 
 # ═══════════════════════════════════════════════════════ proxy restrictions
 @pytest.mark.asyncio
-async def test_proxy_marking_is_limited_to_piece_rate_workers(db, supervisor):
-    """Proxy exists for daily-wage workers who hold no login. A monthly employee
-    has one, so marking them by proxy is refused (service.py:245-247)."""
+async def test_proxy_marking_accepts_any_wage_type(db, supervisor):
+    """THE PIECE-RATE RESTRICTION WAS DELIBERATELY REMOVED — this test used to
+    assert it and had to be inverted.
+
+    It rested on "a monthly employee has a login, so they can punch themselves
+    in". That premise is gone: CLAUDE.md s3 says shop-floor workers get NO login
+    regardless of wage type, and a MONTHLY worker used to be auto-given an
+    `employee` login only because of a rule that was since removed. So a salaried
+    worker who forgets their card has no way in at all if proxy refuses them.
+
+    CLAUDE.md s10 is explicit about the manual door: "when a card fails or is
+    forgotten. ANY WAGE TYPE." Its sibling
+    test_manual_checkin_works_for_monthly_worker asserts the same thing from the
+    other side.
+    """
     await _configured(db)
     salaried = await _employee(db, name="SALARIED", wage_type=WageType.MONTHLY)
 
-    with pytest.raises(HTTPException) as exc:
-        await AttendanceService(db).proxy_mark_present(
-            supervisor, schemas.ProxyMarkRequest(
-                employee_ids=[salaried.id], lat=NEAR[0], lon=NEAR[1]))
-    assert exc.value.status_code == 400
-    assert "piece-rate" in str(exc.value.detail).lower()
+    out = await AttendanceService(db).proxy_mark_present(
+        supervisor, schemas.ProxyMarkRequest(
+            employee_ids=[salaried.id], lat=NEAR[0], lon=NEAR[1]))
+
+    assert len(out) == 1
+    assert out[0].employee_id == salaried.id
 
 
 @pytest.mark.asyncio

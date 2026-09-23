@@ -204,21 +204,54 @@ async def test_the_uom_is_derived_not_taken_from_the_caller(db, draft_style):
 
 # ══════════════════════════════════════════════════════════ the freeze
 @pytest.mark.asyncio
-async def test_a_released_style_refuses_every_write_and_says_why(db, order_tree):
-    """order_tree's style is RELEASED. Its garments are already being issued
-    against the recipe, so the recipe is frozen — and the message has to point at
-    the escape hatch, or a typo'd article becomes unfixable for a whole order."""
+async def test_a_released_style_freezes_what_it_was_cut_and_costed_against(
+        db, order_tree):
+    """order_tree's style is RELEASED, so the parts of the recipe the garments
+    were CUT against are frozen — and the message has to point at the escape
+    hatch, or a typo'd article becomes unfixable for a whole order.
+
+    Editing the LEATHER line after release would rewrite what a garment was
+    costed at AFTER it was cut, leaving the cutting record and the costing
+    disagreeing with nothing to say which is right.
+    """
     from fastapi import HTTPException
     svc = StyleSpecService(db)
     style_id = order_tree["style"].id
 
     for call in (svc.replace_spec(style_id, [LEATHER], actor_name="DM"),
-                 svc.add_line(style_id, dict(BUTTON), actor_name="DM"),
                  svc.confirm(style_id, no_accessories=True, actor_name="DM")):
         with pytest.raises(HTTPException) as exc:
             await call
         assert exc.value.status_code == 409
         assert "/materials/issues" in str(exc.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_an_accessory_may_still_be_corrected_after_release(db, order_tree):
+    """CHANGED DELIBERATELY (backend fix #12).
+
+    Reported: "After release, if the DM finds an incorrect accessory assignment,
+    there is currently no option to edit it."
+
+    An accessory line is not a measurement of work already done — it is a list of
+    what still has to go in the bag, and the wrong button is discovered exactly
+    when somebody goes to fetch it, which is always after release. Freezing it
+    meant the only fix was a database edit.
+
+    WHAT THIS DOES NOT DO is rewrite history: piece_material_issue still records
+    what each garment was actually given, and garments already kitted keep it.
+    """
+    svc = StyleSpecService(db)
+    style_id = order_tree["style"].id
+    line = await svc.add_line(style_id, dict(BUTTON), actor_name="DM")
+    assert line["article"] == BUTTON["article"]
+
+    patched = await svc.patch_line(style_id, line["line_id"],
+                                   {"qty_per_piece": 6}, actor_name="DM")
+    assert patched["qty_per_piece"] == 6.0
+
+    gone = await svc.deactivate_line(style_id, line["line_id"], actor_name="DM")
+    assert gone["deactivated"] is True
 
 
 # ══════════════════════════════════════════ the style / SKU override merge

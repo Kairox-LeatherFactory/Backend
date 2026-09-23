@@ -84,7 +84,7 @@ async def test_reissue_does_not_touch_the_work_already_logged(db, cutter,
     """The point of the whole design: a new plastic card is not a new person."""
     emp, _ = cutter
     db.add(ProductionEvent(
-        sku_id=pieces[0][0].sku_id, operation_id=operations["LEATHER_CUTTING"].id,
+        sku_id=pieces[0].sku_id, operation_id=operations["LEATHER_CUTTING"].id,
         employee_id=emp.id, work_date=__import__("datetime").date.today(),
         qty=40, entered_by="test"))
     await db.commit()
@@ -131,60 +131,62 @@ async def test_reissuing_twice_leaves_exactly_one_active_card(db):
 
 
 @pytest.mark.asyncio
-async def test_one_non_numeric_code_jams_minting_for_that_prefix_forever(db, cutter):
-    """REPRODUCES PRIOR FINDING F16/F79/F99 (still OPEN — pass-07-repository-
-    layer.md:55-68, delta-register.md:61), and sharpens its stated consequence.
+async def test_a_non_numeric_code_does_not_jam_minting_for_that_prefix(db):
+    """A non-numeric code in the namespace must not stop the counter.
 
-    pass-07 predicts that "the ordering is lexical on a string code, so a format
-    change ... silently returns the wrong maximum". This is that prediction,
-    executed — and the consequence is worse than "wrong maximum": it is a
-    PERMANENT jam, not a one-off bad number.
+    THIS TEST USED TO ASSERT THE JAM, and said so: "This test pins the current
+    behaviour, so the fix is a visible change." This is that change.
 
-    `_next_code` (barcode/repository.py:53-76) derives the next counter from the
-    LEXICOGRAPHICALLY highest code matching `PREFIX-%`, then falls back to 0 when
-    that code's tail is not all digits:
+    `_next_code` derives the next counter from the lexicographically highest
+    code matching `PREFIX-%`. It took LIMIT 1 and fell back to 0 when that one
+    code's tail was not all digits, which is a PERMANENT jam rather than a
+    one-off bad number: the first mint after it returns `EMP-000001`, and so
+    does the second, which dies on the unique index. That is an unhandled
+    IntegrityError — HTTP 500 — on every employee create and every card reissue
+    from then on, with no way out through the API.
 
-        top = ... ORDER BY code DESC LIMIT 1
-        if tail.isdigit(): mx = int(tail)      # else mx stays 0
-        return f"{prefix}-{mx + 1:06d}"
+    It now walks down past non-numeric tails. That is correct rather than a
+    heuristic: numeric tails are zero-padded to a fixed width, so among them
+    lexicographic order is numeric order, and skipping other rows cannot
+    reorder them.
 
-    So a SINGLE code in the namespace whose tail sorts high and is not numeric
-    pins the counter at 0 permanently. The first mint after that returns
-    `EMP-000001`; the second returns `EMP-000001` again and dies on the unique
-    index — an unhandled IntegrityError (HTTP 500) on EVERY subsequent employee
-    create and card reissue, forever, with no way out through the API.
+    THE PRECONDITION IS CONSTRUCTED HERE AND THE TEST TAKES NO EMPLOYEE FIXTURE.
+    Both matter, and the second was learned the hard way.
 
-    The docstring's premise ("the zero-padded numeric tail is fixed-width, so
-    lexicographic order == numeric order") holds only while EVERY code in the
-    prefix is numeric-tailed. Nothing enforces that: `register_nocommit`
-    (repository.py:79-91) accepts any string, and the column has no CHECK.
+    It first asserted that `cutter`'s auto-generated `EMP-<uuid hex>` had a
+    non-numeric tail — true only ~94% of the time, since six hex characters are
+    all digits about 6% of the time. Dropping that assertion was not enough:
+    merely REQUESTING the fixture still puts a random `EMP-<hex>` in the table,
+    and when those six characters happen to be digits they form a number far
+    larger than the 42 seeded below, so the next code is EMP-573197 rather than
+    EMP-000043. Same 6% flake, different cause.
 
-    In app code `_next_code` is currently the only EMP writer, so this needs a
-    migrated, seeded or hand-inserted row to fire — but the shared test fixture
-    writes exactly such a row (`EMP-{uuid[:6].upper()}`, conftest.py:170-172),
-    which is how readily the shape occurs. A max over the numeric tail, or a real
-    sequence column, removes the class.
-
-    This test pins the current behaviour, so the fix is a visible change.
+    So this test owns every EMP- row that exists while it runs. A test that
+    asserts an exact generated code cannot share a namespace with a fixture that
+    generates random ones.
     """
-    from sqlalchemy.exc import IntegrityError
+    from app.core.enums import BarcodeStatus, BarcodeType
+    from app.modules.barcode.models import BarcodeRegistry
     from app.modules.employees import schemas as eschemas
     from app.modules.employees.service import EmployeeService
 
-    # `cutter` has already put EMP-<hex> in the table (tail is not all digits).
-    emp, bc = cutter
-    assert not bc.code[4:].isdigit(), "fixture no longer reproduces the precondition"
+    # A numeric high-water mark, and a letter-tailed code that sorts ABOVE it.
+    db.add(BarcodeRegistry(code="EMP-000042", type=BarcodeType.EMPLOYEE.value,
+                           status=BarcodeStatus.ACTIVE.value, caption="numeric"))
+    db.add(BarcodeRegistry(code="EMP-ZZZZZZ", type=BarcodeType.EMPLOYEE.value,
+                           status=BarcodeStatus.ACTIVE.value, caption="letters"))
+    await db.commit()
 
     first = await EmployeeService(db).create(eschemas.EmployeeCreate(
         name="AFTER JAM ONE", designation="CUTTER",
         wage_type=WageType.PIECE_RATE))
-    assert first.employee_barcode == "EMP-000001"
+    # continues from the real numeric maximum, not from zero
+    assert first.employee_barcode == "EMP-000043"
 
-    with pytest.raises(IntegrityError):
-        await EmployeeService(db).create(eschemas.EmployeeCreate(
-            name="AFTER JAM TWO", designation="CUTTER",
-            wage_type=WageType.PIECE_RATE))
-    await db.rollback()
+    second = await EmployeeService(db).create(eschemas.EmployeeCreate(
+        name="AFTER JAM TWO", designation="CUTTER",
+        wage_type=WageType.PIECE_RATE))
+    assert second.employee_barcode == "EMP-000044"
 
 
 # ═══════════════════════════════ deactivate: the leaver, history intact
@@ -261,7 +263,7 @@ async def test_a_retired_piece_label_also_reports_410(db, pieces):
     """F18 (barcode/service.py:59-65): retirement is a lifecycle state on the
     registry, not an employee-only concept. A reprinted piece label whose old
     code is still stuck to a garment must not silently resolve."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     row = (await db.execute(select(BarcodeRegistry)
                             .where(BarcodeRegistry.piece_id == piece.id))
            ).scalars().first()
@@ -282,7 +284,7 @@ async def test_a_piece_code_is_rejected_by_the_employee_door(db, pieces):
     """Type confusion at the scan door: scanning a garment where the actor is
     expected must 404, not resolve to whatever id happens to be populated
     (barcode/service.py:95-98)."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     with pytest.raises(HTTPException) as exc:
         await BarcodeService(db).resolve_employee_id(piece.code)
     assert exc.value.status_code == 404
@@ -297,10 +299,14 @@ async def test_an_employee_code_is_rejected_by_the_piece_door(db, cutter):
 
 
 @pytest.mark.asyncio
-async def test_a_drawer_code_is_rejected_by_the_lot_door(db, pieces):
-    _, drawer = pieces[0]
+async def test_a_piece_code_is_rejected_by_the_lot_door(db, pieces):
+    """A narrow resolver must refuse a code of the wrong type, not answer with
+    whatever FK happens to be populated. This used to use a DRAWER code; the
+    piece code is the one every operator has and is just as wrong for this door.
+    """
+    piece = pieces[0]
     with pytest.raises(HTTPException) as exc:
-        await BarcodeService(db).resolve_lot_id(drawer.code)
+        await BarcodeService(db).resolve_lot_id(piece.code)
     assert exc.value.status_code == 404
 
 

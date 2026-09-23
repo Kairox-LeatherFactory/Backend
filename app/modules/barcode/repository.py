@@ -3,11 +3,11 @@
 modules/barcode/repository.py — Async data access for the barcode registry
 ================================================================================
 Owns every write to barcode_registry + the sequence counters that make employee
-and drawer codes unique. resolve() is a single indexed read on `code`.
+and lot codes unique. resolve() is a single indexed read on `code`.
 
 CODE GENERATION IS DETERMINISTIC AND COLLISION-SAFE.
     Piece codes come from the piece (STYLE-COLOUR-SIZE-seq, already unique).
-    Employee/drawer/lot codes are minted here as PREFIX + zero-padded counter
+    Employee/lot codes are minted here as PREFIX + zero-padded counter
     (EMP-000123). The counter is the current max for that prefix + 1; the unique
     index on `code` is the hard guard, so a concurrent mint fails loudly rather
     than colliding — retry the request if that ever fires (create rate is a few
@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import BarcodeStatus, BarcodeType
 from app.modules.barcode.models import (
-    BarcodeRegistry, Drawer, MaterialLot, MaterialReservation,
+    BarcodeRegistry, MaterialLot, MaterialReservation,
 )
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
 from app.modules.employees.models import Employee
@@ -100,14 +100,29 @@ class BarcodeRepository:
         return res.scalar_one_or_none()
 
     async def get_for_employee(self, employee_id: uuid.UUID,
-                               active_only: bool = True) -> BarcodeRegistry | None:
+                               active_only: bool = True,
+                               for_update: bool = False) -> BarcodeRegistry | None:
+        """This employee's card. Pass for_update=True if you are about to RETIRE
+        it.
+
+        Reissue and deactivate are read-then-retire: find the active card, flip
+        its status, mint a replacement. Two HR users reissuing the same worker at
+        the same moment both read the SAME active row, both retire it, and both
+        mint a new one — leaving the employee with two active cards. `resolve` is
+        then ambiguous for that worker, which is exactly what the one-row-per-code
+        registry exists to prevent. The lock serialises them: the second reads the
+        first's result, finds no active card, and mints one replacement.
+        """
         stmt = select(BarcodeRegistry).where(
             BarcodeRegistry.employee_id == employee_id,
             BarcodeRegistry.type == BarcodeType.EMPLOYEE.value,
         )
         if active_only:
             stmt = stmt.where(BarcodeRegistry.status == BarcodeStatus.ACTIVE.value)
-        return await self.db.scalar(stmt.order_by(BarcodeRegistry.created_at.desc()))
+        stmt = stmt.order_by(BarcodeRegistry.created_at.desc())
+        if for_update:
+            stmt = stmt.with_for_update()
+        return await self.db.scalar(stmt)
 
     async def codes_for_employees(
         self, employee_ids: list[uuid.UUID], active_only: bool = True
@@ -143,16 +158,16 @@ class BarcodeRepository:
         """Everything the PIECE payload shows, in one query.
 
         This was 3 round-trips in the service (piece+joins, then a drawer get, then
-        a consumption select). The drawer is a LEFT JOIN (null before merge) and the
-        consumption is a correlated scalar subquery (null before cutting), so the
-        whole card is one statement — one scan, one query.
+        a consumption select). The consumption is a correlated scalar subquery
+        (null before cutting), so the whole card is one statement — one scan, one
+        query.
 
-        THE DRAWER JOIN IS ON `Drawer.current_piece_id`, NOT `Piece.drawer_id`.
-        Those two are the same link from opposite ends, but only one of them is
-        live: `release_nocommit` nulls BOTH when a piece ships, while a store scan
-        moves `Drawer.state`/`leather_in`/`lining_in` on the row that CLAIMS the
-        piece. Reading the drawer through the claim is what makes the state and
-        holding columns below (bug #12) the same answer the store screen gives.
+        THE STORE COLUMNS COME OFF THE PIECE, and there is no join left to get
+        them wrong. They used to be read through `Drawer.current_piece_id` — the
+        live claim, as opposed to `Piece.drawer_id`, the piece's own assignment —
+        and picking the wrong one of those two gave a card that disagreed with the
+        store screen. The garment carries its own state now, so the question does
+        not arise.
 
         ARTICLE (bug #7/#19) comes off Style — it is the field the printed sticker
         must show and the one the barcode payload never carried.
@@ -179,10 +194,8 @@ class BarcodeRepository:
                 ClientOrder.order_number,
                 Client.name.label("client_name"),
                 Operation.code.label("current_stage"),
-                Drawer.id.label("drawer_id"),
-                Drawer.code.label("drawer_code"),
-                Drawer.state.label("drawer_state"),
-                Drawer.leather_in, Drawer.lining_in,
+                Piece.store_state, Piece.leather_in, Piece.lining_in,
+                Piece.accessories_in,
                 consumption.label("consumption_qty"),
             )
             .join(SKU, SKU.id == Piece.sku_id)
@@ -190,7 +203,6 @@ class BarcodeRepository:
             .join(ClientOrder, ClientOrder.id == Style.client_order_id)
             .join(Client, Client.id == ClientOrder.client_id)
             .outerjoin(Operation, Operation.id == Piece.current_operation_id)
-            .outerjoin(Drawer, Drawer.current_piece_id == Piece.id)
             .where(Piece.id == piece_id)
         )).first()
 
@@ -199,15 +211,6 @@ class BarcodeRepository:
             select(Employee.id, Employee.name, Employee.designation,
                    Employee.wage_type, Employee.is_active)
             .where(Employee.id == employee_id)
-        )).first()
-
-    async def drawer_card(self, drawer_id: uuid.UUID) -> Row | None:
-        return (await self.db.execute(
-            select(Drawer.id, Drawer.code, Drawer.seq, Drawer.state,
-                   Drawer.current_piece_id, Drawer.leather_in, Drawer.lining_in,
-                   Drawer.accessories_in,
-                   )
-            .where(Drawer.id == drawer_id)
         )).first()
 
     async def lot_card(self, lot_id: uuid.UUID) -> Row | None:
@@ -261,17 +264,49 @@ class BarcodeRepository:
         integer sequence column would be the fully clean long-term form.
         """
         like = f"{prefix}-%"
-        top = await self.db.scalar(
+        base = (
             select(BarcodeRegistry.code)
             .where(BarcodeRegistry.code.like(like))
             .order_by(BarcodeRegistry.code.desc())
-            .limit(1)
         )
+        head = len(prefix) + 1
+
+        def _tail(code: str | None) -> str:
+            return (code or "")[head:]
+
+        # FAST PATH — one row, which is what this costs in every normal case.
+        # F79/F99: this must not go back to SELECTing every barcode with the
+        # prefix and taking the max in Python; that was O(all barcodes)
+        # transferred per mint and quadratic across an import that mints
+        # hundreds. Numeric tails are zero-padded to a fixed width, so among
+        # them lexicographic order IS numeric order and the top row is the
+        # answer.
+        top = await self.db.scalar(base.limit(1))
         mx = 0
-        if top:
-            tail = top[len(prefix) + 1:]
-            if tail.isdigit():
-                mx = int(tail)
+        if top is not None and _tail(top).isdigit():
+            mx = int(_tail(top))
+        elif top is not None:
+            # SLOW PATH — only when the highest code is NOT numeric-tailed.
+            #
+            # This used to give up here and leave the counter at 0, which is a
+            # PERMANENT jam rather than a one-off bad number: the next mint
+            # returns PREFIX-000001, and so does the one after, which dies on the
+            # unique index. That is an unhandled IntegrityError (HTTP 500) on
+            # every employee create and every card reissue from then on, with no
+            # way out through the API. One row is enough to cause it,
+            # `register_nocommit` accepts any string, and the shared test fixture
+            # writes exactly such a row (EMP-<hex>).
+            #
+            # Walking further down is CORRECT, not a heuristic: removing
+            # non-numeric rows cannot reorder the numeric ones, so the first
+            # all-digit tail below them is still the highest numeric code. The
+            # window is bounded because non-numeric codes are rare — fixtures,
+            # seeds, hand-inserted rows — and if it is somehow all non-numeric,
+            # mx stays 0, which is the old behaviour and no worse.
+            for code in await self.db.scalars(base.limit(500)):
+                if _tail(code).isdigit():
+                    mx = int(_tail(code))
+                    break
         return f"{prefix}-{mx + 1:0{width}d}"
 
     # ── registration (all *_nocommit; the SERVICE owns the transaction) ──────
@@ -279,8 +314,8 @@ class BarcodeRepository:
                           caption: str | None = None,
                           piece_id: uuid.UUID | None = None,
                           employee_id: uuid.UUID | None = None,
-                          drawer_id: uuid.UUID | None = None,
                           material_lot_id: uuid.UUID | None = None,
+                          material_sheet_id: uuid.UUID | None = None,
                           order_id: uuid.UUID | None = None,
                           sku_id: uuid.UUID | None = None,
                           style_id: uuid.UUID | None = None,
@@ -288,7 +323,8 @@ class BarcodeRepository:
         row = BarcodeRegistry(
             code=_norm(code), type=type_.value, status=BarcodeStatus.ACTIVE.value,
             caption=caption, piece_id=piece_id, employee_id=employee_id,
-            drawer_id=drawer_id, material_lot_id=material_lot_id,
+            material_lot_id=material_lot_id,
+            material_sheet_id=material_sheet_id,
             order_id=order_id, sku_id=sku_id, style_id=style_id,
             is_alias=is_alias,
         )
@@ -301,13 +337,6 @@ class BarcodeRepository:
         return self.register_nocommit(
             code=code, type_=BarcodeType.EMPLOYEE,
             employee_id=employee_id, caption=caption)
-
-    async def mint_drawer_code_nocommit(self, drawer_id: uuid.UUID, seq: int,
-                                        caption: str | None = None) -> BarcodeRegistry:
-        code = f"DRW-{seq:04d}"
-        return self.register_nocommit(
-            code=code, type_=BarcodeType.DRAWER, drawer_id=drawer_id,
-            caption=caption or f"Drawer {seq}")
 
     # ── the compact piece code (bug #19) ─────────────────────────────────────
     async def max_short_code_counter(self) -> int:
@@ -381,6 +410,31 @@ class BarcodeRepository:
         code = await self._next_code(prefix)
         return self.register_nocommit(
             code=code, type_=type_, material_lot_id=material_lot_id, caption=caption)
+
+    def mint_sheet_code_nocommit(self, sheet, caption: str | None = None):
+        """One hide's label. The CODE IS THE SHEET'S OWN, not a generated serial.
+
+        WHY NOT `_next_code("LS")` LIKE EVERY OTHER MINT. `_next_code` derives its
+        counter from the lexicographically greatest code in the prefix and falls
+        back to 0 when that code's tail is not all digits — so ONE non-numeric
+        code in the namespace pins the counter at 0 permanently and every
+        subsequent mint collides on the unique index. That is a live, open bug for
+        the EMP- prefix (see the F16/F79/F99 regression test) and there is no
+        reason to enrol a new prefix in it.
+
+        MaterialSheet.code is already allocated from a COUNT inside the same
+        transaction that creates the hides, and it is already unique by
+        constraint. Reusing it means the label and the row cannot disagree, and
+        the registry row is a pure pointer.
+
+        BOTH LINKS ARE SET. A scan has to answer "which hide" and "what article
+        and colour is it" in one read; the sheet carries the first and only its
+        lot carries the second.
+        """
+        return self.register_nocommit(
+            code=sheet.code, type_=BarcodeType.LEATHER_SHEET,
+            material_sheet_id=sheet.id, material_lot_id=sheet.material_lot_id,
+            caption=caption)
 
     # ── retire / reissue (employee) ──────────────────────────────────────────
     async def retire_nocommit(self, row: BarcodeRegistry, reason: str) -> None:
@@ -517,18 +571,50 @@ class BarcodeRepository:
             .order_by(func.max(BarcodeRegistry.created_at).desc())
         )
 
+        self._orders_with_barcodes_stmt = stmt      # reused by the paged form
         rows = (await self.db.execute(stmt)).all()
-        return [
-            {
-                "order_id": r.order_id,
-                "order_number": r.order_number,
-                "client_name": r.client_name,
-                "minted": int(r.minted),
-                "first_generated_at": r.first_generated_at,
-                "last_generated_at": r.last_generated_at,
-            }
-            for r in rows
-        ]
+        return [self._order_barcode_row(r) for r in rows]
+
+    @staticmethod
+    def _order_barcode_row(r) -> dict:
+        return {
+            "order_id": r.order_id,
+            "order_number": r.order_number,
+            "client_name": r.client_name,
+            "minted": int(r.minted),
+            "first_generated_at": r.first_generated_at,
+            "last_generated_at": r.last_generated_at,
+        }
+
+    async def page_orders_with_barcodes(self, params) -> tuple[list[dict], int]:
+        """One page of the barcode-orders screen, newest minting first.
+
+        GROUP BY means the count has to be taken over the grouped set, not over
+        barcode_registry — `paginate_rows` wraps the whole statement as a
+        subquery, which counts the groups rather than the rows inside them.
+        """
+        from app.core.pagination import paginate_rows
+        stmt = (
+            select(
+                ClientOrder.id.label("order_id"),
+                ClientOrder.order_number,
+                Client.name.label("client_name"),
+                func.count(BarcodeRegistry.id).label("minted"),
+                func.min(BarcodeRegistry.created_at).label("first_generated_at"),
+                func.max(BarcodeRegistry.created_at).label("last_generated_at"),
+            )
+            .join(Client, Client.id == ClientOrder.client_id)
+            .join(
+                BarcodeRegistry,
+                and_(BarcodeRegistry.order_id == ClientOrder.id,
+                     BarcodeRegistry.type == BarcodeType.PIECE.value,
+                     BarcodeRegistry.is_alias.is_(False)),
+            )
+            .group_by(ClientOrder.id, ClientOrder.order_number, Client.name)
+            .order_by(func.max(BarcodeRegistry.created_at).desc(), ClientOrder.id)
+        )
+        rows, total = await paginate_rows(self.db, stmt, params)
+        return [self._order_barcode_row(r) for r in rows], total
 
     # ── planned totals (SKU.qty_ordered) ────────────────────────────────────
     async def order_planned_total(self, order_id: uuid.UUID) -> int:
@@ -663,7 +749,7 @@ class BarcodeRepository:
         count_stmt = count_stmt.where(and_(*conds))
         total = int(await self.db.scalar(count_stmt) or 0)
 
-        # page of rows, enriched with sku/style/size/colour/seq/stage/drawer
+        # page of rows, enriched with sku/style/size/colour/seq/stage
         stmt = (
             select(
                 BarcodeRegistry.code,

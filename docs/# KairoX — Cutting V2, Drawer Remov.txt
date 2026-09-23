@@ -1,0 +1,339 @@
+# KairoX Phase-1 Backend — Audit, Bug-Fix & Scale-Out Plan
+
+## Context
+
+The Phase-1 services (everything except `bom`, `procurement`, `supplier_po`, `inventory`,
+`intelligence`) have grown to ~30k LOC across 18 route groups and 158 endpoints, but have never
+had a consolidated correctness/performance audit. The app is about to carry real factory traffic:
+100+ concurrent users on a barcode-driven floor, where a manager scans batches of pieces and
+payroll is computed from those scans.
+
+I ran the full test suite and audited the in-scope code. The results say the system is
+**functionally broad but not production-hardened**:
+
+- **1396 pass / 20 fail / 10 error / 98 skip / 8 xpass** (267s).
+- At least one endpoint raises an unhandled `AttributeError` (guaranteed HTTP 500).
+- HR holds **write** authority over the entire payroll money path.
+- Material reservations are created but **never released** — stock silently drifts toward zero.
+- There is **zero row-level locking** anywhere in the in-scope codebase.
+- The connection pool caps the whole API at **12 sustained DB connections**, which is the hard
+  ceiling on the 100-user target regardless of how much CPU is added.
+
+Intended outcome: a delivered Word document that records the audit, the complexity analysis and
+the scale-out architecture; and a code change-set that fixes the P0 bugs, closes the API contract
+gaps, and makes the app horizontally scalable on AWS.
+
+**User decisions taken (2026-09-19):**
+1. Deliverable = **Word document + implement all phases**.
+2. Infra = **AWS, deployed as a Docker image**; architecture choice delegated to this plan.
+3. Business-rule conflicts (skill-gate matrix etc.) = **flag with both readings, do not guess**.
+
+---
+
+## Evidence base (all verified, not inferred)
+
+| Measurement | Value | How obtained |
+|---|---|---|
+| Live routes on the app | 233 (158 in-scope) | imported `app.main`, walked `app.routes` |
+| In-scope routes with **no** `response_model` | **55 / 158 (34%)** | same walk |
+| Committed `openapi.json` | 192 ops — **stale by 41** | parsed repo-root `openapi.json` |
+| Postman collections vs live routes | 0 mismatches — collections are current | normalized-path diff |
+| Raw `text()` SQL in scope | **0** — no SQL-injection surface | grep |
+| `with_for_update` / advisory locks in scope | **0** | grep |
+| `.commit()` in repository layer | **30** (13 in `wages/repository.py` alone) | grep |
+| `.commit()` in router layer | 2 (`drawers/router.py:211,245`) | grep |
+| Routers with no pagination params | production, clients, cutting, dashboard, users | grep |
+| DB pool | `pool_size=3, max_overflow=5`, no `pool_recycle`/`pool_timeout` | `core/database.py:88` |
+| Gunicorn workers | `WEB_CONCURRENCY:-4` | `entrypoint.sh:190`, `docker-compose.yml:79` |
+
+---
+
+## Findings
+
+### P0 — Critical (correctness, money, or guaranteed outage)
+
+**F-01 · Guaranteed 500 on the style material-spec path.**
+`app/modules/materials/style_spec_service.py:385` calls `self.materials._display_stock(...)`, but
+`self.materials` is a `MaterialRepository` while `_display_stock` is defined on `MaterialService`
+(`app/modules/materials/service.py:77`). Every call with `with_lot=True` and a resolved lot raises
+`AttributeError` → unhandled → 500. The test log shows this firing on
+`POST /api/v1/styles/{id}/material-spec/lines` (`app/main.py:245`).
+*Fix:* call it on the service, or promote `_display_stock` to a module-level pure function shared
+by both (preferred — it is already a `@staticmethod`).
+
+**F-02 · HR has write authority over the entire payroll money path.**
+`app/modules/wages/router.py:51` defines `_PAYROLL_READERS = require_roles(DM, MD, HR)` and then
+uses that **reader** dependency to guard writes:
+`POST /wages/rates` (:121), `POST /wages/rates/bulk` (:131), `POST /wages/runs` (:185),
+`DELETE /wages/runs/{id}` (:226), `POST /wages/runs/{id}/recompute` (:256).
+Only `/reopen` (:288) and `/close` (:306) correctly gate to DM/MD.
+CLAUDE.md §10 grants HR *visibility*, not authority. Today HR can set piece rates, start a run and
+**delete a payroll run**. Confirmed by 4 failing tests (`test_role_guards.py:147`,
+`test_payroll_uat.py:113,323`).
+*Fix:* split into `_PAYROLL_READERS` (DM/MD/HR) and `_PAYROLL_WRITERS` (DM/MD); apply writers to
+all mutating routes.
+
+**F-03 · Material reservations are never released — stock drifts to phantom-zero.**
+`MaterialRepository.add_reservation_nocommit` is called (`materials/service.py:902`), but
+`consume_reservations_nocommit` (`materials/repository.py:374`, which sets `released_at` and flips
+status) is **called from nowhere in the codebase**. Every reservation stays `status="active"`
+forever, so `available = on_hand − reserved` decreases monotonically and never recovers. The code
+comment at `style_spec_service.py:391-393` admits this. Left alone, the material module strangles
+itself: every lot eventually reads as unavailable and the DM can never issue material.
+*Fix:* call `consume_reservations_nocommit` in the cut-stage consumption path, in the same
+transaction as the stock decrement and event writes; add a release path for cancelled requirements.
+
+**F-04 · No row-level locking anywhere → lost updates under concurrency.**
+Zero `with_for_update` / advisory locks in scope. Every read-modify-write is a race:
+`material_lot.on_hand` decrement at cutting, `drawer.state` transitions, `barcode_registry.status`
+on reissue, wage-line aggregation. Two cutting managers scanning against the same lot concurrently
+will both read the same `on_hand` and the second write silently overwrites the first — **stock is
+lost with no error**. This is latent today at low traffic and becomes routine at 100 users.
+*Fix:* `SELECT … FOR UPDATE` on the lot row before the decrement; a DB `CHECK (on_hand >= 0)`; and
+either `FOR UPDATE` or a `version_id_col` on `Drawer` for the state machine.
+
+**F-05 · Transaction boundaries are scattered across layers.**
+30 commits in repositories, 2 in routers — directly against CLAUDE.md §15. `wages/repository.py`
+alone commits 13 times, so a wage run **cannot be atomic**: a failure part-way leaves a partially
+written run that the "closed run is a frozen snapshot" invariant then freezes.
+*Fix:* remove every repository/router commit; commit once per business operation in the service.
+Enforce with an import-linter contract or a CI grep.
+
+**F-06 · Debug `print` of a bcrypt hash at import time.**
+`app/core/security.py:98` — `print(passw)`. Fires on every process start and writes a credential
+hash to stdout, i.e. straight into CloudWatch.
+*Fix:* delete.
+
+### P1 — High
+
+**F-07 · Proxy attendance is not limited to piece-rate workers.**
+`test_attendance_integrity.py:356` — `DID NOT RAISE`. The documented restriction is unenforced.
+
+**F-08 · `AttendanceRead` serialization crash.**
+`'AttendanceRead' object has no attribute 'recorded_by_user_id'` — the Pydantic model and the
+attendance payload disagree; any route returning it on that path 500s.
+
+**F-09 · Role gate fires *after* body validation → 422 instead of 403.**
+`test_role_guards.py:225` (`assert 422 == 403`): the lining manager creating a lining lot gets a
+validation error rather than a refusal. An unauthorized caller can probe payload shape. Gate order
+must be ROLE first (CLAUDE.md §8 gate 1 is whole-request).
+
+**F-10 · Importer style-key format regression.**
+`test_importer_v2.py:66,84` (`KeyError: 'NIPAL-NEW'`, `'GGZ'`) and `test_order_sheet_golden.py:142`
+(keys are now `GGZ-GARMENT…` where the golden expects `GGZ`). The breakdown sheet is the production
+source of truth (CLAUDE.md §15); a key-format change breaks order reconciliation.
+
+**F-11 · N+1 in the production scan hot path.**
+`production/service.py` issues per-piece awaited queries at :328 (`db.get(Piece)`), :556
+(`_sequence_ok`), :562 (`_merge_ok`), :655 (`has_event_at_op`) — **4–6 sequential round-trips per
+piece**. A 100-piece batch = 400–600 serial round-trips holding one of only 3 pooled connections.
+Same pattern in `store/service.py` (:101,:362,:370,:371) and `drawers/service.py` (:1048,:1081,:1088).
+
+**F-12 · 10 tests never execute — missing fixtures.**
+`fixture 'client' not found`, `fixture 'security_user' not found` across
+`test_attendance_integrity.py`, `test_employees_fixes.py`, `test_gates_pure.py`. These are silent
+coverage holes on attendance integrity and RBAC.
+
+**F-13 · Migration/model FK drift.**
+`test_fk_delete_rules.py:168` — nullable FKs exist in the models but are absent from the migration's
+`_NULLABLE_FKS` (e.g. `order_style.pattern_reference_id`), so the live DB never gets their delete
+rule. Deleting a parent will fail or orphan rows in production but not in SQLite tests.
+
+**F-14 · Missing pagination on list endpoints.**
+`production`, `clients`, `cutting`, `dashboard`, `users` routers declare no `limit`/`offset`/`page`.
+These return unbounded result sets; a year of production events will time out the request and blow
+worker memory.
+
+### P2 — Medium (contract & maintainability)
+
+**F-15 · 55 of 158 in-scope routes (34%) declare no `response_model`** — whole modules are
+untyped: `analytics` 10/10, `imports` 9/9, `styles` 8/8, `jobwork` 5/5, `production` 9/11. The
+OpenAPI schema therefore has no response type for them and the frontend cannot generate a typed
+client no matter how fresh the export is.
+
+**F-16 · Committed `openapi.json` is stale** — 192 operations vs 233 live (41 missing). Any
+frontend generating types from the checked-in file is working against an outdated contract.
+*Note:* the Postman collections under `postman/` **are** current — a normalized diff found zero
+mismatches. The gap is the OpenAPI artifact and the missing response types, not route coverage.
+
+**F-17 · Employee update schema/allow-list disagreement.**
+`test_employees_invariants.py:213`. `EmployeeUpdate` (`schemas.py:121-122`) declares `role` and
+`password`; `service.py:224` excludes them from `data` and `service.py:235` omits them from
+`_ALLOWED`. *This is not a privilege-escalation hole* — `body.role` is handled separately at
+`service.py:246` behind a proper `_GRANTABLE` check. It is a contract inconsistency that the
+assertion correctly flags. Fix the assertion or the schema, not the auth.
+
+**F-18 · Stale xfail markers on the money path.** 8 XPASS in the wage tests still cite "AUDIT F139
+(BLOCKER) — `Piece.style_id` does not exist". That blocker is fixed; the markers now hide real
+signal. Remove them.
+
+### P3 — Flagged for a business decision (per your instruction, not guessed)
+
+**F-19 · Skill-gate matrix disagrees with its own test suite.**
+`test_gates_pure.py:41` fails for `CUTTER→FUSING`, `CUTTER→LINING_CUTTING`, `TAILOR→PASTING`. The
+tests assert these are permitted ("CUTTER covers fusing too"); the shipped matrix refuses them.
+- *If the tests are right:* cutters on the floor are currently blocked from logging fusing and
+  lining cuts, and tailors from pasting — a live production blocker.
+- *If the code is right:* the test file encodes a rule the factory rejected.
+Both readings go in the document with their floor impact; no code changes until you rule.
+
+**F-20 · Procurement/style-spec assertions** (`test_procurement_regression.py:140`,
+`test_procurement_service.py:209`, `test_style_material_spec.py`,
+`test_five_flows_e2e.py::test_flow5`) touch out-of-scope modules or straddle the boundary. Recorded
+in the document, excluded from the change-set.
+
+---
+
+## Scale-out: why 100 concurrent users fails today
+
+**The binding constraint is DB connections, not CPU.**
+
+```
+4 gunicorn workers × pool_size 3          = 12 sustained connections
+4 workers × (pool_size 3 + overflow 5)    = 32 burst connections
+```
+
+Each in-flight request holds a connection for its whole lifetime. With F-11's 4–6 round-trips per
+piece, one manager scanning 100 pieces occupies a connection for ~0.6–0.9s of pure network latency
+alone. 100 concurrent users ⇒ requests queue on `pool_timeout` (undefined, so it defaults to 30s)
+and then fail as 500s. Adding CPU changes nothing.
+
+Secondary blockers to horizontal scaling:
+- **In-process sweepers.** `app/main.py:182,184` start `_notification_sweeper` and
+  `_po_escalation_sweeper` as asyncio tasks inside the API process. With N replicas each escalation
+  fires N times. Must move to Celery beat (which the repo already runs, and already warns must
+  never be scaled).
+- **Migrations at container start.** `entrypoint.sh` runs `alembic upgrade head` when
+  `RUN_MIGRATIONS=true`. N replicas booting together race on the same migration.
+- **`api` publishes port 8000 directly** in `docker-compose.prod.yml` with no reverse proxy and no
+  `deploy.replicas` — the compose file cannot scale `api` at all (port conflict).
+- **No caching layer** for the read-heavy dashboard/analytics surface (22 + 10 routes), despite
+  Redis already being a dependency for Celery.
+- **`settings.debug` triggers `create_all`** (`main.py:162`) — schema drift if debug leaks to prod.
+- **No rate limiting, no GZip, no request timeout, no TrustedHost**; `/docs` and `/redoc` are
+  exposed unconditionally (`main.py:206-207`).
+- **CORS origins hardcoded in source** (`main.py:212-218`) with `allow_credentials=True` plus
+  wildcard methods and headers — a code change is needed to add a frontend domain.
+
+### Target AWS architecture (Docker image, as you use today)
+
+```
+Route 53 → ALB (TLS, /health + /ready target-group checks)
+            └── ECS Fargate service "api"   (N tasks, autoscaled on ALB RequestCountPerTarget)
+            └── ECS Fargate service "worker" (Celery, scales independently)
+            └── ECS Fargate service "beat"   (pinned at exactly 1 task — never scale)
+                     │
+              RDS Proxy ──► RDS/Aurora PostgreSQL   (or Supabase's pooler if you stay there)
+              ElastiCache Redis   (Celery broker + response cache + distributed locks)
+              S3 (uploads — replaces any container-local file storage)
+              ECR (the image you already build) · CloudWatch (logs/metrics) · Secrets Manager
+```
+
+Why this shape: it is the smallest change from "a Docker image on AWS". The same image runs as all
+three services with different entrypoint commands, which `entrypoint.sh` already supports
+(`api` / `worker` / `beat`).
+
+**Connection math with RDS Proxy.** Per task: `pool_size = 5`, `max_overflow = 5`,
+`pool_timeout = 10`, `pool_recycle = 1800`, `pool_pre_ping = True`. With 6 Fargate tasks that is 30
+sustained / 60 burst client-side connections, which RDS Proxy multiplexes down onto a much smaller
+server-side set — so the app scales past the Postgres `max_connections` wall instead of into it.
+Migrations move to a **one-off ECS task run before deployment**, never at task start.
+
+---
+
+## Complexity analysis (required by the deliverable)
+
+Every hot path gets a table row: **operation · current time · current space · post-fix time ·
+post-fix space · DB round-trips**. Worked examples the document will carry:
+
+| Path | Current | After | Note |
+|---|---|---|---|
+| `POST /production/log`, batch of N pieces | O(N) queries, 4–6 RTT each | O(1)–O(3) queries | batch-load pieces, prior events and drawer states in 3 `IN()` queries; gates become in-memory |
+| Pre-mint at breakdown upload, N pieces | N × 4 inserts, row-by-row | `bulk_insert_mappings` in chunks of 1000 | an order of 5,000 pieces is 20,000 inserts today |
+| `GET /dashboard/*` (22 routes) | per-request full aggregation | Redis-cached, 30–60s TTL | read-heavy, tolerates staleness |
+| `GET /analytics/*` (10 routes) | in-Python aggregation | push to SQL + cache | CLAUDE.md says analytics is a live read view |
+| Unbounded list endpoints | O(total rows) memory | O(page) | F-14 |
+
+Method: Big-O in **DB round-trips** (the real cost at this RTT), not just instruction count, plus
+measured p50/p95 from a k6 or Locust run at 25 / 50 / 100 / 200 virtual users, before and after.
+
+---
+
+## Work plan
+
+### Phase 0 — Safety net (do first)
+1. Fix the 10 fixture errors (F-12) so RBAC/attendance tests actually run — these are the tests that
+   would have caught F-02 and F-07.
+2. Remove the stale money-path xfail markers (F-18).
+3. Add a Postgres CI job (CLAUDE.md §14 already asks for this) — SQLite hides F-13 and every native
+   enum issue.
+
+### Phase 1 — P0 correctness & security
+Files: `materials/style_spec_service.py`, `materials/service.py`, `materials/repository.py`,
+`wages/router.py`, `core/security.py`, `production/service.py`, and every in-scope `repository.py`.
+4. F-01 promote `_display_stock` to a shared pure function; fix the call site.
+5. F-02 split `_PAYROLL_READERS` / `_PAYROLL_WRITERS`; regate the 5 mutating wage routes.
+6. F-03 wire `consume_reservations_nocommit` into the cut-stage consumption path.
+7. F-04 add `with_for_update()` on lot + drawer reads before mutation; add `CHECK (on_hand >= 0)`
+   in a migration.
+8. F-05 strip all repository/router commits; one commit per service operation.
+9. F-06 delete the `print`.
+
+### Phase 2 — P1 correctness
+10. F-07 restore the piece-rate restriction on proxy attendance.
+11. F-08 reconcile `AttendanceRead` with its payload.
+12. F-09 move the role gate ahead of body validation (router-level dependency, not in-handler).
+13. F-10 restore the importer style-key format against the golden workbook.
+14. F-13 add the missing nullable FKs to the migration's `_NULLABLE_FKS` + a new migration.
+15. F-11 batch the production scan path — this is also the single biggest scalability win.
+
+### Phase 3 — API contract
+16. F-15 add `response_model` to all 55 routes, starting with the fully-untyped modules
+    (`analytics`, `imports`, `styles`, `jobwork`, `production`).
+17. F-14 add a shared `Page[T]` envelope + `limit`/`offset` to the 5 unpaginated routers.
+18. Standardize the error envelope on the `{detail, request_id}` shape `main.py:247` already uses.
+19. F-16 regenerate `openapi.json` in CI on every merge so it can never drift again.
+
+### Phase 4 — Performance & AWS scale-out
+20. Pool config from env: `pool_size`, `max_overflow`, `pool_timeout`, `pool_recycle`,
+    `pool_pre_ping` in `core/config.py`, consumed by `core/database.py:88`.
+21. Move the two sweepers out of `main.py` lifespan into Celery beat.
+22. Move `alembic upgrade head` out of `entrypoint.sh` container start into a pre-deploy task.
+23. Add Redis response caching for `dashboard` + `analytics`; Redis-backed rate limiting; GZip;
+    TrustedHost; `/docs` gated on non-prod; CORS origins from env.
+24. Add the indexes the audit implies (attendance `(employee_id, work_date)` composite, and the
+    production/drawer filter columns) — measured with `EXPLAIN ANALYZE` on Postgres, not assumed.
+25. ECS/ALB task definitions + autoscaling policy; S3 for uploads; health/readiness wired to the
+    ALB target group.
+26. Load test at 25/50/100/200 VUs, before and after, to produce the document's numbers.
+
+### Phase 5 — Deliverable
+27. Produce the Word document (`.docx`) via the `anthropic-skills:docx` skill, containing: executive
+    summary; per-module audit with every `file:line` finding; the full 158-route API inventory with
+    auth/role/request/response and the response_model gap marked; the complexity tables; the
+    business-rule conflicts (F-19) with both readings; the AWS architecture with a diagram and the
+    connection math; the phased change plan; and the before/after load-test results.
+
+---
+
+## Verification
+
+- `pytest tests/ -v` — target: 0 failed, 0 errors. Every fix lands with a regression test; F-02,
+  F-03 and F-04 each get an explicit one (F-04's is a concurrent-scan test that must fail before
+  the lock and pass after).
+- `pytest -m money` in isolation before any release (the suite already defines this marker).
+- `python verify/run_logic_checks.py` — must stay at 49/49.
+- `lint-imports` (`.importlinter`) — extend with a contract that forbids `commit` outside the
+  service layer.
+- Postgres CI job proving the migrations and the native-enum path (CLAUDE.md §13 traps).
+- `EXPLAIN ANALYZE` on Postgres for each new index — no index is added on assumption.
+- k6/Locust at 25/50/100/200 VUs against a staging ECS deployment; record p50/p95/p99 and error
+  rate before and after Phase 4.
+- Manual smoke: barcode resolve → cut → store-scan → drawer RECEIVED/SENDED → line-stitch →
+  export → drawer recycles; then a wage run over that period.
+
+## Explicitly out of scope
+
+`bom`, `procurement`, `supplier_po`, `inventory`, `intelligence` — not audited, not changed. Where
+an in-scope fix touches a shared seam (e.g. `materials` ↔ `inventory`, CLAUDE.md §12), the seam is
+preserved, not merged.

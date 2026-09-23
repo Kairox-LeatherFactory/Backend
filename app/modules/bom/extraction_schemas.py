@@ -336,6 +336,29 @@ class OrderLine(BaseModel):
     def _coerce_str_color(cls, v: Any) -> str | None:
         return _to_str_or_none(v)
 
+    # UPDATED 2026-09-12 (Hamthan): `printed_total` was a bare `int | None` with no
+    # before-coercion, unlike every other field on this model. Gemini emits a
+    # fractional value whenever it reads the wrong column on a dense grid (a price,
+    # a dcm figure) — 66.8 on IJJ.pdf — and pydantic v2 rejects 66.8 for an `int`
+    # (int_from_float). That single row killed ExtractedOrder validation, which
+    # made extraction.llm_extract_order return None, which (on a scanned PDF, where
+    # the native rung is the only rung) collapsed the WHOLE document to an empty
+    # order with 'native_pdf_extraction_failed'. A cross-check field must never be
+    # able to fail the parse: qty is ALWAYS recomputed from `sizes` downstream, and
+    # _fold_lines_into_styles already handles this value defensively (isinstance
+    # float-or-int, and a `pt is None` branch).
+    @field_validator("printed_total", mode="before")
+    @classmethod
+    def _clean_printed_total(cls, v: Any) -> int | None:
+        f = _to_float(v)
+        if f is None:
+            return None
+        # A printed TOTALE CAPI is a garment count — a whole number. A fractional
+        # one is a misread of some other column, not a total, so drop it: the row
+        # then reports 'row_total_unverified' instead of a 'row_total_mismatch'
+        # against a printed total nobody ever printed.
+        return int(f) if f.is_integer() else None
+
     @field_validator("sizes", mode="before")
     @classmethod
     def _clean_sizes(cls, v: Any) -> dict[str, int]:
