@@ -185,23 +185,24 @@ async def lifespan(app: FastAPI):
     # fail loud if extractor deps missing, not at first upload
     from app.core.deps_check import verify_extractor_deps
     verify_extractor_deps(strict=True)
-
-    if settings.debug:
-        # Never create_all on a database Alembic manages. It builds tables from
-        # TODAY's models ahead of the migrations, which (a) hides revisions that
-        # were never written, so a fresh `alembic upgrade head` later dies on a
-        # missing table, and (b) makes the next migration die with
-        # DuplicateColumn/DuplicateTable. On a new DB: run `alembic upgrade head`
-        # BEFORE the first app start.
-        from sqlalchemy import inspect as _inspect
-        async with async_engine.begin() as conn:
-            managed = await conn.run_sync(
-                lambda c: _inspect(c).has_table("alembic_version"))
-            if managed:
-                logger.info("Alembic-managed database: skipping debug create_all")
-            else:
-                await conn.run_sync(Base.metadata.create_all)
-                logger.info("Database tables verified (debug create_all)")
+    
+    #I DON'T WANT TO CREATE TABLES AUTOMATICALLY, ALEMBIC WILL HANDLE IT.......
+    # if settings.debug:
+    #     # Never create_all on a database Alembic manages. It builds tables from
+    #     # TODAY's models ahead of the migrations, which (a) hides revisions that
+    #     # were never written, so a fresh `alembic upgrade head` later dies on a
+    #     # missing table, and (b) makes the next migration die with
+    #     # DuplicateColumn/DuplicateTable. On a new DB: run `alembic upgrade head`
+    #     # BEFORE the first app start.
+    #     from sqlalchemy import inspect as _inspect
+    #     async with async_engine.begin() as conn:
+    #         managed = await conn.run_sync(
+    #             lambda c: _inspect(c).has_table("alembic_version"))
+    #         if managed:
+    #             logger.info("Alembic-managed database: skipping debug create_all")
+    #         else:
+    #             await conn.run_sync(Base.metadata.create_all)
+    #             logger.info("Database tables verified (debug create_all)")
 
     # F130: config_store warm-up runs HERE (inside lifespan), not at module
     # import time. Importing app.main must not require a live database — tooling
