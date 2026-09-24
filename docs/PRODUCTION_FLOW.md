@@ -809,17 +809,22 @@ never serves against a stale schema.
 | Variable | Notes |
 |---|---|
 | `DATABASE_URL` | Postgres connection string |
-| `SECRET_KEY` | **Must be changed.** ≥32 chars |
+| `SECRET_KEY` | **Must be changed, everywhere including local.** ≥32 chars, no placeholder prefix — the boot fails otherwise |
+| `CORS_ORIGINS` | Unset falls back to the four known frontends in `config.py` |
+| `DOCS_ENABLED` | `true` by default in every environment; `false` hides `/docs` + `/redoc` |
 | `ENVIRONMENT` | `production` for a real deploy |
 | `DEBUG` | **`false` in production** |
 | `MAX_UPLOAD_MB` | Default 25 |
 | `STORAGE_BACKEND` | `local` / `s3` / `supabase` |
 
-> ⚠️ **`DEBUG` and `ENVIRONMENT` are the two most dangerous settings in the system.**
-> Left at their defaults (`local` / `true`), three things happen at once: the JWT
-> secret-key guard is skipped so the app boots on the shipped default key, Alembic is
-> bypassed in favour of `create_all()`, and exception details are returned in HTTP
-> 500 bodies. Set both explicitly on every deployment.
+> ⚠️ **`DEBUG` is the most dangerous setting in the system.** Left at its default
+> (`true`), Alembic is bypassed in favour of `create_all()` on a database that has no
+> `alembic_version` table, and exception details are returned in HTTP 500 bodies. Set
+> it explicitly to `false` on every deployment.
+>
+> The JWT secret-key guard is **no longer** tied to `DEBUG`/`ENVIRONMENT` (2026-09-23):
+> a placeholder or under-32-char `SECRET_KEY` now refuses to boot anywhere, local
+> included.
 
 ---
 

@@ -31,9 +31,9 @@ from app.modules.dashboard.repository import DashboardRepository
 from app.modules.dashboard.schemas import (
     Bottleneck, CurrentOrder, CurrentStyle, CutterRow, CuttingDashboard, DailyRow,
     DashboardMeta, DMAttendance, DMOverallProduction, DMProductionRate, DMQuality,
-    DMStore, DeptPerformanceRow, DirectManagerDashboard, DrawerCutterRow,
-    DrawerDetail, DrawerMovementRow, DrawerRow,
-    EmployeePieceRow, EmptyDrawerRow, LeatherKPIs, LeatherLotRow,
+    DMStore, DeptPerformanceRow, DirectManagerDashboard, StoreCutterRow,
+    StorePieceDetail, StoreMovementRow, StorePieceRow,
+    EmployeePieceRow, LeatherKPIs, LeatherLotRow,
     LiningDashboard, LiningEmployeeRow, LiningLotRow, LiningMaterialKPIs,
     LiningProductionKPIs, MaterialCutterTrace, OrderProgressRow, OrderStageRow,
     OrderTracking, PieceConsumptionRow, PieceStageHistoryRow, PieceTrace,
@@ -118,9 +118,9 @@ _LINING_UNSUPPORTED = {
 _STITCHING_UNSUPPORTED = {
     "damage_tracking": _UNSUPPORTED_DAMAGE,
     "employee_target_photo": _UNSUPPORTED_TARGET_PHOTO,
-    "store_is_drawer_state": (
+    "store_is_a_state": (
         "STORE is not a ProductionEvent — a piece never 'works' at STORE. Store "
-        "handoff numbers are derived from the piece's DRAWER state "
+        "handoff numbers are derived from the piece's own store state "
         "(holding/received/sended), per core/store_display.py."
     ),
     "chain_order": (
@@ -131,21 +131,15 @@ _STITCHING_UNSUPPORTED = {
     ),
 }
 _STORE_UNSUPPORTED = {
-    "empty_drawer_history": (
-        "A drawer that has recycled to WAITING no longer carries its last "
-        "style/material (current_piece_id is cleared). last_sent_date is the "
-        "drawer's sended_at; last_style / last_material are null until a "
-        "drawer_history table records prior occupants."
-    ),
     "employee_photo": (
         "Employee has no photo column. Traceability returns the cutter's name / "
         "id; photo is null until an employee-profile image column exists."
     ),
     "movement_from_audit": (
-        "Drawer movement history is reconstructed from audit_log rows for the "
-        "drawer (DRAWER_RECEIVED / DRAWER_SENDED / MATERIAL_RECEIVED). "
-        "Fine-grained 'leather added / lining added' steps appear only if the "
-        "barcode two-door log wrote an audit row for them."
+        "Store movement history is reconstructed from audit_log rows for the "
+        "PIECE (the store scan, RECEIVED, SENDED, the kit issue). Fine-grained "
+        "'leather added / lining added' steps appear only if the two-door log "
+        "wrote an audit row for them."
     ),
 }
 
@@ -172,8 +166,8 @@ def _scope_label(client_scope: uuid.UUID | None) -> str:
     return "all_clients" if client_scope is None else f"client:{client_scope}"
 
 
-def _drawer_status_label(state: str, leather_in: bool, lining_in: bool) -> str:
-    """Map the drawer state machine to the doc's human status labels (§4)."""
+def _store_status_label(state: str, leather_in: bool, lining_in: bool) -> str:
+    """Map the store state machine to the doc's human status labels (§4)."""
     empty = not leather_in and not lining_in
     if state == "sended":
         return "Sent to Production"
@@ -708,7 +702,7 @@ class DashboardService:
 
         disp = display_stage(
             current_event_stage=data["current_stage"],
-            drawer_state=data["drawer_state"],
+            store_state=data["drawer_state"],
             needs_lining=data["needs_lining"])
 
         history: list[PieceStageHistoryRow] = []
@@ -718,7 +712,7 @@ class DashboardService:
 
         def _store_row() -> PieceStageHistoryRow:
             return PieceStageHistoryRow(
-                stage=STORE, label="Store / Drawer", employee=None,
+                stage=STORE, label="Store", employee=None,
                 work_date=None, is_store_overlay=True,
                 store_status=disp["store_status"])
 
@@ -752,11 +746,10 @@ class DashboardService:
             in_store=disp["in_store"],
             store_label=disp["label"],
             needs_lining=data["needs_lining"],
-            drawer_code=data["drawer_code"],
-            drawer_state=data["drawer_state"],
-            drawer_holding=holding_label(
+            store_state=data["drawer_state"],
+            store_holding=holding_label(
                 leather_in=data["drawer_leather_in"],
-                lining_in=data["drawer_lining_in"]) if data["drawer_code"] else None,
+                lining_in=data["drawer_lining_in"]),
             # None, not 0.0, when nothing was ever measured — "no measurement
             # taken" and "measured zero" are different facts, and lining cuts can
             # legitimately be the former.
@@ -773,34 +766,30 @@ class DashboardService:
 
         kpis = await self.repo.store_kpis(client_scope=client_scope)
         current_styles = await self._store_current_styles(client_scope=client_scope)
-        grid = await self.repo.drawer_grid(
+        grid = await self.repo.store_grid(
             client_scope=client_scope, style_id=style_id, state=state,
             material_type=material_type)
 
-        drawers = [self._drawer_row(r) for r in grid]
-        held = [d for d in drawers if d.state == "received"]
-        empty = [
-            EmptyDrawerRow(
-                drawer_id=d.drawer_id, drawer_code=d.drawer_code, seq=d.seq,
-                last_style=None, last_material=None,
-                last_sent_date=d.sended_at, availability="Yes")
-            for d in drawers
-            if not d.leather_in and not d.lining_in
-        ]
+        garments = [self._store_piece_row(r) for r in grid]
+        held = [g for g in garments if g.state == "received"]
 
+        # NO `empty_garments`. The old screen listed empty DRAWERS, because an
+        # empty box is a real thing somebody can go and put a garment in. A
+        # garment with nothing scanned into it is not an empty anything — it is
+        # simply not in the store yet, and `store_grid` leaves it out.
         return StoreDashboard(
             meta=DashboardMeta(generated_for=today, scope=_scope_label(client_scope),
                                unsupported=_STORE_UNSUPPORTED),
             kpis=StoreKPIs(**kpis), current_styles=current_styles,
-            drawers=drawers, held_drawers=held, empty_drawers=empty)
+            garments=garments, held_garments=held)
 
-    def _drawer_row(self, r) -> DrawerRow:
-        (did, code, seq, state, leather_in, lining_in, received_at, sended_at,
+    def _store_piece_row(self, r) -> StorePieceRow:
+        (_pid, _pcode, seq, state, leather_in, lining_in, received_at, sended_at,
          created_at, pid, pcode, sid, sname, oid, onum, deadline,
          colour, size) = r
-        return DrawerRow(
-            drawer_id=did, drawer_code=code, seq=seq, state=state,
-            status_label=_drawer_status_label(state, bool(leather_in), bool(lining_in)),
+        return StorePieceRow(
+            seq=seq, state=state,
+            status_label=_store_status_label(state, bool(leather_in), bool(lining_in)),
             contents=holding_label(leather_in=leather_in, lining_in=lining_in),
             material_type=_material_type(bool(leather_in), bool(lining_in)),
             leather_in=bool(leather_in), lining_in=bool(lining_in),
@@ -815,28 +804,28 @@ class DashboardService:
         return [
             StoreCurrentStyleRow(
                 style_id=sid, style=sname, order_id=oid, order_number=onum,
-                drawers=int(drawers or 0), leather_drawers=int(leather or 0),
-                lining_drawers=int(lining or 0), both_drawers=int(both or 0),
+                garments=int(drawers or 0), leather_only=int(leather or 0),
+                lining_only=int(lining or 0), leather_and_lining=int(both or 0),
                 ready_to_send=int(ready or 0), target_date=deadline)
             for (sid, sname, oid, onum, deadline, drawers, leather, lining,
                  both, ready) in rows
         ]
 
-    async def drawer_detail(self, *, drawer_id: uuid.UUID) -> DrawerDetail | None:
-        head = await self.repo.drawer_detail(drawer_id=drawer_id)
+    async def store_piece_detail(self, *, piece_id: uuid.UUID) -> StorePieceDetail | None:
+        head = await self.repo.store_piece_detail(piece_id=piece_id)
         if head is None:
             return None
-        cutters: list[DrawerCutterRow] = []
+        cutters: list[StoreCutterRow] = []
         if head["piece_id"] is not None:
             for op_code, emp_id, emp_name, wd in await self.repo.drawer_cutters(
                     piece_id=head["piece_id"]):
-                cutters.append(DrawerCutterRow(
+                cutters.append(StoreCutterRow(
                     material_type="LEATHER" if op_code == _LEATHER_CUT else "LINING",
                     employee_id=emp_id, employee=emp_name, work_date=wd))
-        return DrawerDetail(
-            drawer_id=head["drawer_id"], drawer_code=head["code"], seq=head["seq"],
+        return StorePieceDetail(
+            seq=head["seq"],
             state=head["state"],
-            status_label=_drawer_status_label(
+            status_label=_store_status_label(
                 head["state"], bool(head["leather_in"]), bool(head["lining_in"])),
             contents=holding_label(
                 leather_in=head["leather_in"], lining_in=head["lining_in"]),
@@ -847,10 +836,10 @@ class DashboardService:
             date_received=head["received_at"], date_sended=head["sended_at"],
             created_at=head["created_at"], cutters=cutters)
 
-    async def drawer_movement(self, *, drawer_id: uuid.UUID) -> list[DrawerMovementRow]:
-        rows = await self.repo.drawer_movement(drawer_id=drawer_id)
+    async def store_movement(self, *, piece_id: uuid.UUID) -> list[StoreMovementRow]:
+        rows = await self.repo.store_movement(piece_id=piece_id)
         return [
-            DrawerMovementRow(action=action, at=at or created_at,
+            StoreMovementRow(action=action, at=at or created_at,
                               actor_user_id=actor)
             for action, at, actor, created_at in rows
         ]
@@ -869,9 +858,9 @@ class DashboardService:
                 material_type="LEATHER" if op_code == _LEATHER_CUT else "LINING",
                 employee_id=emp_id, employee=emp_name, style=style,
                 order_number=onum, colour=colour, size=size,
-                cutting_date=wd, drawer_code=dcode)
+                cutting_date=wd, store_state=store_state)
             for (pcode, op_code, emp_id, emp_name, style, onum, colour, size,
-                 wd, dcode) in rows
+                 wd, store_state) in rows
         ]
 
     # ══════════════════════════════════════════════════════ DIRECT MANAGER
@@ -907,10 +896,10 @@ class DashboardService:
             "assumes a single shift; per_piece_rate (rs/piece) is a wages/costing "
             "concern owned by the wages module — both null here."
         ),
-        "store_is_drawer_state": (
-            "The STORE node (kind=STORE) is drawer state, not a production "
+        "store_is_a_state": (
+            "The STORE node (kind=STORE) is the piece's store state, not a production "
             "event: completed = released by the DM plus pieces already "
-            "exported, whose drawers have recycled; pending = still in a drawer."
+            "exported, which have left the store; pending = still in the store."
         ),
         "lining_measured_against_lining_required": (
             "LINING_CUTTING (kind=PARALLEL) has no predecessor, so its `total` "
@@ -919,7 +908,7 @@ class DashboardService:
             "colour / style-name marker, plus any piece already lining-cut), NOT "
             "the order quantity — read its pct against that. Excluded from "
             "bottleneck / blocked_stage: a lining backlog surfaces one node "
-            "later as drawers "
+            "later as garments "
             "holding leather in the store. Detail: /dashboard/lining."
         ),
         "pipeline_sequence_is_display_order": (
@@ -1117,9 +1106,9 @@ class DashboardService:
 
         attendance = DMAttendance(**emp)
         store = DMStore(
-            drawers_in_store=skpis["drawers_in_store"],
-            drawers_sent=skpis["drawers_sent"],
-            drawers_received=handoff["received"])
+            garments_in_store=skpis["garments_in_store"],
+            garments_sent=skpis["garments_sent"],
+            garments_received=handoff["received"])
 
         stage_progress = await self._stage_progress(client_scope=client_scope)
 

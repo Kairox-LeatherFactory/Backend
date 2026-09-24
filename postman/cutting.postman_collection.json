@@ -1,0 +1,569 @@
+{
+  "info": {
+    "name": "KairoX \u00b7 Cutting",
+    "description": "The grid that replaced the cutting manager's spreadsheet. One row is ONE garment; hides are allocated to it, edited freely while DRAFT, then frozen by an audited approval.\n\nSETUP\n  1. Import the whole folder and SELECT the KairoX environment\n     (top-right). That is what shares one token across every\n     collection \u2014 a collection variable is visible only to the\n     collection that set it.\n  2. Run `user` \u2192 Login. Its test script stores `access_token` for\n     you; there is nothing to copy and paste.\n  3. Every request here inherits bearer auth from that token.\n\n`base_url` defaults to http://127.0.0.1:8000.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. File uploads are real form-data rows \u2014 click Select Files on\nthe `file` row. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Add Sheet",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/cutting/rows/{{row_id}}/sheets",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "cutting",
+            "rows",
+            "{{row_id}}",
+            "sheets"
+          ],
+          "variable": [
+            {
+              "key": "row_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "The cutter needed one more skin. TYPE ITS MEASUREMENT, scan it, or pick it.\n\n`dcm` alone is the normal path and it is a LOOKUP: the number written on the\nskin resolves to that hide of this row's article and colour, and the reply\nsays which code it matched. Nothing of that article in stock is a 422 saying\nso plainly \u2014 there is no sheet available to cut this row from.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"sheet_code\": \"\",\n  \"sheet_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"dcm\": 0,\n  \"dcm_tolerance\": 0,\n  \"create_if_missing\": false\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Approve",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/cutting/rows/{{row_id}}/approve",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "cutting",
+            "rows",
+            "{{row_id}}",
+            "approve"
+          ],
+          "variable": [
+            {
+              "key": "row_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Freeze the row: these hides, this total, THIS cutter.\n\n`cutter_employee_id` is named HERE, one garment at a time \u2014 `generate` takes\nno cutter, because one id there put the same worker on every row of the\nstyle and the cutting row is what a piece rate is paid from.\n\n`user.id` is an app_user id \u2014 the LOGIN \u2014 which is what AuditLog.actor_user_id\nrequires. The WORKER is the row's cutter_employee_id and is a different\nperson in a different table.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"cutter_employee_id\": \"00000000-0000-0000-0000-000000000000\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Assign Cutters",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/cutting/rows/assign",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "cutting",
+            "rows",
+            "assign"
+          ]
+        },
+        "description": "Save the grid's cutter column \u2014 a different worker per garment.\n\nThe bulk form of PATCH /cutting/rows/{id}. Partial accept: a frozen row comes\nback in `rejected` and never loses the rows that did assign.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"assignments\": [\n    {\n      \"row_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"cutter_employee_id\": \"00000000-0000-0000-0000-000000000000\"\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Create Lot",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/materials/lots",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "materials",
+            "lots"
+          ]
+        },
+        "description": "Create a material lot. Registers a child barcode and adds the quantity to\nstock in one transaction.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"category\": \"\",\n  \"subtype\": \"\",\n  \"article\": \"\",\n  \"colour\": \"\",\n  \"attributes\": {},\n  \"supplier_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"sheets\": [\n    {\n      \"dcm\": 0,\n      \"note\": \"\"\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Generate",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/cutting/rows/generate",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "cutting",
+            "rows",
+            "generate"
+          ]
+        },
+        "description": "One DRAFT row per un-cut garment, with hides already allocated to it.\n\nSafe to press twice: rows are only created for pieces that have none.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"style_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"colour\": \"\",\n  \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"limit\": 0,\n  \"work_date\": \"2026-08-01\",\n  \"cutter_employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"allocate\": true\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Grid",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/cutting/grid",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "cutting",
+            "grid"
+          ],
+          "query": [
+            {
+              "key": "style_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "",
+              "disabled": false
+            },
+            {
+              "key": "colour",
+              "value": "",
+              "description": "",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "The cutting sheet for one style + colour, as the Excel laid it out.\n\nAlso returns who is checked in today, because production refuses to log an\nabsent worker \u2014 a grid that let one be assigned would collect the work and\nthen fail at the scan, after the leather was already handed out."
+      },
+      "response": []
+    },
+    {
+      "name": "List Lots",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/materials/lots",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "materials",
+            "lots"
+          ],
+          "query": [
+            {
+              "key": "category",
+              "value": "",
+              "description": "LEATHER | LINING | ACCESSORY",
+              "disabled": true
+            },
+            {
+              "key": "subtype",
+              "value": "",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "article",
+              "value": "",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "colour",
+              "value": "",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "thickness",
+              "value": "",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "size",
+              "value": "",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "sku_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "Pre-select the lot this SKU was last cut from.",
+              "disabled": true
+            },
+            {
+              "key": "required",
+              "value": "0",
+              "description": "Total qty this cut needs; flags lots that cover it.",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "THE LOT PICKER for the cut screen \u2014 filter down to the lot, get its id.\n\nThis is the endpoint that lets a frontend supply `leather_lot_id` /\n`lining_lot_id` to `POST /production/log`. The other two material GETs\ncannot: `/materials/spec` returns the FORM DEFINITION (which boxes to\nrender), and `/materials/stock` returns AGGREGATE TOTALS with the lot ids\nsummed away.\n\nTypical cut-screen flow:\n    GET /materials/lots?category=LEATHER&sku_id=<sku>\n      \u2192 `options` fills the article / colour / thickness dropdowns\n      \u2192 the row with `last_used_for_sku: true` is pre-selected\n    \u2026narrow with &article=&colour=&thickness= as the user picks\n      \u2192 one row (material is one lot per spec), take its `lot_id`\n    POST /production/log with consumption.leather_lot_id + dcm\n\nPass `required` (dcm per piece \u00d7 piece count) and each lot reports\n`covers_required`, so a lot that cannot cover the batch can be greyed out\nBEFORE the cut instead of warning after it.\n\nExhausted lots are returned, not hidden \u2014 a manager searching for a lot they\nknow exists must find it, with `available: 0` explaining itself."
+      },
+      "response": []
+    },
+    {
+      "name": "Patch Row",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/cutting/rows/{{row_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "cutting",
+            "rows",
+            "{{row_id}}"
+          ],
+          "variable": [
+            {
+              "key": "row_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"cutter_employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"size\": \"\",\n  \"rc_no\": \"\",\n  \"article\": \"\",\n  \"colour\": \"\",\n  \"work_date\": \"2026-08-01\",\n  \"note\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Patch Sheet",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/cutting/rows/{{row_id}}/sheets/{{sheet_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "cutting",
+            "rows",
+            "{{row_id}}",
+            "sheets",
+            "{{sheet_id}}"
+          ],
+          "variable": [
+            {
+              "key": "row_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            },
+            {
+              "key": "sheet_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Correct what a hide measures. It follows the skin, not the row.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"dcm\": 0\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Receive",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/materials/receive",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "materials",
+            "receive"
+          ]
+        },
+        "description": "approved adds to stock; a PO-mismatch is rejected (409) unless a DM/MD\nsends approve_mismatch=true, which receives it into a new substitute lot.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"supplier_order_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"approved_qty\": 0,\n  \"rejected_qty\": 0,\n  \"reserve_for_required\": 0,\n  \"approve_mismatch\": false,\n  \"sheets\": [\n    {\n      \"dcm\": 0,\n      \"note\": \"\"\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Remove Sheet",
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/cutting/rows/{{row_id}}/sheets/{{sheet_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "cutting",
+            "rows",
+            "{{row_id}}",
+            "sheets",
+            "{{sheet_id}}"
+          ],
+          "variable": [
+            {
+              "key": "row_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            },
+            {
+              "key": "sheet_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "He handed one back. It returns to the shelf, available to the next row."
+      },
+      "response": []
+    },
+    {
+      "name": "Reopen",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/cutting/rows/{{row_id}}/reopen",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "cutting",
+            "rows",
+            "{{row_id}}",
+            "reopen"
+          ],
+          "query": [
+            {
+              "key": "reason",
+              "value": "",
+              "description": "",
+              "disabled": true
+            }
+          ],
+          "variable": [
+            {
+              "key": "row_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Un-freeze an approved row. Recorded, because it un-signs a signature."
+      },
+      "response": []
+    },
+    {
+      "name": "Sheet Options",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/cutting/rows/{{row_id}}/sheet-options",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "cutting",
+            "rows",
+            "{{row_id}}",
+            "sheet-options"
+          ],
+          "query": [
+            {
+              "key": "dcm",
+              "value": "0",
+              "description": "Rank the shelf by distance from this measurement.",
+              "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "",
+              "disabled": false
+            }
+          ],
+          "variable": [
+            {
+              "key": "row_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "What is actually on the shelf for this row, so the dcm box can suggest.\n\nThe operator types a measurement rather than choosing a code, so the screen\nneeds to be able to show what measurements exist before they guess at one."
+      },
+      "response": []
+    }
+  ]
+}

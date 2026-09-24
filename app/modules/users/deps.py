@@ -107,3 +107,45 @@ def require_roles(*allowed: UserRole):
             )
         return user
     return checker
+
+
+# UPDATED 2026-09-17 (Hamthan): require_roles() above waves SUPERUSER_ROLES through
+# every gate, and SUPERUSER_ROLES still contains DIRECT_MANAGER for the MD rollout. That
+# is right for ordinary operational routes, but it quietly defeated the one gate whose
+# whole purpose is to name a single decision-maker: bom/router.py builds
+# `_MD = require_roles(MANAGING_DIRECTOR)` and documents it as "MD only — the sole
+# approver/rejecter/exporter", yet a DIRECT_MANAGER token could approve, reject and
+# export every BOM. The BOM sign-off is the financial control in this workflow — the
+# person who prepares and edits the BOM must not also be the person who approves it —
+# so it needs a gate that takes its allow-list literally.
+#
+# Use require_roles for "this role or above"; use this only where the separation of
+# duties IS the requirement. MANAGING_DIRECTOR still passes any gate that lists it,
+# because it is listed, not because it is a superuser.
+def require_exact_roles(*allowed: UserRole):
+    """Role gate with no DIRECT_MANAGER bypass — the listed roles, plus the MD.
+
+    UPDATED 2026-09-19 (Hamthan): THE MANAGING DIRECTOR PASSES EVERY GATE IN
+    THIS SYSTEM, WITHOUT EXCEPTION. They are the owner of the factory and the
+    superuser of the app; there is no action in it they are not entitled to
+    take, and an MD locked out of a screen has no one to escalate to.
+
+    That does NOT weaken what this gate was built for. Its purpose is the BOM
+    sign-off separation of duties — the DIRECT_MANAGER who prepares and edits a
+    BOM must not also be the one who approves it — and DIRECT_MANAGER is still
+    refused here, which is the whole point. Every current call site already
+    names MANAGING_DIRECTOR in `allowed` anyway (bom/router.py `_MD`), so this
+    changes no behaviour today; it guarantees the rule for gates added later.
+    """
+    async def checker(user: User = Depends(get_current_user)) -> User:
+        if user.role is UserRole.MANAGING_DIRECTOR:
+            return user
+        if user.role not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(f"Role '{user.role.value}' is not permitted for this action — "
+                        f"it is restricted to: "
+                        f"{', '.join(r.value for r in allowed)}."),
+            )
+        return user
+    return checker

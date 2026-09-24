@@ -43,12 +43,31 @@ class UserRead(BaseModel):
 
 
 class UserCreate(BaseModel):
-    """Direct manager creates a staff/manager/viewer login."""
+    """Direct manager creates a staff/manager/viewer login.
+
+    NO `employee_id`. An EMPLOYEE IS NOT A USER — a shop-floor worker has no
+    login at all (CLAUDE.md §3), so a caller of POST /users has nothing to point
+    this at, and the field only ever invited the all-zero UUID that was being
+    sent to satisfy it. The link still exists in the DATABASE (app_user.
+    employee_id) because a STAFF login — HR, a manager, security — does own an
+    employee row for their own attendance and wages. That link is made by the
+    system on the /employees path, never typed into this request.
+    """
     name: str
     phone: str
     email: str | None = None
     role: UserRole = UserRole.VIEWER
     password: str       # defaults to the phone number if omitted
+
+
+class StaffUserCreate(UserCreate):
+    """INTERNAL ONLY — not a request body on any route.
+
+    employees.create() mints a staff login in the same transaction as the
+    employee row and must bind the two, so it needs the one field UserCreate
+    deliberately no longer exposes. Keeping it on a subclass means the public
+    contract cannot grow it back by accident.
+    """
     employee_id: uuid.UUID | None = None
 
 

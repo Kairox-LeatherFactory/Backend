@@ -67,7 +67,7 @@ async def test_the_compact_code_and_the_legacy_code_name_the_same_piece(
 ):
     """A piece minted before the switch keeps working, and gains a compact code
     when the backfill mints one — with the long code demoted to an alias."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     repo = BarcodeService(db).repo
 
     # the fixture models a pre-switch piece: long code only, no compact code
@@ -100,7 +100,7 @@ async def test_the_compact_code_and_the_legacy_code_name_the_same_piece(
 
 @pytest.mark.asyncio
 async def test_resolve_narrowing_accepts_either_code(db, pieces):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     svc = BarcodeService(db)
     repo = svc.repo
     legacy = await repo.get_by_code(piece.code)
@@ -168,7 +168,7 @@ async def test_order_analytics_counts_garments_not_labels(db, order_tree, pieces
     order_id = order_tree["order"].id
     # the fixture's rows carry no order_id, so give them one to make this a real
     # per-order count, exactly as premint does.
-    for p, _ in pieces:
+    for p in pieces:
         row = await svc.repo.get_by_code(p.code)
         row.order_id = order_id
         row.sku_id = p.sku_id
@@ -179,7 +179,7 @@ async def test_order_analytics_counts_garments_not_labels(db, order_tree, pieces
     assert before["generated"] == 5 and before["duplicates"] == 0
 
     # now mint the compact primaries and demote the long rows (the backfill shape)
-    for p, _ in pieces:
+    for p in pieces:
         legacy = await svc.repo.get_by_code(p.code)
         await svc.repo.mint_piece_short_code_nocommit(
             p.id, caption=legacy.caption, order_id=legacy.order_id,
@@ -204,7 +204,7 @@ async def test_order_analytics_counts_garments_not_labels(db, order_tree, pieces
 async def test_the_label_carries_the_business_identity_under_a_small_code(
     db, pieces, order_tree
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     svc = BarcodeService(db)
     out = await svc.print_payload(codes=[piece.code])
     label = out["labels"][0]

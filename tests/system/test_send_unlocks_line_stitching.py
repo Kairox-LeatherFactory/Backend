@@ -14,6 +14,35 @@ WHY IT NEEDS ITS OWN FILE
     line-stitching and have it accepted. A gap anywhere in that chain leaves the
     floor unable to move a garment, and every individual test still passing.
 """
+
+import pytest
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RETIRED WITH THE DRAWER — the /drawers/send HTTP surface.
+#
+# There were 200 physical drawers. A style releases 100+ garments, stalled
+# mid-chain, and the surplus were minted onto a "waiting for a drawer" list that
+# the merge gate then refused to line-stitch — so the DM had to re-allocate boxes
+# by hand, which in practice did not happen. Since 20260902_store_piece the store
+# is a STATE on the garment (piece.store_state), and a state has no capacity.
+#
+# THE RULES THIS FILE ASSERTED ARE NOT LOST. Every one of them — completeness,
+# auto-receive, the store-entry gate, the lining verdict (including the stale
+# needs_lining flag that let a KNIT jacket reach PACKAGE_EXPORT unlined), the
+# merge gate that opens LINE_STITCHING, partial-accept send, the PACKAGE_EXPORT
+# release and the piece lookup — is carried forward in
+# tests/integration/test_store_merge.py, against the API the floor now uses.
+#
+# What is NOT carried forward, deliberately: "a piece scanned into the wrong
+# drawer is a 409". There is no wrong drawer. That rejection policed an
+# assignment the system invented at upload, and its absence is the feature.
+#
+# The file is kept rather than deleted so the drawer's behaviour stays readable
+# while the tables are still in the database (they are retained, unwritten, for
+# audit). It goes when they do.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
 import datetime
 
 import pytest
@@ -23,7 +52,7 @@ from app.core.enums import UserRole
 API = "/api/v1"
 TODAY = datetime.date.today().isoformat()
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.skip(reason="Drawers are retired; see tests/integration/test_store_merge.py")]
 
 
 def _emp(e):
@@ -86,7 +115,7 @@ async def test_line_stitching_opens_only_after_the_drawer_is_sent(
     api_client, as_role, operations, pieces, cutter, lining_cutter, paster, tailor,
     leather_lot
 ):
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     await _to_the_store(api_client, as_role, piece, cutter[0], paster[0],
                         leather_lot, lining_cutter[0])
 
@@ -164,7 +193,7 @@ async def test_send_takes_only_drawer_ids(api_client, as_role, pieces, cutter,
                                           operations):
     """No destination. Sending the old body must not be required, and sending an
     unexpected extra field must not break the call."""
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     await _to_the_store(api_client, as_role, piece, cutter[0], paster[0],
                         leather_lot, lining_cutter[0])
     for part in ("LEATHER", "LINING"):
@@ -199,7 +228,7 @@ async def test_a_piece_needing_no_lining_can_still_reach_line_stitching(
     So there must be a reachable path from 'leather in, complete, not received'
     to 'sent'.
     """
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     piece.needs_lining = False
     await db.commit()
 

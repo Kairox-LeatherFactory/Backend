@@ -1,0 +1,748 @@
+{
+  "info": {
+    "name": "KairoX \u00b7 Dashboard",
+    "description": "The per-role manager screens: cutting, lining, stitching, store and the Direct Manager's own. Every one is a read.\n\nSETUP\n  1. Import the whole folder and SELECT the KairoX environment\n     (top-right). That is what shares one token across every\n     collection \u2014 a collection variable is visible only to the\n     collection that set it.\n  2. Run `user` \u2192 Login. Its test script stores `access_token` for\n     you; there is nothing to copy and paste.\n  3. Every request here inherits bearer auth from that token.\n\n`base_url` defaults to http://127.0.0.1:8000.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. File uploads are real form-data rows \u2014 click Select Files on\nthe `file` row. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Cutting Consumption",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/cutting/consumption",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "cutting",
+            "consumption"
+          ],
+          "query": [
+            {
+              "key": "order_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "employee_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "start",
+              "value": "2026-08-01",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "end",
+              "value": "2026-08-01",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "stage",
+              "value": "",
+              "description": "LEATHER_CUTTING (default) or LINING_CUTTING. Rows never mix stages: the lot column follows the stage.",
+              "disabled": true
+            },
+            {
+              "key": "include_unmeasured",
+              "value": "False",
+              "description": "Include cut events with no recorded quantity (actual_consumption: null) instead of omitting them.",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "Cutting \u00a711/\u00a714: one row per leather-cut event with actual consumption.\n\nONE STAGE PER RESPONSE. This previously returned BOTH cut stages while joining\nthe leather lot, so lining-cut events appeared here with a blank lot and their\nquantities counted toward leather totals."
+      },
+      "response": []
+    },
+    {
+      "name": "Cutting Dashboard",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/cutting",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "cutting"
+          ],
+          "query": [
+            {
+              "key": "order_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "Pin the 'current order' block to a specific order; defaults to the most recent order in scope.",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "The complete Cutting Manager Dashboard in one call (~11 grouped queries).\n\nCACHED, AND BUSTED ON WRITE. Eleven grouped queries recomputed for every\nmanager with the screen open is the single heaviest read in the app. The\ncache is invalidated the instant anyone logs a production event or a store\nscan (core/cache.invalidate), so a cut shows up here immediately rather than\nafter a TTL \u2014 see core/cache.py for why that distinction matters on a floor."
+      },
+      "response": []
+    },
+    {
+      "name": "Cutting Employee Pieces",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/cutting/employees/{{employee_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "cutting",
+            "employees",
+            "{{employee_id}}"
+          ],
+          "variable": [
+            {
+              "key": "employee_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Cutting \u00a75 drill-down: which pieces a cutter cut, with stage + last-worked."
+      },
+      "response": []
+    },
+    {
+      "name": "Cutting Piece Trace",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/cutting/pieces/{{piece_code}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "cutting",
+            "pieces",
+            "{{piece_code}}"
+          ],
+          "variable": [
+            {
+              "key": "piece_code",
+              "value": ""
+            }
+          ]
+        },
+        "description": "Piece tracking from the Cutting dashboard. Same body as\n`/dashboard/pieces/{piece_code}` \u2014 leather consumption per cut event is on\neach history row."
+      },
+      "response": []
+    },
+    {
+      "name": "Direct Manager Dashboard",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/direct-manager",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "direct-manager"
+          ]
+        },
+        "description": "The complete Direct Manager dashboard in one call (~15 grouped queries):\noverall production, department performance, the stage pipeline + bottleneck,\nproduction rate, quality, attendance, store send/receive, per-order progress\nand the 14-day trend.\n\nComposed from the four stage dashboards' own aggregates, so this screen and\n/cutting, /lining, /stitching, /store can never disagree. Drill into any of\nthem for stage detail. Read `meta.unsupported` \u2014 several quality and costing\nfigures are null by design because no table backs them yet."
+      },
+      "response": []
+    },
+    {
+      "name": "Dm Order Tracking",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/direct-manager/orders/{{order_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "direct-manager",
+            "orders",
+            "{{order_id}}"
+          ],
+          "variable": [
+            {
+              "key": "order_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Order tracking \u2014 an order's complete production journey across every\nstage, with the stage currently holding the largest backlog."
+      },
+      "response": []
+    },
+    {
+      "name": "Dm Piece Tracking",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/direct-manager/pieces/{{piece_code}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "direct-manager",
+            "pieces",
+            "{{piece_code}}"
+          ],
+          "variable": [
+            {
+              "key": "piece_code",
+              "value": ""
+            }
+          ]
+        },
+        "description": "Piece tracking from the DM dashboard \u2014 the same shared trace every other\ndashboard serves, through the same helper, so all six URLs stay identical."
+      },
+      "response": []
+    },
+    {
+      "name": "Dm Style Tracking",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/direct-manager/styles/{{style_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "direct-manager",
+            "styles",
+            "{{style_id}}"
+          ],
+          "variable": [
+            {
+              "key": "style_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Style tracking \u2014 per-stage quantities for a style, end to end."
+      },
+      "response": []
+    },
+    {
+      "name": "Factory Alerts",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/alerts",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "alerts"
+          ],
+          "query": [
+            {
+              "key": "today",
+              "value": "2026-08-01",
+              "description": "Override 'today' for freight risk.",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "THE ALERTS, FOR EVERY MANAGER (change-list item 1).\n\nReplaces the standalone Analytics Overview + Risk Alerts screens, which are\nnow 410 Gone. The bottleneck and the alerts were the only parts of those\npages anyone acted on, and a manager should not have to know a separate\nscreen exists to find out their line is blocked \u2014 so they moved here, onto\nthe surface every manager already opens, readable by every manager role\nrather than the DM alone.\n\nThree blocks, most-actionable first:\n\n  bottleneck     THE DEEPEST QUEUE \u2014 the stage with the most work waiting in\n                 front of it. Not \"the first unfinished stage\": the first\n                 unfinished stage is wherever the line happens to have got to,\n                 which is not a constraint and not actionable.\n  stage_spread   Where each downstream stage lags the leather cut. The gap is\n                 true WIP in flight \u2014 cut but not yet arrived at stage X.\n  freight_risk   Orders approaching their sea cut-off. Missing it means air\n                 freight, which is the single biggest margin event in the\n                 business, so it is an alert and not a report line.\n\n`alert_count` is what a badge should render. Empty lists are a good day, not\na missing feature."
+      },
+      "response": []
+    },
+    {
+      "name": "Lining Consumption",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/lining/consumption",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "lining",
+            "consumption"
+          ],
+          "query": [
+            {
+              "key": "order_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "employee_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "start",
+              "value": "2026-08-01",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "end",
+              "value": "2026-08-01",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "stage",
+              "value": "",
+              "description": "LINING_CUTTING (default) or LEATHER_CUTTING. Rows never mix stages: the lot column follows the stage.",
+              "disabled": true
+            },
+            {
+              "key": "include_unmeasured",
+              "value": "False",
+              "description": "Include lining cuts logged with no quantity. Lining consumption is optional, so these are real work that would otherwise be invisible here.",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "Lining \u00a713: one row per lining-cut event with actual lining consumption\n(the lot joined via lining_lot_id). Expected/variance/waste null (BOM).\n\nLining consumption is OPTIONAL, so a cut logged without a measurement is\nexcluded by default \u2014 pass `include_unmeasured=true` to see those events with\na null quantity rather than not at all."
+      },
+      "response": []
+    },
+    {
+      "name": "Lining Dashboard",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/lining",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "lining"
+          ],
+          "query": [
+            {
+              "key": "order_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "Pin the current-order block; defaults to most recent.",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "The complete Lining Manager Dashboard in one call (~12 grouped queries):\nproduction + lining-material KPIs, current order, per-worker lining\nperformance, lining lots, per-order progress, 14-day trend, and upcoming\nlining work (leather-cut pieces not yet lining-cut)."
+      },
+      "response": []
+    },
+    {
+      "name": "Lining Employee Pieces",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/lining/employees/{{employee_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "lining",
+            "employees",
+            "{{employee_id}}"
+          ],
+          "variable": [
+            {
+              "key": "employee_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Lining \u00a717 drill-down: the pieces a lining worker touched, with stage."
+      },
+      "response": []
+    },
+    {
+      "name": "Lining Piece Trace",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/lining/pieces/{{piece_code}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "lining",
+            "pieces",
+            "{{piece_code}}"
+          ],
+          "variable": [
+            {
+              "key": "piece_code",
+              "value": ""
+            }
+          ]
+        },
+        "description": "Piece tracking from the Lining dashboard. A lining cut logged without a\nmeasurement still appears here, with a null consumption."
+      },
+      "response": []
+    },
+    {
+      "name": "Piece Trace",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/pieces/{{piece_code}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "pieces",
+            "{{piece_code}}"
+          ],
+          "variable": [
+            {
+              "key": "piece_code",
+              "value": ""
+            }
+          ]
+        },
+        "description": "A piece's full stage history in pipeline order, with the derived STORE\noverlay, its drawer, and what it consumed at each cut.\n\nTHE canonical piece-tracking read. Two neighbours answer different questions:\n`/production/piece-state` says what happens NEXT (and which stage cards to\nlock); `/analytics/pieces/{code}/story` is the analytics life story."
+      },
+      "response": []
+    },
+    {
+      "name": "Stitching Dashboard",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/stitching",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "stitching"
+          ],
+          "query": [
+            {
+              "key": "order_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "Pin the current-style block; defaults to most recent.",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "The complete Stitching Manager Dashboard in one call (~10 grouped queries):\ntop KPIs, the pre-store (Pasting/Fusing) and post-store (Line/Shell/Final)\nstage blocks, the store handoff, the running style's stage funnel, per-stage\nemployee performance, the 14-day per-stage trend, and per-order progress."
+      },
+      "response": []
+    },
+    {
+      "name": "Stitching Employee Pieces",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/stitching/employees/{{employee_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "stitching",
+            "employees",
+            "{{employee_id}}"
+          ],
+          "variable": [
+            {
+              "key": "employee_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Stitching \u00a714 drill-down: the pieces a worker touched, with current stage."
+      },
+      "response": []
+    },
+    {
+      "name": "Stitching Piece Trace",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/stitching/pieces/{{piece_code}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "stitching",
+            "pieces",
+            "{{piece_code}}"
+          ],
+          "variable": [
+            {
+              "key": "piece_code",
+              "value": ""
+            }
+          ]
+        },
+        "description": "Stitching \u00a721 traceability. The original route, unchanged \u2014 the same body\nis now also served under `/dashboard/pieces/{piece_code}`."
+      },
+      "response": []
+    },
+    {
+      "name": "Store Dashboard",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/store",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "store"
+          ],
+          "query": [
+            {
+              "key": "style_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "\u00a714 style-wise filter.",
+              "disabled": true
+            },
+            {
+              "key": "state",
+              "value": "",
+              "description": "\u00a74 drawer-state filter (waiting|merged|holding_leather|holding_lining|holding_both|received|sended).",
+              "disabled": true
+            },
+            {
+              "key": "material_type",
+              "value": "",
+              "description": "\u00a715 material filter: LEATHER | LINING | BOTH.",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "The complete Store Manager Dashboard in one call (~4 grouped queries):\ndrawer KPIs, current styles in store, the filterable drawer grid, held\ndrawers, and empty drawers available for reuse."
+      },
+      "response": []
+    },
+    {
+      "name": "Store Piece Detail",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/store/garments/{{piece_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "store",
+            "garments",
+            "{{piece_id}}"
+          ],
+          "variable": [
+            {
+              "key": "piece_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Store \u00a76 \u2014 a garment in the store + who cut its leather / lining."
+      },
+      "response": []
+    },
+    {
+      "name": "Store Piece Movement",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/store/garments/{{piece_id}}/movement",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "store",
+            "garments",
+            "{{piece_id}}",
+            "movement"
+          ],
+          "variable": [
+            {
+              "key": "piece_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Store \u00a717 \u2014 a garment's store movement history, from the audit trail."
+      },
+      "response": []
+    },
+    {
+      "name": "Store Piece Trace",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/store/pieces/{{piece_code}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "store",
+            "pieces",
+            "{{piece_code}}"
+          ],
+          "variable": [
+            {
+              "key": "piece_code",
+              "value": ""
+            }
+          ]
+        },
+        "description": "Piece tracking from the Store dashboard \u2014 carries the drawer code, what it\nis holding, and where it was sent."
+      },
+      "response": []
+    },
+    {
+      "name": "Store Traceability",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/dashboard/store/traceability",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "dashboard",
+            "store",
+            "traceability"
+          ],
+          "query": [
+            {
+              "key": "piece_code",
+              "value": "",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "style_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "material_type",
+              "value": "",
+              "description": "LEATHER | LINING",
+              "disabled": true
+            }
+          ]
+        },
+        "description": "Store \u00a78 \u2014 who cut the leather/lining for each piece, and which drawer\nholds it. Filterable by piece code, style, or material type."
+      },
+      "response": []
+    }
+  ]
+}

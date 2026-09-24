@@ -151,7 +151,16 @@ def test_no_not_null_fk_declares_set_null(table, column, referred, ondelete):
 # ── invariant 3 ──────────────────────────────────────────────────────────────
 
 def test_the_migration_lists_exactly_the_nullable_fks_the_models_declare():
-    listed = {(t, c, r) for t, c, r, _name in _load_migration()._NULLABLE_FKS}
+    # THE REGISTRY IS BOTH LISTS. _NULLABLE_FKS is what that migration APPLIES;
+    # _NULLABLE_FKS_BORN_WITH_RULE is what later migrations create with the rule
+    # already inline (their tables do not exist at that point in the chain, so
+    # applying them there would break a fresh `alembic upgrade head`). The
+    # invariant under test is unchanged — every nullable FK in the models is
+    # accounted for somewhere — only the mechanism differs.
+    _mig = _load_migration()
+    listed = {(t, c, r) for t, c, r, _name in _mig._NULLABLE_FKS}
+    listed |= {(t, c, r) for t, c, r, _name
+               in getattr(_mig, "_NULLABLE_FKS_BORN_WITH_RULE", [])}
     declared = {(t, c, r) for t, c, r, _n, _o in _NULLABLE} - _MEANINGFUL_NULL_FKS
 
     missing = declared - listed

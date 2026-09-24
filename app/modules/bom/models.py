@@ -110,9 +110,24 @@ class Bom(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "bom"
     __table_args__ = (
         UniqueConstraint("client_order_id", "style_id", name="uq_bom_order_style"),
-        UniqueConstraint("submission_id", name="uq_bom_submission"),
-         UniqueConstraint("submission_id", "style_signature",
-                         name="uq_bom_submission_style"),   # replaces uq_bom_submission
+        # UPDATED 2026-09-17 (Hamthan): REMOVED UniqueConstraint("submission_id",
+        # name="uq_bom_submission"). It was left behind when the per-style flow
+        # landed, next to a uq_bom_submission_style that was already annotated
+        # "replaces uq_bom_submission" — but nothing ever dropped it, in the model
+        # or in a migration, so BOTH were live in Postgres.
+        #
+        # One order sheet breaks down into MANY styles (submission
+        # 55e27857-3e0d-4b0c-a261-8218d76b1345 has eight: clermont, flavio,
+        # francis, shinobi, tower, virgilio, vest, favio) and each gets its own
+        # BOM. The single-column constraint allowed only the FIRST of them:
+        # clermont generated fine, then every later style's INSERT died with
+        # "duplicate key value violates unique constraint uq_bom_submission" deep
+        # inside the Celery worker (bom.generate_bom_for_style), where the 202
+        # the operator already got can never report it. The composite constraint
+        # below is the rule that was actually intended — one BOM per style per
+        # submission — and is now the only one.
+        UniqueConstraint("submission_id", "style_signature",
+                         name="uq_bom_submission_style"),
     )
     # A Stage-2 BOM is now born from the order + spec sheets ALONE, anchored on the
     # submission. The Client→Order→Style→SKU breakdown is created (and back-linked into
@@ -225,6 +240,19 @@ class PomDictionary(Base, UUIDMixin, TimestampMixin):
         GUID(), ForeignKey("garment_type.id", ondelete="SET NULL"), nullable=True
     )
     weight: Mapped[int] = mapped_column(Integer, default=1)
+    # UPDATED 2026-09-11 (Hamthan): _resolve_and_persist_poms's LLM fallback
+    # (service.py) already tried to write status="suggested" + a confidence
+    # score whenever it guesses a mapping the seeded YAML dictionary doesn't
+    # have — matching the suggested/confirmed pattern OrderStyle already uses
+    # for spec_match_status/dxf_match_status — but neither field existed here,
+    # so every LLM-guessed term crashed the whole generate-BOM task with
+    # TypeError instead of being persisted. default="confirmed" keeps every
+    # pre-existing/seeded/admin-added row (add_pom_mapping never passes
+    # status) at its current trusted meaning; only the LLM path writes
+    # "suggested", so a global, shared dictionary doesn't silently fill up
+    # with unreviewed guesses indistinguishable from curated entries.
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="confirmed")
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
 
 class PomMeasurement(Base, UUIDMixin, TimestampMixin):
     """One standardized POM, per spec sheet, per size (§3b). The Beau Geste grid yields
@@ -551,8 +579,23 @@ class OrderStyle(Base, UUIDMixin, TimestampMixin):
         GUID(), ForeignKey("document.id", ondelete="SET NULL"))
     spec_match_status: Mapped[str] = mapped_column(       # suggested|confirmed|none
         String(20), nullable=False, default="none")
+    # UPDATED 2026-09-11 (Hamthan): this column's whole purpose is the "DXF
+    # match" feature (dxf_match_status below, repo.patterns_for_client,
+    # confirm_style_attachments) — attaching the DXF-parsed pattern data a
+    # style's BOM consumption is computed from. That data lives in
+    # PatternExtraction (table pattern_extraction, populated by POST /patterns
+    # -> ingest_pattern_dxf), NOT in the unrelated legacy PatternReference
+    # model (table pattern_reference, a free-text "follow pattern code X"
+    # concept from a different feature that nothing currently writes to).
+    # The FK was wired to the wrong table, so confirming a style with the
+    # pattern_id POST /patterns actually returns crashed with
+    # ForeignKeyViolationError: that id only ever exists in pattern_extraction.
+    # Kept the column/param name pattern_reference_id as-is (external API
+    # contract; frontend already sends this field name) — only the FK target
+    # changes. Needs a matching Alembic migration to repoint the live
+    # constraint (fk_order_style_pattern_reference_id_pattern_reference).
     pattern_reference_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("pattern_reference.id", ondelete="SET NULL"))
+        GUID(), ForeignKey("pattern_extraction.id", ondelete="SET NULL"))
     dxf_match_status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="none")
     bom_id: Mapped[uuid.UUID | None] = mapped_column(

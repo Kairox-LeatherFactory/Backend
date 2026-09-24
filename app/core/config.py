@@ -54,6 +54,22 @@ class Settings(BaseSettings):
     # production default. Configured once in app.main._configure_logging().
     log_level: str = "INFO"             # DEBUG | INFO | WARNING | ERROR
 
+    # ── Interactive API docs (/docs, /redoc) ─────────────────────────────────
+    # ON EVERYWHERE BY DEFAULT (Hamthan, 2026-09-23). These used to be killed
+    # automatically outside a dev box, which meant the two frontend devs and
+    # anyone testing staging lost the one page that shows every route, payload
+    # and role — for a factory-internal API that trade was not worth it.
+    #
+    # What you are accepting: /docs is a public *map* of the API. It does not
+    # grant access — every route still enforces its JWT and role gate — but it
+    # does tell a stranger which routes exist and what they take. The mitigation
+    # is network-level (keep the API off the open internet, or put the docs
+    # path behind the load balancer's auth), not a hidden page.
+    #
+    # Set DOCS_ENABLED=false for a single deploy if you ever want them dark;
+    # no code change needed.
+    docs_enabled: bool = True
+
     # ── Database ─────────────────────────────────────────────────────────────
     # Sync URL drives Alembic migrations and the seed script (simpler, blocking).
     database_url: str = "postgresql+psycopg2://factory:factory@localhost:5432/factory"
@@ -64,6 +80,35 @@ class Settings(BaseSettings):
     # whitelisted tables only). Blank => unused (the agent shares the app session).
     # This is NOT Supabase Auth — just a separate Postgres role connection string.
     ai_reader_database_url: str = ""
+
+    # ── Connection pool (THE concurrency ceiling — tune this, not the CPU) ────
+    # An in-flight request holds one pooled connection for its WHOLE lifetime, so
+    # the number of requests this process can genuinely serve at once is
+    # `db_pool_size + db_max_overflow`, no matter how many CPUs it has. Across the
+    # service that ceiling is:
+    #
+    #     gunicorn workers (or ECS tasks) x (db_pool_size + db_max_overflow)
+    #
+    # These were hardcoded at pool_size=3 / max_overflow=5 in database.py. With
+    # WEB_CONCURRENCY=4 that is 12 sustained and 32 burst connections for the
+    # entire API, which is the wall a 100-concurrent-user floor hits first — and
+    # it could not be changed without a code edit and a redeploy.
+    #
+    # Sizing: multiply out against your Postgres `max_connections` (or put RDS
+    # Proxy / PgBouncer in front and multiply against ITS client limit instead —
+    # that is what lets you scale tasks past the server's connection budget).
+    db_pool_size: int = 5
+    db_max_overflow: int = 5
+    # FAIL FAST INSTEAD OF HANGING. SQLAlchemy's default is 30s, so under
+    # saturation a request waits half a minute for a connection and the caller
+    # has usually given up long before. 10s surfaces exhaustion as a prompt,
+    # visible error that autoscaling can react to.
+    db_pool_timeout: int = 10
+    # Recycle below any upstream idle-connection reaper (RDS Proxy, PgBouncer and
+    # most managed Postgres cut idle connections; 30 min is comfortably under the
+    # common defaults) so the app never hands out a socket the server has closed.
+    db_pool_recycle: int = 1800
+    db_pool_pre_ping: bool = True
 
     # ── Auth (self-issued JWT) ───────────────────────────────────────────────
     # Chat model for the LangGraph agent. Blank => deterministic router (no model).
@@ -235,6 +280,105 @@ class Settings(BaseSettings):
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
 
+    # ── Read cache (dashboard + analytics) ───────────────────────────────────
+    # OFF unless switched on, because a cache is only correct if the write paths
+    # that invalidate it are wired up (core/cache.invalidate). Turning this on in
+    # an environment where that is not true shows managers stale numbers.
+    #
+    # The strategy is BUST ON WRITE, not a plain TTL: a production event, a store
+    # scan or a material move bumps a version counter and every cached entry
+    # becomes unreachable at once. So a cut logged on the floor is visible on the
+    # dashboard on the very next read, and the TTL below is only a backstop for a
+    # bump that failed to land.
+    cache_enabled: bool = False
+    cache_ttl_seconds: int = 60
+
+    # ── Trusted hosts ────────────────────────────────────────────────────────
+    # Which Host headers this app will answer to. Blank = answer to anything,
+    # which is the right default for local dev and wrong behind a load balancer:
+    # a Host header the app echoes back into a link is a cache-poisoning and
+    # password-reset-link vector. Set it to your real domain(s) in production.
+    #   TRUSTED_HOSTS=api.kairox.example,kairox.example
+    trusted_hosts: str = ""
+
+    @property
+    def trusted_host_list(self) -> list[str]:
+        hosts = [h.strip() for h in (self.trusted_hosts or "").split(",") if h.strip()]
+        return hosts or ["*"]
+
+    # ── Login throttle (AUTH ONLY — see core/throttle.py) ────────────────────
+    # Deliberately narrow (Hamthan, 2026-09-20: "auth only"). The floor is NOT
+    # rate limited: a scanner doing 200 scans in a burst is a manager working
+    # through a trolley, and a throttle that fires mid-shift stops production to
+    # protect nothing. /auth/login is the one route an attacker can reach with no
+    # credentials, so it is the one route with a ceiling.
+    #
+    # 10 attempts a minute is generous for a person who has forgotten their
+    # password and useless to someone iterating a wordlist. Fails OPEN when
+    # Redis is away.
+    login_rate_limit_enabled: bool = True
+    login_rate_limit_attempts: int = 10
+    login_rate_limit_window_seconds: int = 60
+
+    # ── CORS ─────────────────────────────────────────────────────────────────
+    # WAS A HARDCODED LIST IN main.py. Adding a frontend domain — a new Vercel
+    # preview, a staging host, the production domain — meant editing source and
+    # redeploying the API. Comma-separated, e.g.
+    #   CORS_ORIGINS=https://app.example.com,https://staging.example.com
+    # Empty falls back to _DEFAULT_CORS_ORIGINS below, in EVERY environment.
+    cors_origins: str = ""
+
+    # THE FRONTENDS THIS API IS FOR. Used whenever CORS_ORIGINS is unset —
+    # production included (Hamthan, 2026-09-23). This replaces the previous
+    # "fail closed with an empty list in production", which meant a deploy that
+    # forgot CORS_ORIGINS came up serving no browser at all: every request from
+    # the real frontend died as a CORS error that looks nothing like a missing
+    # config. A known-good list is the safer failure mode here — it is still a
+    # fixed allow-list, never "*".
+    #
+    # NO TRAILING SLASHES. A browser sends `Origin: https://host` with no path
+    # and no slash; "https://host/" would never match anything.
+    _DEFAULT_CORS_ORIGINS = (
+        "https://frontend-rust-pi-23.vercel.app",
+        "https://stagingpte.vercel.app",
+        "http://localhost:3005",
+        "http://localhost:3012",
+    )
+    # Added on top of the above on a dev box only (the Next.js / Expo defaults).
+    _DEV_CORS_ORIGINS = (
+        "http://localhost:3000",
+        "http://localhost:8081",
+        "http://localhost:19006",
+    )
+
+    @staticmethod
+    def _normalise_origin(origin: str) -> str:
+        """Trim whitespace and any trailing slash pasted in from a browser bar."""
+        return origin.strip().rstrip("/")
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        explicit = [self._normalise_origin(o)
+                    for o in (self.cors_origins or "").split(",")
+                    if self._normalise_origin(o)]
+        if explicit:
+            return explicit
+        origins = list(self._DEFAULT_CORS_ORIGINS)
+        if not self.is_production:
+            origins += [o for o in self._DEV_CORS_ORIGINS if o not in origins]
+        return origins
+
+    @property
+    def is_production(self) -> bool:
+        """True for anything that is not a developer's machine.
+
+        Gates the interactive API docs and the CORS fallback. Deliberately
+        symmetrical with `_reject_default_secret_outside_local`: 'local' alone is
+        not a claim that this is a dev box — debug must also be on.
+        """
+        env = (self.environment or "").strip().lower()
+        return not (env == "local" and bool(self.debug))
+
     # ── F32 / H5: never sign production tokens with a well-known key ──────────
     # H5: the original guard keyed ONLY on `environment`, which defaults to
     # "local" (config.py:50) — so DEBUG=false with ENVIRONMENT unset booted on
@@ -245,25 +389,28 @@ class Settings(BaseSettings):
     _MIN_SECRET_LEN = 32
 
     @model_validator(mode="after")
-    def _reject_default_secret_outside_local(self) -> "Settings":
-        """A missing/misconfigured SECRET_KEY must FAIL a non-local boot, not
-        silently sign forgeable JWTs. The dev default survives only when BOTH
-        environment == 'local' AND debug is on — either one alone is not a
-        statement that this is a developer's machine.
-        """
-        env = (self.environment or "").strip().lower()
-        key = (self.secret_key or "").strip()
-        is_local_dev = (env == "local" and bool(self.debug))
-        if is_local_dev:
-            return self
+    def _reject_default_secret(self) -> "Settings":
+        """A missing/misconfigured SECRET_KEY must FAIL the boot, not silently
+        sign forgeable JWTs.
 
+        NO ENVIRONMENT IS EXEMPT (Hamthan, 2026-09-23). This used to let the
+        shipped placeholder through whenever environment == 'local' AND debug
+        was on — which is the default configuration, so the one machine that
+        never got checked was every developer's, and a token minted there is
+        just as forgeable as one minted in production. A real key costs one
+        command; there is no case for a second, weaker class of key:
+
+            python -c "import secrets;print(secrets.token_urlsafe(48))"
+        """
+        key = (self.secret_key or "").strip()
         low = key.lower()
         if any(low.startswith(p) for p in self._INSECURE_SECRET_PREFIXES):
             raise RuntimeError(
-                "SECRET_KEY is still a well-known placeholder while "
-                f"ENVIRONMENT={self.environment!r} DEBUG={self.debug!r}. "
-                "Set a real SECRET_KEY. Refusing to boot with a publicly-known "
-                "signing key."
+                f"SECRET_KEY starts with a well-known placeholder ({key[:12]!r}...) "
+                f"— ENVIRONMENT={self.environment!r} DEBUG={self.debug!r}. "
+                "Refusing to boot with a publicly-known signing key. Generate "
+                "one with `python -c \"import secrets;print(secrets.token_urlsafe(48))\"` "
+                "and put it in .env as SECRET_KEY."
             )
         if len(key) < self._MIN_SECRET_LEN:
             raise RuntimeError(

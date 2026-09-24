@@ -28,6 +28,10 @@ class SpecLineIn(BaseModel):
     colour: str | None = None
     thickness: str | None = None
     size: str | None = None
+    # Which garment sizes this line is for. NULL = every size. Left unset, it is
+    # inferred from `size` when that reads as a garment size (a "zip L"), so the
+    # DM enters what they always entered.
+    garment_size: str | None = None
     qty_per_piece: float
     uom: str | None = None              # derived; see the docstring
     material_lot_id: uuid.UUID | None = None

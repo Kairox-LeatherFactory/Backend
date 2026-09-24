@@ -9,10 +9,11 @@ Priority-1 coverage. Each test pins one invariant the business stated:
     · windows may not overlap                (the same pieces paid twice)
     · rates are date-effective               (mid-period change splits by day)
 
-Several of these currently sit behind AUDIT F139, which kills the piece-rate
-aggregate before any of them is reached. Those tests are xfail'd against the
-finding rather than worked around: the audit rule is that application code is
-never edited to make a test pass. Each one flips to XPASS when F139 lands.
+These were all xfail'd behind AUDIT F139, which killed the piece-rate aggregate
+before any of them was reached. That blocker is fixed — the aggregate groups by
+SKU.style_id (production/repository.py), not the Piece.style_id that never
+existed — so the markers are gone. A stale xfail on the money path is worse than
+no test: it reports XPASS, which is green, and hides the assertion entirely.
 """
 from datetime import date, timedelta
 
@@ -27,11 +28,6 @@ from app.modules.production import models as pm
 from app.modules.wages.models import Rate, WageLine, WageRun
 from app.modules.wages.service import WageService
 
-F139 = pytest.mark.xfail(
-    reason="AUDIT F139 (BLOCKER): production/repository.py:213,222 GROUP/ORDER BY "
-           "Piece.style_id, which does not exist — every piece-rate run raises "
-           "AttributeError before emitting SQL. Not fixed here by design.",
-    raises=AttributeError, strict=False)
 
 # The window must end on or before today (_validate_window, service.py:291-295).
 END = date.today() - timedelta(days=1)
@@ -159,7 +155,6 @@ async def test_the_same_employee_may_be_paid_in_two_different_runs(db):
 
 
 # ══════════════════════════════════════════════════ PIECE_RATE vs MONTHLY fork
-@F139
 @pytest.mark.asyncio
 async def test_a_piece_worker_is_never_paid_a_salary(db):
     w = await _world(db)
@@ -178,7 +173,6 @@ async def test_a_piece_worker_is_never_paid_a_salary(db):
                for l in payload["lines"])
 
 
-@F139
 @pytest.mark.asyncio
 async def test_a_monthly_worker_is_never_paid_per_piece(db):
     """Even with production logged against them, a MONTHLY worker is prorated.
@@ -198,7 +192,6 @@ async def test_a_monthly_worker_is_never_paid_per_piece(db):
     assert payload["total_pieces"] == 0
 
 
-@F139
 @pytest.mark.asyncio
 async def test_every_employee_gets_at_most_one_line(db):
     """One line per person — and, since the fork, across the PAIR of runs.
@@ -224,7 +217,6 @@ async def test_every_employee_gets_at_most_one_line(db):
 
 
 # ═══════════════════════════════════════════════════ date-effective rate rule
-@F139
 @pytest.mark.asyncio
 async def test_a_midperiod_rate_change_prices_each_day_at_its_own_rate(db):
     """The best-implemented rule in the module: the cache key includes work_date
@@ -332,7 +324,6 @@ async def test_an_abandoned_open_run_still_blocks_the_window(db):
     assert "open" in str(exc.value.detail).lower()
 
 
-@F139
 @pytest.mark.asyncio
 async def test_a_non_overlapping_earlier_window_is_allowed(db):
     """Adjacent fortnights are the normal case and must not be blocked."""
@@ -343,3 +334,121 @@ async def test_a_non_overlapping_earlier_window_is_allowed(db):
 
     payload = await _piece_run(db, period_start=START, period_end=END)
     assert payload["period_start"] == START or str(START) in str(payload)
+
+
+# ══════════════════════════════════ a run that pays nothing must say why
+# "After assigning rates for all operations, Compute Wage is not calculating the
+# total wage." Three different situations produce exactly that, and the response
+# could not tell them apart: an empty window, a population on the wrong wage
+# type, and a full rate sheet dated after the work all came back as
+# `total_amount: 0.0` with an empty `lines` list and nothing else to go on.
+@pytest.mark.asyncio
+async def test_a_rate_entered_after_the_work_still_prices_it_and_says_so(db):
+    """THE COMMONEST CAUSE OF A ZERO PAYROLL, and it is a data-entry artefact.
+
+    The fortnight is worked. The manager then sits down and fills in the rate
+    sheet, and the form sends TODAY as effective_from because that is the obvious
+    default. Every rate is now dated after every piece, the strict
+    `effective_from <= work_date` query matches nothing, and the run pays 0.00
+    against a sheet that visibly has a rate in every row.
+
+    The earliest rate on file applies, and the run REPORTS that it was applied to
+    work predating it — a manager is entitled to know.
+    """
+    w = await _world(db)
+    await _log(db, w, qty=20, on=WORK_DAY)
+    await _rate(db, w, value=14.0, effective_from=date.today())  # after the work
+
+    out = await _piece_run(db, w, period_start=START, period_end=END)
+
+    assert out["total_amount"] == pytest.approx(280.0)
+    assert out["unrated_operations"] == [], \
+        "a rate that exists is not an unrated operation"
+    d = out["diagnostics"]
+    assert d["pieces_priced_from_a_backdated_rate"] == 20
+    assert any("effective_from is AFTER" in n for n in d["notes"])
+
+
+@pytest.mark.asyncio
+async def test_a_rate_in_force_on_the_day_is_never_overridden_by_an_earlier_one(db):
+    """The fallback can only ever turn a 0.00 into a payment.
+
+    Two rates: 10.00 from before the work, 25.00 from after it. The day's own
+    rate is 10.00 and stays 10.00 — if anything is effective on the date, the
+    earliest-rate fallback is not consulted at all.
+    """
+    w = await _world(db)
+    await _log(db, w, qty=10, on=WORK_DAY)
+    await _rate(db, w, value=10.0, effective_from=START - timedelta(days=30))
+    await _rate(db, w, value=25.0, effective_from=date.today())
+
+    out = await _piece_run(db, w, period_start=START, period_end=END)
+
+    assert out["total_amount"] == pytest.approx(100.0)
+    assert out["diagnostics"]["pieces_priced_from_a_backdated_rate"] == 0
+
+
+@pytest.mark.asyncio
+async def test_work_by_a_non_piece_rate_worker_is_reported_not_swallowed(db):
+    """A MONTHLY worker's pieces are not paid by a PIECE run — their salary
+    covers them — but the manager asking "where are my 30 pieces" gets an answer
+    instead of an empty sheet."""
+    w = await _world(db)
+    await _log(db, w, qty=30, on=WORK_DAY, employee=w["monthly"])
+    await _rate(db, w, value=14.0, effective_from=START)
+
+    out = await _piece_run(db, w, period_start=START, period_end=END)
+
+    assert out["total_amount"] == 0.0
+    d = out["diagnostics"]
+    assert d["pieces_in_window"] == 30
+    assert d["pieces_paid"] == 0
+    assert d["pieces_skipped_wrong_wage_type"] == 30
+    assert any("not on PIECE_RATE" in n for n in d["notes"])
+    assert any("SALARIED" in n for n in d["notes"]), \
+        "name the people, so the manager can go and look at their records"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_window_says_it_is_empty_rather_than_paying_zero(db):
+    """An unpriced run and a run with nothing to price are different problems and
+    used to look identical."""
+    w = await _world(db)
+    await _rate(db, w, value=14.0, effective_from=START)
+
+    out = await _piece_run(db, w, period_start=START, period_end=END)
+
+    d = out["diagnostics"]
+    assert d["events_in_window"] == 0
+    assert any("No production events were logged" in n for n in d["notes"])
+
+
+@pytest.mark.asyncio
+async def test_every_piece_in_the_window_is_accounted_for(db):
+    """The buckets ADD UP, which is what makes the block trustworthy: paid +
+    skipped + unrated is every piece the query found."""
+    w = await _world(db)
+    await _log(db, w, qty=12, on=WORK_DAY)                       # paid
+    await _log(db, w, qty=7, on=WORK_DAY, employee=w["monthly"])  # wrong type
+    await _rate(db, w, value=14.0, effective_from=START)
+
+    out = await _piece_run(db, w, period_start=START, period_end=END)
+    d = out["diagnostics"]
+
+    assert d["pieces_in_window"] == 19
+    assert (d["pieces_paid"] + d["pieces_skipped_wrong_wage_type"]
+            + d["pieces_unrated"]) == d["pieces_in_window"]
+
+
+@pytest.mark.asyncio
+async def test_a_fully_priced_run_says_so_rather_than_staying_silent(db):
+    """`notes` is never empty. A block that is only populated when something is
+    wrong is one nobody learns to read."""
+    w = await _world(db)
+    await _log(db, w, qty=5, on=WORK_DAY)
+    await _rate(db, w, value=14.0, effective_from=START)
+
+    out = await _piece_run(db, w, period_start=START, period_end=END)
+
+    assert out["total_amount"] == pytest.approx(70.0)
+    assert out["diagnostics"]["notes"] == ["Every piece in the window was priced."]

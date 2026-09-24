@@ -56,7 +56,7 @@ from app.modules.barcode.repository import BarcodeRepository
 from app.modules.barcode.service import BarcodeService
 from app.modules.employees.models import Employee
 from app.modules.users.models import User
-from app.modules.users.schemas import UserCreate
+from app.modules.users.schemas import StaffUserCreate
 from app.modules.users.service import UserService
 
 # EVERY model module must be imported before the first ORM operation, not just
@@ -209,8 +209,8 @@ async def _ensure_person(db, *, name, designation, wage_type, salary,
         existing = await db.scalar(select(User).where(User.phone == ph))
         if existing is None:
             await UserService(db).provision_user(
-                UserCreate(name=emp.name, phone=ph, email=email, role=role,
-                        password=ph, employee_id=emp.id),
+                StaffUserCreate(name=emp.name, phone=ph, email=email, role=role,
+                                password=ph, employee_id=emp.id),
                 must_change_password=True,
             )
             out["login_new"] = True
@@ -218,7 +218,7 @@ async def _ensure_person(db, *, name, designation, wage_type, salary,
             # login predates the employee row — link them rather than duplicate
             existing.employee_id = emp.id
     elif role is not None:
-        log.warning("  ! %s has role %s but no phone — login SKIPPED",
+        log.warning("  ! %s has role %s but no phone - login SKIPPED",
                     name, role.value)
 
     await db.commit()
@@ -232,7 +232,7 @@ async def seed() -> None:
     emp_new = card_new = login_new = failed = 0
 
     async with AsyncSessionLocal() as db:
-        log.info("── STAFF (employee + card + login) ──")
+        log.info("-- STAFF (employee + card + login) --")
         for s in STAFF:
             try:
                 r = await _ensure_person(db, wage_type=WageType.MONTHLY, **s)
@@ -247,7 +247,7 @@ async def seed() -> None:
                      "+" if r["emp_new"] else "=", r["name"], r["designation"],
                      r["barcode"], r["role"])
 
-        log.info("── WORKERS (employee + card, no login) ──")
+        log.info("-- WORKERS (employee + card, no login) --")
         for name, desig, wage, salary in WORKERS:
             try:
                 r = await _ensure_person(db, name=name, designation=desig,
@@ -273,16 +273,16 @@ async def seed() -> None:
                         r["barcode"], r["role"]])
 
     log.info("")
-    log.info("── DONE ── %d people processed, %d failed", len(rows), failed)
+    log.info("-- DONE -- %d people processed, %d failed", len(rows), failed)
     log.info("   employees : %d new / %d already present", emp_new, len(rows) - emp_new)
     log.info("   cards     : %d minted / %d already held one", card_new, len(rows) - card_new)
     log.info("   logins    : %d created (staff only)", login_new)
     log.info("   cards CSV : %s  (print Code128 from the `barcode` column)", CARDS_CSV)
     log.info("   Default password = phone (digits). must_change_password=True.")
     log.info("")
-    log.info("   REMINDER: the two MDs have no salary on record — every wage run "
+    log.info("   REMINDER: the two MDs have no salary on record - every wage run "
              "will flag them as monthly_salary_missing until one is set.")
-    log.info("   REMINDER: no route grants MERCHANDISER access yet — Tanzeel can "
+    log.info("   REMINDER: no route grants MERCHANDISER access yet - Tanzeel can "
              "log in, but every role gate will 403 until that is decided.")
 
 
