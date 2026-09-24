@@ -106,15 +106,29 @@ class SheetDeleteResult(BaseModel):
 
 
 class ArrivalPatch(BaseModel):
-    """Correct a PENDING gate entry.
+    """Correct a PENDING gate entry — and, with the split, complete it.
 
     `declared_qty` MOVES STOCK — it is the quantity this arrival put on the
     floor — and it is applied as a delta, so a cut made in between is not
     silently undone.
+
+    Send `approved_qty` and/or `rejected_qty` and the arrival is COMPLETED in
+    the same call, exactly as POST .../complete would. Send only one and the
+    other is worked out from the declared total.
+
+    `article` / `colour` are CHECKED, not changed: they must match the lot the
+    arrival landed on. Changing what the material IS moves it to another lot,
+    which is a void and a re-entry, not an edit.
     """
     declared_qty: float | None = Field(default=None, gt=0)
     declared_sheet_count: int | None = Field(default=None, gt=0)
     note: str | None = None
+    approved_qty: float | None = Field(default=None, ge=0)
+    rejected_qty: float | None = Field(default=None, ge=0)
+    thickness: str | None = None
+    sheets: list[SheetIn] | None = None
+    article: str | None = None
+    colour: str | None = None
 
 
 class ArrivalVoidResult(BaseModel):
@@ -268,6 +282,10 @@ class ArrivalRow(BaseModel):
     arrived_at: str | None = None
     completed_at: str | None = None
     outstanding: list[str] = Field(default_factory=list)
+    # Filled only on a PATCH that completed the arrival.
+    on_hand_delta: float | None = None
+    sheets: list[SheetRead] = Field(default_factory=list)
+    warnings: list[dict] = Field(default_factory=list)
 
 
 class ArrivalList(BaseModel):
@@ -459,7 +477,20 @@ class StockRead(StockFigures):
 class ReceiveRequest(BaseModel):
     lot_id: uuid.UUID
     supplier_order_id: uuid.UUID | None = None
-    approved_qty: float = Field(ge=0)
+    # OPTIONAL. Everything that came off the van, approved + rejected, in the
+    # lot's own unit — the same figure POST /materials/arrivals calls total_qty.
+    # Send it and rejected_qty may be left out: it is worked out as
+    # total − approved. Send all three and they must add up (422 otherwise).
+    total_qty: float | None = Field(default=None, gt=0)
+    # OPTIONAL. The bundle/hide count taken at the gate. Checked against the
+    # hides in `sheets` — reported on a mismatch, never enforced.
+    sheet_count: int | None = Field(default=None, gt=0)
+    # OPTIONAL when total_qty is sent. Leave BOTH approved_qty and rejected_qty
+    # out and the delivery is recorded as a PENDING arrival: total_qty goes into
+    # stock provisionally and the split is entered later at
+    # PATCH /materials/arrivals/{receipt_id}. Send only rejected_qty and
+    # approved is worked out as total − rejected.
+    approved_qty: float | None = Field(default=None, ge=0)
     rejected_qty: float = Field(ge=0, default=0)
     reserve_for_required: float | None = None
     approve_mismatch: bool = False          # NEW: DM/MD accept a substitution
@@ -469,12 +500,52 @@ class ReceiveRequest(BaseModel):
 
 class ReceiveResult(StockFigures):
     lot_id: uuid.UUID
+    # The delivery row — what PATCH /materials/receipts/{receipt_id} corrects.
+    receipt_id: uuid.UUID | None = None
+    # COMPLETED when the split was sent; PENDING when it is still owed — finish
+    # it at PATCH /materials/arrivals/{receipt_id}. `outstanding` names what is.
+    status: str = "COMPLETED"
+    outstanding: list[str] = Field(default_factory=list)
+    message: str | None = None
+    total_qty: float = 0.0                 # approved + rejected, this delivery
+    approved_qty: float = 0.0
     rejected_logged: float
+    sheet_count: int | None = None          # as declared; None if not sent
+    sheets_entered: int = 0                 # hides actually measured in `sheets`
     supplier_order_status: str | None
     substituted: bool = False               # NEW: received into a NEW lot
     mismatch_fields: list[str] | None = None  # NEW: which fields differed
     sheets: list[SheetRead] = Field(default_factory=list)   # labels to print
     sheet_reconciliation: SheetReconciliation | None = None
+    warnings: list[dict] = Field(default_factory=list)
+
+
+class ReceiptPatch(BaseModel):
+    """Correct ONE delivery's approved/rejected split. Send what changes.
+
+    Same rules as POST /materials/receive: send `total_qty` without
+    `rejected_qty` and rejected is worked out as total − approved; send all three
+    and they must add up. A change to approved MOVES STOCK by the difference.
+    """
+    approved_qty: float | None = Field(default=None, ge=0)
+    rejected_qty: float | None = Field(default=None, ge=0)
+    total_qty: float | None = Field(default=None, gt=0)
+    sheet_count: int | None = Field(default=None, gt=0)
+    reason: str = Field(min_length=3, max_length=300)
+
+
+class ReceiptAdjustResult(StockFigures):
+    receipt_id: uuid.UUID
+    lot_id: uuid.UUID
+    status: str
+    total_qty: float = 0.0
+    approved_qty: float = 0.0
+    rejected_qty: float = 0.0
+    sheet_count: int | None = None
+    stock_delta: float = 0.0            # new approved − old approved
+    before: dict = Field(default_factory=dict)
+    reason: str
+    message: str | None = None
 
 
 class OrderSpecPatch(BaseModel):            # NEW: DM/MD edit an order's spec
@@ -521,8 +592,11 @@ class ReceiptRow(BaseModel):
     read them back, so "what did we buy and when" was unanswerable from the app.
     """
     receipt_id: uuid.UUID
+    status: str | None = None
+    total_qty: float | None = None      # as declared at receiving
     approved_qty: float
     rejected_qty: float
+    sheet_count: int | None = None
     supplier_order_id: uuid.UUID | None = None
     received_by: uuid.UUID | None = None
     received_at: str | None = None

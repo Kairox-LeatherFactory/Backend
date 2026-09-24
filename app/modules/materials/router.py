@@ -450,7 +450,11 @@ async def update_arrival(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(_LOT_WRITERS),
 ):
-    """Correct a PENDING gate entry: its quantity, bundle count or note.
+    """Correct a PENDING gate entry: its quantity, bundle count or note — and,
+    when approved_qty / rejected_qty are sent, COMPLETE it in the same call
+    (same effect as POST .../complete; send one and the other is worked out
+    from the declared total). article / colour are checked against the lot,
+    never changed: 422 if they differ.
 
     `declared_qty` MOVES STOCK, because that quantity is what this arrival put
     on the floor — correcting 3400 to 340 has to take 3060 back out, or the
@@ -521,6 +525,24 @@ async def receive(
     sends approve_mismatch=true, which receives it into a new substitute lot."""
     return await MaterialService(db).receive(
         body, actor_id=user.id, actor_role=user.role)
+
+
+@router.patch("/receipts/{receipt_id}", response_model=schemas.ReceiptAdjustResult)
+async def adjust_receipt(
+    receipt_id: uuid.UUID,
+    body: schemas.ReceiptPatch,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_RECEIVERS),
+):
+    """CORRECT ONE DELIVERY'S approved / rejected split, with a reason, audited.
+
+    The receipt id is on the /receive response and in GET /lots/{id}/history.
+    A change to approved moves stock by the difference (a delta, so cuts made
+    since are kept); rejected only corrects the supplier's quality history.
+    409 on a PENDING arrival — use /arrivals/{id}/complete — and 409 if lowering
+    approved would take stock negative or below what is reserved."""
+    return await MaterialService(db).adjust_receipt(
+        receipt_id, body.model_dump(exclude_unset=True), actor_id=user.id)
 
 
 @sup_router.post("/orders", response_model=schemas.SupplierOrderResult, status_code=201)

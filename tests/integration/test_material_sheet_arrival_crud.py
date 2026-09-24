@@ -397,7 +397,10 @@ class TestUpdateArrival:
         await MaterialService(db).update_arrival(
             made["receipt_id"], {"declared_qty": 340})
         receipt = await db.get(MaterialReceipt, made["receipt_id"])
-        assert receipt.approved_qty == Decimal("340.000")
+        # Nothing is approved before QC; `received` counts a PENDING receipt
+        # by its declared total instead.
+        assert receipt.declared_qty == Decimal("340.000")
+        assert receipt.approved_qty == Decimal("0.000")
         history = await MaterialService(db).lot_history(made["lot_id"])
         assert history["received"] == 340.0
 

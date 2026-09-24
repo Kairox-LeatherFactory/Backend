@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import SHEET_ALLOCATABLE, SheetStatus
@@ -109,9 +109,15 @@ class MaterialRepository:
         """
         if not lot_ids:
             return {}
+        # A PENDING receipt has approved_qty 0 (nothing is approved before QC)
+        # but its material IS in the building, so it counts by what was declared.
+        received = case(
+            (MaterialReceipt.status == "PENDING",
+             func.coalesce(MaterialReceipt.declared_qty, 0)),
+            else_=MaterialReceipt.approved_qty)
         res = await self.db.execute(
             select(MaterialReceipt.material_lot_id,
-                   func.coalesce(func.sum(MaterialReceipt.approved_qty), 0),
+                   func.coalesce(func.sum(received), 0),
                    func.coalesce(func.sum(MaterialReceipt.rejected_qty), 0),
                    func.count())
             .where(MaterialReceipt.material_lot_id.in_(tuple(lot_ids)))
@@ -200,18 +206,33 @@ class MaterialRepository:
         return res.scalar_one_or_none()
 
     async def next_sheet_seq(self) -> int:
-        """The next LS- serial.
+        """The highest LS- serial ever issued. The caller mints from +1.
 
-        COUNTS, RATHER THAN READING THE HIGHEST CODE. The barcode repository's
-        `_next_code` derives its counter from the lexicographically greatest code
-        in the prefix, which pins the counter at 0 forever the moment one
-        non-numeric code enters the namespace — a live, open bug that
-        test_one_non_numeric_code_jams_minting_for_that_prefix_forever documents
-        for EMP-. Sheets are minted only here, in bulk, inside one transaction,
-        so a count is both correct and immune to that failure.
+        IT USED TO COUNT THE ROWS, and a count is wrong the moment a hide is
+        deleted: 24 hides, delete one, count 23, and the next mint is LS-000024
+        again — a unique-constraint 500 on material_sheet. Worse, the deleted
+        hide's barcode is RETIRED, not removed, so reusing its code would make an
+        old label scan as a different skin. A serial is never handed out twice.
+
+        So this reads the highest NUMERIC serial across BOTH the sheet table and
+        the barcode registry (which still holds the retired codes). Longest code
+        first, then greatest, because LS-1000000 is larger than LS-999999 but
+        sorts below it as text. A non-numeric code in the namespace is skipped
+        rather than trusted — the failure the barcode repository's `_next_code`
+        has for EMP- (test_one_non_numeric_code_jams_minting_for_that_prefix_forever).
         """
-        return int(await self.db.scalar(
-            select(func.count()).select_from(MaterialSheet)) or 0)
+        from app.modules.barcode.models import BarcodeRegistry
+        best = 0
+        for col in (MaterialSheet.code, BarcodeRegistry.code):
+            rows = await self.db.execute(
+                select(col).where(col.like("LS-%"))
+                .order_by(func.length(col).desc(), col.desc()).limit(50))
+            for (code,) in rows.all():
+                tail = (code or "")[3:]
+                if tail.isdigit():
+                    best = max(best, int(tail))
+                    break
+        return best
 
     async def sheets_for_lot(self, lot_id: uuid.UUID,
                              statuses: set | None = None) -> list:
