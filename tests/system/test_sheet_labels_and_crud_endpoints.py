@@ -206,6 +206,35 @@ class TestSheetEndpoints:
                                  params={"code": sheet["code"]})
         assert r.status_code == 410
 
+    async def test_adding_hides_after_a_delete_never_reuses_a_code(
+            self, api_client, as_role, sheeted):
+        """THE REPORTED 500. Four hides, delete one: the serial used to be a
+        row COUNT, so the next hide was minted as a code that still existed —
+        uq_material_sheet_code — or, deleting the last one, as the retired
+        label's code, so an old sticker would scan as a new skin."""
+        as_role(UserRole.DIRECT_MANAGER)
+        codes = {s["code"] for s in sheeted["sheets"]}
+        # Delete an EARLIER hide: count drops to 3, highest code is still #4.
+        await api_client.delete(
+            f"{API}/materials/sheets/{sheeted['sheets'][0]['sheet_id']}")
+        r = await api_client.post(
+            f"{API}/materials/lots/{sheeted['lot_id']}/sheets",
+            json={"sheets": [{"dcm": 45}, {"dcm": 54}]})
+        assert r.status_code in (200, 201), r.text
+        new_codes = {s["code"] for s in r.json()["added"]}
+        assert len(new_codes) == 2 and not (new_codes & codes)
+
+        # Delete the LAST hide too — its retired code must not come back.
+        last = max(new_codes)
+        sheet_id = next(s["sheet_id"] for s in r.json()["added"]
+                        if s["code"] == last)
+        await api_client.delete(f"{API}/materials/sheets/{sheet_id}")
+        r = await api_client.post(
+            f"{API}/materials/lots/{sheeted['lot_id']}/sheets",
+            json={"sheets": [{"dcm": 40}]})
+        assert r.status_code in (200, 201), r.text
+        assert r.json()["added"][0]["code"] not in codes | new_codes
+
     async def test_an_unknown_hide_is_404_on_every_route(
             self, api_client, as_role):
         as_role(UserRole.DIRECT_MANAGER)

@@ -558,9 +558,9 @@ def release_orders(db: Session, order_numbers: list[str]) -> dict:
         if not style_ids:
             continue
         db.commit()          # _release_sync opens its own session; don't hold locks
-        # allow_pool_growth=False — still declared by _release_sync, governs
-        # nothing here. See the docstring.
-        stats = _release_sync(order.id, list(style_ids), SEED_ACTOR, False, None)
+        # No lining declarations are supplied by the seed; release falls back
+        # to the normal style inference for needs_lining.
+        stats = _release_sync(order.id, list(style_ids), SEED_ACTOR)
         total["styles_released"] += len(style_ids)
         total["pieces_minted"] += int(stats.get("pieces_minted", 0))
         print(f"   - {number:22} styles={len(style_ids):<3} "
