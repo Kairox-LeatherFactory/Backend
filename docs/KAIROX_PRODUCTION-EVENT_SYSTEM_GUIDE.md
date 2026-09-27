@@ -213,7 +213,7 @@ The system infers whether the part arriving is leather or lining from the piece'
 
 A part cannot be parked before it has been made: storing a lining on a garment nobody has cut a lining for is a **409**. The store is where a finished part is put down, not where an unfinished one waits.
 
-Accessories are different. Scanning `part=ACCESSORY` issues the garment's whole accessory kit from the style's recipe and **spends stock**. It is never inferred — a wrongly guessed kit would move money nobody asked to move.
+Accessories are different, and they take a **third scan: the packet's own `LOT-ACC-…` label**. Each scan issues exactly the one recipe line that packet matches and **spends stock**, so it is never inferred — a wrongly guessed kit would move money nobody asked to move. `part=ACCESSORY` with no packet is a 422: the old blanket scan spent every accessory line at once from the recipe alone, which meant an M-size button in an L-size jacket was undetectable. A packet whose size is not the garment's is **refused** with a 409 and waits for a DM/MD to approve the substitution; nothing is taken from stock until they do and the operator re-scans.
 
 ### Step 7 — Send
 
@@ -1132,12 +1132,20 @@ the drawer only ever said where it happened to be sitting.
 `part` is **optional**. The server infers LEATHER vs LINING from the piece's own
 cut history and what the garment is still missing. Send it only to override.
 
-**`part=ACCESSORY` is explicit-only and never inferred.** The worst a wrong
-LEATHER/LINING guess can do is set a boolean a human can flip back. An inferred
-ACCESSORY would **spend stock** — it decrements every accessory lot on the
-style's spec — so a mis-inference would move money nothing on the floor asked to
-move. The accessory scan is **idempotent**: a second tap issues nothing and
-returns the same 200.
+**An accessory is a PACKET scan — `lot_barcode` (LOT-ACC-…) — and never
+inferred.** The worst a wrong LEATHER/LINING guess can do is set a boolean a human
+can flip back. An accessory scan **spends stock**, so a mis-inference would move
+money nothing on the floor asked to move. Scanning a packet IS the accessory scan,
+so `part` may be omitted; `part=ACCESSORY` with **no** packet is a 422, because the
+blanket kit scan it used to mean decremented every line on the style's spec from
+one tap and so could never compare a packet's size to the garment's. The scan stays
+**idempotent**: a second tap on the same packet issues nothing.
+
+**A packet whose size is not the garment's is REFUSED** — a 409, nothing
+decremented, and an approval request left behind (`GET /store/substitutions`) for a
+**DM/MD** to approve or reject. Approving is permission, not the issue: the operator
+re-scans, and that is what writes the movement against their own card. One approval
+covers one garment.
 
 **A part cannot be parked before it has been made.** Storing a lining on a
 garment with no `LINING_CUTTING` event is a **409**: the store is where a

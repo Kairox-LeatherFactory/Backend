@@ -828,6 +828,39 @@ class KitStatus(str, enum.Enum):
 # ══════════════════════════════════════════════════════════════════════════
 # AUDIT ACTIONS (written to core.AuditLog for the hard transitions)
 # ══════════════════════════════════════════════════════════════════════════
+class KitSubstitutionStatus(str, enum.Enum):
+    """Where a wrong-size accessory substitution stands.
+
+    THE SCAN THAT RAISES ONE IS REJECTED, AND THAT IS THE WHOLE DESIGN. An L
+    garment handed an M packet is the single most expensive mistake this factory
+    makes: the error is invisible on the floor, found by the client in Dubai, and
+    paid for in return freight plus a re-made garment. So the packet is NOT
+    issued and the request WAITS — a warning nobody has to act on is a warning
+    the floor learns to scan past.
+
+    PENDING   the operator scanned a packet whose size is not the garment's. The
+              stock has NOT moved and the garment is NOT kitted.
+    APPROVED  a DM/MD looked at it and said yes. The operator re-scans the same
+              packet and it issues.
+    REJECTED  a DM/MD said no. Fetch the right packet. Re-approvable, because
+              "no" today and "yes" tomorrow is a real sequence and forcing a
+              second row would lose the first decision.
+    CONSUMED  the approval has been spent by the re-scan. Terminal, so one
+              approval cannot license a second garment.
+    """
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    CONSUMED = "CONSUMED"
+
+
+# An approval that may still be acted on. APPROVED is spendable; PENDING is not,
+# and the difference is what the re-scan asks about.
+KIT_SUBSTITUTION_OPEN = frozenset({
+    KitSubstitutionStatus.PENDING.value, KitSubstitutionStatus.APPROVED.value,
+})
+
+
 class BarcodeAuditAction(str, enum.Enum):
     DRAWER_RECEIVED = "DRAWER_RECEIVED"
     DRAWER_SENDED = "DRAWER_SENDED"
@@ -853,6 +886,13 @@ class BarcodeAuditAction(str, enum.Enum):
     # Work sent outside the factory.
     JOB_WORK_DISPATCHED = "JOB_WORK_DISPATCHED"
     JOB_WORK_RETURNED = "JOB_WORK_RETURNED"
+    # The wrong-size accessory. REQUESTED is written by the scan that was
+    # REFUSED, so the refusal itself is on the record — without it the only trace
+    # of "somebody tried to put an M zip in an L jacket" would be the absence of
+    # a row, and a DM approving one would look like the first event in the story.
+    MATERIAL_KIT_SUBSTITUTION_REQUESTED = "MATERIAL_KIT_SUBSTITUTION_REQUESTED"
+    MATERIAL_KIT_SUBSTITUTION_APPROVED = "MATERIAL_KIT_SUBSTITUTION_APPROVED"
+    MATERIAL_KIT_SUBSTITUTION_REJECTED = "MATERIAL_KIT_SUBSTITUTION_REJECTED"
 
 
 

@@ -356,29 +356,50 @@ class TestLotBarcodeRow:
 
 
 # ══════════════════════════════════════════════ is this a GARMENT size?
-class TestLooksLikeAGarmentSize:
-    @pytest.mark.parametrize("value", ["S", "M", "L", "XL", "48", "52", "70"])
-    def test_a_real_garment_size_reads_as_one(self, value):
-        assert StyleSpecService._looks_like_a_garment_size(value) is True
+class TestReadsAsGarmentSize:
+    """WHAT THIS PREDICATE IS FOR CHANGED, and the tests changed with it.
+
+    It used to INFER `garment_size` from a material size. It no longer infers
+    anything — garment_size is explicit or NULL — and this is now only the trigger
+    for the 422 that REFUSES a line whose material size is unmistakably a garment
+    size and which does not say which garments it is for. So the bar moved: it must
+    be certain, not merely plausible.
+    """
+    @pytest.mark.parametrize("value", ["S", "M", "L", "XL", "XXL", "2XL"])
+    def test_an_alpha_rung_is_unmistakably_a_garment_size(self, value):
+        assert StyleSpecService._reads_as_garment_size(value) is True
+
+    @pytest.mark.parametrize("value", ["48", "52", "70", "60", "45", "63"])
+    def test_a_BARE_NUMBER_IS_NOT_READ_AS_A_SIZE_ANY_MORE(self, value):
+        """THE BUG THIS FIXES, and it cost a shipment's worth of missing zips.
+
+        Every number from 30 to 70 used to read as a garment size, because those
+        are the EU jacket rungs — so a 60cm zip entered as size '60' was scoped to
+        4XL garments and a 45cm zip to XS. And a line scoped to a size no garment
+        has is not a smaller recipe: it is ABSENT. merge_lines drops it,
+        kit_required comes back False, and every other size ships with no zip.
+
+        '50' is a garment size on one client's sheet and a centimetre length on the
+        next, so it cannot be told from the token. Recipe-wide,
+        kit_rules.accessory_size_ambiguities asks the DM instead of guessing.
+        """
+        assert StyleSpecService._reads_as_garment_size(value) is False
 
     @pytest.mark.parametrize("value", ["60CM", "18L", "", None, "  "])
     def test_a_material_measurement_does_not(self, value):
         """A 60cm zip is not an L jacket. Reading it as one would confine a
         perfectly general line to a size that does not exist."""
-        assert StyleSpecService._looks_like_a_garment_size(value) is False
+        assert StyleSpecService._reads_as_garment_size(value) is False
 
-    @pytest.mark.parametrize("value", ["29", "71", "100"])
-    def test_a_number_off_the_eu_jacket_ladder_is_not_a_size(self, value):
-        assert StyleSpecService._looks_like_a_garment_size(value) is False
-
-    @pytest.mark.parametrize("value", ["M/L", "XL-2", "SIZE 4", "4.5MM"])
+    @pytest.mark.parametrize("value", ["M/L", "XL-2", "SIZE 4", "4.5MM",
+                                       "63 · YKK-169"])
     def test_a_token_with_letters_and_punctuation_is_a_material_label(self, value):
         """Letters plus anything non-alphanumeric is a description, not a rung
         on the size ladder."""
-        assert StyleSpecService._looks_like_a_garment_size(value) is False
+        assert StyleSpecService._reads_as_garment_size(value) is False
 
     def test_the_check_is_case_insensitive(self):
-        assert StyleSpecService._looks_like_a_garment_size("m") is True
+        assert StyleSpecService._reads_as_garment_size("m") is True
 
 
 # ══════════════════════════════════════════════════ does a line apply?

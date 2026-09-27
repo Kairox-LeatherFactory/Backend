@@ -583,6 +583,72 @@ class PieceMaterialIssue(Base, UUIDMixin, TimestampMixin):
     issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class KitSubstitutionRequest(Base, UUIDMixin, TimestampMixin):
+    """An L garment was handed an M packet. The scan was REFUSED; this is the ask.
+
+    WHY A TABLE AND NOT A `force` FLAG ON THE SCAN. A flag puts the decision in
+    the hands of the person holding the wrong packet, at the moment they want to
+    get on with their work, and it is pressed. The decision belongs to a DM/MD who
+    is not standing there, so it has to outlive the scan — which means a row, a
+    status, and a second scan that finds the answer.
+
+    THE STOCK HAS NOT MOVED WHEN THIS ROW IS WRITTEN. The scan that raises it
+    ends in a 409: nothing is decremented, no ledger row is added,
+    `accessories_in` stays False. That is the difference between this and every
+    other warning in the app (the skill gate, the stock shortfall), which record
+    the work and flag it. Here the wrong size IS the failure, and recording it
+    would be recording the thing we are trying to prevent.
+
+    IDEMPOTENT ON (piece, line, lot). The operator re-scans — because the whole
+    protocol is "scan, get refused, wait, scan again" — and each re-scan must find
+    this row rather than pile up a queue of identical asks for the DM to wade
+    through. CONSUMED is terminal for the same reason a wage run freezes: one
+    approval licenses one garment, and a second garment is a second decision.
+    """
+    __tablename__ = "kit_substitution_request"
+    __table_args__ = (
+        UniqueConstraint("piece_id", "spec_line_id", "material_lot_id",
+                         name="uq_kit_substitution_request"),
+    )
+    # CASCADE, unlike the ledger's SET NULL: a pending approval for a deleted
+    # piece is not history worth keeping, it is a question nobody can answer. The
+    # audit_log row written beside it is what survives.
+    piece_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("piece.id", ondelete="CASCADE"), index=True)
+    spec_line_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("style_material_spec.id", ondelete="CASCADE"),
+        index=True)
+    material_lot_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("material_lot.id", ondelete="SET NULL"),
+        nullable=True, index=True)
+
+    # ── what was asked, snapshotted so the DM's screen needs no joins and the
+    # row still reads correctly after a lot is re-articled ───────────────────
+    garment_size: Mapped[str | None] = mapped_column(String(40))
+    lot_size: Mapped[str | None] = mapped_column(String(40))
+    article: Mapped[str | None] = mapped_column(String(120))
+    colour: Mapped[str | None] = mapped_column(String(80))
+    subtype: Mapped[str | None] = mapped_column(String(20))
+    qty: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
+
+    status: Mapped[str] = mapped_column(
+        String(15), nullable=False, default="PENDING",
+        server_default="PENDING", index=True)   # KitSubstitutionStatus
+
+    # The two identities the store already splits: the card that was scanned and
+    # the login that scanned it (see PieceMaterialIssue for why they are not one).
+    requested_by_employee_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("employee.id", ondelete="SET NULL"), nullable=True)
+    requested_by: Mapped[str | None] = mapped_column(String(120))
+    reason: Mapped[str | None] = mapped_column(String(300))
+
+    decided_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(120))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decision_note: Mapped[str | None] = mapped_column(String(300))
+
+
 # ── CROSS-MODULE FK RESOLUTION ───────────────────────────────────────────────
 # `material_sheet.cutting_row_id` names a table defined in app.modules.cutting.
 # SQLAlchemy resolves FK target strings against the SHARED MetaData when mappers

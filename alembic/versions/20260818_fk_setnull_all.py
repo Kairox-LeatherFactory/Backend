@@ -410,6 +410,16 @@ _NULLABLE_FKS_BORN_WITH_RULE = [
     # about material that physically arrived and must outlive them.
     ("material_receipt", "completed_by", "app_user",
      "fk_material_receipt_completed_by_app_user"),
+    # 20260927_kit_packet_scan — the wrong-size accessory approval. Its piece and
+    # spec_line FKs are CASCADE, not SET NULL, and so are deliberately absent from
+    # this registry: an approval whose garment is gone is a question nobody can
+    # answer, not history. These three are the nullable ones.
+    ("kit_substitution_request", "material_lot_id", "material_lot",
+     "fk_kit_substitution_lot"),
+    ("kit_substitution_request", "requested_by_employee_id", "employee",
+     "fk_kit_substitution_employee"),
+    ("kit_substitution_request", "decided_by_user_id", "app_user",
+     "fk_kit_substitution_decided_by"),
 ]
 
 

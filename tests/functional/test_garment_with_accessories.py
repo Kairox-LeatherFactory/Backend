@@ -128,10 +128,19 @@ async def test_a_jacket_with_a_recipe_walks_the_chain_and_spends_its_kit_once(
     assert blocked["sent"] == []
     assert "accessory kit" in blocked["not_ready"][0]["reason"]
 
-    # ── 5 · the kit scan: the money moves here ───────────────────────────────
-    k = await store.store_scan(piece_id=piece.id,
-                                part=StorePart.ACCESSORY,
-                                employee_id=cutter[0].id, entered_by="STORE")
+    # ── 5 · the packet scans: the money moves here, ONE PACKET AT A TIME ─────
+    # There is no blanket kit scan any more. The operator scans the buttons, then
+    # the zip, and the garment is not complete until the last one — which is what
+    # makes "did the L jacket get the L buttons" an answerable question.
+    partial = await store.store_scan(piece_id=piece.id, lot_id=button.id,
+                                     employee_id=cutter[0].id,
+                                     entered_by="STORE")
+    assert partial["kit"]["status"] == KitStatus.PARTIAL.value
+    assert partial["auto_received"] is False, "the zip is still owed"
+    assert "ACCESSORIES" in partial["awaiting"]
+
+    k = await store.store_scan(piece_id=piece.id, lot_id=zipper.id,
+                               employee_id=cutter[0].id, entered_by="STORE")
     assert k["kit"]["status"] == KitStatus.ISSUED.value
     assert k["auto_received"] is True                  # now it completes
     assert k["store_state"] == StoreState.RECEIVED.value

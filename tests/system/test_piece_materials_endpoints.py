@@ -126,10 +126,16 @@ async def test_the_scan_gun_door_returns_the_same_thing(client, navy_piece):
 async def test_the_ledger_shows_what_was_actually_issued(client, navy_piece,
                                                          cutter, db):
     """`issued` is the record of what went in the bag, not what was asked for."""
+    # THE PACKET'S OWN LABEL IS THE SCAN. `part: "ACCESSORY"` with no packet is a
+    # 422 now: a blanket kit scan spent every line the recipe named and so could
+    # never tell an L packet from an M one.
+    from sqlalchemy import select as _select
+    lot_id = await db.scalar(
+        _select(MaterialLot.id).where(MaterialLot.article == "BTN-4H"))
     scan = await client.post(f"{API}/store/scan", json={
         "employee_id": str(cutter[0].id),
         "piece_barcode": navy_piece.code,
-        "part": "ACCESSORY"})
+        "lot_id": str(lot_id)})
     assert scan.status_code == 201, scan.text
 
     body = (await client.get(
