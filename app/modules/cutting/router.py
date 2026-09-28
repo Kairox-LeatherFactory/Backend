@@ -41,6 +41,8 @@ _CUTTING = require_roles(
 async def grid(
     style_id: uuid.UUID,
     colour: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=10000),
+    offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(_CUTTING),
 ):
@@ -50,7 +52,8 @@ async def grid(
     absent worker — a grid that let one be assigned would collect the work and
     then fail at the scan, after the leather was already handed out.
     """
-    return await CuttingService(db).grid(style_id=style_id, colour=colour)
+    return await CuttingService(db).grid(
+        style_id=style_id, colour=colour, limit=limit, offset=offset)
 
 
 @router.post("/rows/generate", response_model=schemas.GenerateResult,
