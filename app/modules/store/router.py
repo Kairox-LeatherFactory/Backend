@@ -3,9 +3,12 @@
 modules/store/router.py — HTTP only. Two scans, not three.
 ================================================================================
 POST /store/scan                  worker + garment → part into the store
+                                  (+ packet label for an accessory)
 POST /store/send                  release garments to line-stitching
 GET  /store/pieces                what is in the store right now
 GET  /store/pieces/{piece_code}   WHERE IS THIS GARMENT — the lookup page
+GET  /store/substitutions         wrong-size packets waiting on a DM
+POST /store/substitutions/{id}/approve|reject      the DM/MD decision
 
 THE LOOKUP IS DELIBERATELY WIDE (bug #15). The DM assigns somebody to place
 garments in the store, and that person has no DM login — so under the old routes
@@ -57,10 +60,16 @@ async def store_scan(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(_FLOOR),
 ):
-    """Scan the worker, scan the garment. The drawer scan is gone.
+    """Scan the worker, scan the garment — and the packet, for an accessory.
 
     Barcodes are resolved to ids HERE so the service sees ids only
     (CLAUDE.md §15) — the same split the production log uses.
+
+    AN ACCESSORY IS ISSUED ONE PACKET AT A TIME. Send `lot_barcode` (LOT-ACC-…)
+    and this scan issues exactly the recipe line that packet matches; there is no
+    blanket kit scan any more. A packet whose size is not the garment's is
+    REFUSED with a 409 and an approval request a DM/MD decides below — nothing is
+    taken from stock until they do.
     """
     barcodes = BarcodeService(db)
     employee_id = await barcodes.resolve_actor(
@@ -68,12 +77,77 @@ async def store_scan(
     piece_id = body.piece_id
     if piece_id is None:
         piece_id = await barcodes.resolve_piece_id(body.piece_barcode)
+    lot_id = body.lot_id
+    if lot_id is None and body.lot_barcode:
+        lot_id = await barcodes.resolve_lot_id(body.lot_barcode)
 
     return await StoreService(db).store_scan(
         piece_id=piece_id, employee_id=employee_id, part=body.part,
-        lines=body.lines,
+        lot_id=lot_id, qty=body.qty,
+        substitution_reason=body.substitution_reason,
         # The LOGIN signs the audit row; the WORKER is employee_id above.
         actor_user_id=user.id, entered_by=user.name)
+
+
+# ── the wrong-size approvals ─────────────────────────────────────────────────
+# WHO MAY DECIDE ONE, and it is deliberately narrower than the floor. The whole
+# reason the scan is refused rather than flagged is that the person holding the
+# wrong packet should not be the person who authorises it — so this is DM/MD only,
+# the same two roles that bypass the production stage gates.
+_APPROVERS = require_roles(UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER)
+
+
+@router.get("/substitutions", response_model=schemas.SubstitutionList)
+async def list_substitutions(
+    request_status: str | None = Query(
+        default=None, alias="status",
+        description="PENDING|APPROVED|REJECTED|CONSUMED. Omit for all."),
+    limit: int = Query(default=200, le=1000),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_READERS),
+):
+    """The wrong-size queue, oldest first — garments waiting on a decision.
+
+    THE QUEUE IS WHAT MAKES THE REFUSAL SAFE. An operator told "wait for approval"
+    is waiting on somebody who has not been told anything; an ask nobody can find
+    is a garment parked in the store for a reason nobody remembers. Same shape and
+    same reason as the material-arrivals come-back-to-it queue.
+    """
+    return await StoreService(db).list_substitutions(
+        status_filter=request_status, limit=limit, offset=offset)
+
+
+@router.post("/substitutions/{request_id}/approve",
+             response_model=schemas.SubstitutionResult)
+async def approve_substitution(
+    request_id: uuid.UUID,
+    body: schemas.SubstitutionDecision | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_APPROVERS),
+):
+    """Permit this one packet into this one garment. IT DOES NOT ISSUE IT.
+
+    The operator re-scans the packet and that is what moves the stock, against
+    their own card. One approval covers one garment: the re-scan marks it CONSUMED.
+    """
+    return await StoreService(db).decide_substitution(
+        request_id, approve=True, note=(body.note if body else None),
+        actor_user_id=user.id, actor_name=user.name)
+
+
+@router.post("/substitutions/{request_id}/reject",
+             response_model=schemas.SubstitutionResult)
+async def reject_substitution(
+    request_id: uuid.UUID,
+    body: schemas.SubstitutionDecision | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_APPROVERS),
+):
+    """Refuse it — the floor fetches the right packet. Re-approvable later."""
+    return await StoreService(db).decide_substitution(
+        request_id, approve=False, note=(body.note if body else None),
+        actor_user_id=user.id, actor_name=user.name)
 
 
 @router.post("/send", response_model=schemas.StoreSendResult)

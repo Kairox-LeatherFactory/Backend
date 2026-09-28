@@ -441,7 +441,7 @@
         "description": "approved adds to stock; a PO-mismatch is rejected (409) unless a DM/MD\nsends approve_mismatch=true, which receives it into a new substitute lot.",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"supplier_order_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"approved_qty\": 0,\n  \"rejected_qty\": 0,\n  \"reserve_for_required\": 0,\n  \"approve_mismatch\": false,\n  \"sheets\": [\n    {\n      \"dcm\": 0,\n      \"note\": \"\"\n    }\n  ]\n}",
+          "raw": "{\n  \"lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"supplier_order_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"total_qty\": 0,\n  \"sheet_count\": 0,\n  \"approved_qty\": 0,\n  \"rejected_qty\": 0,\n  \"reserve_for_required\": 0,\n  \"approve_mismatch\": false,\n  \"sheets\": [\n    {\n      \"dcm\": 0,\n      \"note\": \"\"\n    }\n  ]\n}",
           "options": {
             "raw": {
               "language": "json"

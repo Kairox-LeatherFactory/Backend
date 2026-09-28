@@ -106,7 +106,15 @@ The piece must have completed the previous stage on its chain. The block carries
 
 ## Gate 4 — merge (LINE_STITCHING only)
 
-The garment must have been **released from the store**. A lined jacket needs leather **and** lining; a leather-only piece (`needs_lining: false`) clears on leather alone.
+The garment must have been **released from the store**. Release is a **completeness** test, not a sequence one, and it has three clauses (`core/kit_rules.piece_complete`):
+
+| Clause | When it applies |
+|---|---|
+| leather is in | always |
+| lining is in | only when `needs_lining: true` — a leather-only piece clears on leather alone |
+| the **kit** is issued | only when the style declares accessories (`kit_required`) |
+
+The accessory clause is the one that is easy to forget: a style with a button or a zip on its material spec is **not** complete on leather and lining, and `accessories_in` turns true only when **every** declared line has been issued by its own packet scan. So a garment can sit at HOLDING_BOTH, look finished on the floor, and still be refused by this gate because nobody has scanned its zip packet.
 
 ## Gate 5 — assignment
 
@@ -207,6 +215,19 @@ Send `code` (the scanned garment) and `employee_barcode` (the scanned worker), a
 It uses **the very same predicates** `POST /log` enforces, so a card the UI opens is a card the log will accept. It also carries the garment's store standing and how many pieces of its SKU are still outstanding at the next stage.
 
 > Call this for **one garment**, not a SKU. A scan screen holds one garment in the operator's hand; a SKU-wide read answers a different question and cannot say anything about that piece.
+
+## The two pickers the manual door needs
+
+The barcode door needs no picker — the gun supplies the codes. The **manual door** has to be filled in by hand, and these are the two reads that fill it in.
+
+| Read | Gives | Notes |
+|---|---|---|
+| `GET /production/skus` | the SKU picker: `code` plus *style · colour · size* | **Paged**, and **scoped to a client** where the caller is one |
+| `GET /production/operations` | the configured production operations — the pipeline steps | flat list, floor readers |
+
+**Narrow the SKU picker, do not page through it.** Unfiltered it is every SKU in the factory — one row per colour and size of every style of every order, which makes it the largest picker in the service. Pass `order_id` or `style_id`.
+
+> **`/operations` is reference data for labelling a screen, and nothing else.** It does not mean a caller picks a stage from it: the caller **never sends a stage** (§2, Idea 1). Use it to name what happened, not to choose what happens.
 
 ---
 

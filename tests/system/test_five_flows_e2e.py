@@ -408,8 +408,11 @@ async def test_flow5_sized_accessories_the_kit_and_the_money(
     await db.commit()
 
     # ── the accessory stock, and a recipe with one line per size ────────────
+    # ONE LOT PER SIZE, AND EACH GETS ITS OWN LOT-ACC LABEL. That label is what
+    # the store now scans, and the reason the wrong size is detectable at all.
+    packets = {}
     for size in ("S", "M", "L"):
-        _ok(await api_client.post(f"{API}/materials/lots", json={
+        packets[size] = _ok(await api_client.post(f"{API}/materials/lots", json={
             "category": "ACCESSORY", "subtype": "ZIP", "article": "ZIP-N",
             "colour": "PINE GREEN",
             "attributes": {"size": size, "count": 100}}))
@@ -417,11 +420,15 @@ async def test_flow5_sized_accessories_the_kit_and_the_money(
     # order_tree's style is RELEASED, so the LEATHER line is frozen — and must
     # be: it is what the garments were cut and costed against. ACCESSORIES are
     # correctable after release (fix #12), which is the path used here.
+    # `garment_size` is SAID, not inferred. The inference read any number from 30
+    # to 70 as a garment size, so a 60cm zip was scoped to 4XL jackets and every
+    # other size got no zip line — which is not a short kit, it is no kit.
     for size in ("S", "M", "L"):
         _ok(await api_client.post(
             f"{API}/styles/{style.id}/material-spec/lines",
             json={"category": "ACCESSORY", "subtype": "ZIP", "article": "ZIP-N",
-                  "colour": "PINE GREEN", "size": size, "qty_per_piece": 1}),
+                  "colour": "PINE GREEN", "size": size,
+                  "garment_size": size, "qty_per_piece": 1}),
             200, 201)
 
     lines = _ok(await api_client.get(f"{API}/styles/{style.id}/material-spec"))
@@ -461,9 +468,47 @@ async def test_flow5_sized_accessories_the_kit_and_the_money(
     assert leather_in["store_state"] == "holding_leather"
     assert leather_in["kit"] is not None, "the kit rides every scan"
 
+    # THE WRONG SIZE IS REFUSED, NOT FLAGGED. The S packet in an M garment is the
+    # mistake the client in Dubai finds, so the scan fails, nothing is spent, and
+    # a DM/MD is asked.
+    wrong = await api_client.post(f"{API}/store/scan", json={
+        "employee_id": str(cutter[0].id), "piece_id": str(piece.id),
+        "lot_id": packets["S"]["lot_id"]})
+    assert wrong.status_code == 409, wrong.text
+    assert "WRONG SIZE" in wrong.text
+    request_id = wrong.headers["X-Kit-Substitution-Request"]
+
+    # It is not silently dropped either — it is a queue somebody can answer.
+    queue = _ok(await api_client.get(f"{API}/store/substitutions",
+                                     params={"status": "PENDING"}))
+    assert queue["pending"] == 1
+    assert queue["requests"][0]["request_id"] == request_id
+
+    # THE PERSON HOLDING THE WRONG PACKET MAY NOT AUTHORISE IT. That is the whole
+    # reason the scan is refused rather than flagged, so the approval is DM/MD only
+    # — the same two roles that bypass the production stage gates.
+    denied = await api_client.post(
+        f"{API}/store/substitutions/{request_id}/approve", json={})
+    assert denied.status_code == 403, denied.text
+
+    as_role(UserRole.DIRECT_MANAGER)
+    decision = _ok(await api_client.post(
+        f"{API}/store/substitutions/{request_id}/reject",
+        json={"note": "fetch the M packet"}))
+    assert decision["status"] == "REJECTED"
+
+    # And a refused packet stays refused on the floor.
+    as_role(UserRole.STORE_MANAGER)
+    again = await api_client.post(f"{API}/store/scan", json={
+        "employee_id": str(cutter[0].id), "piece_id": str(piece.id),
+        "lot_id": packets["S"]["lot_id"]})
+    assert again.status_code == 409
+    assert "REFUSED" in again.text
+
+    # And the right packet issues normally.
     kitted = _ok(await api_client.post(f"{API}/store/scan", json={
         "employee_id": str(cutter[0].id), "piece_id": str(piece.id),
-        "part": "ACCESSORY"}), 201)
+        "lot_id": packets["M"]["lot_id"]}), 201)
     assert kitted["accessories_in"] is True
     assert "ACCESSORIES" not in kitted["awaiting"]
 

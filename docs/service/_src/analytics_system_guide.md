@@ -163,5 +163,5 @@ It answers "what did this style really cost us in leather", which is not the sam
 - **This module owns no tables and must never write.** If a figure needs a table, it belongs in the module that owns the data.
 - **`employee-rates` pre-loads every rate in one query** and resolves them in Python. The alternative — a scalar subquery per row — is an N-query payroll report, and this is the endpoint a manager refreshes all day.
 - **Its rate resolution mirrors `WageRepository.effective_rate` exactly.** If one changes, both must.
-- **`_stage_progress` and `_totals` are shared** by the order level and the style level, so a style page is always a strict subset of its order page.
+- **`_stage_progress` and `_scope_totals` are shared** by the order level and the style level, so a style page is always a strict subset of its order page.
 - **The 410 stubs are kept deliberately.** Delete them one release after the frontend stops calling them.

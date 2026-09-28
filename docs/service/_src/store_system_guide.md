@@ -51,11 +51,46 @@ The old flow was worker → **drawer** → piece, with a 409 when the garment wa
 
 > Rule 2 asks for **PASTING**, not "any leather-side event". Accepting LEATHER_CUTTING or FUSING is how a piece that was cut but not pasted got stored as leather, and the merge gate then opened on it.
 
-## ACCESSORY is NEVER inferred
+## ACCESSORY is a PACKET SCAN, and never inferred
 
-That is a safety rule, not a convenience. Inferring LEATHER vs LINING can at worst set the wrong boolean, and a human can undo that. An inferred **ACCESSORY spends stock** — it decrements every accessory lot on the style's recipe — so a wrong guess would move money nothing on the floor asked to move.
+An accessory scan **spends stock**, so it was always explicit-only: inferring LEATHER vs LINING can at worst set the wrong boolean and a human can undo that, while a wrongly guessed kit moves money nobody asked to move.
 
-**To issue a kit you must send `"part": "ACCESSORY"` explicitly.**
+It is now also **one packet at a time**, identified by the packet's own `LOT-ACC-…` label:
+
+```json
+{ "employee_barcode": "EMP-000123",
+  "piece_barcode":    "PC-23456A",
+  "lot_barcode":      "LOT-ACC-000007" }
+```
+
+Scanning a packet **is** the accessory scan — `part` may be omitted, and a `part` that says anything else is a 422. Optional `qty` issues a short quantity (2 of the 4 buttons); omitted means the whole outstanding amount.
+
+**`"part": "ACCESSORY"` with no packet is a 422.** The blanket kit scan is gone, and removing it is the feature: it read the recipe and decremented every accessory line at once, so no physical packet was ever part of the exchange and an M-size button in an L-size jacket was undetectable by construction. That mistake is invisible on the floor, found by the client in Dubai, and paid for in return freight plus a remade garment.
+
+The response's `kit` block is the **whole checklist**, not just the packet scanned — the operator who has just done the zip needs to be told the buttons are still owed while they are still at the terminal. `accessories_in` turns true only when every declared line is issued.
+
+## The wrong size is REFUSED, and waits for a DM
+
+Every other mid-scan problem in this app records the work and warns — the skill gate, the stock shortfall — because the work physically happened and losing the record is worse. The wrong size is the exception: there is nothing worth preserving about it going in.
+
+A packet whose size is not the garment's gets a **409**, nothing is decremented, and the refusal leaves behind an approval request (the id is in the `X-Kit-Substitution-Request` response header):
+
+| Route | Who | What it does |
+|---|---|---|
+| `GET /store/substitutions` | the read roles | the queue, oldest first, with `pending` |
+| `POST /store/substitutions/{id}/approve` | **DM / MD only** | permits it — **does not issue it** |
+| `POST /store/substitutions/{id}/reject` | **DM / MD only** | refuses it; re-approvable later |
+
+**Approving is permission, not the issue.** The operator is holding the packet and the DM is not, so the DM grants permission and the operator **re-scans** — which is what moves the stock against the worker's own card. One approval covers one garment: the re-scan marks it `CONSUMED`.
+
+Three other answers a packet scan can give, each a different fix:
+
+| Outcome | Status | What it means |
+|---|---|---|
+| wrong size | 409 | right article, wrong size → a DM decides |
+| not in the recipe | 422 | wrong packet entirely → check it, or `POST /materials/issues` |
+| no line for this size | 409 | the **recipe** is missing a line for this size → a DM fixes the spec, because every garment of this size is in the same state |
+| no accessory spec | 409 | the style declares none, or its lines are all for another colourway/size |
 
 ## The entry gate
 

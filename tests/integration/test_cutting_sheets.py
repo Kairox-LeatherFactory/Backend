@@ -161,6 +161,28 @@ async def test_the_grid_allocates_hides_sized_to_the_garment(db, order_tree,
     assert first["total_dcm"] >= first["target_dcm"] or gen["warnings"]
 
 
+async def test_the_grid_paginates_rows_and_keeps_accurate_totals(
+        db, order_tree, garments, cutter):
+    await _lot(db)
+    service = CuttingService(db)
+
+    before_generation = await service.grid(
+        style_id=order_tree["style"].id, colour="PINE GREEN", limit=1, offset=1)
+    assert before_generation["uncut_pieces"] == 2
+    assert before_generation["rows"] == []
+
+    await service.generate(GenerateRequest(
+        style_id=order_tree["style"].id, colour="PINE GREEN"))
+    page = await service.grid(
+        style_id=order_tree["style"].id, colour="PINE GREEN", limit=1, offset=1)
+
+    assert page["count"] == 1
+    assert page["total"] == 2
+    assert page["limit"] == 1
+    assert page["offset"] == 1
+    assert page["uncut_pieces"] == 0
+
+
 async def test_generating_twice_creates_nothing_the_second_time(db, order_tree,
                                                                 garments, cutter):
     """A manager who is not sure the button worked will press it again."""

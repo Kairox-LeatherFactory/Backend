@@ -126,6 +126,14 @@ Pass `required` (dcm per piece × piece count) and every lot reports `covers_req
 
 Exhausted lots are **returned, not hidden**. A manager searching for a lot they know exists must find it, with `available: 0` explaining itself.
 
+## What one style has cost in leather — `GET /materials/leather-by-style`
+
+The six numbers above are per **lot**: they answer "what is on the shelf". This answers the other question a DM actually asks — **"what has this style eaten?"** — as arrived / consumed / available per style, paged, and filterable to one `style_id`.
+
+**It is a read, not a ledger.** All three figures come from places that already record them, which is the point: a second running total kept per style would be a number that can disagree with the lots, and then neither is trustworthy.
+
+**The consumed figure is split by rework.** So "this style cost X dcm, of which Y went on defects" is answerable, and that split is the entire reason the endpoint is worth having — a single consumption total cannot tell an expensive style from a badly-cut one. Open to every stock reader.
+
 ---
 
 # 3. Part B — A delivery, entered in two sittings
@@ -145,6 +153,9 @@ This is the flow that matches what really happens at the gate.
        -> approved / rejected split
        -> every hide's dcm
        -> stock corrected, status COMPLETED
+
+       (or PATCH /materials/arrivals/{receipt_id} with approved_qty —
+        same effect, for the screen that is correcting the entry anyway)
 ```
 
 ## Why this shape
@@ -172,7 +183,20 @@ The **rejected** quantity is logged against the supplier's quality history. It w
 | `PATCH /materials/arrivals/{id}` | PENDING only. **`declared_qty` moves stock** — correcting 3400 to 340 takes 3060 back out, applied as a delta so a cut made in between is not undone. 409 once COMPLETED, and 409 if it would drive the lot negative. |
 | `DELETE /materials/arrivals/{id}` | Voids a PENDING arrival (the van entered twice). The stock it put on the floor comes back out. 409 once COMPLETED, and 409 if any of it has already been cut. |
 
+`PATCH` also **doubles as the second sitting**. Send `approved_qty` or `rejected_qty` on it and the arrival is COMPLETED in that same call, with exactly the effect of `POST /materials/arrivals/{id}/complete` — send one and the other is worked out from the declared total. That exists because the screen that corrects a gate entry and the screen that signs it off are usually the same screen, and a correction followed by a second call is two chances to stop halfway. `article` and `colour` are **checked** against the lot on this call and never changed: a PATCH that disagrees with the lot is a **422**, because a different article is a different delivery.
+
 > **The lot survives a void**, even when that was its only delivery. Its barcode may be printed and a recipe may already point at it. A lot at zero is an empty shelf, which is a true statement. Retire it separately if it should never have existed.
+
+## Correcting a delivery that is already COMPLETED
+
+`PATCH /materials/receipts/{receipt_id}` is the other correction, and it is a different one: the arrival calls above only reach a **PENDING** gate entry, and the split somebody typed at the second sitting is wrong just as often. Without this there was nowhere to fix "approved 340, should have been 240" once the QC record existed, so it was fixed in the database by hand or not at all.
+
+- The receipt id comes off the `/receive` response and out of `GET /materials/lots/{id}/history`.
+- A change to **approved** moves stock **by the difference** — a delta again, so hides cut since the receipt are kept.
+- A change to **rejected** moves no stock. It only corrects the supplier's quality history, which is the whole reason the two numbers are recorded separately.
+- It takes a **reason**, and it is audited.
+- **409 on a PENDING arrival** — that one belongs to `/arrivals/{id}/complete`, not here — and **409** if lowering approved would take the lot negative or below what is already reserved.
+- Roles: **DM, MD, HR** (the receivers).
 
 ## `POST /materials/receive` — the other receiving door
 
@@ -209,10 +233,53 @@ A line names a material by six columns (category, subtype, article, colour, thic
 
 Two `size`-like fields exist and they mean different things — do not mix them up:
 
-| Field | Meaning |
-|---|---|
-| `size` | **the material's** size — a 60 cm zip |
-| `garment_size` | **which jackets** this line is for — the size-L line |
+| Field | Meaning | Matched against |
+|---|---|---|
+| `size` | **the material's** size — a 60 cm zip, an 18L button | `MaterialLot.size`, to find the lot |
+| `garment_size` | **which jackets** this line is for — the size-L line | `SKU.size`, to decide if the line applies at all |
+
+`garment_size = null` means **every size**. That is what keeps one generic 18L
+button line at one row, and it is why every line entered before the column existed
+still resolves to exactly the recipe it always did.
+
+### `garment_size` is stated, never inferred
+
+It used to be **guessed** from the material size whenever that size looked like a
+garment size — and any bare number from 30 to 70 looked like one, because those are
+the EU jacket rungs. So a 60 cm zip entered as `size: "60"` was read as a size-60
+garment, mapped to 4XL, and scoped to 4XL jackets only. A 45 cm zip went to XS.
+
+**A line that reaches no garment is not a smaller recipe — it is no recipe.** The
+line is dropped, `kit_required` comes back false for that size, completeness
+collapses to leather-and-lining, and every garment of every other size is
+complete, sendable and shipped without its zip. Nothing warns, because from the
+garment's point of view the style simply declares no accessories.
+
+So the guess is gone:
+
+- a material size that is **unmistakably** a garment size (`L`, `XXL`) and names no
+  `garment_size` is a **422** telling you to say which garments it is for;
+- a **number** is never read as a garment size — `60` is centimetres until somebody
+  says otherwise;
+- migration **`20260928_garment_size_backfill`** clears the rows the old guess had
+  already mis-scoped — every line whose `garment_size` equals a purely numeric
+  `size`. Alpha ones are left alone: `L` beside `garment_size: "L"` is a line
+  somebody meant.
+
+> **The data fix is a module-level function, not inline SQL in `upgrade()`, and it
+> is covered by `tests/integration/test_garment_size_backfill.py`.** It cannot be
+> exercised by running the chain — an alembic-built SQLite database rejects every
+> INSERT, because the baseline puts `server_default=sa.text('now()')` on 138
+> timestamp columns and SQLite has no `now()` — so inline it would have executed
+> for the very first time on production. A one-way UPDATE over live recipe rows is
+> the last place to find out the predicate was wrong, because afterwards a cleared
+> line and a line somebody deliberately left unscoped are the same row.
+>
+> **Any database written to before the guess was removed still needs it run once.**
+> This is not hypothetical: the chain was squashed on 2026-09-28 and the squash
+> dropped the fix, because a baseline autogenerated from the models carries the
+> schema and no data migrations at all. It was restored by hand. Check for that
+> before assuming a future squash carried it either.
 
 A line has a **scope**:
 
@@ -232,13 +299,43 @@ A line has a **scope**:
 
 `POST /styles/{id}/material-spec/confirm` is the sign-off. It is **separate from the release call on purpose**: the DM can finish the recipe days earlier, and the release screen can show `release_blockers` **before** the button is pressed instead of explaining a rejection afterwards.
 
-The three blockers:
+The five blockers:
 
 1. the spec is not confirmed;
 2. there is **no LEATHER line** — the dcm per piece is what the ledger and the costing are built on;
-3. the spec names **no accessories** and nobody declared that it needs none.
+3. the spec names **no accessories** and nobody declared that it needs none;
+4. **a size-varying accessory has no line for some size the order contains**;
+5. **several material sizes of one accessory, and not one of them says which garments it is for.**
 
 That third one is a **three-state** field. An empty accessory list on its own is ambiguous: it could be a garment that genuinely takes none, or one whose buttons nobody has entered yet. So it needs an explicit `no_accessories: true`; `null` — nobody asked — does not pass.
+
+### 4 · size coverage
+
+If **any** line for an article names a `garment_size`, that article is
+**size-varying**, and every size the order actually contains must have its own
+line. Zip lines for M and L on an order that also runs S and XL is a blocker —
+those garments would get no zip at all (see *`garment_size` is stated, never
+inferred* above for why that is silence rather than a shortage).
+
+One line for the article with **no** `garment_size` covers every size and closes
+the question, so a generic 18L button never trips this.
+
+A per-colourway (`SKU`-scoped) line counts as covering its own SKU's size even
+when it names no `garment_size` — being that SKU's line already means that.
+
+### 5 · size ambiguity
+
+`ZIP 48`, `ZIP 50`, `ZIP 52`, none of them scoped, means **every** garment is
+issued all three zips. But `50` is a garment size on one client's sheet and a
+centimetre length on the next, and nothing in the token can tell you which — so
+this is **asked**, not guessed. One line per article is never ambiguous, however
+its size is labelled: a single 60 cm zip on every garment is exactly what an
+unscoped line means.
+
+> Both checks are pure functions in `app/core/kit_rules.py`
+> (`accessory_size_gaps`, `accessory_size_ambiguities`), and `size_matches` is the
+> single size rule the whole app shares — so `52` and `L` are one garment on the
+> release screen, in the recipe filter and at the store scan alike.
 
 > **A missing LINING line is a warning, not a blocker.** Lining consumption is optional on the cut path, so requiring it here would contradict the ledger rule downstream.
 
@@ -286,7 +383,7 @@ SKU overrides copy **only where the colourways match** on (colour code, size). T
 |---|---|---|
 | Lot writers | DM, MD, Cutting Mgr, Lining Mgr, **HR** | create/edit lots, hides, arrivals |
 | Stock readers | + Stitching Mgr, Store Mgr, Security | every read, including the recipe |
-| Receivers | DM, MD, HR | `receive`, `adjust`, retire a lot, void an arrival |
+| Receivers | DM, MD, HR | `receive`, `adjust`, correct a COMPLETED receipt, retire a lot, void an arrival |
 | DM only (+MD) | | supplier orders, all recipe **writes** |
 | Issuers | DM, MD, **Store Manager** | `POST /materials/issues` |
 

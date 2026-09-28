@@ -272,6 +272,8 @@ from app.core.enums_barcode import (  # noqa: E402
     SHEET_ALLOCATABLE,
     MaterialIssueSource,
     KitStatus,
+    KitSubstitutionStatus,
+    KIT_SUBSTITUTION_OPEN,
     BarcodeAuditAction,
     LINING_MANAGER,
     MERGE_GATE_ENTRY,

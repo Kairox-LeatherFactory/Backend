@@ -182,13 +182,30 @@ class TestAddLine:
         assert e.value.status_code == 422
         assert "does not belong to" in e.value.detail
 
-    async def test_a_sized_material_infers_the_garment_size_it_belongs_on(
+    async def test_a_sized_material_must_SAY_which_garments_it_is_for(
             self, db, draft_style):
-        """A 'zip L' is the zip for an L jacket, and the DM enters exactly
-        that — so the matching starts working without a new field to fill in."""
+        """IT USED TO BE INFERRED, AND THE INFERENCE COST A SHIPMENT.
+
+        A material size that read as a garment size set `garment_size` to it —
+        and every bare number from 30 to 70 read as one, because those are the EU
+        jacket rungs. So a 60cm zip entered as '60' was scoped to 4XL garments,
+        and S/M/L/XL got no zip line at all: not a short kit, NO kit, because a
+        style with no applicable accessory line has kit_required=False and ships
+        complete. A 'zip L' is now refused until the DM says which garments it is
+        for, and it is stored exactly as they said.
+        """
+        with pytest.raises(HTTPException) as e:
+            await StyleSpecService(db).add_line(
+                draft_style.id,
+                button_line(subtype="ZIP", article="ZIP-1", size="L"),
+                actor_name=BY)
+        assert e.value.status_code == 422
+        assert "garment_size" in str(e.value.detail)
+
         out = await StyleSpecService(db).add_line(
             draft_style.id,
-            button_line(subtype="ZIP", article="ZIP-1", size="L"),
+            button_line(subtype="ZIP", article="ZIP-1", size="L",
+                        garment_size="L"),
             actor_name=BY)
         assert out["garment_size"] == "L"
 
@@ -750,8 +767,10 @@ class TestRequirement:
                         code="JP-CLERMONT-PINE-L"))
         await db.commit()
         await StyleSpecService(db).replace_spec(draft_style.id, [
-            button_line(subtype="ZIP", article="ZIP-1", size="M"),
-            button_line(subtype="ZIP", article="ZIP-1", size="L"),
+            button_line(subtype="ZIP", article="ZIP-1", size="M",
+                        garment_size="M"),
+            button_line(subtype="ZIP", article="ZIP-1", size="L",
+                        garment_size="L"),
         ], actor_name=BY)
         out = await StyleSpecService(db).requirement(draft_style.id)
         by_size = {l["garment_size"]: l["pieces"] for l in out["lines"]}
@@ -1026,10 +1045,12 @@ class TestIssueKit:
         """So the screen shows a COMPLETE checklist, even when the operator is
         short of one article and is issuing the rest."""
         await make_lot(db)
-        await make_lot(db, subtype="ZIP", article="ZIP-1", size="M")
+        # A 60CM zip, deliberately: a material measurement is not a garment size,
+        # so this line is unscoped and reaches the garment whatever its size.
+        await make_lot(db, subtype="ZIP", article="ZIP-1", size="60CM")
         await StyleSpecService(db).replace_spec(draft_style.id, [
             button_line(),
-            button_line(subtype="ZIP", article="ZIP-1", size="M",
+            button_line(subtype="ZIP", article="ZIP-1", size="60CM",
                         qty_per_piece=1),
         ], actor_name=BY)
         svc = StyleSpecService(db)
@@ -1044,17 +1065,39 @@ class TestIssueKit:
         assert [r["article"] for r in out["outstanding"]] == ["ZIP-1"]
         assert out["complete"] is False
 
-    async def test_a_substituted_lot_may_be_named_on_the_scan(self, db, ready):
+    async def test_a_substituted_lot_IS_REFUSED_UNLESS_IT_IS_APPROVED(
+            self, db, ready):
+        """A NAMED LOT IS STILL CHECKED, and it never used to be.
+
+        This path fetched whatever `material_lot_id` it was handed and decremented
+        it — no article, no colour, no size, not even is_active — so the M-size
+        button lot could be spent against an L garment's line and the ledger
+        recorded it as correct. The unpinned path has always matched on six
+        columns; only the pinned one trusted the caller.
+
+        A DM-approved substitution still goes through, because that is a human
+        deciding rather than a caller asserting.
+        """
         style, piece, _ = ready
         other = await make_lot(db, article="BTN-SUB", size="20L")
         svc = StyleSpecService(db)
         lines = await svc.repo.lines_for_style(style.id)
         spec = next(l for l in lines if l.category == "ACCESSORY")
 
-        out = await svc.issue_kit_nocommit(
+        refused = await svc.issue_kit_nocommit(
             piece=piece, drawer=None,
             requested_lines=[{"spec_id": str(spec.id),
                               "material_lot_id": other.id}])
+        assert refused["issued_now"] == []
+        assert refused["unresolved"][0]["reason"] == "MISMATCH"
+        await db.refresh(other)
+        assert other.on_hand == Decimal("500.000"), "nothing may be spent"
+
+        out = await svc.issue_kit_nocommit(
+            piece=piece, drawer=None,
+            requested_lines=[{"spec_id": str(spec.id),
+                              "material_lot_id": other.id,
+                              "substitution_approved": True}])
         await db.commit()
         assert out["issued_now"][0]["lot_id"] == str(other.id)
         await db.refresh(other)
@@ -1070,7 +1113,11 @@ class TestIssueKit:
             piece=piece, drawer=None,
             requested_lines=[{"spec_id": str(spec.id),
                               "material_lot_id": uuid.uuid4()}])
-        assert out["unresolved"][0]["reason"] == RESOLUTION_NONE
+        # MISMATCH, not NONE: the line resolves perfectly well by key — it is the
+        # lot the CALLER named that is not a thing, which is a different fault and
+        # a different fix. The note says so in words.
+        assert out["unresolved"][0]["reason"] == "MISMATCH"
+        assert "does not exist" in out["unresolved"][0]["note"]
 
     async def test_an_unresolvable_line_never_aborts_the_lines_that_resolved(
             self, db, draft_style, pieces):
@@ -1152,7 +1199,8 @@ class TestIssueKit:
             self, db, draft_style, pieces):
         await StyleSpecService(db).replace_spec(
             draft_style.id,
-            [button_line(subtype="ZIP", article="ZIP-1", size="L")],
+            [button_line(subtype="ZIP", article="ZIP-1", size="L",
+                         garment_size="L")],
             actor_name=BY)
         with pytest.raises(HTTPException) as e:
             await StyleSpecService(db).issue_kit_nocommit(
@@ -1303,7 +1351,8 @@ class TestPieceMaterials:
         await db.commit()
         await StyleSpecService(db).replace_spec(draft_style.id, [
             button_line(article="BTN-NAVY", sku_id=other.id),
-            button_line(subtype="ZIP", article="ZIP-1", size="L"),
+            button_line(subtype="ZIP", article="ZIP-1", size="L",
+                        garment_size="L"),
             button_line(article="BTN-ZERO", sku_id=order_tree["sku"].id,
                         qty_per_piece=0),
         ], actor_name=BY)

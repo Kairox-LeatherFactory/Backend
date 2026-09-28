@@ -274,6 +274,8 @@ rows for audit.
 4. **MERGE (completeness)** — for LINE_STITCHING only: is the piece **SENDED**
    (leather + lining both stored and released)? → **per-piece** (`merge_blocked`).
    Read off `piece.store_state`; there is no drawer to consult.
+   `accessories_in` is part of completeness and is a **roll-up over every
+   declared accessory line**, each issued by its own packet scan — see §9a.
 
 Gate 1 is whole-request because the role is wrong for the whole batch. Gates 2–4 are per-piece so
 **one bad piece never loses the good ones a manager scanned with it.** MD/DM bypass the role gate.
@@ -317,9 +319,12 @@ line-stitch, because a piece with no drawer could not be proven complete. A DM h
 to re-allocate boxes by hand, which was involved enough that it did not happen.
 A state has no capacity, so nothing can run out.
 
-- **Store-scan is TWO scans, not three:** the worker, then the garment
+- **Store-scan is TWO scans for a cut part:** the worker, then the garment
   (`POST /store/scan`). There is no drawer to scan and no "wrong drawer" 409 —
   that rejection policed an assignment the system invented at upload.
+  **An accessory takes a third scan — the packet's own `LOT-ACC-…` label — and
+  that one is not a box the system invented, it is the physical thing in the
+  operator's hand. See §9a.**
 - **Completeness, not sequence:** a lined jacket needs leather **and** lining
   before it's complete; a leather-only piece (`needs_lining=False`) is complete on
   leather alone. A style with an accessory spec also needs its kit.
@@ -334,6 +339,123 @@ Alembic autogenerate does not try to DROP them (§11). `barcode.models` still ma
 them; nothing else imports them.
 
 ---
+
+## 9a. Accessories — ONE PACKET PER SCAN, and the wrong size never goes in
+
+**The mistake this whole section exists to stop:** an M-size button in an L-size
+jacket. It is invisible on the factory floor, it is found by the client in Dubai,
+and it is paid for in return freight plus a remade garment.
+
+### Where accessories live (unchanged)
+An accessory is a `MaterialLot` — `category=ACCESSORY`, `subtype` ∈
+BUTTON/ZIP/THREAD/OTHER — keyed on `(article, colour, thickness, size, subtype)`
+with a DB unique index, and each lot mints **one `LOT-ACC-000001` barcode**. So the
+"L-size black horn button" packet already is its own lot with its own label,
+separate from the M one. There is deliberately **no per-button barcode**: one
+button out of 5,000 is any other button (`enums_barcode.py` on `ACCESSORY_LOT`).
+
+### The per-style recipe: `size` vs `garment_size`
+`StyleMaterialSpec` carries **two** size columns and confusing them is the bug:
+
+| Column | Means | Matched against |
+|---|---|---|
+| `size` | the **material's** size — a 60cm zip, an 18L button | `MaterialLot.size` (finds the lot) |
+| `garment_size` | which **garments** the line is for | `SKU.size` (decides if the line applies) |
+
+`garment_size = NULL` means **every size**, which is what keeps one generic 18L
+button line at one row.
+
+**`garment_size` IS EXPLICIT AND IS NEVER INFERRED.** It used to be guessed from
+the material size, and any bare number 30–70 read as a garment size because those
+are the EU jacket rungs — so a 60cm zip entered as `size: "60"` was scoped to
+**4XL** and a 45cm zip to **XS**. A line scoped to a size no garment has is not a
+smaller recipe, it is **absent**: `merge_lines` drops it, `kit_required` comes back
+False, `piece_complete` collapses to leather-and-lining, and every other size
+ships with no zip and no warning. A material size that is *unmistakably* a garment
+size (`L`, `XXL`) and names no `garment_size` is now a **422** asking which
+garments it is for. `_reads_as_garment_size` is only that 422's trigger; it infers
+nothing. `20260928_garment_size_backfill` clears the rows the old guess had
+already mis-scoped.
+
+### The release gate now checks SIZE COVERAGE
+Two new pure checks in `core/kit_rules.py`, folded into `release_blockers` at all
+four call sites:
+
+- **`accessory_size_gaps`** — if *any* line for an article names a `garment_size`,
+  that article is **size-varying**, so **every ordered size** must have a line.
+  Zip lines for M and L on an order that also runs S/XL blocks release. One
+  unscoped line for the article covers everything and closes the question.
+- **`accessory_size_ambiguities`** — several material sizes on one article and not
+  one of them scoped (`ZIP 48 / 50 / 52`, all unscoped) blocks release, because
+  every garment would be issued all three. `'50'` is a garment size on one sheet
+  and a centimetre length on the next, so it is **asked**, never guessed.
+
+`kit_rules.size_matches` is the single size rule — `applies_to_size`, the coverage
+gate and the packet scan all delegate to it, so `52` and `L` are one garment
+everywhere.
+
+### The store scan: `POST /store/scan` with `lot_barcode`
+```
+scan the WORKER  →  scan the GARMENT  →  scan the PACKET (LOT-ACC-…)
+```
+Each scan issues **exactly the one recipe line that packet matches**. Scanning a
+packet *is* the accessory scan, so `part` may be omitted; a `part` naming anything
+else is a 422.
+
+**`part: "ACCESSORY"` with no packet is a 422 — the blanket kit scan is GONE.** It
+read the recipe and decremented every accessory line from one tap, so no physical
+packet was ever part of the exchange and the wrong size was undetectable *by
+construction*. `lines[]`/`KitLineRequest` went with it; the optional `qty` on the
+scan covers a short issue (2 of 4 buttons).
+
+The response's `kit` block is the **whole checklist**, not just the packet scanned
+— the operator who has just done the zip must be told the buttons are still owed
+while they are still at the terminal. `accessories_in` turns true only when every
+declared line is issued.
+
+`match_packet` matches in **two tiers**, and the split is what makes a wrong size a
+wrong size rather than an unknown packet: tier 1 ignores size (subtype, article,
+colour, thickness) so the M packet still finds the style's BUTTON lines; tier 2
+then asks the two size questions separately. Its four other verdicts:
+
+| Verdict | Status | What it means / the fix |
+|---|---|---|
+| `NO_KIT` | 409 | the style declares no accessories, or all its lines are for another colourway/size (`_no_kit_reason` says which) |
+| `NOT_IN_RECIPE` | 422 | wrong packet entirely → check it, or `POST /materials/issues` off-spec |
+| `NO_LINE_FOR_SIZE` | 409 | the **recipe** has no line for this garment's size → a DM fixes the spec, because every garment of that size is in the same state. This is the release-gate gap showing up on the floor |
+| `AMBIGUOUS` | 409 | the packet matches several lines → combine or scope them |
+
+### The wrong size is REFUSED and waits for a DM/MD
+**This is the one place in the app where a mid-scan problem is not recorded with a
+warning.** The skill gate and the stock shortfall both log the work and flag it,
+because the work physically happened and losing the record is worse. Here the wrong
+size *is* the failure, so there is nothing worth preserving:
+
+- the scan **409s**, nothing is decremented, no ledger row, `accessories_in` untouched
+- a `KitSubstitutionRequest` row is **committed before the raise** — the scan must
+  fail, but the ask has to survive the failed request or the operator is told to
+  wait for an approval that exists nowhere. The id is in the
+  `X-Kit-Substitution-Request` header
+- **idempotent on `(piece, spec_line, lot)`** — the protocol is "scan, get refused,
+  wait, scan again", so a re-scan finds the same row instead of queueing another
+- `GET /store/substitutions` is the DM's queue, oldest first, like the material
+  arrivals queue. An ask nobody can find is a garment parked for a reason nobody
+  remembers
+- `POST /store/substitutions/{id}/approve|reject` is **DM/MD only** — the person
+  holding the wrong packet must not be the person who authorises it
+- **APPROVING IS PERMISSION, NOT THE ISSUE.** The operator re-scans, and *that*
+  writes the movement against the worker's own card. An approval that spent stock
+  itself would record a manager as having issued a packet they never touched
+- `PENDING → APPROVED → CONSUMED` (terminal: one approval, one garment).
+  `REJECTED` is re-approvable — "no" Tuesday and "yes" Wednesday is a real sequence
+
+### A named lot is now CHECKED (`lot_fits_line`)
+A caller-supplied `material_lot_id` used to be fetched and decremented with **no
+comparison of any kind** — not article, colour, size, nor even `is_active` — so the
+M button lot could be spent against an L garment's line and the ledger recorded it
+as correct. Category and subtype are **never** waived (a substitution is "this size
+will do", never "a zip instead of a button"); article, colour and size are waived
+only for a **DM-approved** substitution.
 
 ## 10. Attendance, Employees, Users, Wages, Analytics
 
@@ -464,6 +586,30 @@ them separate now is exactly what makes that connection a bridge instead of a re
   Write the name exactly as it appears left of the `=` in `core/enums.py`.
   The schema's other native enums (`attendance_source`, `wage_type`, `run_status`) are all
   uppercase names — match them.
+- **THE CHAIN WAS SQUASHED on 2026-09-28** into one baseline,
+  `20260928_1013_initial_migration.py` (revision `1d4a32009101`,
+  `down_revision = None`). A squashed baseline is autogenerated from the models, so
+  it carries the **schema and nothing else** — every data migration the old chain
+  performed is absent by construction. Check for one before you squash again.
+- `20260928_garment_size_backfill` is that check having been done once: it **clears
+  the inferred `garment_size`** on accessory recipe lines whose `garment_size`
+  equals a purely numeric material size — those were the guess, not a human, and
+  each one silently removed the accessory from every other size (§9a). It was
+  carried over by hand when the squash dropped it. The table it used to ship
+  alongside, `kit_substitution_request`, is in the baseline.
+  The data fix is a module-level function `clear_inferred_garment_sizes(bind)`
+  covered by `tests/integration/test_garment_size_backfill.py` rather than inline in
+  `upgrade()`, because it cannot be exercised by running the chain: since the squash
+  the DDL applies on SQLite, but an alembic-built SQLite database rejects every
+  INSERT — the baseline puts `server_default=sa.text('now()')` on 138 timestamp
+  columns and SQLite has no `now()`. Inline, it would have run for the first time on
+  production.
+- **A test must never name a migration file.** Both tests that did
+  (`test_garment_size_backfill`, `test_fk_delete_rules`) died on a
+  `FileNotFoundError` the moment the chain was squashed. Find a root revision by its
+  `down_revision = None`, and prefer asserting against the schema over a hand-kept
+  list inside a migration — the list `20260818_fk_setnull_all.py` carried went with
+  the file.
 - The barcode migration adds: `barcode_registry`, `drawer`, `material_lot`,
   `material_reservation`, `material_receipt`, `supplier`, `supplier_order`, plus the 5 columns on
   `piece` / `production_event`.
@@ -480,7 +626,7 @@ Priority: **money paths > data-integrity paths > read paths.**
 | Layer | Location | What it proves | Runs on |
 |---|---|---|---|
 | 1 · Unit | `tests/unit/` | pure gate/stage/designation predicates | no DB (ran: 49/49 pass) |
-| 2 · Integration | `tests/integration/` | two-door log, 4 gates, consumption + single decrement, merge gate, barcode lifecycle, strict materials, pre-mint | SQLite |
+| 2 · Integration | `tests/integration/` | two-door log, 4 gates, consumption + single decrement, merge gate, barcode lifecycle, strict materials, pre-mint, **accessory packet scan + wrong-size approval** (`test_accessory_packet_scan.py`), **the garment_size backfill** (`test_garment_size_backfill.py`) | SQLite |
 | 3 · Functional | `tests/functional/` | one garment cut→export + drawer recycle | SQLite |
 | 4 · System/E2E | `tests/system/` | through the FastAPI routers (status codes, role guards) | httpx |
 | 5 · UAT | `tests/uat/` | 7 business scenarios (upload→pieces, cut→stock, skill block, no-skip, merge gate, leaver history-safe, shortfall→receive) | SQLite |

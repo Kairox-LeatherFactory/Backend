@@ -3230,6 +3230,48 @@
           "response": []
         },
         {
+          "name": "Adjust Receipt",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/receipts/{{receipt_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "receipts",
+                "{{receipt_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "receipt_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "CORRECT ONE DELIVERY'S approved / rejected split, with a reason, audited.\n\nThe receipt id is on the /receive response and in GET /lots/{id}/history.\nA change to approved moves stock by the difference (a delta, so cuts made\nsince are kept); rejected only corrects the supplier's quality history.\n409 on a PENDING arrival \u2014 use /arrivals/{id}/complete \u2014 and 409 if lowering\napproved would take stock negative or below what is reserved.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"approved_qty\": 0,\n  \"rejected_qty\": 0,\n  \"total_qty\": 0,\n  \"sheet_count\": 0,\n  \"reason\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
           "name": "Complete Arrival",
           "request": {
             "method": "POST",
@@ -3761,7 +3803,7 @@
             "description": "approved adds to stock; a PO-mismatch is rejected (409) unless a DM/MD\nsends approve_mismatch=true, which receives it into a new substitute lot.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"supplier_order_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"approved_qty\": 0,\n  \"rejected_qty\": 0,\n  \"reserve_for_required\": 0,\n  \"approve_mismatch\": false,\n  \"sheets\": [\n    {\n      \"dcm\": 0,\n      \"note\": \"\"\n    }\n  ]\n}",
+              "raw": "{\n  \"lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"supplier_order_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"total_qty\": 0,\n  \"sheet_count\": 0,\n  \"approved_qty\": 0,\n  \"rejected_qty\": 0,\n  \"reserve_for_required\": 0,\n  \"approve_mismatch\": false,\n  \"sheets\": [\n    {\n      \"dcm\": 0,\n      \"note\": \"\"\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -3963,10 +4005,10 @@
                 }
               ]
             },
-            "description": "Correct a PENDING gate entry: its quantity, bundle count or note.\n\n`declared_qty` MOVES STOCK, because that quantity is what this arrival put\non the floor \u2014 correcting 3400 to 340 has to take 3060 back out, or the\ncorrection is cosmetic and the shelf still claims material that never\narrived. It is applied as a DELTA, so a cut made in between is not silently\nundone.\n\n409 once the arrival is COMPLETED (that is the QC record of a delivery), and\n409 if the correction would drive the lot negative \u2014 an entry wrong by more\nthan what is left is a different delivery, not a typo, so void it and enter\nthe real one.",
+            "description": "Correct a PENDING gate entry: its quantity, bundle count or note \u2014 and,\nwhen approved_qty / rejected_qty are sent, COMPLETE it in the same call\n(same effect as POST .../complete; send one and the other is worked out\nfrom the declared total). article / colour are checked against the lot,\nnever changed: 422 if they differ.\n\n`declared_qty` MOVES STOCK, because that quantity is what this arrival put\non the floor \u2014 correcting 3400 to 340 has to take 3060 back out, or the\ncorrection is cosmetic and the shelf still claims material that never\narrived. It is applied as a DELTA, so a cut made in between is not silently\nundone.\n\n409 once the arrival is COMPLETED (that is the QC record of a delivery), and\n409 if the correction would drive the lot negative \u2014 an entry wrong by more\nthan what is left is a different delivery, not a typo, so void it and enter\nthe real one.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"declared_qty\": 0,\n  \"declared_sheet_count\": 0,\n  \"note\": \"\"\n}",
+              "raw": "{\n  \"declared_qty\": 0,\n  \"declared_sheet_count\": 0,\n  \"note\": \"\",\n  \"approved_qty\": 0,\n  \"rejected_qty\": 0,\n  \"thickness\": \"\",\n  \"sheets\": [\n    {\n      \"dcm\": 0,\n      \"note\": \"\"\n    }\n  ],\n  \"article\": \"\",\n  \"colour\": \"\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -8676,6 +8718,49 @@
       "name": "store",
       "item": [
         {
+          "name": "Approve Substitution",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/store/substitutions/{{request_id}}/approve",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "store",
+                "substitutions",
+                "{{request_id}}",
+                "approve"
+              ],
+              "variable": [
+                {
+                  "key": "request_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Permit this one packet into this one garment. IT DOES NOT ISSUE IT.\n\nThe operator re-scans the packet and that is what moves the stock, against\ntheir own card. One approval covers one garment: the re-scan marks it CONSUMED.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"note\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
           "name": "Find Piece",
           "request": {
             "method": "GET",
@@ -8751,6 +8836,47 @@
           "response": []
         },
         {
+          "name": "List Substitutions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/store/substitutions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "store",
+                "substitutions"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "",
+                  "description": "PENDING|APPROVED|REJECTED|CONSUMED. Omit for all.",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "",
+                  "disabled": false
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "",
+                  "disabled": false
+                }
+              ]
+            },
+            "description": "The wrong-size queue, oldest first \u2014 garments waiting on a decision.\n\nTHE QUEUE IS WHAT MAKES THE REFUSAL SAFE. An operator told \"wait for approval\"\nis waiting on somebody who has not been told anything; an ask nobody can find\nis a garment parked in the store for a reason nobody remembers. Same shape and\nsame reason as the material-arrivals come-back-to-it queue."
+          },
+          "response": []
+        },
+        {
           "name": "Piece Materials",
           "request": {
             "method": "GET",
@@ -8776,6 +8902,49 @@
               ]
             },
             "description": "WHAT IS MERGED INTO THIS GARMENT \u2014 the whole picture, in one read.\n\n`applies`        the recipe for THIS colourway at THIS size \u2014 leather,\n                 lining, and every accessory line with `issued_qty` and\n                 `outstanding`.\n`not_applicable` the style's OTHER lines, each saying why it is not this\n                 garment's: `other_sku` (scoped to another colourway),\n                 `other_size` (an L zip is not an S zip), or `zeroed` (this\n                 colourway declares it takes none).\n`issued`         the ledger \u2014 what physically went in, from which lot, when\n                 and through whose card, MANUAL corrections included.\n`consumed`       the leather actually recorded at the cut. It lives on the\n                 production event, not the issue ledger, and is merged here\n                 so a screen never has to know there were two writes.\n\n`not_applicable` is the field to read when a kit scan says there is nothing\nto issue while `/material-spec/requirement` shows a full recipe: that view\nis STYLE-WIDE and a kit is issued PER GARMENT."
+          },
+          "response": []
+        },
+        {
+          "name": "Reject Substitution",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/store/substitutions/{{request_id}}/reject",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "store",
+                "substitutions",
+                "{{request_id}}",
+                "reject"
+              ],
+              "variable": [
+                {
+                  "key": "request_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Refuse it \u2014 the floor fetches the right packet. Re-approvable later.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"note\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": []
         },
@@ -8836,10 +9005,10 @@
                 "scan"
               ]
             },
-            "description": "Scan the worker, scan the garment. The drawer scan is gone.\n\nBarcodes are resolved to ids HERE so the service sees ids only\n(CLAUDE.md \u00a715) \u2014 the same split the production log uses.",
+            "description": "Scan the worker, scan the garment \u2014 and the packet, for an accessory.\n\nBarcodes are resolved to ids HERE so the service sees ids only\n(CLAUDE.md \u00a715) \u2014 the same split the production log uses.\n\nAN ACCESSORY IS ISSUED ONE PACKET AT A TIME. Send `lot_barcode` (LOT-ACC-\u2026)\nand this scan issues exactly the recipe line that packet matches; there is no\nblanket kit scan any more. A packet whose size is not the garment's is\nREFUSED with a 409 and an approval request a DM/MD decides below \u2014 nothing is\ntaken from stock until they do.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"employee_barcode\": \"\",\n  \"employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"piece_barcode\": \"\",\n  \"piece_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"part\": \"\",\n  \"lines\": [\n    {\n      \"spec_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"qty\": 0,\n      \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\"\n    }\n  ]\n}",
+              "raw": "{\n  \"employee_barcode\": \"\",\n  \"employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"piece_barcode\": \"\",\n  \"piece_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"part\": \"\",\n  \"lot_barcode\": \"\",\n  \"lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"qty\": 0,\n  \"substitution_reason\": \"\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
