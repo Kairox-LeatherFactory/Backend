@@ -131,20 +131,23 @@ class CuttingService:
             "warnings": warnings,
         }
 
-    async def grid(self, *, style_id: uuid.UUID, colour: str | None = None) -> dict:
-        """The whole sheet for one style+colour, plus what the header needs."""
+    async def grid(self, *, style_id: uuid.UUID, colour: str | None = None,
+                   limit: int = 50, offset: int = 0) -> dict:
+        """One page of the style+colour sheet, plus what the header needs."""
         style = await self.repo.get_style(style_id)
         if style is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Style not found.")
 
-        rows = await self.repo.rows_for_style(style_id, colour=colour)
+        rows = await self.repo.rows_for_style(
+            style_id, colour=colour, limit=limit, offset=offset)
+        total = await self.repo.count_rows_for_style(style_id, colour=colour)
         piece_codes = await self._piece_codes([r.piece_id for r in rows])
         cutters = await self._present_cutters()
         names = {c["employee_id"]: c["name"] for c in cutters}
 
         payloads = [await self._row_payload(r, piece_codes=piece_codes,
                                             cutter_names=names) for r in rows]
-        uncut = await self.repo.uncut_pieces(style_id, colour=colour)
+        uncut_count = await self.repo.count_uncut_pieces(style_id, colour=colour)
 
         warnings: list[str] = []
         if not cutters:
@@ -155,7 +158,8 @@ class CuttingService:
             "style_id": style.id, "style_name": style.name, "colour": colour,
             "colours": await self.repo.colours_for_style(style_id),
             "rows": payloads, "present_cutters": cutters,
-            "uncut_pieces": len(uncut), "warnings": warnings,
+            "uncut_pieces": uncut_count, "count": len(payloads), "total": total,
+            "limit": limit, "offset": offset, "warnings": warnings,
         }
 
     async def _piece_codes(self, piece_ids: list) -> dict:

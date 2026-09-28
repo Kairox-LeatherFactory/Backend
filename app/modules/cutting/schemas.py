@@ -80,6 +80,10 @@ class CuttingGrid(BaseModel):
     # cannot legally be logged against — production refuses an absent worker.
     present_cutters: list[dict] = Field(default_factory=list)
     uncut_pieces: int = 0
+    count: int = 0
+    total: int = 0
+    limit: int = 50
+    offset: int = 0
     warnings: list[str] = Field(default_factory=list)
 
 

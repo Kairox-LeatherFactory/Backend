@@ -52,15 +52,33 @@ class CuttingRepository:
 
     async def rows_for_style(self, style_id: uuid.UUID, *,
                              colour: str | None = None,
-                             statuses: set | None = None) -> list:
+                             statuses: set | None = None,
+                             limit: int | None = None,
+                             offset: int = 0) -> list:
         stmt = select(CuttingRow).where(CuttingRow.style_id == style_id)
         if colour:
             stmt = stmt.where(func.upper(CuttingRow.colour) == colour.strip().upper())
         if statuses:
             stmt = stmt.where(CuttingRow.status.in_(tuple(statuses)))
         # Size then serial: the grid reads as the Excel did, grouped by size.
-        stmt = stmt.order_by(CuttingRow.size.asc(), CuttingRow.created_at.asc())
+        stmt = stmt.order_by(CuttingRow.size.asc(), CuttingRow.created_at.asc(),
+                             CuttingRow.id.asc())
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        if offset:
+            stmt = stmt.offset(offset)
         return list((await self.db.execute(stmt)).scalars().all())
+
+    async def count_rows_for_style(self, style_id: uuid.UUID, *,
+                                   colour: str | None = None,
+                                   statuses: set | None = None) -> int:
+        stmt = select(func.count()).select_from(CuttingRow).where(
+            CuttingRow.style_id == style_id)
+        if colour:
+            stmt = stmt.where(func.upper(CuttingRow.colour) == colour.strip().upper())
+        if statuses:
+            stmt = stmt.where(CuttingRow.status.in_(tuple(statuses)))
+        return int(await self.db.scalar(stmt) or 0)
 
     # ── the pieces a grid is generated FROM ──────────────────────────────────
     async def uncut_pieces(self, style_id: uuid.UUID, *,
@@ -88,6 +106,20 @@ class CuttingRepository:
         if limit:
             stmt = stmt.limit(limit)
         return list((await self.db.execute(stmt)).all())
+
+    async def count_uncut_pieces(self, style_id: uuid.UUID, *,
+                                 colour: str | None = None) -> int:
+        stmt = (select(func.count(Piece.id))
+                .join(SKU, SKU.id == Piece.sku_id)
+                .outerjoin(CuttingRow, CuttingRow.piece_id == Piece.id)
+                .where(SKU.style_id == style_id,
+                       Piece.is_active.is_(True),
+                       CuttingRow.id.is_(None)))
+        if colour:
+            c = colour.strip().upper()
+            stmt = stmt.where(func.upper(func.coalesce(
+                SKU.color_name, SKU.color_code)) == c)
+        return int(await self.db.scalar(stmt) or 0)
 
     async def get_style(self, style_id: uuid.UUID) -> Style | None:
         return await self.db.get(Style, style_id)
