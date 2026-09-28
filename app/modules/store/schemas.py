@@ -5,32 +5,40 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-class KitLineRequest(BaseModel):
-    spec_id: uuid.UUID | None = None
-    qty: float | None = None
-    material_lot_id: uuid.UUID | None = None
-
-
 class StoreScanRequest(BaseModel):
-    """Scan the worker, scan the garment. THAT IS THE WHOLE FLOW.
+    """Scan the worker, scan the garment — and for an accessory, scan the packet.
 
     THE DRAWER SCAN IS GONE, and removing it is the feature. The old flow was
     employee → DRAWER → piece, with a 409 when the piece was not the one that
     drawer had been assigned at upload. That third scan existed only to find a
-    numbered box; the box is gone, so what is left is the worker and the garment.
+    numbered box; the box is gone.
 
-    `part` stays OPTIONAL and is inferred from the garment's own history — the
-    operator should not be asked a question the system can answer. ACCESSORY is
-    the exception and must always be explicit: an inferred accessory scan would
-    SPEND STOCK against the style's recipe, and a mis-inference would move money
-    nothing on the floor asked to move.
+    A LEATHER OR LINING SCAN IS STILL TWO SCANS and `part` is still inferred from
+    the garment's own history — the operator should not be asked a question the
+    system can answer.
+
+    AN ACCESSORY IS THREE, AND THE THIRD IS THE PACKET'S OWN LABEL. `lot_barcode`
+    (LOT-ACC-…) is what says which recipe line this scan is issuing, and it is
+    now the ONLY way to issue one. Sending `part: "ACCESSORY"` without a packet
+    is a 422: the blanket kit scan spent every accessory line the recipe named
+    from a single tap, so nothing in the exchange involved the physical packets
+    and an M packet in an L jacket could not be detected at all.
     """
     employee_barcode: str | None = None
     employee_id: uuid.UUID | None = None
     piece_barcode: str | None = None
     piece_id: uuid.UUID | None = None
-    part: str | None = None                    # LEATHER | LINING | ACCESSORY
-    lines: list[KitLineRequest] | None = None  # a partial/substituted kit issue
+    part: str | None = None            # LEATHER | LINING (ACCESSORY: scan the lot)
+    # The accessory packet. Scanning one IS the accessory scan — `part` may be
+    # omitted, and a `part` that says anything else is a 422.
+    lot_barcode: str | None = None
+    lot_id: uuid.UUID | None = None
+    # A SHORT ISSUE: the operator put in 2 of the 4 buttons the line asks for.
+    # Omitted means the whole outstanding quantity, which is the normal case.
+    qty: float | None = None
+    # Why this packet, when its size is not the garment's. Carried on the approval
+    # request so the DM reading the queue is not guessing.
+    substitution_reason: str | None = None
 
     @model_validator(mode="after")
     def _need_both(self):
@@ -64,8 +72,43 @@ class StoreScanResult(BaseModel):
     needs_lining: bool
     lining_reason: str | None = None
     kit: dict | None = None
+    # Set only when this scan spent a DM-APPROVED wrong-size packet. A refused one
+    # never reaches a 201 — it is a 409 with the request id to approve.
+    substitution: dict | None = None
     next_action: str
     warnings: list[str] = Field(default_factory=list)
+
+
+class SubstitutionDecision(BaseModel):
+    """A DM/MD answering one wrong-size ask. Approving does NOT issue anything.
+
+    The operator is holding the packet and the DM is not, so the DM grants
+    permission and the operator re-scans — which is what writes the stock movement
+    against the worker's own card. An approval that spent stock by itself would
+    record a manager as having issued a packet they never touched.
+    """
+    note: str | None = None
+
+
+class SubstitutionResult(BaseModel):
+    request_id: str
+    status: str                      # PENDING | APPROVED | REJECTED | CONSUMED
+    piece_code: str | None = None
+    article: str | None = None
+    garment_size: str | None = None
+    lot_size: str | None = None
+    decided_by: str | None = None
+    decision_note: str | None = None
+    message: str
+
+
+class SubstitutionList(BaseModel):
+    count: int
+    total: int = 0
+    pending: int = 0
+    limit: int = 200
+    offset: int = 0
+    requests: list[dict] = Field(default_factory=list)
 
 
 class StoreSendRequest(BaseModel):

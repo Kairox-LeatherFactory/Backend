@@ -57,6 +57,18 @@ RESOLUTION_PINNED = "PINNED"        # the line names an exact lot id
 RESOLUTION_MATCHED = "MATCHED"      # exactly one lot matches the six-column key
 RESOLUTION_NONE = "NONE"            # no lot matches — receive stock first
 RESOLUTION_AMBIGUOUS = "AMBIGUOUS"  # several match — the key is not specific enough
+RESOLUTION_MISMATCH = "MISMATCH"    # a lot was NAMED and it is not this line's
+
+# What matching a scanned packet against the recipe can conclude. The store turns
+# each into a different HTTP answer, which is the whole point of naming them:
+# WRONG_SIZE waits for a DM, NO_LINE_FOR_SIZE is a recipe the DM must fix, and
+# NOT_IN_RECIPE is simply the wrong packet in the operator's hand.
+PACKET_OK = "OK"
+PACKET_NO_KIT = "NO_KIT"            # the style declares no accessories at all
+PACKET_WRONG_SIZE = "WRONG_SIZE"
+PACKET_NO_LINE_FOR_SIZE = "NO_LINE_FOR_SIZE"
+PACKET_NOT_IN_RECIPE = "NOT_IN_RECIPE"
+PACKET_AMBIGUOUS = "AMBIGUOUS"
 
 
 class StyleSpecService:
@@ -142,6 +154,24 @@ class StyleSpecService:
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 "Every accessory recipe line must name an article.")
 
+        size = (body.get("size") or "").strip() or None
+        garment_size = (body.get("garment_size") or "").strip().upper() or None
+        # SAY IT, DO NOT MAKE US GUESS. This used to be inferred from the material
+        # size whenever that size read as a garment size, and the inference was
+        # wrong in both directions: it confined a 60cm zip to 4XL garments (60 is
+        # on the EU ladder) while a "BUTTON L" meaning an L jacket depended on the
+        # same coin-flip. A material size that is unmistakably a garment size is
+        # the one case where the DM's intent is clear AND the cost of being wrong
+        # is a whole shipment, so it is the one case we refuse to proceed on.
+        if garment_size is None and self._reads_as_garment_size(size):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"This line's size is '{size}', which is a garment size, but it "
+                f"does not say which garments it is for. Set garment_size: "
+                f"'{str(size).strip().upper()}' if it is for {str(size).strip().upper()} "
+                f"garments only, or leave size blank and name the material's own "
+                f"size instead. A line with no garment_size goes on EVERY size.")
+
         thickness = (body.get("thickness") or "").strip() or None
         if category in {"LEATHER", "LINING"} and not thickness:
             raise HTTPException(
@@ -183,19 +213,15 @@ class StyleSpecService:
             "article": article,
             "colour": (body.get("colour") or "").strip() or None,
             "thickness": thickness,
-            "size": (body.get("size") or "").strip() or None,
-            # WHICH GARMENT SIZES THIS LINE IS FOR. Explicit wins; otherwise it
-            # is inferred from the material's own size, because in this factory
-            # a size-specific accessory is labelled with the GARMENT's size —
-            # a "zip L" is the zip for an L jacket. That default is what lets the
-            # DM keep entering exactly what they entered before and have the
-            # matching start working. A 60cm zip or an 18L button does not read
-            # as a garment size and stays NULL = every size.
-            "garment_size": (
-                (body.get("garment_size") or "").strip() or None
-                or ((body.get("size") or "").strip().upper()
-                    if self._looks_like_a_garment_size(body.get("size"))
-                    else None)),
+            "size": size,
+            # WHICH GARMENT SIZES THIS LINE IS FOR — EXPLICIT ONLY, never
+            # inferred. NULL still means every size, which is what keeps one
+            # generic 18L button line at one row and every pre-existing line
+            # behaving exactly as it did. What changed is that the system no
+            # longer decides this for you: see the 422 above, and
+            # kit_rules.accessory_size_ambiguities for the case it cannot see
+            # from one line.
+            "garment_size": garment_size,
             "qty_per_piece": qty,
             # DERIVED, AND A SENT VALUE IS DISCARDED. uom is a property of the
             # material kind, not a choice: buttons are pcs and thread is mtrs
@@ -238,32 +264,155 @@ class StyleSpecService:
             return None, RESOLUTION_AMBIGUOUS, [str(l.id) for l in lots[:5]]
         return lots[0], RESOLUTION_MATCHED, []
 
+    # ════════════════════════════════════════════════ the packet → line match
+    @staticmethod
+    def _same(a, b) -> bool:
+        return (str(a or "").strip().upper()) == (str(b or "").strip().upper())
+
+    @classmethod
+    def lot_fits_line(cls, lot, line, *, approved: bool = False) -> tuple:
+        """May this lot be spent against this recipe line? (ok, why not).
+
+        THE CHECK THAT WAS MISSING. A caller-supplied `material_lot_id` used to be
+        fetched and decremented with no comparison of any kind — not the article,
+        not the colour, not the size, not even `is_active` — so an operator (or a
+        mistyped integration) could spend the M-size button lot against an L
+        garment's line and the ledger would record it as correct. The unpinned path
+        has always matched on six columns; the pinned path trusted the caller.
+
+        SUBTYPE AND CATEGORY ARE NEVER WAIVED, approval or not: a substitution is
+        somebody saying "this size will do", never "a zip will do instead of a
+        button". Article, colour and size ARE waivable, because those are what a
+        DM-approved substitution actually substitutes.
+        """
+        if lot is None:
+            return False, "the lot named on this scan does not exist"
+        if not lot.is_active:
+            return False, f"lot {lot.article} has been retired"
+        if not cls._same(lot.category, line.category):
+            return False, (f"{lot.article} is {lot.category}, and this line is "
+                           f"{line.category}")
+        if not cls._same(lot.subtype, line.subtype):
+            return False, (f"{lot.article} is a {lot.subtype}, and this line "
+                           f"needs a {line.subtype}")
+        if approved:
+            return True, ""
+        for field, label in (("article", "article"), ("colour", "colour"),
+                             ("size", "size")):
+            want = getattr(line, field, None)
+            if want and not cls._same(getattr(lot, field, None), want):
+                return False, (f"this line's {label} is {want} and the lot's is "
+                               f"{getattr(lot, field, None) or 'blank'}")
+        return True, ""
+
+    async def match_packet(self, *, piece, lot) -> dict:
+        """Which recipe line is THIS packet, for THIS garment? The store's scan.
+
+        THE PACKET'S OWN LABEL IS THE ANSWER TO "WHICH LINE", and that is the
+        reason the store no longer issues a whole kit on one scan. A blanket kit
+        scan spends every accessory line at once from the recipe alone, so the
+        system never learns which physical packets were opened — and the one
+        mistake that costs a shipment, an M packet in an L jacket, is invisible to
+        it by construction. A packet scan puts the physical label and the garment's
+        size in the same comparison.
+
+        MATCHED IN TWO TIERS, and the split is what makes a wrong size a wrong size
+        instead of an unknown packet. Tier one ignores size entirely (category,
+        subtype, article, colour, thickness), so the M packet still finds the
+        BUTTON lines of this style. Tier two then asks the two size questions
+        separately: does this line belong on this garment, and is this the material
+        the line asked for.
+        """
+        _p, sku, style = await self._piece_context(piece.id)
+        if style is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                "This piece has no parent style.")
+        garment_size = (getattr(sku, "size", None) or "").strip().upper() or None
+
+        # SKU precedence WITHOUT the size filter: passing garment_size=None makes
+        # applies_to_size pass everything, so a style-wide line still loses to its
+        # per-colourway override while every size stays visible to tier two.
+        merged = self.merge_lines(await self.repo.lines_for_style(style.id),
+                                  sku.id if sku else None, None)
+        accessories = [l for l in merged
+                       if l.category == MaterialCategory.ACCESSORY.value]
+
+        tier1 = [l for l in accessories
+                 if self._same(l.subtype, lot.subtype)
+                 and self._same(l.article, lot.article)
+                 and (not l.colour or self._same(l.colour, lot.colour))
+                 and (not l.thickness or self._same(l.thickness, lot.thickness))]
+        out = {"outcome": PACKET_NOT_IN_RECIPE, "line": None,
+               "garment_size": garment_size, "lot": lot,
+               "candidates": [], "expected_sizes": [], "no_kit_reason": None}
+        if not accessories:
+            # NO RECIPE AT ALL is a different answer from "not this packet", and
+            # _no_kit_reason is the sentence that already distinguishes the three
+            # ways it happens. Saying "wrong packet" here would send the operator
+            # hunting for a packet that was never specified.
+            out["outcome"] = PACKET_NO_KIT
+            out["no_kit_reason"] = await self._no_kit_reason(style, sku, piece)
+            return out
+        if not tier1:
+            return out
+
+        # THE TARGET LINE MUST BE ONE THIS GARMENT ACTUALLY HAS. issue_kit_nocommit
+        # iterates the size-filtered recipe, so an override naming the M line for
+        # an L garment would be silently ignored — the approval would appear to
+        # work and spend nothing.
+        applicable = [l for l in tier1 if self.applies_to_size(l, garment_size)]
+        if not applicable:
+            out["outcome"] = PACKET_NO_LINE_FOR_SIZE
+            out["expected_sizes"] = sorted(
+                {str(l.garment_size) for l in tier1 if l.garment_size})
+            return out
+
+        exact = [l for l in applicable
+                 if not l.size or self._same(l.size, lot.size)]
+        if len(exact) > 1:
+            out["outcome"] = PACKET_AMBIGUOUS
+            out["candidates"] = [str(l.id) for l in exact[:5]]
+            return out
+        if exact:
+            out["outcome"] = PACKET_OK
+            out["line"] = exact[0]
+            return out
+
+        if len(applicable) > 1:
+            out["outcome"] = PACKET_AMBIGUOUS
+            out["candidates"] = [str(l.id) for l in applicable[:5]]
+            return out
+        out["outcome"] = PACKET_WRONG_SIZE
+        out["line"] = applicable[0]
+        out["expected_sizes"] = [str(applicable[0].size)] if applicable[0].size else []
+        return out
+
     # ══════════════════════════════════════════ the style/SKU merge
     @staticmethod
-    def _looks_like_a_garment_size(value) -> bool:
-        """Is this material `size` actually a GARMENT size in disguise?
+    def _reads_as_garment_size(value) -> bool:
+        """Is this material `size` UNMISTAKABLY a garment size? Alpha rungs only.
 
-        In this factory an accessory that varies by garment size is labelled with
-        the garment's size — a "zip L" is the zip for an L jacket, and the DM
-        enters exactly that. So a line whose material size reads as a garment
-        size is almost certainly size-specific, and defaulting garment_size to it
-        makes the matching work without asking the DM to fill in a new field they
-        have never had to fill in before.
+        NARROWER THAN IT WAS, AND THE NARROWING IS THE FIX. This used to accept
+        any bare number from 30 to 70 as a garment size, on the strength of the EU
+        jacket ladder — so a 60cm zip entered as size '60' was read as a size-60
+        garment, mapped to 4XL, and silently scoped to 4XL jackets only. Every
+        other size then had no zip line at all, which does not mean a short kit:
+        it means `kit_required` is False and the garment ships without a zip.
 
-        A 60cm zip or an 18L button is NOT a garment size, and must not be read
-        as one: doing so would confine a perfectly general line to a size that
-        does not exist.
+        'L' and 'XXL' cannot be anything but a garment size, so they still count —
+        not to infer from any more, but to REFUSE the line until the DM says what
+        they meant. A number stays ambiguous by nature and is never read here; the
+        recipe-wide check (kit_rules.accessory_size_ambiguities) catches the case
+        where several numbers on one article prove they were garment sizes.
         """
-        from app.core.leather_norms import normalise_size
         token = (str(value or "")).strip().upper()
-        if not token:
+        if not token or token.isdigit():
             return False
-        # A real garment size normalises to a rung. '60CM' and '18L' do not.
-        if any(ch.isalpha() for ch in token) and not token.isalnum():
-            return False
-        if token.isdigit():
-            return 30 <= int(token) <= 70        # the EU jacket ladder
-        return normalise_size(token) is not None and len(token) <= 5
+        if not token.isalnum():
+            return False                  # '63 · YKK-169', '60CM/BLACK'
+        from app.core.leather_norms import normalise_size
+        # An alpha rung is short and normalises. '18L' does not normalise.
+        return len(token) <= 5 and normalise_size(token) is not None
 
     @staticmethod
     def applies_to_size(line, garment_size: str | None) -> bool:
@@ -273,19 +422,13 @@ class StyleSpecService:
         back-compatible: every line that predates the column has NULL, so every
         already-released style resolves to exactly the recipe it resolved to
         before.
+
+        THE RULE ITSELF LIVES IN kit_rules.size_matches, because the release gate's
+        coverage check and the store's packet scan ask the same question and a
+        second spelling of "is an L line an L garment's line" is a second answer.
         """
-        want = getattr(line, "garment_size", None)
-        if not want:
-            return True
-        if not garment_size:
-            return True          # the piece's size is unknown — do not drop it
-        from app.core.leather_norms import normalise_size
-        a, b = str(want).strip().upper(), str(garment_size).strip().upper()
-        if a == b:
-            return True
-        # '52' and 'L' are the same garment on the Italian ladder.
-        na, nb = normalise_size(a), normalise_size(b)
-        return na is not None and na == nb
+        return kit_rules.size_matches(getattr(line, "garment_size", None),
+                                      garment_size)
 
     @staticmethod
     def merge_lines(lines: list, sku_id: uuid.UUID | None,
@@ -432,7 +575,8 @@ class StyleSpecService:
             has_accessory_lines=any(l.category == MaterialCategory.ACCESSORY.value
                                     for l in lines),
             has_leather_line=any(l.category == MaterialCategory.LEATHER.value
-                                 and (l.qty_per_piece or 0) > 0 for l in lines))
+                                 and (l.qty_per_piece or 0) > 0 for l in lines),
+            **await self.size_checks(style_id, lines))
         return {
             "style_id": str(style.id), "style_code": style.code,
             "style_name": style.name,
@@ -627,7 +771,8 @@ class StyleSpecService:
             style_name=style.name, confirmed_at=now,
             no_accessories=style.material_spec_no_accessories,
             has_accessory_lines=bool(accessory_lines),
-            has_leather_line=has_leather)
+            has_leather_line=has_leather,
+            **await self.size_checks(style_id, lines))
 
         # WARNINGS, NOT BLOCKERS. Lining consumption has been optional on the cut
         # path since the client confirmed every lining field is optional, so
@@ -809,7 +954,8 @@ class StyleSpecService:
             has_accessory_lines=any(l.category == MaterialCategory.ACCESSORY.value
                                     for l in lines),
             has_leather_line=any(l.category == MaterialCategory.LEATHER.value
-                                 and (l.qty_per_piece or 0) > 0 for l in lines))
+                                 and (l.qty_per_piece or 0) > 0 for l in lines),
+            **await self.size_checks(style_id, lines))
         return {
             "style_id": str(style.id), "style_code": style.code,
             "style_name": style.name, "qty_ordered": total_qty,
@@ -822,6 +968,68 @@ class StyleSpecService:
                 f"releasing." if short_lines else
                 f"Stock covers all {len(out_lines)} material line(s) for "
                 f"{total_qty} piece(s)."),
+        }
+
+    # ══════════════════════════════════════════════ the size-coverage checks
+    async def _sku_facts(self, style_ids: list[uuid.UUID]) -> tuple[dict, dict]:
+        """({style_id: [ordered size, ...]}, {sku_id: size}) in one query.
+
+        ORDERED SIZES ARE THE YARDSTICK for the coverage gate: a style whose order
+        runs S/M/L must have an accessory line reaching each of those three, and a
+        size nobody ordered is not a gap. Only SKUs with a quantity count, so a
+        zero-quantity row left by an importer cannot block a release.
+        """
+        if not style_ids:
+            return {}, {}
+        rows = (await self.db.execute(
+            select(SKU.id, SKU.style_id, SKU.size,
+                   func.coalesce(SKU.qty_ordered, 0))
+            .where(SKU.style_id.in_(list(style_ids))))).all()
+        by_style: dict = {}
+        sku_size: dict = {}
+        for sku_id, style_id, size, qty in rows:
+            token = (size or "").strip().upper()
+            sku_size[sku_id] = token or None
+            if token and int(qty or 0) > 0:
+                by_style.setdefault(style_id, set()).add(token)
+        return ({k: sorted(v) for k, v in by_style.items()}, sku_size)
+
+    @staticmethod
+    def _coverage_dicts(lines, sku_size: dict) -> list[dict]:
+        """Recipe lines as the plain dicts kit_rules' pure checks take.
+
+        A SKU-SCOPED LINE COVERS ITS OWN SKU'S SIZE even when it names no
+        garment_size — that is what scoping it to one colourway already means.
+        Without this, a DM who covered every size through per-colourway overrides
+        would be told the sizes were uncovered, and a false blocker on a release is
+        worse than no blocker: it teaches people the gate is noise.
+        """
+        out = []
+        for line in lines:
+            gsize = getattr(line, "garment_size", None)
+            if not gsize and line.sku_id is not None:
+                gsize = sku_size.get(line.sku_id)
+            out.append({
+                "category": line.category, "subtype": line.subtype,
+                "article": line.article, "size": line.size,
+                "garment_size": gsize,
+                "qty_per_piece": float(line.qty_per_piece or 0),
+            })
+        return out
+
+    async def size_checks(self, style_id: uuid.UUID, lines: list) -> dict:
+        """The two size kwargs release_blockers takes, for ONE style.
+
+        Returned as a dict so every call site spreads it — `**await
+        self.size_checks(...)` — rather than each one remembering two argument
+        names. There are four of them and the gate is only a gate if all four ask.
+        """
+        by_style, sku_size = await self._sku_facts([style_id])
+        dicts = self._coverage_dicts(lines, sku_size)
+        return {
+            "size_coverage_gaps": kit_rules.accessory_size_gaps(
+                lines=dicts, ordered_sizes=by_style.get(style_id, [])),
+            "size_ambiguities": kit_rules.accessory_size_ambiguities(lines=dicts),
         }
 
     # ══════════════════════════════════════ surfaces other modules call
@@ -837,9 +1045,14 @@ class StyleSpecService:
         rows = (await self.db.execute(
             select(Style).where(Style.id.in_(style_ids)))).scalars().all()
         by_style = await self.repo.lines_for_styles([s.id for s in rows]) # LINE STYLE ONLY
+        # ONE query for every style's ordered sizes, for the same reason the lines
+        # are batched: a release names a dozen styles and the gate must not become
+        # a dozen more round trips.
+        sizes_by_style, sku_size = await self._sku_facts([s.id for s in rows])
         out: dict = {}
         for style in rows:
             lines = by_style.get(style.id, [])
+            dicts = self._coverage_dicts(lines, sku_size)
             out[style.id] = kit_rules.release_blockers(
                 style_name=style.name,
                 confirmed_at=style.material_spec_confirmed_at,
@@ -848,7 +1061,10 @@ class StyleSpecService:
                     l.category == MaterialCategory.ACCESSORY.value for l in lines),
                 has_leather_line=any(
                     l.category == MaterialCategory.LEATHER.value
-                    and (l.qty_per_piece or 0) > 0 for l in lines))
+                    and (l.qty_per_piece or 0) > 0 for l in lines),
+                size_coverage_gaps=kit_rules.accessory_size_gaps(
+                    lines=dicts, ordered_sizes=sizes_by_style.get(style.id, [])),
+                size_ambiguities=kit_rules.accessory_size_ambiguities(lines=dicts))
         return out
 
     async def kit_required_for_piece(self, piece_id: uuid.UUID) -> bool:
@@ -1317,7 +1533,21 @@ class StyleSpecService:
 
             if override.get("material_lot_id"):
                 lot = await self.materials.get_lot(override["material_lot_id"])
-                resolution = RESOLUTION_PINNED if lot else RESOLUTION_NONE
+                # A NAMED LOT IS STILL CHECKED. See lot_fits_line: this path used
+                # to spend whatever id it was handed, which is how the wrong size
+                # became recordable as the right one.
+                fits, why = self.lot_fits_line(
+                    lot, line,
+                    approved=bool(override.get("substitution_approved")))
+                if not fits:
+                    unresolved.append(dict(
+                        self._kit_line(line, float(owed)),
+                        reason=RESOLUTION_MISMATCH, candidate_lot_ids=[],
+                        note=(f"The lot named for {line.article} was not issued "
+                              f"because {why}. Scan the packet the line asks for, "
+                              f"or have a DM approve the substitution.")))
+                    continue
+                resolution = RESOLUTION_PINNED
                 candidates = []
             else:
                 lot, resolution, candidates = await self._resolve_lot(line)

@@ -52,6 +52,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from scripts import _dbguard
 from app.core.database import SessionLocal
 from app.core.enums import BarcodeStatus, BarcodeType
 from app.modules.barcode.models import BarcodeRegistry
@@ -67,7 +68,9 @@ from app.modules.barcode.repository import (
 #   expression 'Submission' failed to locate a name ('Submission')
 # on the very first SELECT, which mentions neither Document nor Submission and
 # reads like a broken model rather than a missing import. Same block as
-# scripts/bootstrap_drawers.py and scripts/seed_employees.py; keep them in step.
+# scripts/seed_employees.py and scripts/ensure_roles.py; keep them in step.
+# (It used to name scripts/bootstrap_drawers.py, which went with the drawer
+# module — there is no drawer pool to bootstrap any more. CLAUDE.md §9.)
 from app.core import models as _core_models            # noqa: F401,E402
 from app.modules.clients import models as _clients     # noqa: F401,E402
 from app.modules.employees import models as _emp       # noqa: F401,E402
@@ -165,7 +168,16 @@ def main() -> None:
                     help="report what would change; write nothing")
     ap.add_argument("--batch", type=int, default=1000,
                     help="rows per commit (default 1000)")
+    _dbguard.add_argument(ap)
     args = ap.parse_args()
+
+    # Writes rows, so it must be sure WHICH database it is writing to.
+    # ASYNC_DATABASE_URL overrides DATABASE_URL outright
+    # (config.effective_async_url), so the two can silently name
+    # different databases — that is how 42 people reached live Supabase
+    # on 2026-09-28. See scripts/_dbguard.py.
+    _dbguard.assert_one_database("backfill_short_codes.py",
+                                 allow_split=args.allow_split_db)
 
     with SessionLocal() as db:
         stats = backfill(db, batch=args.batch, dry_run=args.dry_run)

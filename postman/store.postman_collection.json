@@ -28,6 +28,49 @@
   ],
   "item": [
     {
+      "name": "Approve Substitution",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/store/substitutions/{{request_id}}/approve",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "store",
+            "substitutions",
+            "{{request_id}}",
+            "approve"
+          ],
+          "variable": [
+            {
+              "key": "request_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Permit this one packet into this one garment. IT DOES NOT ISSUE IT.\n\nThe operator re-scans the packet and that is what moves the stock, against\ntheir own card. One approval covers one garment: the re-scan marks it CONSUMED.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"note\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
       "name": "Find Piece",
       "request": {
         "method": "GET",
@@ -103,6 +146,47 @@
       "response": []
     },
     {
+      "name": "List Substitutions",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/store/substitutions",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "store",
+            "substitutions"
+          ],
+          "query": [
+            {
+              "key": "status",
+              "value": "",
+              "description": "PENDING|APPROVED|REJECTED|CONSUMED. Omit for all.",
+              "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "",
+              "disabled": false
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "",
+              "disabled": false
+            }
+          ]
+        },
+        "description": "The wrong-size queue, oldest first \u2014 garments waiting on a decision.\n\nTHE QUEUE IS WHAT MAKES THE REFUSAL SAFE. An operator told \"wait for approval\"\nis waiting on somebody who has not been told anything; an ask nobody can find\nis a garment parked in the store for a reason nobody remembers. Same shape and\nsame reason as the material-arrivals come-back-to-it queue."
+      },
+      "response": []
+    },
+    {
       "name": "Piece Materials",
       "request": {
         "method": "GET",
@@ -157,6 +241,49 @@
         "body": {
           "mode": "raw",
           "raw": "{\n  \"piece_barcode\": \"\",\n  \"piece_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"lot_barcode\": \"\",\n  \"employee_barcode\": \"\",\n  \"employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"qty\": 0,\n  \"note\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Reject Substitution",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/store/substitutions/{{request_id}}/reject",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "store",
+            "substitutions",
+            "{{request_id}}",
+            "reject"
+          ],
+          "variable": [
+            {
+              "key": "request_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Refuse it \u2014 the floor fetches the right packet. Re-approvable later.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"note\": \"\"\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -223,10 +350,10 @@
             "scan"
           ]
         },
-        "description": "Scan the worker, scan the garment. The drawer scan is gone.\n\nBarcodes are resolved to ids HERE so the service sees ids only\n(CLAUDE.md \u00a715) \u2014 the same split the production log uses.",
+        "description": "Scan the worker, scan the garment \u2014 and the packet, for an accessory.\n\nBarcodes are resolved to ids HERE so the service sees ids only\n(CLAUDE.md \u00a715) \u2014 the same split the production log uses.\n\nAN ACCESSORY IS ISSUED ONE PACKET AT A TIME. Send `lot_barcode` (LOT-ACC-\u2026)\nand this scan issues exactly the recipe line that packet matches; there is no\nblanket kit scan any more. A packet whose size is not the garment's is\nREFUSED with a 409 and an approval request a DM/MD decides below \u2014 nothing is\ntaken from stock until they do.",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"employee_barcode\": \"\",\n  \"employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"piece_barcode\": \"\",\n  \"piece_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"part\": \"\",\n  \"lines\": [\n    {\n      \"spec_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"qty\": 0,\n      \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\"\n    }\n  ]\n}",
+          "raw": "{\n  \"employee_barcode\": \"\",\n  \"employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"piece_barcode\": \"\",\n  \"piece_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"part\": \"\",\n  \"lot_barcode\": \"\",\n  \"lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"qty\": 0,\n  \"substitution_reason\": \"\"\n}",
           "options": {
             "raw": {
               "language": "json"

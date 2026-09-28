@@ -48,6 +48,15 @@ import logging
 import re
 from pathlib import Path
 
+# Make `import app...` / `from scripts import ...` work whether this runs as
+# `python -m scripts.<name>` (repo root already on sys.path) or as a bare path
+# `python scripts/<name>.py` (sys.path[0] is scripts/, so neither is importable).
+# Without it the bare-path form died on ModuleNotFoundError, which reads as a
+# broken checkout rather than the wrong invocation.
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 from sqlalchemy import func, select
 
 from app.core.database import AsyncSessionLocal
@@ -287,4 +296,17 @@ async def seed() -> None:
 
 
 if __name__ == "__main__":
+    # THIS IS THE SCRIPT THAT WROTE TO THE WRONG DATABASE on 2026-09-28. It is
+    # async, so it follows ASYNC_DATABASE_URL — and that variable takes absolute
+    # precedence over DATABASE_URL in config.effective_async_url. An operator who
+    # had redirected DATABASE_URL to a scratch file, and had every reason to
+    # believe the whole process was pointed there, put 42 people and 8 logins into
+    # live Supabase instead. See scripts/_dbguard.py for the full account.
+    #
+    # The guard is on __main__ only: when scripts/seed.py drives this as step 6 it
+    # has already run the same check, and a second identical refusal would just be
+    # noise.
+    from scripts._dbguard import assert_one_database
+
+    assert_one_database("seed_employees.py")
     asyncio.run(seed())

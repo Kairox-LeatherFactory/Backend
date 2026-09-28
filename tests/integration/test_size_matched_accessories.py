@@ -57,9 +57,17 @@ async def sized_style(db):
 
 
 def _thread(size):
+    """Thread for one garment size, SAID OUT LOUD.
+
+    `garment_size` used to be inferred from `size` whenever `size` read as a
+    garment size — and the inference also read a 60cm zip as a size-60 garment,
+    scoped it to 4XL and left every other size with no zip line at all. So the
+    guess is gone and an unmistakable garment size with nothing saying which
+    garments it is for is now a 422. The DM states it; nothing infers it.
+    """
     return {"category": "ACCESSORY", "subtype": "THREAD", "article": "THREAD-40",
             "colour": "NAVY", "thickness": "40", "size": size,
-            "qty_per_piece": 2}
+            "garment_size": size, "qty_per_piece": 2}
 
 
 async def test_a_sized_accessory_reaches_only_its_own_size(db, sized_style):
@@ -125,17 +133,19 @@ async def test_a_material_size_is_not_mistaken_for_a_garment_size(db, sized_styl
 
 
 async def test_a_zip_labelled_with_a_garment_size_matches_that_garment(db, sized_style):
-    """Your case: 'size of zip L is automatically merged to the size-L piece'.
+    """Your case: the size-L zip goes to the size-L piece and nowhere else.
 
-    The DM enters what they always entered — a zip labelled L — and the matching
-    starts working, because a material size that reads as a garment size defaults
-    `garment_size` to it.
+    WHAT CHANGED: the DM now SAYS which garments the line is for rather than the
+    system inferring it from the material size. The matching itself is unchanged —
+    which is the point of this test — but the intent is now recorded instead of
+    guessed, because the same guess confined a 60cm zip to 4XL jackets.
     """
     st, skus = sized_style
     svc = StyleSpecService(db)
     await svc.replace_spec(st.id, [
         {"category": "ACCESSORY", "subtype": "ZIP", "article": "ZIP-N",
-         "colour": "NAVY", "size": s, "qty_per_piece": 1} for s in ("S", "M", "L")],
+         "colour": "NAVY", "size": s, "garment_size": s,
+         "qty_per_piece": 1} for s in ("S", "M", "L")],
         actor_name="DM")
     for size in ("S", "M", "L"):
         lines = await svc.effective_lines(st.id, skus[size].id)
@@ -150,3 +160,48 @@ async def test_the_italian_ladder_matches_the_alpha_one(db, sized_style):
     assert svc.applies_to_size(type("L", (), {"garment_size": "52"})(), "L")
     assert svc.applies_to_size(type("L", (), {"garment_size": "L"})(), "52")
     assert not svc.applies_to_size(type("L", (), {"garment_size": "52"})(), "S")
+
+
+async def test_an_unmistakable_garment_size_with_no_scope_is_REFUSED(db, sized_style):
+    """THE GUESS IS GONE, AND ITS ABSENCE IS ENFORCED.
+
+    A line whose material size is 'L' is either an L-garment's accessory or a
+    material whose own size happens to be called L, and the two differ by a whole
+    kit. The system used to pick one. It now refuses the line and says what to send
+    instead — the one case where the DM's intent is clear enough to demand and the
+    cost of being wrong is a returned shipment.
+    """
+    from fastapi import HTTPException
+    st, _skus = sized_style
+    svc = StyleSpecService(db)
+    with pytest.raises(HTTPException) as exc:
+        await svc.replace_spec(st.id, [
+            {"category": "ACCESSORY", "subtype": "ZIP", "article": "ZIP-N",
+             "colour": "NAVY", "size": "L", "qty_per_piece": 1}],
+            actor_name="DM")
+    assert exc.value.status_code == 422
+    assert "garment_size" in str(exc.value.detail)
+
+
+async def test_a_numeric_material_size_is_no_longer_scoped_to_a_garment(db, sized_style):
+    """THE REGRESSION THIS WHOLE CHANGE EXISTS TO FIX.
+
+    '60' is on the EU jacket ladder, so a 60cm zip entered as size '60' used to be
+    read as a size-60 garment, mapped to 4XL and scoped there. That is not a
+    smaller recipe for S/M/L: those garments got NO zip line, so kit_required came
+    back False, piece_complete collapsed to leather-and-lining, and they shipped
+    without a zip. The line must stay unscoped.
+    """
+    st, skus = sized_style
+    svc = StyleSpecService(db)
+    await svc.replace_spec(st.id, [
+        {"category": "ACCESSORY", "subtype": "ZIP", "article": "ZIP-60",
+         "colour": "NAVY", "size": "60", "qty_per_piece": 1}],
+        actor_name="DM")
+    stored = [l for l in await svc.repo.lines_for_style(st.id)
+              if l.article == "ZIP-60"]
+    assert len(stored) == 1
+    assert stored[0].garment_size is None, "60 is centimetres, not a size-60 jacket"
+    for size in ("S", "M", "L"):
+        lines = await svc.effective_lines(st.id, skus[size].id)
+        assert [l.article for l in lines if l.category == "ACCESSORY"] == ["ZIP-60"]

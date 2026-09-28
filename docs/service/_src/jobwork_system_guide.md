@@ -11,7 +11,7 @@ Two things make it different from everything else in the system:
 |---|---|
 | HTTP routes | `app/modules/jobwork/router.py` |
 | Business rules | `app/modules/jobwork/service.py` |
-| Tables | `app/modules/jobwork/models.py` (`job_work_vendor`, `job_work`, `job_work_piece`) |
+| Tables | `app/modules/jobwork/models.py` (`vendor`, `job_work`, `job_work_piece`) |
 
 **Who:** sending garments out and agreeing what is paid for them is a **DM/MD** decision. Everyone else can read where things are.
 

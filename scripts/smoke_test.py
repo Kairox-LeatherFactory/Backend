@@ -17,9 +17,17 @@ RUN
 """
 import asyncio
 import os
+import secrets
 
 os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
-os.environ.setdefault("SECRET_KEY", "smoke-test")
+# A REAL RANDOM KEY, not a placeholder. This was "smoke-test" — 10 characters —
+# and config.py enforces a 32-character minimum with no environment exempt
+# (F32/H5), so the one script whose whole job is "run this after any change to
+# confirm nothing is broken" died on import with a RuntimeError about the key.
+# setdefault could not save it either: an os.environ value BEATS .env, so
+# supplying a good key in .env did not help — the placeholder won. The key is
+# ephemeral and this process signs its own tokens with it, which is all it needs.
+os.environ.setdefault("SECRET_KEY", secrets.token_urlsafe(48))
 
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -66,8 +74,26 @@ async def main():
         r = await c.get("/api/v1/employees")
         checks.append(("unauth blocked", r.status_code == 401))
 
+        # THE FACTORY-WIDE READ MOVED TO THE ROLE DASHBOARDS.
+        # This was GET /api/v1/analytics/overview, which is now retired and
+        # answers 410 Gone naming its replacements — so the smoke test failed on
+        # a route the app deliberately removed, which reads as a regression and
+        # is not one. The DM dashboard is the whole-factory view now.
+        r = await c.get("/api/v1/dashboard/direct-manager", headers=h)
+        checks.append(("dm dashboard", r.status_code == 200))
+
+        # The retirement itself is worth asserting: 410 (not 404) is what tells a
+        # frontend holding an old build "this was removed" rather than "you typed
+        # it wrong", and the body names where the figures went.
         r = await c.get("/api/v1/analytics/overview", headers=h)
-        checks.append(("analytics", r.status_code == 200))
+        checks.append(("retired overview -> 410", r.status_code == 410))
+
+        # /barcode/resolve is every scan's front door (CLAUDE.md §6), and an
+        # unknown code must be 404 — distinct from 410, which means a retired
+        # employee card. If this ever 200s or 500s, every scanner is affected.
+        r = await c.get("/api/v1/barcode/resolve",
+                        params={"code": "NO-SUCH-CODE-0000"}, headers=h)
+        checks.append(("unknown barcode -> 404", r.status_code == 404))
 
     await engine.dispose()
 

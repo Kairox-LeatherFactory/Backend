@@ -73,9 +73,19 @@ from collections import Counter
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+# Make `import app...` / `from scripts import ...` work whether this runs as
+# `python -m scripts.<name>` (repo root already on sys.path) or as a bare path
+# `python scripts/<name>.py` (sys.path[0] is scripts/, so neither is importable).
+# Without it the bare-path form died on ModuleNotFoundError, which reads as a
+# broken checkout rather than the wrong invocation.
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 from fastapi import HTTPException
 from sqlalchemy import func, select
 
+from scripts import _dbguard
 from app.core.database import AsyncSessionLocal
 from app.core.enums import (BarcodeStatus, MaterialCategory,
                             SupplierOrderStatus, resolve_spec)
@@ -707,7 +717,16 @@ def main() -> None:
                     help="seed just this category (repeatable); default: all")
     ap.add_argument("--dry-run", action="store_true",
                     help="validate the data and report; write nothing")
+    _dbguard.add_argument(ap)
     args = ap.parse_args()
+
+    # Writes rows, so it must be sure WHICH database it is writing to.
+    # ASYNC_DATABASE_URL overrides DATABASE_URL outright
+    # (config.effective_async_url), so the two can silently name
+    # different databases — that is how 42 people reached live Supabase
+    # on 2026-09-28. See scripts/_dbguard.py.
+    _dbguard.assert_one_database("seed_materials.py",
+                                 allow_split=args.allow_split_db)
 
     only = {c.upper() for c in args.only}
     raise SystemExit(asyncio.run(seed(only, dry=args.dry_run)))
