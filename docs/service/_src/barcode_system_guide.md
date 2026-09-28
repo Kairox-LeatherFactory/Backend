@@ -111,7 +111,17 @@ Any logged-in user can call resolve, including the legacy `employee` role. That 
 | a hide | `"PIECE"` | same |
 | `PIECE` | `null` | there is nothing left to present |
 
-The store scan is **two codes, not three** — worker, then garment. There is no box to find. This field is **guidance for the screen**, not permission: the authority on whether a scan is legal is the store service.
+The store scan is **two codes for a cut part** — worker, then garment. There is no box to find.
+
+**An accessory is three: worker, garment, then the packet's own `LOT-ACC-` label.**
+That third code is not a box the system invented — it is the physical packet in the
+operator's hand, and scanning it is what lets the packet's size be compared with the
+garment's. So for an accessory lot the order is the reverse of the table above: the
+piece is scanned *before* the packet. The table's `"PIECE"` answer is written for the
+cutting screen, where a lot really is named first.
+
+This field is **guidance for the screen**, not permission: the authority on whether a
+scan is legal is the store service.
 
 ### `next_stage` — where the garment is going
 

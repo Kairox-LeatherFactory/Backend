@@ -209,10 +209,37 @@ A line names a material by six columns (category, subtype, article, colour, thic
 
 Two `size`-like fields exist and they mean different things — do not mix them up:
 
-| Field | Meaning |
-|---|---|
-| `size` | **the material's** size — a 60 cm zip |
-| `garment_size` | **which jackets** this line is for — the size-L line |
+| Field | Meaning | Matched against |
+|---|---|---|
+| `size` | **the material's** size — a 60 cm zip, an 18L button | `MaterialLot.size`, to find the lot |
+| `garment_size` | **which jackets** this line is for — the size-L line | `SKU.size`, to decide if the line applies at all |
+
+`garment_size = null` means **every size**. That is what keeps one generic 18L
+button line at one row, and it is why every line entered before the column existed
+still resolves to exactly the recipe it always did.
+
+### `garment_size` is stated, never inferred
+
+It used to be **guessed** from the material size whenever that size looked like a
+garment size — and any bare number from 30 to 70 looked like one, because those are
+the EU jacket rungs. So a 60 cm zip entered as `size: "60"` was read as a size-60
+garment, mapped to 4XL, and scoped to 4XL jackets only. A 45 cm zip went to XS.
+
+**A line that reaches no garment is not a smaller recipe — it is no recipe.** The
+line is dropped, `kit_required` comes back false for that size, completeness
+collapses to leather-and-lining, and every garment of every other size is
+complete, sendable and shipped without its zip. Nothing warns, because from the
+garment's point of view the style simply declares no accessories.
+
+So the guess is gone:
+
+- a material size that is **unmistakably** a garment size (`L`, `XXL`) and names no
+  `garment_size` is a **422** telling you to say which garments it is for;
+- a **number** is never read as a garment size — `60` is centimetres until somebody
+  says otherwise;
+- migration `20260927_kit_packet_scan` clears the rows the old guess had already
+  mis-scoped (where `garment_size` equals a purely numeric `size`). Alpha ones are
+  left alone: `L` beside `garment_size: "L"` is a line somebody meant.
 
 A line has a **scope**:
 
@@ -232,13 +259,43 @@ A line has a **scope**:
 
 `POST /styles/{id}/material-spec/confirm` is the sign-off. It is **separate from the release call on purpose**: the DM can finish the recipe days earlier, and the release screen can show `release_blockers` **before** the button is pressed instead of explaining a rejection afterwards.
 
-The three blockers:
+The five blockers:
 
 1. the spec is not confirmed;
 2. there is **no LEATHER line** — the dcm per piece is what the ledger and the costing are built on;
-3. the spec names **no accessories** and nobody declared that it needs none.
+3. the spec names **no accessories** and nobody declared that it needs none;
+4. **a size-varying accessory has no line for some size the order contains**;
+5. **several material sizes of one accessory, and not one of them says which garments it is for.**
 
 That third one is a **three-state** field. An empty accessory list on its own is ambiguous: it could be a garment that genuinely takes none, or one whose buttons nobody has entered yet. So it needs an explicit `no_accessories: true`; `null` — nobody asked — does not pass.
+
+### 4 · size coverage
+
+If **any** line for an article names a `garment_size`, that article is
+**size-varying**, and every size the order actually contains must have its own
+line. Zip lines for M and L on an order that also runs S and XL is a blocker —
+those garments would get no zip at all (see *`garment_size` is stated, never
+inferred* above for why that is silence rather than a shortage).
+
+One line for the article with **no** `garment_size` covers every size and closes
+the question, so a generic 18L button never trips this.
+
+A per-colourway (`SKU`-scoped) line counts as covering its own SKU's size even
+when it names no `garment_size` — being that SKU's line already means that.
+
+### 5 · size ambiguity
+
+`ZIP 48`, `ZIP 50`, `ZIP 52`, none of them scoped, means **every** garment is
+issued all three zips. But `50` is a garment size on one client's sheet and a
+centimetre length on the next, and nothing in the token can tell you which — so
+this is **asked**, not guessed. One line per article is never ambiguous, however
+its size is labelled: a single 60 cm zip on every garment is exactly what an
+unscoped line means.
+
+> Both checks are pure functions in `app/core/kit_rules.py`
+> (`accessory_size_gaps`, `accessory_size_ambiguities`), and `size_matches` is the
+> single size rule the whole app shares — so `52` and `L` are one garment on the
+> release screen, in the recipe filter and at the store scan alike.
 
 > **A missing LINING line is a warning, not a blocker.** Lining consumption is optional on the cut path, so requiring it here would contradict the ledger rule downstream.
 
