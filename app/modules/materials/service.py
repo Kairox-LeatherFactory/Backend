@@ -585,8 +585,12 @@ class MaterialService:
             "rejected": totals.get("rejected", 0.0),
             "receipts": [{
                 "receipt_id": r.id,
+                "status": r.status,
+                "total_qty": (float(r.declared_qty)
+                              if r.declared_qty is not None else None),
                 "approved_qty": float(r.approved_qty or 0),
                 "rejected_qty": float(r.rejected_qty or 0),
+                "sheet_count": r.declared_sheet_count,
                 "supplier_order_id": r.supplier_order_id,
                 "received_by": r.received_by,
                 "received_at": r.created_at.isoformat() if r.created_at else None,
@@ -1138,6 +1142,23 @@ class MaterialService:
             raise HTTPException(status.HTTP_404_NOT_FOUND,
                                 "This arrival's lot no longer exists.")
 
+        # IDENTITY IS CHECKED, NOT EDITED. The arrival's quantity is already in
+        # THIS lot's stock; a different article/colour is a different lot, and
+        # renaming here would either rename the whole lot (every other delivery
+        # of it too) or silently ignore what was typed. Both are wrong.
+        for field in ("article", "colour"):
+            sent = patch.get(field)
+            have = getattr(lot, field, None)
+            if sent is not None and (sent or "").strip().upper() != (have or "").strip().upper():
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    f"This arrival is on lot {lot.article} · {lot.colour or '-'}, "
+                    f"but {field} '{sent}' was sent. An arrival cannot be moved "
+                    f"to another material by editing it: void it with DELETE "
+                    f"/materials/arrivals/{receipt_id} and enter it again. If "
+                    f"the LOT itself is misnamed, correct it with PATCH "
+                    f"/materials/lots/{lot.id}.")
+
         before = {"declared_qty": float(receipt.declared_qty or 0),
                   "declared_sheet_count": receipt.declared_sheet_count,
                   "note": receipt.note}
@@ -1164,10 +1185,6 @@ class MaterialService:
                     f"already been cut or issued. Void the arrival and enter the "
                     f"real delivery instead.")
             lot.on_hand = new_on_hand
-            # approved_qty tracks the declared figure until `complete` splits it;
-            # leaving it behind would make `received` and the purchase history
-            # disagree with the arrival they came from.
-            receipt.approved_qty = new_qty
             receipt.declared_qty = new_qty
         if patch.get("declared_sheet_count") is not None:
             receipt.declared_sheet_count = patch["declared_sheet_count"]
@@ -1181,6 +1198,33 @@ class MaterialService:
                                      "declared_sheet_count": receipt.declared_sheet_count,
                                      "note": receipt.note},
                            "stock_delta": float(delta)})
+
+        # WITH THE SPLIT, THIS IS THE SECOND SITTING. Handed to complete_arrival
+        # uncommitted, so the correction above and the completion land in ONE
+        # transaction — never a corrected-but-not-completed arrival.
+        if patch.get("approved_qty") is not None or patch.get("rejected_qty") is not None:
+            from app.modules.materials import schemas
+            declared = Decimal(str(receipt.declared_qty or 0))
+            a, r = patch.get("approved_qty"), patch.get("rejected_qty")
+            if a is None:
+                a = declared - Decimal(str(r))
+                if a < 0:
+                    raise HTTPException(
+                        status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        f"rejected_qty ({float(r):g}) is more than the "
+                        f"{float(declared):g} {lot.uom} this arrival declared.")
+            if r is None:
+                r = max(declared - Decimal(str(a)), Decimal(0))
+            done = await self.complete_arrival(receipt_id, schemas.ArrivalComplete(
+                approved_qty=float(a), rejected_qty=float(r),
+                sheets=patch.get("sheets"), thickness=patch.get("thickness")),
+                actor_id=actor_id)
+            await self.db.refresh(receipt)
+            row = self._arrival_row(receipt, lot)
+            row.update({k: done[k] for k in done if k not in row})
+            row["on_hand_delta"] = done["on_hand_delta"] + float(delta)
+            return row
+
         await self.db.commit()
         await self.db.refresh(receipt)
         await self.db.refresh(lot)
@@ -1245,6 +1289,139 @@ class MaterialService:
                 f"itself is kept — its barcode may be printed and a recipe may "
                 f"already point at it; retire it separately if it should not "
                 f"exist."),
+        }
+
+    async def adjust_receipt(self, receipt_id: uuid.UUID, patch: dict, *,
+                             actor_id=None) -> dict:
+        """Correct a RECEIVED delivery's approved/rejected split, with a reason.
+
+        A CHANGE TO APPROVED MOVES STOCK, by (new approved − old approved) — a
+        delta, never an assignment, so a cut made from this delivery since it was
+        received is not silently undone. Rejected was never in stock (it went
+        back on the van), so changing it corrects the supplier's quality history
+        and nothing else.
+
+        PENDING arrivals are refused: their split does not exist yet. That is
+        PATCH /materials/arrivals/{id} or its /complete.
+        """
+        from app.core.enums import IntakeStatus
+
+        receipt = await self.repo.get_receipt(receipt_id)
+        if receipt is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Receipt not found.")
+        if receipt.status == IntakeStatus.PENDING.value:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "This delivery is a PENDING arrival — it has no approved/"
+                "rejected split yet. Enter it with POST /materials/arrivals/"
+                f"{receipt_id}/complete, or correct the gate figure with "
+                f"PATCH /materials/arrivals/{receipt_id}.")
+        lot = await self.repo.get_lot_for_update(receipt.material_lot_id)
+        if lot is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                "This receipt's lot no longer exists.")
+        reason = (patch.get("reason") or "").strip()
+        if len(reason) < 3:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Give a reason for correcting a delivery — it is the only record "
+                "of why the received figures changed.")
+
+        old_a = Decimal(str(receipt.approved_qty or 0))
+        old_r = Decimal(str(receipt.rejected_qty or 0))
+        new_a = (Decimal(str(patch["approved_qty"]))
+                 if patch.get("approved_qty") is not None else old_a)
+        new_r = (Decimal(str(patch["rejected_qty"]))
+                 if patch.get("rejected_qty") is not None else old_r)
+        if new_a < 0 or new_r < 0:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "Quantities cannot be negative.")
+
+        # Same arithmetic as POST /materials/receive.
+        total = patch.get("total_qty")
+        if total is not None:
+            total = Decimal(str(total))
+            if new_a > total:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    f"approved_qty ({float(new_a):g}) is more than total_qty "
+                    f"({float(total):g}) — more cannot be approved than arrived.")
+            if patch.get("rejected_qty") is None:
+                new_r = total - new_a
+            elif new_a + new_r != total:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    f"approved_qty ({float(new_a):g}) + rejected_qty "
+                    f"({float(new_r):g}) = {float(new_a + new_r):g}, but "
+                    f"total_qty is {float(total):g}. Correct one of them, or "
+                    f"leave rejected_qty out and it is worked out for you.")
+
+        sheet_count = patch.get("sheet_count")
+        if (new_a == old_a and new_r == old_r and total is None
+                and sheet_count is None):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Nothing to change — send approved_qty, rejected_qty, "
+                "total_qty or sheet_count.")
+
+        delta = new_a - old_a
+        new_on_hand = (lot.on_hand or Decimal(0)) + delta
+        if new_on_hand < 0:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Approving {float(new_a):g} instead of {float(old_a):g} would "
+                f"take {lot.article} to {float(new_on_hand):g} {lot.uom} — "
+                f"{float(-new_on_hand):g} of it has already been cut or issued. "
+                f"Stock cannot go negative.")
+        reserved = await self.repo.active_reserved(lot.id)
+        if delta < 0 and new_on_hand < reserved:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"{float(reserved):g} {lot.uom} of {lot.article} is reserved for "
+                f"a cut. Lowering approved by {float(-delta):g} would leave "
+                f"{float(new_on_hand):g} — less than is committed. Release the "
+                f"reservation first.")
+
+        before = {"total_qty": (float(receipt.declared_qty)
+                                if receipt.declared_qty is not None else None),
+                  "approved_qty": float(old_a), "rejected_qty": float(old_r),
+                  "sheet_count": receipt.declared_sheet_count}
+        lot.on_hand = new_on_hand
+        receipt.approved_qty = new_a
+        receipt.rejected_qty = new_r
+        # The receipt's total is approved + rejected once it has a split. Kept in
+        # step so the purchase history does not show a total the split disagrees
+        # with.
+        receipt.declared_qty = new_a + new_r
+        if sheet_count is not None:
+            receipt.declared_sheet_count = sheet_count
+
+        after = {"total_qty": float(new_a + new_r),
+                 "approved_qty": float(new_a), "rejected_qty": float(new_r),
+                 "sheet_count": receipt.declared_sheet_count}
+        await self._audit(actor_id, "MATERIAL_RECEIPT_ADJUSTED", lot.id, {
+            "receipt_id": str(receipt.id), "before": before, "after": after,
+            "stock_delta": float(delta), "reason": reason})
+        await self.db.commit()
+        await self.db.refresh(lot)
+        await self.db.refresh(receipt)
+
+        reserved = await self.repo.active_reserved(lot.id)
+        sheets_now = await self.repo.sheet_counts_by_status(lot.id)
+        return {
+            "receipt_id": receipt.id,
+            "lot_id": lot.id,
+            "status": receipt.status,
+            **after,
+            **stock_numbers(lot.on_hand, lot.used, reserved),
+            **sheet_rollup(sheets_now),
+            "stock_delta": float(delta),
+            "before": before,
+            "reason": reason,
+            "message": (
+                f"Stock corrected by {float(delta):+g} {lot.uom}."
+                if delta else
+                "Stock unchanged — only the rejected figure / counts moved."),
         }
 
     async def _audit(self, actor_id, action: str, entity_id, after: dict) -> None:
@@ -1551,13 +1728,13 @@ class MaterialService:
             codes = await self.repo.barcodes_by_lot([lot.id])
             barcode = codes.get(lot.id)
 
-        # THE RECEIPT IS THE THING TO COME BACK TO. approved_qty is set to the
-        # declared total so `received` and the purchase history read correctly
-        # from the moment the material is in the building — an arrival IS a
-        # receipt of that quantity, provisionally. `complete` corrects both.
+        # THE RECEIPT IS THE THING TO COME BACK TO. Nothing is approved or
+        # rejected until QC says so, so both are 0; what arrived is declared_qty,
+        # and `received` counts a PENDING receipt by it (repo.received_totals).
+        # `complete` fills the split in.
         receipt = self.repo.add_receipt_nocommit(
             material_lot_id=lot.id, supplier_order_id=body.supplier_order_id,
-            approved_qty=qty, rejected_qty=Decimal(0), received_by=actor_id,
+            approved_qty=Decimal(0), rejected_qty=Decimal(0), received_by=actor_id,
             status=IntakeStatus.PENDING.value, declared_qty=qty,
             declared_sheet_count=body.sheet_count, note=body.note)
         await self.db.flush()
@@ -1592,6 +1769,11 @@ class MaterialService:
                 + f" still to be entered — POST /materials/arrivals/"
                   f"{receipt.id}/complete when there is time."),
         }
+
+    @staticmethod
+    def _pending_block(pending: dict | None) -> dict:
+        return {"pending_arrivals": (pending or {}).get("count", 0),
+                "pending_arrival_qty": (pending or {}).get("declared_qty", 0.0)}
 
     @staticmethod
     def _outstanding_fields(lot, sheet_count) -> list:
@@ -1795,12 +1977,65 @@ class MaterialService:
         if not lot:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Lot not found.")
  
+        from app.core.enums import IntakeStatus
+
+        approved_sent = body.approved_qty is not None
+        rejected_sent = "rejected_qty" in body.model_fields_set
         approved = Decimal(str(body.approved_qty or 0))
         rejected = Decimal(str(body.rejected_qty or 0))
         if approved < 0 or rejected < 0:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 "Quantities cannot be negative.")
- 
+
+        # THE TOTAL THAT CAME OFF THE VAN. Optional; when sent, the split has to
+        # account for it. Unlike the sheet count this IS enforced — it is
+        # arithmetic on three numbers typed on one form, not a glance at a bundle.
+        total = getattr(body, "total_qty", None)
+        if total is not None:
+            total = Decimal(str(total))
+
+        # NO SPLIT YET → A PENDING ARRIVAL. Same two-sitting rule as
+        # POST /materials/arrivals: the total goes into stock provisionally (the
+        # material is in the building) and approved/rejected are entered later
+        # at PATCH /materials/arrivals/{receipt_id}, which corrects stock by the
+        # difference.
+        pending = not approved_sent and not rejected_sent
+        if not approved_sent and total is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "Send approved_qty, or send total_qty and enter the approved/"
+                "rejected split later at PATCH /materials/arrivals/{receipt_id}.")
+        if pending:
+            # Nothing is approved or rejected until QC says so.
+            approved, rejected = Decimal(0), Decimal(0)
+        elif not approved_sent:
+            # Only the rejection is known: the rest of the delivery is approved.
+            if rejected > total:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    f"rejected_qty ({float(rejected):g}) is more than "
+                    f"total_qty ({float(total):g}).")
+            approved = total - rejected
+        elif total is not None:
+            if approved > total:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    f"approved_qty ({float(approved):g}) is more than "
+                    f"total_qty ({float(total):g}) — more cannot be approved "
+                    f"than arrived.")
+            if "rejected_qty" not in body.model_fields_set:
+                rejected = total - approved
+            elif approved + rejected != total:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    f"approved_qty ({float(approved):g}) + rejected_qty "
+                    f"({float(rejected):g}) = {float(approved + rejected):g}, "
+                    f"but total_qty is {float(total):g}. Correct one of them, "
+                    f"or leave rejected_qty out and it is worked out for you.")
+        else:
+            total = approved + rejected
+        sheet_count = getattr(body, "sheet_count", None)
+
         order = None
         mismatch = []
         substituted = False
@@ -1839,12 +2074,21 @@ class MaterialService:
                     target_lot.id, _type,
                     f"SUBSTITUTE · {lot.article} · {lot.colour or ''}")
  
-        # add approved qty to whichever lot we settled on
-        target_lot.on_hand = (target_lot.on_hand or 0) + approved
+        # add approved qty to whichever lot we settled on — or, while the split
+        # is still owed, the whole total PROVISIONALLY. The receipt says nothing
+        # is approved yet (approved_qty 0); the completion corrects stock by
+        # (approved − declared), which is why the total has to be in it now.
+        stock_in = total if pending else approved
+        target_lot.on_hand = (target_lot.on_hand or 0) + stock_in
+        receipt_id = uuid.uuid4()
         self.repo.add_receipt_nocommit(
+            id=receipt_id,
             material_lot_id=target_lot.id, supplier_order_id=body.supplier_order_id,
-            approved_qty=approved, rejected_qty=rejected, received_by=actor_id)
- 
+            approved_qty=approved, rejected_qty=rejected, received_by=actor_id,
+            declared_qty=total, declared_sheet_count=sheet_count,
+            status=(IntakeStatus.PENDING.value if pending
+                    else IntakeStatus.COMPLETED.value))
+
         if body.reserve_for_required:
             self.repo.add_reservation_nocommit(
                 target_lot.id, Decimal(str(body.reserve_for_required)),
@@ -1855,8 +2099,21 @@ class MaterialService:
         # lot, and sheeting it to the ordered lot would file real hides under an
         # article nobody received.
         minted = await self._mint_sheets_for(
-            target_lot, getattr(body, "sheets", None), declared_qty=approved)
- 
+            target_lot, getattr(body, "sheets", None), declared_qty=stock_in)
+
+        warnings = list(self.decrement_warnings)
+        if sheet_count is not None and minted and len(minted) != sheet_count:
+            # REPORTED, NEVER ENFORCED — the same rule as complete_arrival.
+            warnings.append({
+                "kind": "sheet_count_mismatch",
+                "lot_id": str(target_lot.id),
+                "declared_sheet_count": sheet_count,
+                "sheets_entered": len(minted),
+                "note": (f"{sheet_count} sheet(s) were counted but "
+                         f"{len(minted)} were measured. The hides that exist are "
+                         f"the ones entered here; check whether one is missing."),
+            })
+
         order_status = None
         if order and order.status != SupplierOrderStatus.ARRIVED.value:
             from datetime import datetime, timezone
@@ -1870,7 +2127,10 @@ class MaterialService:
             actor_id,
             "MATERIAL_RECEIVED_SUBSTITUTE" if substituted else "MATERIAL_RECEIVED",
             target_lot.id,
-            {"approved": float(approved), "rejected": float(rejected),
+            {"receipt_id": str(receipt_id), "pending": pending,
+             "total": float(total), "approved": float(approved),
+             "rejected": float(rejected), "sheet_count": sheet_count,
+             "sheets_entered": len(minted),
              "mismatch_fields": mismatch or None,
              "original_lot_id": str(lot.id) if substituted else None})
         await self.db.commit()
@@ -1883,7 +2143,23 @@ class MaterialService:
             # arrived / used / balance / reserved / available / on_hand
             **stock_numbers(target_lot.on_hand, target_lot.used, reserved),
             **sheet_rollup(sheets_now),
+            **self._pending_block(
+                (await self.repo.pending_intake_by_lot([target_lot.id]))
+                .get(target_lot.id)),
+            "receipt_id": receipt_id,
+            "status": (IntakeStatus.PENDING.value if pending
+                       else IntakeStatus.COMPLETED.value),
+            "outstanding": (self._outstanding_fields(target_lot, sheet_count)
+                            if pending else []),
+            "message": (
+                f"{float(total):g} {target_lot.uom} is in stock provisionally. "
+                f"Enter approved_qty / rejected_qty at PATCH /materials/"
+                f"arrivals/{receipt_id} when QC is done." if pending else None),
+            "total_qty": float(total),
+            "approved_qty": float(approved),
             "rejected_logged": float(rejected),
+            "sheet_count": sheet_count,
+            "sheets_entered": len(minted),
             "supplier_order_status": order_status,
             "substituted": substituted,
             "mismatch_fields": mismatch or None,
@@ -1895,6 +2171,7 @@ class MaterialService:
             # read as a mismatch rather than as an absence.
             "sheet_reconciliation": (
                 await self.sheet_reconciliation(target_lot) if minted else None),
+            "warnings": warnings,
         }
 
     # ── consumption hooks (the cutting log and the store kit) ────────────────

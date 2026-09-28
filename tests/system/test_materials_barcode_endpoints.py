@@ -657,6 +657,167 @@ class TestStockAndReceiving:
         assert r.json()["rejected_logged"] == 5.0
         assert r.json()["substituted"] is False
 
+    async def test_total_qty_works_out_the_rejected_split(
+            self, api_client, as_role, lot):
+        as_role(UserRole.HR)
+        r = await api_client.post(f"{API}/materials/receive", json={
+            "lot_id": lot["lot_id"], "total_qty": 105, "approved_qty": 100})
+        assert r.status_code == 200, r.text
+        assert r.json()["total_qty"] == 105.0
+        assert r.json()["approved_qty"] == 100.0
+        assert r.json()["rejected_logged"] == 5.0
+        assert r.json()["on_hand"] == 500.0
+
+    async def test_a_split_that_does_not_add_up_to_the_total_is_422(
+            self, api_client, as_role, lot):
+        as_role(UserRole.HR)
+        r = await api_client.post(f"{API}/materials/receive", json={
+            "lot_id": lot["lot_id"], "total_qty": 100,
+            "approved_qty": 100, "rejected_qty": 5})
+        assert r.status_code == 422 and "total_qty" in r.text
+
+    async def test_approving_more_than_arrived_is_422(
+            self, api_client, as_role, lot):
+        as_role(UserRole.HR)
+        r = await api_client.post(f"{API}/materials/receive", json={
+            "lot_id": lot["lot_id"], "total_qty": 50, "approved_qty": 60})
+        assert r.status_code == 422
+
+    async def test_a_sheet_count_mismatch_is_warned_not_refused(
+            self, api_client, as_role, lot):
+        as_role(UserRole.DIRECT_MANAGER)
+        r = await api_client.post(f"{API}/materials/receive", json={
+            "lot_id": lot["lot_id"], "total_qty": 90, "approved_qty": 90,
+            "sheet_count": 3, "sheets": [{"dcm": 43}, {"dcm": 47}]})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["sheet_count"] == 3 and body["sheets_entered"] == 2
+        assert [w["kind"] for w in body["warnings"]] == ["sheet_count_mismatch"]
+
+    async def test_a_receipt_split_is_corrected_and_stock_follows(
+            self, api_client, as_role, lot):
+        as_role(UserRole.HR)
+        r = await api_client.post(f"{API}/materials/receive", json={
+            "lot_id": lot["lot_id"], "total_qty": 105, "approved_qty": 100})
+        receipt_id = r.json()["receipt_id"]
+        assert receipt_id
+
+        # 10 of the "approved" were actually bad: approved 90, rejected 15.
+        r = await api_client.patch(f"{API}/materials/receipts/{receipt_id}", json={
+            "approved_qty": 90, "rejected_qty": 15, "reason": "QC recount"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["approved_qty"] == 90.0 and body["rejected_qty"] == 15.0
+        assert body["total_qty"] == 105.0
+        assert body["stock_delta"] == -10.0
+        assert body["on_hand"] == 490.0
+        assert body["before"]["approved_qty"] == 100.0
+
+        hist = (await api_client.get(
+            f"{API}/materials/lots/{lot['lot_id']}/history")).json()
+        row = next(x for x in hist["receipts"] if x["receipt_id"] == receipt_id)
+        assert row["approved_qty"] == 90.0 and row["rejected_qty"] == 15.0
+
+    async def test_a_receipt_correction_with_total_works_out_rejected(
+            self, api_client, as_role, lot):
+        as_role(UserRole.HR)
+        rid = (await api_client.post(f"{API}/materials/receive", json={
+            "lot_id": lot["lot_id"], "approved_qty": 100,
+            "rejected_qty": 5})).json()["receipt_id"]
+        r = await api_client.patch(f"{API}/materials/receipts/{rid}", json={
+            "total_qty": 110, "approved_qty": 104, "reason": "typo at receiving"})
+        assert r.status_code == 200, r.text
+        assert r.json()["rejected_qty"] == 6.0
+        assert r.json()["stock_delta"] == 4.0
+
+    async def test_a_receipt_correction_needs_a_reason(
+            self, api_client, as_role, lot):
+        as_role(UserRole.HR)
+        rid = (await api_client.post(f"{API}/materials/receive", json={
+            "lot_id": lot["lot_id"], "approved_qty": 10})).json()["receipt_id"]
+        r = await api_client.patch(f"{API}/materials/receipts/{rid}", json={
+            "approved_qty": 8})
+        assert r.status_code == 422
+
+    async def test_a_receipt_correction_cannot_take_stock_negative(
+            self, api_client, as_role, lot):
+        as_role(UserRole.HR)
+        rid = (await api_client.post(f"{API}/materials/receive", json={
+            "lot_id": lot["lot_id"], "approved_qty": 10})).json()["receipt_id"]
+        # Everything on the shelf goes out first.
+        await api_client.patch(f"{API}/materials/lots/{lot['lot_id']}/adjust",
+                               json={"delta": -410, "reason": "count"})
+        r = await api_client.patch(f"{API}/materials/receipts/{rid}", json={
+            "approved_qty": 0, "reason": "all bad"})
+        assert r.status_code == 409
+
+    async def test_an_unknown_receipt_is_404(self, api_client, as_role):
+        as_role(UserRole.HR)
+        r = await api_client.patch(
+            f"{API}/materials/receipts/{uuid.uuid4()}",
+            json={"approved_qty": 1, "reason": "whatever"})
+        assert r.status_code == 404
+
+    async def test_receive_without_a_split_is_a_pending_arrival(
+            self, api_client, as_role, lot):
+        as_role(UserRole.HR)
+        r = await api_client.post(f"{API}/materials/receive", json={
+            "lot_id": lot["lot_id"], "total_qty": 100, "sheet_count": 3})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "PENDING"
+        assert "approved_qty" in body["outstanding"]
+        assert body["approved_qty"] == 0.0       # nothing approved before QC
+        assert body["total_qty"] == 100.0
+        assert body["on_hand"] == 500.0          # provisional, cuttable
+        assert body["pending_arrivals"] == 1
+        assert body["pending_arrival_qty"] == 100.0
+        rid = body["receipt_id"]
+
+        queue = (await api_client.get(f"{API}/materials/arrivals")).json()
+        assert rid in {a["receipt_id"] for a in queue["arrivals"]}
+
+        # The split arrives later — 90 approved, 10 rejected.
+        r = await api_client.patch(f"{API}/materials/arrivals/{rid}", json={
+            "article": lot["article"], "approved_qty": 90, "rejected_qty": 10,
+            "declared_sheet_count": 4})
+        assert r.status_code == 200, r.text
+        row = r.json()
+        assert row["status"] == "COMPLETED"
+        assert row["approved_qty"] == 90.0 and row["rejected_qty"] == 10.0
+        assert row["declared_sheet_count"] == 4
+        assert row["on_hand_delta"] == -10.0
+        lot_now = (await api_client.get(
+            f"{API}/materials/lots/{lot['lot_id']}")).json()
+        assert lot_now["on_hand"] == 490.0
+
+    async def test_arrival_patch_with_only_rejected_works_out_approved(
+            self, api_client, as_role, lot):
+        as_role(UserRole.HR)
+        rid = (await api_client.post(f"{API}/materials/receive", json={
+            "lot_id": lot["lot_id"], "total_qty": 100})).json()["receipt_id"]
+        r = await api_client.patch(f"{API}/materials/arrivals/{rid}",
+                                   json={"rejected_qty": 25})
+        assert r.status_code == 200, r.text
+        assert r.json()["approved_qty"] == 75.0
+        assert r.json()["status"] == "COMPLETED"
+
+    async def test_arrival_patch_refuses_a_different_colour(
+            self, api_client, as_role, lot):
+        as_role(UserRole.HR)
+        rid = (await api_client.post(f"{API}/materials/receive", json={
+            "lot_id": lot["lot_id"], "total_qty": 100})).json()["receipt_id"]
+        r = await api_client.patch(f"{API}/materials/arrivals/{rid}", json={
+            "colour": "NOT-THIS-COLOUR", "approved_qty": 90})
+        assert r.status_code == 422 and "DELETE" in r.text
+
+    async def test_receive_with_neither_approved_nor_total_is_422(
+            self, api_client, as_role, lot):
+        as_role(UserRole.HR)
+        r = await api_client.post(f"{API}/materials/receive", json={
+            "lot_id": lot["lot_id"]})
+        assert r.status_code == 422
+
     async def test_negative_quantities_never_reach_the_service(
             self, api_client, as_role, lot):
         as_role(UserRole.HR)
