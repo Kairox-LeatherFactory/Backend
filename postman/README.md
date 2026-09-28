@@ -12,10 +12,10 @@ are generated from the app's own `/openapi.json`, and a hand-edited collection i
 a second copy of the contract that drifts the moment a route changes. A stale
 collection is worse than none: it fails in ways that look like server bugs.
 
-Last regenerated against **240 live operations across 25 tags** (247 requests —
-five endpoints appear in a second collection because they belong to that
-screen). Every route the app serves is in here, and nothing in here is a route
-the app no longer serves.
+Last regenerated against **244 live operations across 25 tags** (251 requests —
+five endpoints appear in a second collection because they belong to that screen,
+and the withdrawn `drawer` file carries two dashboard reads). Every route the app
+serves is in here, and nothing in here is a route the app no longer serves.
 
 **Each of these services also has two Word documents** in `docs/service/`: a
 SYSTEM GUIDE (how the service works) and an API REFERENCE (every endpoint, with
@@ -60,10 +60,10 @@ Files** on the `file` row.
 | `client` | 9 | Buyers, their orders, and the styles under them. |
 | `import` | 9 | Breakdown preview → commit → edit → **release** (the mint). |
 | `barcode` | 11 | `resolve` is every scan's front door. |
-| `material` | 35 | Lots, stock, receiving with per-hide sheets, the style recipe. |
+| `material` | 36 | Lots, stock, receiving with per-hide sheets, the style recipe. |
 | `cutting` | 13 | The grid that replaced the cutting manager's spreadsheet. |
 | `production` | 11 | `POST /production/log` — the whole floor's logging surface. |
-| `store` | 6 | Employee + piece, then send. Replaces the drawer. |
+| `store` | 9 | Employee + piece, then send — plus the wrong-size queue. |
 | `inspection` | 6 | Reject and rework, against the **responsible** stage. |
 | `jobwork` | 5 | Garments at an outside factory, and what they cost. |
 | `wage` | 16 | Rates, runs, the ledger. A closed run is frozen. |
@@ -85,7 +85,7 @@ Stage 2/3 and read as if that were the running order.
 
 ---
 
-## Four things the collections will not tell you
+## Five things the collections will not tell you
 
 **Check the body, not the status code.** Several endpoints accept partially:
 `POST /production/log` returns `200` with `logged: []` and a populated
@@ -93,6 +93,19 @@ Stage 2/3 and read as if that were the running order.
 returns `200` with `count_sent: 0` and everything in `not_ready`. One bad piece
 never loses the good ones scanned with it, which is deliberate — and it means a
 green tick in Postman does not mean the work was recorded.
+
+**The accessory scan is the one place a failure still writes a row.** `POST
+/store/scan` with a `lot_barcode` issues exactly the one recipe line that packet
+matches, and a packet of the wrong size is **refused** — `409`, nothing
+decremented, no ledger row, `accessories_in` untouched. But the request for a
+DM's approval is committed *before* the raise, and its id comes back in the
+`X-Kit-Substitution-Request` response header, because an operator told to wait
+for an approval that exists nowhere is a garment parked for a reason nobody
+remembers. Re-scanning is idempotent on `(piece, spec_line, lot)`, so the
+protocol really is scan → refused → wait → scan again. The queue is `GET
+/store/substitutions`, and `approve` is **permission, not the issue**: the
+operator re-scans afterwards and *that* spends the stock against their own card.
+There is no blanket `part: "ACCESSORY"` scan any more — sending one is a 422.
 
 **`{{employee_id}}` is a worker, not a login.** Shop-floor workers have no
 `app_user` row at all. Anywhere a request wants the *actor*, it wants the login

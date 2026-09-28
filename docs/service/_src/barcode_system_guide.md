@@ -211,7 +211,7 @@ The response is `{employee_id, employee_barcode, active, history_preserved}`. `h
 
 # 7. The order screens
 
-These four reads exist so somebody can answer "did this order's barcodes actually get made?" without opening a garment.
+These five reads exist so somebody can answer "did this order's barcodes actually get made?" without opening a garment.
 
 | Endpoint | Use |
 |---|---|
@@ -220,6 +220,8 @@ These four reads exist so somebody can answer "did this order's barcodes actuall
 | `GET /barcode/orders/{order_id}/skus` | SKU + style options for the filter dropdowns |
 | `GET /barcode/orders/{order_id}/analytics` | planned vs generated vs balance, for the order and per style |
 | `GET /barcode/orders/{order_id}/barcodes` | the history table, filterable by SKU / style / style+size / status / date range |
+
+> **⚠ `GET /barcode/orders/{order_id}/barcodes` currently requires NO TOKEN AT ALL — treat this as a bug, not as a contract.** Every other read on this router takes `_SCREEN_READERS`; this one declares no auth dependency, so anyone who can reach the host can page an order's entire barcode history. It is an omitted dependency, not a decision: unlike `/barcode/resolve` (below), which is deliberately open to any logged-in user so the gate operator can scan a card, there is no floor scenario that needs this table without a login. **Do not build a frontend that relies on it being open.** The fix is one line — `_: User = Depends(_SCREEN_READERS)` — and this note should be deleted with it.
 
 ## Reading the analytics
 

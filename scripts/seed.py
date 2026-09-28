@@ -70,10 +70,16 @@ USAGE
     never deletes anything outside the orders it owns.
 
 MOCK CREDENTIALS
-    Management logins are 9000000000..9000000007, password == the number, all
-    flagged must_change_password. Client portal logins are 92000000NN. These are
-    DEMO CREDENTIALS — they are predictable by design and must not survive
-    contact with a real factory network.
+    Management logins are 9000000000..9000000008, password == the number, all
+    flagged must_change_password. The store hub is username STOREMANAGER /
+    password STORE (asked for by name; see seed_users). Client portal logins are
+    92000000NN. These are DEMO CREDENTIALS — they are predictable by design and
+    must not survive contact with a real factory network.
+
+    Between them these cover every one of the TEN roles that actually gate a
+    route. `scripts/ensure_roles.py` audits the same ten against a real database
+    and uses THE SAME phone per role, so running it after this seed reports ten
+    OKs rather than minting a second account for a role that already has one.
 ================================================================================
 """
 import argparse
@@ -91,6 +97,7 @@ import openpyxl
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from scripts import _dbguard
 from app.core.database import Base, SessionLocal, engine
 from app.core.enums import (
     MaterialCategory, ProductionReleaseStatus, ProductionStage,
@@ -691,6 +698,12 @@ def seed_users(db: Session) -> dict[str, int]:
         ("HR / Accounts", "9000000005", UserRole.HR),
         ("Lining Manager", "9000000006", UserRole.LINING_MANAGER),
         ("Security Gate", "9000000007", UserRole.SECURITY),
+        # SUPERVISOR gates 43 routes (the floor roster reads) and had no seeded
+        # login, so every supervisor screen 403'd on a fully seeded database and
+        # the only way to look at one was to borrow a DM token — which bypasses
+        # the role gate and therefore proves nothing about it. CLAUDE.md §3: the
+        # supervisor READS the roster and writes no attendance.
+        ("Floor Supervisor", "9000000008", UserRole.SUPERVISOR),
     ]
     for nm, ph, role in staff:
         _make_user(db, name=nm, phone=ph, role=role,
@@ -752,7 +765,16 @@ def main() -> None:
                          "kit/issue surface cannot be exercised.")
     ap.add_argument("--create-all", action="store_true",
                     help="dev only: CREATE TABLE anything missing (prod uses Alembic)")
+    _dbguard.add_argument(ap)
     args = ap.parse_args()
+
+    # THIS SCRIPT USES BOTH ENGINES. Its own steps are sync; step 6 delegates to
+    # the async scripts/seed_employees.py. Setting DATABASE_URL alone redirects
+    # only the sync half — on 2026-09-28 that sent 41 employees, their cards and
+    # seven staff logins to a live Supabase database while everything else went
+    # to the operator's scratch file, and the run printed SEED COMPLETE. Checked
+    # before anything is written, never after.
+    _dbguard.assert_one_database("seed.py", allow_split=args.allow_split_db)
 
     if args.create_all:
         Base.metadata.create_all(engine)

@@ -126,6 +126,14 @@ Pass `required` (dcm per piece × piece count) and every lot reports `covers_req
 
 Exhausted lots are **returned, not hidden**. A manager searching for a lot they know exists must find it, with `available: 0` explaining itself.
 
+## What one style has cost in leather — `GET /materials/leather-by-style`
+
+The six numbers above are per **lot**: they answer "what is on the shelf". This answers the other question a DM actually asks — **"what has this style eaten?"** — as arrived / consumed / available per style, paged, and filterable to one `style_id`.
+
+**It is a read, not a ledger.** All three figures come from places that already record them, which is the point: a second running total kept per style would be a number that can disagree with the lots, and then neither is trustworthy.
+
+**The consumed figure is split by rework.** So "this style cost X dcm, of which Y went on defects" is answerable, and that split is the entire reason the endpoint is worth having — a single consumption total cannot tell an expensive style from a badly-cut one. Open to every stock reader.
+
 ---
 
 # 3. Part B — A delivery, entered in two sittings
@@ -145,6 +153,9 @@ This is the flow that matches what really happens at the gate.
        -> approved / rejected split
        -> every hide's dcm
        -> stock corrected, status COMPLETED
+
+       (or PATCH /materials/arrivals/{receipt_id} with approved_qty —
+        same effect, for the screen that is correcting the entry anyway)
 ```
 
 ## Why this shape
@@ -172,7 +183,20 @@ The **rejected** quantity is logged against the supplier's quality history. It w
 | `PATCH /materials/arrivals/{id}` | PENDING only. **`declared_qty` moves stock** — correcting 3400 to 340 takes 3060 back out, applied as a delta so a cut made in between is not undone. 409 once COMPLETED, and 409 if it would drive the lot negative. |
 | `DELETE /materials/arrivals/{id}` | Voids a PENDING arrival (the van entered twice). The stock it put on the floor comes back out. 409 once COMPLETED, and 409 if any of it has already been cut. |
 
+`PATCH` also **doubles as the second sitting**. Send `approved_qty` or `rejected_qty` on it and the arrival is COMPLETED in that same call, with exactly the effect of `POST /materials/arrivals/{id}/complete` — send one and the other is worked out from the declared total. That exists because the screen that corrects a gate entry and the screen that signs it off are usually the same screen, and a correction followed by a second call is two chances to stop halfway. `article` and `colour` are **checked** against the lot on this call and never changed: a PATCH that disagrees with the lot is a **422**, because a different article is a different delivery.
+
 > **The lot survives a void**, even when that was its only delivery. Its barcode may be printed and a recipe may already point at it. A lot at zero is an empty shelf, which is a true statement. Retire it separately if it should never have existed.
+
+## Correcting a delivery that is already COMPLETED
+
+`PATCH /materials/receipts/{receipt_id}` is the other correction, and it is a different one: the arrival calls above only reach a **PENDING** gate entry, and the split somebody typed at the second sitting is wrong just as often. Without this there was nowhere to fix "approved 340, should have been 240" once the QC record existed, so it was fixed in the database by hand or not at all.
+
+- The receipt id comes off the `/receive` response and out of `GET /materials/lots/{id}/history`.
+- A change to **approved** moves stock **by the difference** — a delta again, so hides cut since the receipt are kept.
+- A change to **rejected** moves no stock. It only corrects the supplier's quality history, which is the whole reason the two numbers are recorded separately.
+- It takes a **reason**, and it is audited.
+- **409 on a PENDING arrival** — that one belongs to `/arrivals/{id}/complete`, not here — and **409** if lowering approved would take the lot negative or below what is already reserved.
+- Roles: **DM, MD, HR** (the receivers).
 
 ## `POST /materials/receive` — the other receiving door
 
@@ -237,9 +261,25 @@ So the guess is gone:
   `garment_size` is a **422** telling you to say which garments it is for;
 - a **number** is never read as a garment size — `60` is centimetres until somebody
   says otherwise;
-- migration `20260927_kit_packet_scan` clears the rows the old guess had already
-  mis-scoped (where `garment_size` equals a purely numeric `size`). Alpha ones are
-  left alone: `L` beside `garment_size: "L"` is a line somebody meant.
+- migration **`20260928_garment_size_backfill`** clears the rows the old guess had
+  already mis-scoped — every line whose `garment_size` equals a purely numeric
+  `size`. Alpha ones are left alone: `L` beside `garment_size: "L"` is a line
+  somebody meant.
+
+> **The data fix is a module-level function, not inline SQL in `upgrade()`, and it
+> is covered by `tests/integration/test_garment_size_backfill.py`.** It cannot be
+> exercised by running the chain — an alembic-built SQLite database rejects every
+> INSERT, because the baseline puts `server_default=sa.text('now()')` on 138
+> timestamp columns and SQLite has no `now()` — so inline it would have executed
+> for the very first time on production. A one-way UPDATE over live recipe rows is
+> the last place to find out the predicate was wrong, because afterwards a cleared
+> line and a line somebody deliberately left unscoped are the same row.
+>
+> **Any database written to before the guess was removed still needs it run once.**
+> This is not hypothetical: the chain was squashed on 2026-09-28 and the squash
+> dropped the fix, because a baseline autogenerated from the models carries the
+> schema and no data migrations at all. It was restored by hand. Check for that
+> before assuming a future squash carried it either.
 
 A line has a **scope**:
 
@@ -343,7 +383,7 @@ SKU overrides copy **only where the colourways match** on (colour code, size). T
 |---|---|---|
 | Lot writers | DM, MD, Cutting Mgr, Lining Mgr, **HR** | create/edit lots, hides, arrivals |
 | Stock readers | + Stitching Mgr, Store Mgr, Security | every read, including the recipe |
-| Receivers | DM, MD, HR | `receive`, `adjust`, retire a lot, void an arrival |
+| Receivers | DM, MD, HR | `receive`, `adjust`, correct a COMPLETED receipt, retire a lot, void an arrival |
 | DM only (+MD) | | supplier orders, all recipe **writes** |
 | Issuers | DM, MD, **Store Manager** | `POST /materials/issues` |
 

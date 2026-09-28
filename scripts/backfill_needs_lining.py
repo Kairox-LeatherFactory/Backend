@@ -59,6 +59,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from scripts import _dbguard
 from app.core.database import SessionLocal
 
 # EVERY model module, so the mapper can configure. Not optional and not tidy-able
@@ -158,7 +159,16 @@ def main() -> None:
     ap.add_argument("--only-false", action="store_true",
                     help="only turn flags ON; never clear one that is already set")
     ap.add_argument("--batch", type=int, default=1000, help="rows per commit")
+    _dbguard.add_argument(ap)
     args = ap.parse_args()
+
+    # Writes rows, so it must be sure WHICH database it is writing to.
+    # ASYNC_DATABASE_URL overrides DATABASE_URL outright
+    # (config.effective_async_url), so the two can silently name
+    # different databases — that is how 42 people reached live Supabase
+    # on 2026-09-28. See scripts/_dbguard.py.
+    _dbguard.assert_one_database("backfill_needs_lining.py",
+                                 allow_split=args.allow_split_db)
 
     with SessionLocal() as db:
         stats = backfill(db, order_number=args.order, only_false=args.only_false,

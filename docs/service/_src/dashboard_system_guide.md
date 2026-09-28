@@ -55,8 +55,11 @@ That distinction matters on a factory floor. A cutting manager who logs a cut an
 | MD, DM | everything (superusers) |
 | HR, Supervisor | everything |
 | Cutting / Lining / Stitching / Store Manager | everything |
+| **Security** | **no** — 403 |
 | **Client** | **no** — 403 |
 | Viewer | no |
+
+**Security is on the outside of these screens on purpose.** The gate operator scans cards in and out and needs `POST /attendance/scan-check-in` and `GET /barcode/resolve` — not a floor dashboard. A role that only ever stands at the gate has no reason to read consumption figures or per-worker output.
 
 A client token is **not** admitted to floor dashboards. They expose worker names and floor data.
 

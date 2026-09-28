@@ -92,6 +92,15 @@ A rejection is a **422 with the same diagnostics**, so the screen can tell the u
 
 > **Re-uploading the same bytes replays the cached verdict** rather than re-classifying. The `sha256` on the document is what makes that possible.
 
+## Reading one document's verdict again — `GET /procurement/submissions/{id}/documents/{document_id}`
+
+`GET /procurement/submissions/{id}` answers "is this folder ready", which is a summary. This answers "what exactly did you decide about **this file**, and why" — the same `document` block the upload returned, fetched again long after the upload response has gone from the screen.
+
+That matters because the diagnostics above are the whole argument for a rejection, and a `422` is the worst possible place to keep them: the upload screen is usually gone by the time somebody asks the supplier for a better file. This is the durable copy.
+
+- The document **must belong to that submission**. A real document id under the wrong submission is a **404**, not somebody else's report — the two ids are checked against each other rather than the second one being trusted on its own.
+- **DM/MD only**, like the rest of intake.
+
 ---
 
 # 4. Stage 2 — The BOM
@@ -106,6 +115,22 @@ GET  /procurement/order-styles/{order_style_id}/bom            -> poll
 ```
 
 The same pattern applies to the order breakdown (`POST/GET …/order-breakdown`) and to a DXF pattern upload (`POST /procurement/patterns` → `202` with a `job_id` and a `channel`).
+
+## First, say which spec and which pattern — `POST /procurement/order-styles/{id}/attachments`
+
+A BOM is generated **from** a spec sheet and a DXF pattern, and the system only ever **suggests** which ones. This call is where a human confirms that pairing, or overrides it, for **one style**.
+
+It is **synchronous** — a couple of column writes, no LLM — so unlike everything else in this stage there is nothing to poll.
+
+| Field | Does |
+|---|---|
+| `spec_document_id` | pin the spec sheet |
+| `pattern_reference_id` | pin the DXF pattern |
+| `clear_spec` / `clear_dxf` | drop a suggestion instead of confirming it |
+
+Ids passed explicitly are **validated to exist and to belong to the same client** — a spec sheet from another buyer is refused rather than costed.
+
+> **Why `clear_*` exists at all.** `generate-bom` refuses to run against a **dangling suggestion** — a spec the system guessed and nobody ruled on. So there have to be two ways to settle it: confirm it, or clear it. Without the second, a wrong suggestion could only be resolved by accepting it.
 
 ## What a BOM line carries
 
@@ -314,19 +339,71 @@ Both can be switched off with their settings flags.
 
 ---
 
-# 10. Who can do what
+# 10. The admin reference data (`/procurement/admin/*`)
 
-| Action | Roles |
+A generated BOM is only as good as four tables of reference data, and all four used to be **hardcoded**, editable by a redeploy. These endpoints make them editable at runtime instead. **Every one of them is DM/MD.**
+
+| Endpoint | Holds |
 |---|---|
-| Stage-1 uploads, submissions | Direct Manager, Managing Director |
-| Confirm cutting on a BOM | **Cutting Manager** |
-| Approve / reject / export a BOM | **Managing Director only** — the DM is refused |
-| Everything else in Stages 2–5 | DM and MD |
-| Admin config (cost catalogue, checks, DXF yields, POM dictionary) | DM and MD |
+| `PUT /admin/dxf-yields/{species}` | the yield factor for a hide species — `sheep`, `goat`, `calf`, `lamb`, and a `_default` |
+| `POST /admin/fabric-roles` | the CAD lexicon: which fabric label in a DXF means which role |
+| `GET`/`PUT /admin/cost-catalog[/{garment_code}]` | the default cost lines for a garment code |
+| `GET`/`PUT /admin/checks[/{client_code}]` | the per-client BOM validation rules |
+| `GET`/`POST /admin/pom-dictionary` | measurement-term → POM-code mappings |
+
+## Two things about these that will bite
+
+**A `PUT` replaces a code's whole line set, it does not merge.** `PUT /admin/cost-catalog/{garment_code}` sends every line that garment code should have. Sending one line leaves it with one line.
+
+**A write takes effect immediately, without a restart — and that is engineered, not incidental.** The fabric lexicon is read **synchronously** on the hot path, inside BOM generation. A live database read there would block the event loop, so this config lives in a **process-level snapshot**: warmed once at startup, and **pushed in directly by these admin writes**. There is a TTL re-read as a backstop for a second replica's write, so on more than one replica a change can lag by that TTL. Single-replica today; do not add a fifth reference table by reading it live on that path.
+
+**An empty table means DEFAULTS, not zero.** A fresh database falls back to the built-in values, so an unseeded system produces a sane BOM rather than a BOM costed at nothing. That means `GET /admin/cost-catalog` returning values proves nothing about whether anybody has configured it.
+
+## `GET /admin/pom-dictionary` shows which mappings are still a guess
+
+Its rows carry `status` and `confidence`, so an admin can tell an **LLM-suggested** mapping that still needs review from one a human confirmed. Without those two fields the dictionary read like settled reference data when half of it was a machine's guess.
 
 ---
 
-# 11. Patterns a frontend must handle
+# 11. Who can do what
+
+Read **"plus MD and DM"** into every row except the two that say otherwise — they are superusers and pass any ordinary gate (see the User guide). Only `require_exact_roles` refuses them.
+
+| Action | Roles |
+|---|---|
+| Stage-1 uploads, submissions, the per-document report | Direct Manager, Managing Director |
+| Read a BOM and its items; **edit** its items; confirm cutting | **Cutting Manager** (+ DM/MD) |
+| **Approve / reject / export a BOM** | **Managing Director ONLY — the DM is refused** |
+| Inventory check, generate POs, PO lifecycle, admin config, suppliers (create/edit) | DM and MD |
+| **Approve / reject a purchase order** | Cutting Manager, DM, **HR**, MD |
+| **Delete or reactivate a supplier** | **MD only** |
+| Move the production board on | Cutting Manager, DM, MD |
+| **Read-only: inventory checks, POs, suppliers, the production board** | DM, MD, **Viewer** |
+| Notifications, patterns, order breakdown, attachments, `generate-bom` | **any logged-in user** |
+
+## Three of those rows will surprise you
+
+**`Viewer` is a real read role in this service.** It can read inventory checks, purchase orders, the supplier directory and the production board — and nowhere else in the app does `viewer` get a gate of its own. It exists so an accountant can see committed spend without being able to commit any. Nothing else in Phase 2 admits it.
+
+**HR can approve a purchase order.** That is the only place HR touches procurement, and it is a money approval, so it is worth knowing rather than discovering.
+
+**Several Stage-2 writes are gated only by "logged in".** `POST /order-styles/{id}/attachments`, `POST …/generate-bom`, `POST /patterns` and `POST …/order-breakdown` take a token and **check no role** — a `supervisor` or `security` login can trigger BOM generation today. That looks like an omission rather than a decision, since everything around them is DM/MD. **Do not design a screen around it**; assume it will tighten to DM/MD.
+
+## ⚠ The webhooks and tracking pixels are gated, and they must not be
+
+`/webhooks/ses`, `/webhooks/twilio/whatsapp`, `/webhooks/twilio/voice`, `/t/o/{token}.gif` and `/t/c/{token}` **declare no auth of their own** — correctly, because their caller is Amazon SES, Twilio, or a supplier's mail client fetching an image, and each carries an opaque per-send token instead of a session. The supplier-PO router's own header says exactly that.
+
+**But the router is mounted with `dependencies=[Depends(block_employees)]`**, and `block_employees` depends on `get_current_user`, which raises **401 without a Bearer token**. So today:
+
+- a supplier opening the PO email fetches the pixel and gets **401** — the open is never recorded;
+- a click gets **401** instead of the 302 redirect — the supplier does not reach the target;
+- SES delivery events and Twilio replies get **401** — an acknowledgement by WhatsApp or by pressing 1 is never recorded, and the chase escalates as though the supplier ignored it.
+
+Nothing raises an error inside the factory, which is why this survives: the failure is entirely on the supplier's side of the wire, and it looks exactly like a supplier who is not responding. **These five routes need mounting outside the locked router**, or with an explicit auth exemption.
+
+---
+
+# 12. Patterns a frontend must handle
 
 | Pattern | Where |
 |---|---|
@@ -338,7 +415,7 @@ Both can be switched off with their settings flags.
 
 ---
 
-# 12. Notes for backend developers
+# 13. Notes for backend developers
 
 - **`presenters.py` in each module is pure serialisation** — ORM rows in, response dict out. No session, no rules, no I/O. Keep shape-only code there so the services stay orchestration.
 - **Inventory keys everything to a `bom_id`.** That is exactly why it is a different module from Phase-1 `material`, and why the two must not be merged (`CLAUDE.md` §12).

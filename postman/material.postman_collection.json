@@ -117,6 +117,48 @@
           "response": []
         },
         {
+          "name": "Adjust Receipt",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/receipts/{{receipt_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "receipts",
+                "{{receipt_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "receipt_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "CORRECT ONE DELIVERY'S approved / rejected split, with a reason, audited.\n\nThe receipt id is on the /receive response and in GET /lots/{id}/history.\nA change to approved moves stock by the difference (a delta, so cuts made\nsince are kept); rejected only corrects the supplier's quality history.\n409 on a PENDING arrival \u2014 use /arrivals/{id}/complete \u2014 and 409 if lowering\napproved would take stock negative or below what is reserved.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"approved_qty\": 0,\n  \"rejected_qty\": 0,\n  \"total_qty\": 0,\n  \"sheet_count\": 0,\n  \"reason\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
           "name": "Complete Arrival",
           "request": {
             "method": "POST",
@@ -648,7 +690,7 @@
             "description": "approved adds to stock; a PO-mismatch is rejected (409) unless a DM/MD\nsends approve_mismatch=true, which receives it into a new substitute lot.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"supplier_order_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"approved_qty\": 0,\n  \"rejected_qty\": 0,\n  \"reserve_for_required\": 0,\n  \"approve_mismatch\": false,\n  \"sheets\": [\n    {\n      \"dcm\": 0,\n      \"note\": \"\"\n    }\n  ]\n}",
+              "raw": "{\n  \"lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"supplier_order_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"total_qty\": 0,\n  \"sheet_count\": 0,\n  \"approved_qty\": 0,\n  \"rejected_qty\": 0,\n  \"reserve_for_required\": 0,\n  \"approve_mismatch\": false,\n  \"sheets\": [\n    {\n      \"dcm\": 0,\n      \"note\": \"\"\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -850,10 +892,10 @@
                 }
               ]
             },
-            "description": "Correct a PENDING gate entry: its quantity, bundle count or note.\n\n`declared_qty` MOVES STOCK, because that quantity is what this arrival put\non the floor \u2014 correcting 3400 to 340 has to take 3060 back out, or the\ncorrection is cosmetic and the shelf still claims material that never\narrived. It is applied as a DELTA, so a cut made in between is not silently\nundone.\n\n409 once the arrival is COMPLETED (that is the QC record of a delivery), and\n409 if the correction would drive the lot negative \u2014 an entry wrong by more\nthan what is left is a different delivery, not a typo, so void it and enter\nthe real one.",
+            "description": "Correct a PENDING gate entry: its quantity, bundle count or note \u2014 and,\nwhen approved_qty / rejected_qty are sent, COMPLETE it in the same call\n(same effect as POST .../complete; send one and the other is worked out\nfrom the declared total). article / colour are checked against the lot,\nnever changed: 422 if they differ.\n\n`declared_qty` MOVES STOCK, because that quantity is what this arrival put\non the floor \u2014 correcting 3400 to 340 has to take 3060 back out, or the\ncorrection is cosmetic and the shelf still claims material that never\narrived. It is applied as a DELTA, so a cut made in between is not silently\nundone.\n\n409 once the arrival is COMPLETED (that is the QC record of a delivery), and\n409 if the correction would drive the lot negative \u2014 an entry wrong by more\nthan what is left is a different delivery, not a typo, so void it and enter\nthe real one.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"declared_qty\": 0,\n  \"declared_sheet_count\": 0,\n  \"note\": \"\"\n}",
+              "raw": "{\n  \"declared_qty\": 0,\n  \"declared_sheet_count\": 0,\n  \"note\": \"\",\n  \"approved_qty\": 0,\n  \"rejected_qty\": 0,\n  \"thickness\": \"\",\n  \"sheets\": [\n    {\n      \"dcm\": 0,\n      \"note\": \"\"\n    }\n  ],\n  \"article\": \"\",\n  \"colour\": \"\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
