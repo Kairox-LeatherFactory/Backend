@@ -199,8 +199,28 @@ A style cannot be released until its **per-piece material recipe** is confirmed.
 - *"…'s material spec has not been confirmed. Enter the per-piece consumption (PUT /styles/{id}/material-spec) and confirm it."*
 - *"… has no LEATHER line — the dcm consumed per piece is what the material ledger and the costing are built on. Add it before releasing."*
 - *"…'s spec names no accessories and nobody has declared that it needs none. Add the accessory lines, or confirm the spec with `no_accessories: true`."*
+- *"… has accessory lines on some colourways but none at all on PINE GREEN · L. Those garments will be treated as needing no accessories and will ship without any. Add their lines — they need not match the other colourways, each SKU takes whatever it takes — or confirm the spec with `no_accessories: true`."*
 
 Release is the **last moment** anyone can be asked these questions, which is why they are asked here.
+
+### What is asked of which material
+
+| Material | At release |
+|---|---|
+| **Leather** | **required** per style — the dcm per piece |
+| **Lining** | **optional** per style — never a blocker |
+| **Accessories** | **per SKU**, and every SKU's set is **independent** |
+
+**Accessories are assigned per SKU and need not match each other.** A SKU is a colour
+*and* a size, so a line that names one has said everything about which garments it is
+for — and two colourways of one style may take completely different accessories:
+NAVY·L a horn button, PINE·M a metal shank and a zip, sharing no article, colour or
+size. The gate does **not** ask whether the sets match; the only accessory question is
+whether some ordered SKU has **nothing at all**, because such a garment gets
+`kit_required=false` and ships with no accessories while nothing downstream complains.
+
+> An earlier gate did demand that every SKU carry every article any SKU declared, and
+> rejected real releases for doing the correct thing. It is gone.
 
 ## Releasing more of a style later
 

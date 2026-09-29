@@ -353,7 +353,7 @@
         "description": "Scan the worker, scan the garment \u2014 and the packet, for an accessory.\n\nBarcodes are resolved to ids HERE so the service sees ids only\n(CLAUDE.md \u00a715) \u2014 the same split the production log uses.\n\nAN ACCESSORY IS ISSUED ONE PACKET AT A TIME. Send `lot_barcode` (LOT-ACC-\u2026)\nand this scan issues exactly the recipe line that packet matches; there is no\nblanket kit scan any more. A packet whose size is not the garment's is\nREFUSED with a 409 and an approval request a DM/MD decides below \u2014 nothing is\ntaken from stock until they do.",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"employee_barcode\": \"\",\n  \"employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"piece_barcode\": \"\",\n  \"piece_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"part\": \"\",\n  \"lot_barcode\": \"\",\n  \"lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"qty\": 0,\n  \"substitution_reason\": \"\"\n}",
+          "raw": "{\n  \"employee_barcode\": \"\",\n  \"employee_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"piece_barcode\": \"\",\n  \"piece_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"part\": \"\",\n  \"lot_barcode\": \"\",\n  \"lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"lot_barcodes\": [\n    \"\"\n  ],\n  \"lot_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"substitution_reason\": \"\"\n}",
           "options": {
             "raw": {
               "language": "json"

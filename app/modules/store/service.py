@@ -201,7 +201,7 @@ class StoreService:
                 f"waits.")
 
     async def store_scan(self, *, piece_id, employee_id, part=None,
-                         lot_id=None, lot_ids=None, qty=None,
+                         lot_id=None, lot_ids=None,
                          substitution_reason=None, actor_user_id=None,
                          entered_by: str | None = None) -> dict:
         """Put one part of one garment into the store. ONE transaction.
@@ -213,6 +213,11 @@ class StoreService:
         AN ACCESSORY NEEDS ITS PACKET'S OWN LABEL — `lot_id` — and there is no
         longer any way to issue a whole kit from the recipe in one tap. See
         _issue_packet for why that blanket scan had to go.
+
+        NO QUANTITY IS PASSED OR ACCEPTED. The piece gives its SKU and the packet
+        gives its article/colour/size; the recipe line those two resolve to carries
+        `qty_per_piece`, and `issue_kit_nocommit` already issues exactly what is
+        outstanding against it. See StoreScanRequest for why the field went.
         """
         piece = await self.get_piece_for_update(piece_id)
         if piece is None:
@@ -279,7 +284,7 @@ class StoreService:
 
         if chosen is StorePart.ACCESSORY:
             kit, substitution, batch = await self._issue_accessories(
-                piece=piece, lot_ids=packets, qty=qty, employee_id=employee_id,
+                piece=piece, lot_ids=packets, employee_id=employee_id,
                 entered_by=entered_by, actor_user_id=actor_user_id,
                 reason=substitution_reason)
             piece.accessories_in = bool(kit["complete"])
@@ -405,7 +410,7 @@ class StoreService:
         }
 
     # ════════════════════════════════════════════════ the accessory packet
-    async def _issue_packet(self, *, piece, lot_id, qty, employee_id,
+    async def _issue_packet(self, *, piece, lot_id, employee_id,
                             entered_by, actor_user_id, reason,
                             collect: bool = False) -> tuple:
         """Issue ONE accessory packet into one garment.
@@ -523,7 +528,7 @@ class StoreService:
             else:
                 held = await self._hold_for_substitution(
                     row=row, piece=piece, line=line, lot=lot, label=label,
-                    garment_size=match["garment_size"], qty=qty,
+                    garment_size=match["garment_size"],
                     employee_id=employee_id, entered_by=entered_by,
                     actor_user_id=actor_user_id, reason=reason,
                     commit=not collect)
@@ -532,10 +537,12 @@ class StoreService:
                     headers={"X-Kit-Substitution-Request": held["request_id"]},
                     request_id=held["request_id"])
 
+        # NO `qty` KEY, SO `issue_kit_nocommit` ISSUES THE WHOLE OUTSTANDING. Its
+        # `qty` override only ever NARROWED what the line asked for, and the scan no
+        # longer has a number to narrow it with: the recipe line is the quantity.
+        # The override survives on issue_kit_nocommit for its own internal callers.
         request = {"spec_id": str(line.id), "material_lot_id": lot.id,
                    "substitution_approved": approved_row is not None}
-        if qty is not None:
-            request["qty"] = qty
         issued = await specs.issue_kit_nocommit(
             piece=piece, requested_lines=[request],
             employee_id=employee_id, entered_by=entered_by)
@@ -654,7 +661,7 @@ class StoreService:
         kit["packets"] = packets
         return kit
 
-    async def _issue_accessories(self, *, piece, lot_ids, qty, employee_id,
+    async def _issue_accessories(self, *, piece, lot_ids, employee_id,
                                  entered_by, actor_user_id, reason) -> tuple:
         """Issue one or more accessory packets. Returns (kit, substitution, batch).
 
@@ -672,7 +679,7 @@ class StoreService:
         records, substitution = [], None
         for lot_id in lot_ids:
             sub, record = await self._issue_packet(
-                piece=piece, lot_id=lot_id, qty=qty, employee_id=employee_id,
+                piece=piece, lot_id=lot_id, employee_id=employee_id,
                 entered_by=entered_by, actor_user_id=actor_user_id,
                 reason=reason, collect=collect)
             records.append(record)
@@ -687,7 +694,22 @@ class StoreService:
                            for r in records],
             "refused": [{k: v for k, v in r.items() if k != "_issued"}
                         for r in refused],
-            "still_owed": sorted({r["article"] for r in kit["outstanding"]}),
+            # WHAT IS STILL OWED, BY NAME. It was a set of bare article codes, which
+            # is the one field on the row an operator cannot read off the packet in
+            # their hand. Each row now describes itself — kind, article, colour,
+            # size, how much — and `still_owed_line` is the sentence for the toast.
+            "still_owed": [
+                {"spec_id": r.get("spec_id"), "label": r.get("label"),
+                 "subtype": r.get("subtype"), "article": r.get("article"),
+                 "colour": r.get("colour"), "size": r.get("size"),
+                 "outstanding": r.get("outstanding", r.get("qty")),
+                 "uom": r.get("uom"), "state": r.get("state")}
+                for r in kit["pending"]],
+            "still_owed_line": kit["pending_line"],
+            # The old flat shape, kept so anything already reading it keeps working.
+            "still_owed_articles": sorted({r["article"]
+                                           for r in kit["outstanding"]}),
+            "progress": kit["progress"],
         }
         return kit, substitution, batch
 
@@ -724,7 +746,7 @@ class StoreService:
             .limit(1))).scalar_one_or_none()
 
     async def _hold_for_substitution(self, *, row, piece, line, lot, label,
-                                     garment_size, qty, employee_id,
+                                     garment_size, employee_id,
                                      entered_by, actor_user_id, reason,
                                      commit: bool) -> dict:
         """Record the ask a DM can answer, and DESCRIBE the refusal. Never raises.
@@ -775,8 +797,10 @@ class StoreService:
                 piece_id=piece.id, spec_line_id=line.id, material_lot_id=lot.id,
                 garment_size=garment_size, lot_size=lot.size,
                 article=lot.article, colour=lot.colour, subtype=lot.subtype,
-                qty=(Decimal(str(qty)) if qty is not None
-                     else Decimal(str(line.qty_per_piece or 0))),
+                # WHAT THE LINE ASKS FOR, always — the scan carries no quantity
+                # to override it with, so the DM reading the queue sees the recipe's
+                # own number rather than something an operator typed.
+                qty=Decimal(str(line.qty_per_piece or 0)),
                 status=KitSubstitutionStatus.PENDING.value,
                 requested_by_employee_id=employee_id, requested_by=entered_by,
                 reason=reason)
@@ -1133,6 +1157,16 @@ class StoreService:
         except Exception:
             block = {}
         row["accessories"] = block.get("accessories") or []
+        # THE SAME THREE-WAY SPLIT THE SCAN RETURNS, from the same computation, so
+        # this lookup is the ONE endpoint that answers "what does this garment take,
+        # what has been scanned, what is pending" without the caller subtracting
+        # anything. The scan tells the operator mid-scan; this tells anyone, later.
+        row["accessories_scanned"] = block.get("accessories_scanned") or []
+        row["accessories_pending"] = block.get("accessories_pending") or []
+        row["accessories_progress"] = block.get("accessories_progress") or {
+            "declared": 0, "scanned": 0, "pending": 0,
+            "required_total": 0.0, "issued_total": 0.0, "unresolved": 0}
+        row["pending_line"] = block.get("pending_line")
         row["summary_line"] = block.get("summary_line")
         row["spec_confirmed"] = bool(block.get("spec_confirmed"))
         return row

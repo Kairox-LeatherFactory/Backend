@@ -1368,7 +1368,7 @@ class StyleSpecService:
         """
         labels = (await self._ordered_sku_labels([style_id])).get(style_id, [])
         return {
-            "sku_coverage_gaps": kit_rules.accessory_sku_gaps(
+            "skus_missing_accessories": kit_rules.skus_without_accessories(
                 lines=self._coverage_dicts(lines), ordered_skus=labels),
         }
 
@@ -1401,7 +1401,7 @@ class StyleSpecService:
                 has_leather_line=any(
                     l.category == MaterialCategory.LEATHER.value
                     and (l.qty_per_piece or 0) > 0 for l in lines),
-                sku_coverage_gaps=kit_rules.accessory_sku_gaps(
+                skus_missing_accessories=kit_rules.skus_without_accessories(
                     lines=self._coverage_dicts(lines),
                     ordered_skus=labels_by_style.get(style.id, [])))
         return out
@@ -1486,9 +1486,18 @@ class StyleSpecService:
         A null piece_id returns the NOT_REQUIRED shape rather than None, so a
         screen always has something to render.
         """
+        # THE EMPTY SHAPE MUST CARRY EVERY KEY THE FULL ONE DOES. A screen renders
+        # whichever it is handed, and `kit_view` reads these straight through — a
+        # missing key here is a KeyError on the store scan of any garment whose style
+        # predates the spec, which is most of what is already on the floor.
         empty = {"kit_status": KitStatus.NOT_REQUIRED.value, "kit_required": False,
                  "spec_confirmed": False, "summary_line": None,
-                 "leather": None, "lining": None, "accessories": []}
+                 "leather": None, "lining": None, "accessories": [],
+                 "accessories_scanned": [], "accessories_pending": [],
+                 "accessories_progress": {
+                     "declared": 0, "scanned": 0, "pending": 0,
+                     "required_total": 0.0, "issued_total": 0.0, "unresolved": 0},
+                 "pending_line": None}
         if piece_id is None:
             return empty
         try:
@@ -1533,9 +1542,18 @@ class StyleSpecService:
                 issued_total += got
                 if resolution in (RESOLUTION_NONE, RESOLUTION_AMBIGUOUS):
                     unresolved += 1
+                # `state` AND `label` ON EVERY LINE, so no screen has to re-derive
+                # either. accessories_in is a roll-up and cannot say WHICH packet is
+                # missing; this is the per-line answer, in the same four words
+                # wherever it is read (kit_rules.accessory_line_state).
                 accessories.append(dict(
                     base, issued_qty=got,
                     outstanding=max(0.0, round(need - got, 3)),
+                    state=kit_rules.accessory_line_state(
+                        qty_per_piece=need, issued_qty=got,
+                        resolvable=resolution not in (RESOLUTION_NONE,
+                                                      RESOLUTION_AMBIGUOUS)),
+                    label=kit_rules.accessory_label(base),
                     short=bool(available is not None and available < need)))
             elif line.category == MaterialCategory.LEATHER.value and leather is None:
                 leather = base
@@ -1548,6 +1566,14 @@ class StyleSpecService:
         if leather is not None:
             leather["consumed"] = await self._consumed_at_cut(piece.id)
 
+        # THE THREE-WAY SPLIT, COMPUTED ONCE HERE. Every surface that answers "what
+        # does this garment need, what has been scanned, what is still pending"
+        # reads it from this one place — the scan response, the garment lookup and
+        # the store list — so the three can never disagree about which packet is
+        # outstanding. Doing it in each of them is three implementations of one
+        # subtraction, and the store screen had already grown its own.
+        scanned = [a for a in accessories if a["outstanding"] <= 0]
+        pending = [a for a in accessories if a["outstanding"] > 0]
         return {
             "kit_status": kit_rules.kit_status(
                 kit_required=bool(accessories), required_total=required_total,
@@ -1556,7 +1582,40 @@ class StyleSpecService:
             "spec_confirmed": style.material_spec_confirmed_at is not None,
             "summary_line": self._summary_line(accessories),
             "leather": leather, "lining": lining, "accessories": accessories,
+            # DECLARED / SCANNED / PENDING, spelled out rather than implied by a
+            # boolean. `accessories_in` says only "all of them or not".
+            "accessories_scanned": scanned,
+            "accessories_pending": pending,
+            "accessories_progress": {
+                "declared": len(accessories),
+                "scanned": len(scanned),
+                "pending": len(pending),
+                "required_total": round(required_total, 3),
+                "issued_total": round(issued_total, 3),
+                "unresolved": unresolved,
+            },
+            "pending_line": self._pending_line(scanned, pending),
         }
+
+    @staticmethod
+    def _pending_line(scanned: list, pending: list) -> str | None:
+        """"Waiting for ZIP · YKK-60 BLACK. Scanned: BUTTON · HORN-4H, THREAD · T40."
+
+        THE SENTENCE THE OPERATOR IS OWED. They have just scanned two of three
+        packets and the response has to tell them, in words, which one is still
+        missing — not hand them a boolean and a list to diff. Null when the style
+        declares no accessories, so the screen renders nothing rather than "waiting
+        for nothing".
+        """
+        if not scanned and not pending:
+            return None
+        if not pending:
+            return ("All accessories scanned: "
+                    + ", ".join(a["label"] for a in scanned) + ".")
+        out = "Waiting for " + ", ".join(a["label"] for a in pending) + "."
+        if scanned:
+            out += " Scanned: " + ", ".join(a["label"] for a in scanned) + "."
+        return out
 
     @staticmethod
     def _summary_line(accessories: list) -> str | None:
@@ -1988,6 +2047,16 @@ class StyleSpecService:
         return {
             "status": block["kit_status"],
             "summary_line": block["summary_line"],
+            # THE WHOLE CHECKLIST, THREE WAYS. `declared` is every line the SKU's
+            # recipe names, `scanned` the ones fully issued, `pending` what is still
+            # owed — so the operator at the terminal reads the answer instead of
+            # diffing two lists. All three come from material_requirement_block, so
+            # this view and the garment lookup cannot drift.
+            "declared": block["accessories"],
+            "scanned": block["accessories_scanned"],
+            "pending": block["accessories_pending"],
+            "progress": block["accessories_progress"],
+            "pending_line": block["pending_line"],
             "issued_now": [], "already_issued": [],
             "outstanding": [a for a in block["accessories"]
                             if a["outstanding"] > 0],
