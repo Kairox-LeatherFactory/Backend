@@ -81,7 +81,52 @@ async def material_spec(
     """The fields to SHOW for a category: which to filter stock by, which are
     required to add a lot, and the quantity field + unit. Drives the Add-New form
     and the stock search boxes so the UI matches the material class exactly."""
-    return MaterialService(db).filter_fields(category, subtype)
+    return await MaterialService(db).filter_fields(category, subtype)
+
+
+# ── the accessory catalogue ───────────────────────────────────────────────────
+# WHY THESE ARE READ-WIDE AND WRITE-NARROW, like every other material surface: the
+# whole floor needs to know what an eyelet is measured in; only a DM decides that a
+# kind's size follows the garment, because that is what the recipe form and the
+# copy-from matching read.
+@router.get("/accessory-types", response_model=schemas.AccessoryTypeList)
+async def list_accessory_types(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_STOCK_READERS),
+):
+    """Every accessory kind this factory stocks, and what each one carries.
+
+    THIS LIST GROWS BY ITSELF. A kind is created the first time a packet of it is
+    RECEIVED — see POST /materials/arrivals and POST /materials/lots, which register
+    an unknown `subtype` rather than rejecting it and report it back as
+    `accessory_type_registered`. There is no "add an accessory kind" form, because
+    the moment anybody actually knows about a new accessory is the moment one arrives.
+
+    `size_varies_by_sku` is the field the recipe screen should read: false means one
+    line covers every SKU of a style (a button), true means ask per SKU (a zip).
+    """
+    from app.modules.materials.accessory_catalog import AccessoryCatalog
+    return {"types": await AccessoryCatalog(db).list_types()}
+
+
+@router.patch("/accessory-types/{code}",
+               response_model=schemas.AccessoryTypeResult)
+async def patch_accessory_type(
+    code: str,
+    body: schemas.AccessoryTypePatch,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_LOT_WRITERS),
+):
+    """Refine a kind — usually one that registered itself at the gate.
+
+    `code` and `qty_field` are NOT patchable: every lot, recipe line and ledger row
+    of this kind is keyed to the code, and `qty_field` names the attribute whose
+    value was already added to `on_hand`. Changing either would re-point history
+    without saying so.
+    """
+    from app.modules.materials.accessory_catalog import AccessoryCatalog
+    return await AccessoryCatalog(db).patch_type(
+        code, body.model_dump(exclude_unset=True), actor_name=user.name)
 
 
 @router.get("/lots", response_model=schemas.LotListResult)

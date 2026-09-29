@@ -1,44 +1,40 @@
 # 1. What this service is
 
-**Phase 2 — everything that has to happen before the factory floor can start.**
+**Phase 2, the two buying ends of the pipeline: Stage 1 (intake) and Stage 5 (purchase orders).**
 
-Phase 1 tracks garments on the floor and assumes the material is already there. Phase 2 answers one question:
+Phase 1 tracks garments on the floor and assumes the material is already there. Phase 2 answers the question that comes before that:
 
 > *"A client just sent us an order. What material do we need, do we have it, and if not, who do we buy it from — and have they confirmed?"*
 
-Today that is answered by people, with spreadsheets, phone calls and memory. This service turns it into a system.
-
-> **A longer, three-audience version of this document already exists**: `docs/KAIROX_PROCUREMENT_SYSTEM_GUIDE.md` (and its PDF), plus `docs/KAIROX_PROCUREMENT_API_REFERENCE.md`. This guide is the working summary; go there for the full narrative and the algorithms.
-
----
-
-# 2. The five stages
+Today that is answered by people, with spreadsheets, phone calls and memory. This is the system that replaces them, and this document covers **the first step and the last**:
 
 ```
  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
  │ STAGE 1  │  │ STAGE 2  │  │ STAGE 3  │  │ STAGE 4  │  │ STAGE 5  │
  │ INTAKE   │─▶│   BOM    │─▶│ APPROVAL │─▶│INVENTORY │─▶│SUPPLIER  │
- │          │  │          │  │          │  │  CHECK   │  │   PO     │
+ │ ★ here   │  │          │  │          │  │  CHECK   │  │ PO ★here │
  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘
   order sheet   bill of       the MD signs   what do we    buy the
   + spec sheet  materials     it off         already have  shortfall
   come in       is generated                 in stock?     and chase it
 ```
 
-**They only work in order.** You cannot check inventory against a BOM that has not been generated, and you cannot buy a shortfall you have not measured. That is why the Postman folders are ordered by stage rather than alphabetically.
+**The stages only work in order.** You cannot check inventory against a BOM you have not generated, and you cannot buy a shortfall you have not measured.
 
-| Module | Stage | Code |
+| Module | Stage | Document |
 |---|---|---|
-| Procurement | 1 — intake | `app/modules/procurement/` |
-| BOM | 2 and 3 — generation and approval | `app/modules/bom/` |
-| Inventory | 4 — the stock check | `app/modules/inventory/` |
-| Supplier PO | 5 — purchase orders | `app/modules/supplier_po/` |
+| `app/modules/procurement/` | **1 — intake** | **this one** |
+| `app/modules/bom/` | 2 and 3 — generation and approval | `BOM_SYSTEM_GUIDE.docx` |
+| `app/modules/inventory/` | 4 — the stock check | `INVENTORY_SYSTEM_GUIDE.docx` |
+| `app/modules/supplier_po/` | **5 — purchase orders** | **this one** |
 
-All four are mounted under `/api/v1/procurement/…` so they read as one workflow.
+All four are mounted under `/api/v1/procurement/…` so the URLs read as one workflow.
+
+> **A longer, three-audience narrative exists** in `docs/KAIROX_PROCUREMENT_SYSTEM_GUIDE.md` (and its PDF), plus `docs/KAIROX_PROCUREMENT_API_REFERENCE.md`. Those cover all five stages including the algorithms.
 
 ---
 
-# 3. Stage 1 — Intake
+# 2. Stage 1 — Intake
 
 ## The flow
 
@@ -49,7 +45,9 @@ POST /procurement/submissions/{id}/spec-sheet    upload the spec sheet
 GET  /procurement/submissions/{id}               is it ready for Stage 2?
 ```
 
-There is also a **one-shot door** — `POST /procurement/upload/order-sheet` and `/upload/spec-sheet` — which opens the submission and uploads in a single call.
+There is also a **one-shot door** — `POST /procurement/upload/order-sheet` and `/upload/spec-sheet` — which opens the submission and uploads in a single call. The submission is created **only if the file passes validation**; a rejected file returns 4xx diagnostics and no submission is visible to the caller. Take the `submission_id` out of the response and use it for the paired upload.
+
+> **Open the submission with a `client_id` if you can.** `POST /submissions` accepts `{"client_id": …}`, and a submission without one is refused later by the Stage-2 order breakdown with a 422. Setting it up front is one field; fixing it later is a re-open.
 
 ## The gate
 
@@ -59,223 +57,196 @@ There is also a **one-shot door** — `POST /procurement/upload/order-sheet` and
 - `"order_sheet rejected"`
 - `"spec_sheet scan_status=infected"`
 
+`complete` says both slots are accepted; `ready_for_stage_2` additionally requires the scans to be clean. A scan status of `clean` **or `skipped`** passes — `skipped` is what you get with scanning disabled in development.
+
 ## The upload is classified, not trusted
 
-A file uploaded into the order-sheet slot is checked to see whether it **is** an order sheet. The verdict comes back in full:
+A file uploaded into the order-sheet slot is checked to see whether it **is** an order sheet. The verdict comes back in full, on the `document.validation` block:
 
 | Field | Meaning |
 |---|---|
-| `validation.status` | `accepted` / `rejected` / `needs_manual_review` |
+| `status` | `accepted` / `rejected` / `needs_manual_review` / `pending` / `superseded` |
 | `classified_as` | what it actually looks like |
+| `spec_type`, `client_match` | the sub-kind and which client's layout it resembles |
 | `confidence` | 0–1 |
 | `method` | `heuristic`, `llm` or `manual` |
+| `llm_label`, `llm_model` | what the model said, and which model — the audit trail |
 | `signals_expected` | what this kind of document must contain |
 | `signals_found` | what the file actually contained |
 | `signals_matched` | the overlap |
-| `reason_code` | why it was rejected, as a code |
+| `reason_code` | why it was rejected, as a stable code |
 | `suggested_fix` | **why it was rejected, in words — show this** |
 
-A rejection is a **422 with the same diagnostics**, so the screen can tell the user exactly what was missing rather than "upload failed".
+A rejection is a **4xx with the same diagnostics**, so the screen can tell the user exactly what was missing rather than "upload failed".
+
+## Two gates, and only the ambiguous minority costs money
+
+Classification is a **hybrid**. A cheap heuristic settles structured spreadsheets for free. Only what it cannot settle — scanned or handwritten PDFs with no text layer, unknown layouts, mid-band scores — escalates to the LLM, which runs a provider chain: the primary extraction model, then the fallback, then **`needs_manual_review`**.
+
+> **Nothing is ever silently guessed.** A model answer below the accept threshold returns `needs_manual_review`, not a fabricated classification. And when no provider key is configured at all, escalation degrades to `needs_manual_review` rather than crashing the front door — a model outage never stalls the easy cases, because the heuristic already settled them.
+
+## `?force=true` — the DM overrides a manual review
+
+Both upload endpoints take `force` as a query parameter. `force=true` accepts a `needs_manual_review` document anyway and lets the pipeline proceed — the DM or MD vouches for it.
+
+**Hard rejections are never overridable.** A virus, an unsupported MIME type, an oversized or corrupt file, or a file in the wrong slot is refused with or without `force`.
 
 ## The other guards
 
-| Guard | Status |
-|---|---|
-| unsupported file type | **415** |
-| file too large | **413** |
-| empty or corrupt | **422** |
-| virus detected | **422** |
-| virus scanner unavailable | **503** |
-| wrong slot (a spec sheet posted as an order sheet) | **422** |
-| the submission is already locked | **409** |
-| byte-identical file already uploaded | **409** |
-
-> **Re-uploading the same bytes replays the cached verdict** rather than re-classifying. The `sha256` on the document is what makes that possible.
-
-## Reading one document's verdict again — `GET /procurement/submissions/{id}/documents/{document_id}`
-
-`GET /procurement/submissions/{id}` answers "is this folder ready", which is a summary. This answers "what exactly did you decide about **this file**, and why" — the same `document` block the upload returned, fetched again long after the upload response has gone from the screen.
-
-That matters because the diagnostics above are the whole argument for a rejection, and a `422` is the worst possible place to keep them: the upload screen is usually gone by the time somebody asks the supplier for a better file. This is the durable copy.
-
-- The document **must belong to that submission**. A real document id under the wrong submission is a **404**, not somebody else's report — the two ids are checked against each other rather than the second one being trusted on its own.
-- **DM/MD only**, like the rest of intake.
-
----
-
-# 4. Stage 2 — The BOM
-
-Generation is **asynchronous**. You ask for it, you get a `202`, and you poll.
-
-```
-POST /procurement/order-styles/{order_style_id}/generate-bom   -> 202 queued
-GET  /procurement/order-styles/{order_style_id}/bom            -> poll
-       status: "not_started"  ->  keep polling
-       status: "ready"        ->  bom: { … }
-```
-
-The same pattern applies to the order breakdown (`POST/GET …/order-breakdown`) and to a DXF pattern upload (`POST /procurement/patterns` → `202` with a `job_id` and a `channel`).
-
-## First, say which spec and which pattern — `POST /procurement/order-styles/{id}/attachments`
-
-A BOM is generated **from** a spec sheet and a DXF pattern, and the system only ever **suggests** which ones. This call is where a human confirms that pairing, or overrides it, for **one style**.
-
-It is **synchronous** — a couple of column writes, no LLM — so unlike everything else in this stage there is nothing to poll.
-
-| Field | Does |
-|---|---|
-| `spec_document_id` | pin the spec sheet |
-| `pattern_reference_id` | pin the DXF pattern |
-| `clear_spec` / `clear_dxf` | drop a suggestion instead of confirming it |
-
-Ids passed explicitly are **validated to exist and to belong to the same client** — a spec sheet from another buyer is refused rather than costed.
-
-> **Why `clear_*` exists at all.** `generate-bom` refuses to run against a **dangling suggestion** — a spec the system guessed and nobody ruled on. So there have to be two ways to settle it: confirm it, or clear it. Without the second, a wrong suggestion could only be resolved by accepting it.
-
-## What a BOM line carries
-
-Beyond the obvious (material, colour, quantity per garment, unit price, totals), two fields matter for review:
-
-| Field | Meaning |
-|---|---|
-| `dcm_source` | where the consumption figure came from — for example the DXF pattern |
-| `dcm_confidence` | 0–1. **The low-confidence lines are the ones to check first.** |
-
-## Editing — the optimistic lock
-
-`PATCH /procurement/boms/{bom_id}/items` must send `base_revision`, the `revision` you last read.
-
-- If somebody else edited it meanwhile, you get **409** carrying `current_revision`. Reload and re-apply.
-- On success the BOM comes back with `revision` incremented.
-
-That is what stops two people silently overwriting each other on a costing document.
-
----
-
-# 5. Stage 3 — Approval, and the separation of duties
-
-```
-draft ──confirm-cutting──► ready_for_review ──approve──► approved ──► exported
-                                   │                        │
-                                   └────reject──► rejected ─┴─reopen──► draft
-                                                                  (also: locked)
-```
-
-| Call | Who | Note |
+| Guard | Status | `reason_code` |
 |---|---|---|
-| `POST /boms/{id}/confirm-cutting` | **Cutting Manager** | confirms the consumption figures. Moves `draft` → `ready_for_review`. |
-| `POST /boms/{id}/approve` | **Managing Director ONLY** | refuses a BOM whose cutting has not been confirmed. `lock: true` → `locked`. |
-| `POST /boms/{id}/reject` | **MD only** | `reason` required |
-| `POST /boms/{id}/reopen` | DM / MD | back to `draft` |
-| `POST /boms/{id}/export` | **MD only** | renders the document |
+| unsupported file type | **415** | `unsupported_mime` |
+| file too large (`MAX_UPLOAD_MB`, default 25) | **413** | `file_too_large` |
+| empty or corrupt | **422** | `empty_or_corrupt` |
+| virus detected | **422** | `virus_detected` |
+| virus scanner unavailable | **503** | `scanner_unavailable` |
+| not an order sheet / not a spec sheet | **422** | `not_an_order_sheet` / `not_a_spec_sheet` |
+| wrong slot (a spec sheet posted as an order sheet) | **422** | `wrong_slot` |
+| needs a human to look | **422** | `needs_manual_review` |
+| the submission is already locked | **409** | `submission_locked` |
+| byte-identical file already on record | **409** | `duplicate_content` |
 
-> **The Direct Manager is refused on approve, reject and export — on purpose.** The DM prepares and edits the BOM; the person who prepares a financial document must not be the person who approves it. This is the one place in KairoX where the DM's usual superuser bypass does not apply (`require_exact_roles`). The MD passes every gate in the system.
+> **Re-uploading the same bytes replays the cached verdict** rather than re-classifying. The `sha256` on the document is what makes that possible. Note the limit: the cache is a true short-circuit only for **the same slot of the same submission**. `Document.sha256` is globally unique, so the same bytes cannot be stored again under another submission — that is the 409.
 
-**Export is idempotent.** Calling it twice does not export twice: the second call replays the same document with `replay: true` and the **original** `exported_at`. Do not render a replay as a second export.
+## The pipeline is quarantine-then-promote
 
-## Notifications
+The order of operations matters and is deliberate:
 
-When a BOM is waiting for review, the approver gets a notification.
+1. **scan the raw bytes.** Infected → 422. Scanner unreachable while required → **503, fail-closed**. Clean or skipped → the bytes go to `quarantine/`.
+2. **sniff the true MIME** and extract features — the declared content type is not trusted.
+3. **validate identity** (heuristic → LLM).
+4. **accepted → promote** `quarantine/` to `submissions/` and return a `storage_url`. **Rejected or needs-review → the quarantined object is deleted** and `storage_url` is `null`.
 
-| Call | Use |
-|---|---|
-| `GET /procurement/notifications` | the list, `unread_only` optional |
-| `GET /procurement/notifications/stream` | **Server-Sent Events** — a live push |
-| `POST /procurement/notifications/{id}/open` | mark it read |
+So an accepted document is always one that was scanned and validated, and no rejected file ever leaves quarantine.
 
-> **Marking it read is what stops the escalation.** An unopened notification is chased by a background sweeper, which eventually escalates it **by email**. That is why the sweeper runs under a fleet-wide lock — see §8.
+## Reading one document's verdict again
 
----
+`GET /procurement/submissions/{id}` answers *"is this folder ready"* — a summary. `GET /procurement/submissions/{id}/documents/{document_id}` answers *"what exactly did you decide about **this file**, and why"* — the same `document` block the upload returned, fetched again long after the upload response has gone from the screen.
 
-# 6. Stage 4 — The inventory check
+That matters because the diagnostics above are the whole argument for a rejection, and a 422 is the worst possible place to keep them: the upload screen is usually gone by the time somebody has to ask the client for a better file. **This is the durable copy.**
 
-## First, load the warehouse
+- The document **must belong to that submission**. A real document id under the wrong submission is a **404**, not somebody else's report — the two ids are checked against each other rather than the second being trusted on its own.
+- **DM / MD only**, like the rest of intake.
 
-```
-POST /procurement/inventory/preview   parse the spreadsheet, write nothing
-POST /procurement/inventory/commit    the same parse, written
-GET  /procurement/inventory/items     the master
-```
+## The submission lifecycle
 
-The preview says `raw_count`, `kept`, `dropped` and a `warnings[]` naming the rows it could not use. **Always preview first** — the commit overwrites the master the check runs against.
-
-## Then, run the check
-
-```
-POST /procurement/boms/{bom_id}/inventory-check    run it
-GET  /procurement/boms/{bom_id}/inventory-check    re-read the last one
-GET  /procurement/inventory-checks                 the dashboard
-GET  /procurement/inventory-checks/{check_id}      one stored check
-```
-
-**The GET does not recompute.** It re-renders what the check said when it ran. That is deliberate: a purchase decision must be traceable to the numbers it was made on.
-
-## Reading a line
-
-| Field | Meaning |
-|---|---|
-| `required_qty` | what the BOM needs |
-| `matched` | the inventory item it matched, and **how** (`method`). `null` = unmatched |
-| `on_hand_qty` | on the shelf |
-| `available_qty` | free to promise |
-| `reserved_for_this_bom` | held for this BOM |
-| `shortfall_qty` | **what must be bought** |
-| `status` | `sufficient` / `partial` / `out_of_stock` |
-| `flags` | `unmatched`, `uom_mismatch` |
-
-Two flags deserve attention on the screen:
-
-- **`unmatched`** — the material could not be found in the master at all. It is not "out of stock"; nobody knows.
-- **`uom_mismatch`** — it matched, but the units disagree. The number may be meaningless until somebody looks.
-
-## The badge
-
-`summary.badge` is the **worst** line in the BOM: `out_of_stock` beats `partial` beats `sufficient`. Use it for the row on the dashboard; use the counts for the detail.
-
-`shortfall_value` is shortfall × rate, summed — the money the shortfall represents.
-
-## Reservations
-
-A check **reserves** what it can. A reservation is `active` (counted against `available`), `released` (freed) or `consumed` (physically issued). That is how two BOMs cannot both be promised the same stock.
+`open` → `complete` (both slots accepted and clean) → `consumed` (Stage 2 picked it up). `rejected` is a terminal manual close. `queued` covers the gap where a submission is complete but Stage 2 has not started.
 
 ---
 
-# 7. Stage 5 — Purchase orders
+# 3. Between the two: what happens in Stages 2–4
 
-## Generating
+Not covered here, but you need to know the shape to build the screen:
 
-`POST /procurement/boms/{bom_id}/generate-pos` turns the shortfall into draft POs, **one per matched supplier**.
+1. The submission's order sheet is broken down into **styles** (`POST /submissions/{id}/order-breakdown`, 202 then poll).
+2. Each style gets its spec sheet and DXF pattern confirmed, then a **BOM generated** (202 then poll).
+3. The **Cutting Manager confirms** the consumption figures; the **MD alone approves** — the DM is refused on purpose.
+4. Approving runs the **inventory check**, which produces the **shortfall**.
 
-The supplier is matched from **what they have historically sold us** — the `supply_history` on each supplier, loaded by the supplier import. When no supplier can be matched, the PO is still created with:
+Stage 5 begins with that shortfall. See `BOM_SYSTEM_GUIDE.docx` and `INVENTORY_SYSTEM_GUIDE.docx`.
 
-- **`needs_supplier: true`** — nobody is on it yet; somebody must choose.
-- **`no_contact_channel: true`** — there is a supplier but they have neither email nor phone, so it cannot be sent.
+---
 
-Both are the screen's to-do list.
+# 4. Stage 5 — Generating the purchase orders
 
-## The lifecycle
+`POST /procurement/boms/{bom_id}/generate-pos` turns the shortfall into **draft POs, one per matched supplier**.
+
+## Its three preconditions
+
+| Situation | Response |
+|---|---|
+| the BOM does not exist | **404** |
+| no inventory check has run | **409 `no_inventory_check`** |
+| POs already exist for this BOM (and are not cancelled) | **200 with `already_generated: true`** and the existing POs — an idempotent replay, not an error |
+
+A BOM with **no shortfall lines** returns an empty `purchase_orders[]` and the message *"No shortfall lines — nothing to order."* That is a success: everything was in stock.
+
+## How a supplier is chosen
+
+The supplier is matched from **what they have historically sold us** — the `supply_history` loaded by the supplier import — deterministically first, and never by a silent guess:
+
+| # | Step | `match_method` | Auto-bound? |
+|---|---|---|---|
+| 1 | an exact historical supply of that article | `ledger` | yes |
+| 2 | an alias rewrite, then step 1 again | `alias` | yes |
+| 3 | the category / dominant-mode fallback | `category` | yes, but **ranked as weak** |
+| 4 | a fuzzy candidate | — | **no — advisory only** |
+| 5 | nothing confident | `null` | **the PO is held** |
+
+Ranking is **recency · frequency · contactability − rate**. A tie, a category-only hit or low confidence sets **`ambiguous: true`** — do not auto-select; surface the shortlist and let the buyer pick. The full shortlist is on the PO as `candidates.ranked`, each entry carrying `supplier_name`, `score`, `txn_count`, `has_contact`, `last_rate` and `last_purchased_at`.
+
+> **Contactability is a ranking term, not a hard filter.** A frequent contactless vendor still surfaces — possibly at the top — and the PO is flagged downstream instead of the vendor being hidden.
+
+## The two flags that are your to-do list
+
+| Flag | Means | Fix |
+|---|---|---|
+| **`needs_supplier: true`** | no supplier could be resolved for these lines | assign one via `PATCH /pos/{id}/items` |
+| **`no_contact_channel: true`** | there *is* a supplier, but they have neither email nor phone | add a contact to the supplier |
+
+Each unresolved line becomes **its own held draft PO**, not one combined one, so assigning a supplier to one never entangles another.
+
+## Defaults on a generated line
+
+Quantity is the shortfall. The unit price and UOM default to the **top-ranked supplier's last rate and unit** where there is one, and fall back to the BOM line's own. Each `po_item` keeps its `bom_item_id` and `inventory_item_id` back-links, so a PO line can always be traced to the BOM line and the stock row that produced it.
+
+GST is computed from configuration: **CGST + SGST** for an intra-state supplier, **IGST** for inter-state, decided by comparing the supplier's `state_code` to the buyer's.
+
+---
+
+# 5. Stage 5 — The purchase-order lifecycle
 
 ```
-draft ─submit─► pending_approval ─approve─► approved ─send─► sent
+draft ─submit─▶ pending_approval ─approve─▶ approved ─send─▶ sent
                        │                                       │
-                       └──reject──► rejected ──► draft         ├─► responded ─► confirmed
-                                                               └─► escalated ─► confirmed
+                       └──reject──▶ rejected ──▶ draft         ├─▶ responded ─▶ confirmed
+                                                               └─▶ escalated ─▶ confirmed
 
-  cancelled is reachable from any state before it is sent.
+  cancelled is reachable from any state BEFORE it is sent.
 ```
 
-| Call | Effect |
+| Call | Effect | Refuses |
+|---|---|---|
+| `PATCH /pos/{id}/items` | edit lines, add or remove them, change the supplier. Same `base_revision` optimistic lock as the BOM. | **409 `po_locked`** once sent — cancel and re-issue instead; **409 `stale_revision`** |
+| `POST /pos/{id}/submit` | ask for approval; notifies the routed approvers | **409 `not_submittable`** unless draft or rejected; **409 `needs_supplier`**; **409 `empty_po`** |
+| `POST /pos/{id}/approve` | the decision | **409 `not_pending_approval`**; **403 `wrong_approver`** |
+| `POST /pos/{id}/reject` | `reason` required | **422 `reason_required`**; same 409/403 as approve |
+| `POST /pos/{id}/send` | number it, render the PDF, email it, start the escalation clock | **409 `not_approved`** |
+| `POST /pos/{id}/acknowledge` | record the supplier's confirmation | — |
+| `POST /pos/{id}/cancel` | cancel | **409 `po_locked`** once sent |
+
+> **Changing the supplier on a PATCH re-routes the approver and resets any approval.** That is correct — a different vendor is a different decision — and it will surprise a user who thought they were fixing a typo.
+
+## Approval routing depends on what is being bought
+
+This is the least obvious rule in Stage 5, and a 403 is how you will discover it:
+
+| Supplier type | May approve or reject |
 |---|---|
-| `PATCH /pos/{id}/items` | edit lines. **409 `po_locked` once it is sent** — cancel and re-issue instead. Uses the same `base_revision` lock as the BOM. |
-| `POST /pos/{id}/submit` | ask for approval |
-| `POST /pos/{id}/approve` / `/reject` | the decision (`reason` required to reject) |
-| `POST /pos/{id}/send` | emails it, generates the PDF, starts the escalation clock |
-| `POST /pos/{id}/acknowledge` | record the supplier's confirmation |
-| `POST /pos/{id}/cancel` | cancel |
+| **`leather`** | **Cutting Manager**, MD |
+| `accessory`, `service`, or unset | MD, **Direct Manager**, **HR** |
 
-## Chasing the supplier
+The **MD approves anything**. The router admits all four candidate roles, and the service then enforces the exact routing — so a Direct Manager who can open the screen can still be refused on a leather PO, with **403 `wrong_approver`** naming the roles it does route to. A supplier with no type set is treated as `accessory`.
 
-Once a PO is sent, the system watches for a response:
+**HR approving a purchase order is real**, not a bug. It is the only place HR touches procurement, and it is a money approval.
+
+## Send is the point of no return
+
+`POST /pos/{id}/send` does five things in one call:
+
+1. allocates the **financial-year PO number** (April–March)
+2. renders the PDF and stores it, **deduplicated by sha256**, using the template for that supplier type
+3. routes by contact: a usable email is **emailed** with the PDF attached, a tracking pixel injected and links wrapped; otherwise it short-circuits to the WhatsApp rung; with neither, `no_contact_channel` is set and nothing goes out
+4. sets `next_escalation_at` and starts the ladder
+5. advances the production board to `po_raised`
+
+An email address that has **hard-bounced** (`email_status: invalid`) is treated as no email at all.
+
+---
+
+# 6. Stage 5 — Chasing the supplier
+
+Once a PO is sent, the system watches for a response.
 
 | Field | Meaning |
 |---|---|
@@ -285,139 +256,139 @@ Once a PO is sent, the system watches for a response:
 | `next_escalation_at` | when the sweeper will chase next |
 | `acknowledged_at` / `acknowledged_channel` | **they confirmed — this stops the ladder** |
 
-The chase runs over three channels: **email**, then **WhatsApp**, then a **voice call**. The replies arrive through webhooks:
+## The ladder
+
+One rung per due PO per sweep, at `po_escalation_hours` (**default 5 hours**) apart:
+
+| Rung | Action |
+|---|---|
+| 0 → 1 | **WhatsApp** the supplier |
+| 1 → 2 | **auto-call** them |
+| 2 → 3 | **exhausted** — an in-app notice to the buyer; no further automatic contact |
+
+The sweep is DB-idempotent — the `acknowledged_at IS NULL` and `current_rung < 3` guards make a second pass a no-op — so it survives restarts and never double-chases.
+
+**An acknowledgement on any channel stops the ladder immediately**, sets the status to `confirmed`, and advances the board to `po_confirmed`.
+
+## The five routes that are not for your frontend
 
 | Endpoint | Called by |
 |---|---|
-| `POST /procurement/webhooks/ses` | Amazon SES (delivery, bounce, complaint) |
-| `POST /procurement/webhooks/twilio/whatsapp` | Twilio |
-| `POST /procurement/webhooks/twilio/voice` | Twilio |
-| `GET /procurement/t/o/{token}.gif` | the supplier's mail client (the pixel) |
+| `POST /procurement/webhooks/ses` | Amazon SES — delivery, bounce, complaint |
+| `POST /procurement/webhooks/twilio/whatsapp` | Twilio — the supplier's reply |
+| `POST /procurement/webhooks/twilio/voice` | Twilio — the supplier pressing 1 |
+| `GET /procurement/t/o/{token}.gif` | the supplier's mail client fetching the pixel |
 | `GET /procurement/t/c/{token}` | the supplier clicking a link (302 redirect) |
 
-> **None of those five are for your frontend.** They exist for the outside world. The webhooks always answer `{"ok": true}` so the provider does not retry, and the pixel always returns an image — even for an unknown token — so a supplier never sees a broken image in their inbox.
+They exist for the outside world and carry an **opaque per-send token instead of a session**. The webhooks always answer `{"ok": true}` so the provider does not retry, and the pixel always returns an image — even for an unknown token — so a supplier never sees a broken image in their inbox.
 
-## Suppliers
+A **hard bounce** flags the address invalid and short-circuits the PO to the WhatsApp rung rather than burning five hours on a dead address. A **complaint** suppresses further email.
 
-| Call | Note |
-|---|---|
-| `POST /procurement/suppliers/import/preview` / `/commit` | load the directory and the purchase history from a workbook |
-| `GET /procurement/suppliers` | the directory |
-| `GET /procurement/suppliers/{id}` | one supplier **plus their supply history and open POs** |
-| `POST` / `PATCH` | create and edit |
-| `DELETE` | **deactivates — never deletes.** Purchase history hangs off the row. |
-| `POST /suppliers/{id}/reactivate` | put them back in service |
+## ⚠ Those five routes are gated today, and they must not be
 
-`has_contact` on a supplier row is the field that decides whether a PO can be sent at all. **Adding a contact to a contactless supplier unblocks the send.**
+They **declare no auth of their own** — correctly. But the supplier-PO router is mounted with `dependencies=[Depends(block_employees)]`, and that dependency requires a Bearer token. So today:
+
+- a supplier opening the PO email fetches the pixel and gets **401** — the open is never recorded;
+- a click gets **401** instead of the 302 — the supplier never reaches the target;
+- SES delivery events and Twilio replies get **401** — an acknowledgement by WhatsApp or by pressing 1 is never recorded, and **the chase escalates as though the supplier ignored it**.
+
+Nothing raises an error inside the factory, which is exactly why this survives: the failure is entirely on the supplier's side of the wire, and it looks identical to a supplier who is not responding. **These five routes need mounting outside the locked router, or with an explicit auth exemption.**
 
 ---
 
-# 8. The production board — the thread back to the floor
+# 7. Stage 5 — Suppliers
+
+| Call | Note |
+|---|---|
+| `POST /procurement/suppliers/import/preview` / `/commit` | load the directory **and the purchase history** from a workbook — always preview first |
+| `GET /procurement/suppliers` | the directory |
+| `GET /procurement/suppliers/{id}` | one supplier **plus their `supply_history` and `open_pos`** |
+| `POST` / `PATCH /procurement/suppliers[/{id}]` | create and edit |
+| `DELETE /procurement/suppliers/{id}` | **deactivates — never deletes.** Purchase history hangs off the row. Gated at MD — **but see the note below.** |
+| `POST /procurement/suppliers/{id}/reactivate` | put them back in service. Same gate. |
+
+> **Those last two say "MD" and admit the DM as well.** They are built with `require_roles(MANAGING_DIRECTOR)`, and `require_roles` waves both superuser roles — MD *and* DM — through every gate. Only `require_exact_roles` takes its allow-list literally, and Stage 5 does not use it anywhere. So deactivating a supplier is **MD or DM** in practice. The BOM approval gate is the one place in Phase 2 that really is one role (see `BOM_SYSTEM_GUIDE.docx` §6). Do not build a screen that promises a DM will be refused here.
+
+Fields that change behaviour rather than just displaying:
+
+| Field | Effect |
+|---|---|
+| **`has_contact`** | computed as `email or phone`. **Decides whether a PO can be sent at all** — adding a contact to a contactless supplier unblocks the send. |
+| **`supplier_type`** | `leather` / `accessory` / `service`. **Drives both the PDF template and the approver routing** (§5). |
+| **`state_code`** | drives intra- vs inter-state GST |
+| **`email_status`** | `unknown` / `valid` / `invalid`. Set by bounce feedback; `invalid` makes the send skip email. |
+| `payment_terms_days`, `lead_time_days`, `currency`, `gstin` | carried onto the PO |
+
+The `supply_history` is the ledger the matcher ranks on: per normalised article, the `txn_count`, `last_purchased_at`, and `last_rate` / `min_rate` / `max_rate`.
+
+---
+
+# 8. The production board — the thread back to Phase 1
 
 `GET /procurement/production-tracking` is one row per style:
 
 | Field | Meaning |
 |---|---|
+| `status` | the ladder below |
 | `po_count` | purchase orders raised for it |
 | `po_confirmed_count` | how many suppliers have confirmed |
 | `material_ready_at` | when everything needed had arrived |
 | `released_at` | when it went to the floor |
 
-When `po_confirmed_count` equals `po_count`, the material is on its way. `POST /production-tracking/{id}/transition` moves a row on.
+```
+awaiting_bom → bom_approved → inventory_checked → po_raised → po_confirmed
+             → material_ready → released_to_production → in_production → completed
+```
 
-This is the seam where Phase 2 hands over to Phase 1.
+Most of those edges are advanced **automatically** as a side-effect of the call that earns them: approving a BOM, running an inventory check, sending the first PO, receiving an acknowledgement. `POST /production-tracking/{id}/transition` is the manual move for the rest.
+
+When `po_confirmed_count` equals `po_count`, the material is on its way. **This is the seam where Phase 2 hands over to Phase 1.**
 
 ---
 
 # 9. Background work
 
-Two sweepers run **inside the API process**: BOM notification escalation and supplier-PO escalation.
+Two sweepers run **inside the API process**: BOM notification escalation (2 hours, internal) and supplier-PO escalation (5 hours, external). They share the lifespan loop and each has its own on/off setting.
 
-> They are wrapped in a **Redis single-flight lock**, so exactly one process in the whole fleet does the work each cycle. Escalation **sends email**, which is not idempotent from the recipient's side: without the lock, `workers × replicas` copies of every escalation go out per cycle — four from one box at `WEB_CONCURRENCY=4`, and 4×N behind a load balancer. It was also the main thing stopping the API from being scaled out at all.
-
-Both can be switched off with their settings flags.
+> They are wrapped in a **Redis single-flight lock**, so exactly one process in the whole fleet does the work each cycle. Escalation **sends email and makes calls**, which is not idempotent from the recipient's side: without the lock, `workers × replicas` copies of every escalation go out per cycle — four from one box at `WEB_CONCURRENCY=4`, and 4×N behind a load balancer. It was also the main thing stopping the API from being scaled out at all.
 
 ---
 
-# 10. The admin reference data (`/procurement/admin/*`)
+# 10. Who can do what
 
-A generated BOM is only as good as four tables of reference data, and all four used to be **hardcoded**, editable by a redeploy. These endpoints make them editable at runtime instead. **Every one of them is DM/MD.**
-
-| Endpoint | Holds |
-|---|---|
-| `PUT /admin/dxf-yields/{species}` | the yield factor for a hide species — `sheep`, `goat`, `calf`, `lamb`, and a `_default` |
-| `POST /admin/fabric-roles` | the CAD lexicon: which fabric label in a DXF means which role |
-| `GET`/`PUT /admin/cost-catalog[/{garment_code}]` | the default cost lines for a garment code |
-| `GET`/`PUT /admin/checks[/{client_code}]` | the per-client BOM validation rules |
-| `GET`/`POST /admin/pom-dictionary` | measurement-term → POM-code mappings |
-
-## Two things about these that will bite
-
-**A `PUT` replaces a code's whole line set, it does not merge.** `PUT /admin/cost-catalog/{garment_code}` sends every line that garment code should have. Sending one line leaves it with one line.
-
-**A write takes effect immediately, without a restart — and that is engineered, not incidental.** The fabric lexicon is read **synchronously** on the hot path, inside BOM generation. A live database read there would block the event loop, so this config lives in a **process-level snapshot**: warmed once at startup, and **pushed in directly by these admin writes**. There is a TTL re-read as a backstop for a second replica's write, so on more than one replica a change can lag by that TTL. Single-replica today; do not add a fifth reference table by reading it live on that path.
-
-**An empty table means DEFAULTS, not zero.** A fresh database falls back to the built-in values, so an unseeded system produces a sane BOM rather than a BOM costed at nothing. That means `GET /admin/cost-catalog` returning values proves nothing about whether anybody has configured it.
-
-## `GET /admin/pom-dictionary` shows which mappings are still a guess
-
-Its rows carry `status` and `confidence`, so an admin can tell an **LLM-suggested** mapping that still needs review from one a human confirmed. Without those two fields the dictionary read like settled reference data when half of it was a machine's guess.
-
----
-
-# 11. Who can do what
-
-Read **"plus MD and DM"** into every row except the two that say otherwise — they are superusers and pass any ordinary gate (see the User guide). Only `require_exact_roles` refuses them.
+Read **"plus MD and DM"** into every row that does not say otherwise — they are superusers and pass any ordinary role gate.
 
 | Action | Roles |
 |---|---|
-| Stage-1 uploads, submissions, the per-document report | Direct Manager, Managing Director |
-| Read a BOM and its items; **edit** its items; confirm cutting | **Cutting Manager** (+ DM/MD) |
-| **Approve / reject / export a BOM** | **Managing Director ONLY — the DM is refused** |
-| Inventory check, generate POs, PO lifecycle, admin config, suppliers (create/edit) | DM and MD |
-| **Approve / reject a purchase order** | Cutting Manager, DM, **HR**, MD |
-| **Delete or reactivate a supplier** | **MD only** |
+| Stage-1 submissions, uploads, the per-document report | **Direct Manager, Managing Director** |
+| Generate POs; PO edit, submit, send, cancel, acknowledge | DM, MD |
+| **Approve / reject a purchase order** | **routed by supplier type** — leather: Cutting Manager + MD; accessory/service: MD, DM, HR |
+| Supplier create, edit, import | DM, MD |
+| Deactivate or reactivate a supplier | gated at MD, **but the DM passes too** — see §7 |
 | Move the production board on | Cutting Manager, DM, MD |
-| **Read-only: inventory checks, POs, suppliers, the production board** | DM, MD, **Viewer** |
-| Notifications, patterns, order breakdown, attachments, `generate-bom` | **any logged-in user** |
+| **Read-only: POs, suppliers, the production board** | DM, MD, **Viewer** |
+| The webhooks and tracking pixels | **should be open** — see the warning in §6 |
 
-## Three of those rows will surprise you
-
-**`Viewer` is a real read role in this service.** It can read inventory checks, purchase orders, the supplier directory and the production board — and nowhere else in the app does `viewer` get a gate of its own. It exists so an accountant can see committed spend without being able to commit any. Nothing else in Phase 2 admits it.
-
-**HR can approve a purchase order.** That is the only place HR touches procurement, and it is a money approval, so it is worth knowing rather than discovering.
-
-**Several Stage-2 writes are gated only by "logged in".** `POST /order-styles/{id}/attachments`, `POST …/generate-bom`, `POST /patterns` and `POST …/order-breakdown` take a token and **check no role** — a `supervisor` or `security` login can trigger BOM generation today. That looks like an omission rather than a decision, since everything around them is DM/MD. **Do not design a screen around it**; assume it will tighten to DM/MD.
-
-## ⚠ The webhooks and tracking pixels are gated, and they must not be
-
-`/webhooks/ses`, `/webhooks/twilio/whatsapp`, `/webhooks/twilio/voice`, `/t/o/{token}.gif` and `/t/c/{token}` **declare no auth of their own** — correctly, because their caller is Amazon SES, Twilio, or a supplier's mail client fetching an image, and each carries an opaque per-send token instead of a session. The supplier-PO router's own header says exactly that.
-
-**But the router is mounted with `dependencies=[Depends(block_employees)]`**, and `block_employees` depends on `get_current_user`, which raises **401 without a Bearer token**. So today:
-
-- a supplier opening the PO email fetches the pixel and gets **401** — the open is never recorded;
-- a click gets **401** instead of the 302 redirect — the supplier does not reach the target;
-- SES delivery events and Twilio replies get **401** — an acknowledgement by WhatsApp or by pressing 1 is never recorded, and the chase escalates as though the supplier ignored it.
-
-Nothing raises an error inside the factory, which is why this survives: the failure is entirely on the supplier's side of the wire, and it looks exactly like a supplier who is not responding. **These five routes need mounting outside the locked router**, or with an explicit auth exemption.
+> **`Viewer` is a real read role in Phase 2**, and almost nowhere else in the app. It can read purchase orders, the supplier directory, the production board and (in Stage 4) inventory checks. It exists so an accountant can see committed spend without being able to commit any.
 
 ---
 
-# 12. Patterns a frontend must handle
+# 11. Patterns a frontend must handle
 
 | Pattern | Where |
 |---|---|
-| **202 and poll** | BOM generation, order breakdown, pattern upload |
-| **Server-Sent Events** | `GET /procurement/notifications/stream` |
-| **Optimistic locking (`base_revision` → 409)** | BOM items, PO items |
-| **Replay, not repeat** | BOM export (`replay: true`), duplicate uploads (cached verdict) |
-| **Structured 409/422 bodies** | many errors here carry `{"error": "...", ...}` inside `detail`, not just a sentence — read `detail.error` |
+| **Preview before commit** | the supplier import — and the inventory import in Stage 4 |
+| **Optimistic locking (`base_revision` → 409 `stale_revision`)** | `PATCH /pos/{id}/items` |
+| **Replay, not repeat** | `already_generated: true` on generate-pos; the cached verdict on a duplicate upload |
+| **Structured error bodies** | most 4xx here carry `{"error": "…", "message": "…"}` **inside** `detail`, not just a sentence. Read `detail.error` to branch, `detail.message` or `suggested_fix` to display. |
+| **A `reason_code` catalogue** | every Stage-1 rejection maps to a stable code with a fixed HTTP status — branch on the code, never on the message text |
 
 ---
 
-# 13. Notes for backend developers
+# 12. Notes for backend developers
 
 - **`presenters.py` in each module is pure serialisation** — ORM rows in, response dict out. No session, no rules, no I/O. Keep shape-only code there so the services stay orchestration.
-- **Inventory keys everything to a `bom_id`.** That is exactly why it is a different module from Phase-1 `material`, and why the two must not be merged (`CLAUDE.md` §12).
-- **The Phase-1 → Phase-2 bridge, when it comes, is a connection and not a rewrite:** the BOM's inventory check will read stock, and the physical stock it reads against **is** the Phase-1 material lots.
+- **The Stage-1 pipeline touches no session.** All the blocking work — scan, sniff, classify, store — is one synchronous function pushed into a threadpool; the async service persists the result. That is what keeps the event loop free.
+- **`supplier_match.py` and `inventory_match.py` are pure and take a candidate pool**, never a session. The set-based fetch lives in the repository; the decision is unit-testable with no database.
+- **Cross-module reads go through the owning service's DTO.** Supplier-PO reads the BOM and the inventory shortfall that way, and order/style identity through `clients.service` — never another module's repository or models.
 - **`require_exact_roles` exists for the BOM sign-off.** Use `require_roles` for "this role or above"; use the exact form only where separation of duties *is* the requirement.

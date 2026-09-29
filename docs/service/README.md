@@ -1,6 +1,6 @@
 # KairoX — per-service documentation
 
-**Two Word documents for every service**, 17 services, 34 files.
+**Two Word documents for every service**, 20 services, 40 files.
 
 | File | What it is | Who writes it |
 |---|---|---|
@@ -103,9 +103,19 @@ The real fix is a `response_model` on the route: every entry that disappears fro
 | `WAGE` | Rates, runs, the ledger |
 | `DASHBOARD` | The per-role manager screens |
 | `ANALYTICS` | Read-only reporting and the piece life story |
-| `PROCUREMENT` | Phase 2 — intake → BOM → approval → inventory → supplier PO |
-| `SYSTEM` | Health, readiness, root, the chatbot |
+| `PROCUREMENT` | Phase 2, stages 1 and 5 — document intake, and supplier purchase orders |
+| `BOM` | Phase 2, stages 2 and 3 — generate the bill of materials, then approve it |
+| `INVENTORY` | Phase 2, stage 4 — match the BOM against stock and measure the shortfall |
+| `INTELLIGENCE` | The factory chatbot: `/chat` and `/chat/stream` |
+| `SYSTEM` | Health, readiness, root, and how the app is assembled |
 
-Deeper Phase-2 material lives beside this folder:
-`docs/KAIROX_PROCUREMENT_SYSTEM_GUIDE.md` and
+**The four Phase-2 modules are four services, not one.** `procurement`, `bom`,
+`inventory` and `supplier_po` all mount under `/api/v1/procurement/...` so the URLs
+read as one workflow, but they are documented separately because they are read
+separately: nobody debugging a stock match wants to page through the supplier
+escalation ladder first. `supplier_po` rides with `procurement` because Stage 1
+and Stage 5 are the two ends that actually buy something.
+
+Deeper Phase-2 material, covering all five stages in one narrative, lives beside
+this folder: `docs/KAIROX_PROCUREMENT_SYSTEM_GUIDE.md` and
 `docs/KAIROX_PROCUREMENT_API_REFERENCE.md`.

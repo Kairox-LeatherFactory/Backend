@@ -218,6 +218,70 @@ class Drawer(Base, UUIDMixin, TimestampMixin):
     # constant is a question the schema should not be asking.
 
 
+class AccessoryType(Base, UUIDMixin, TimestampMixin):
+    """The kinds of accessory this factory stocks — DATA, not an enum.
+
+    WHY A TABLE AND NOT MORE `MaterialSubtype` MEMBERS. There are far more
+    accessories than buttons, zips and thread: eyelets, lace pins, rib knit trim,
+    and a steady trickle of new ones. Every one of those would otherwise be an enum
+    member, a `MATERIAL_SPEC` entry and a deploy — and until it got one it fell to
+    `OTHER`, whose spec requires `description` + `count` and whose filters are
+    `article, colour` with NO SIZE AT ALL. So rib knit trim, an accessory whose size
+    genuinely varies per SKU, had no size field to vary.
+
+    IT POPULATES ITSELF FROM INTAKE. A new accessory becomes known because a packet
+    of it physically ARRIVED, not because somebody remembered to fill in a settings
+    screen — see MaterialService.arrive and .create_lot, which register an unknown
+    subtype instead of rejecting it. `first_seen_at` and `created_by` are how an
+    auto-registered type is told apart from a curated one, because the gate is the
+    least supervised entry in the app and a type appearing by accident must be
+    visible rather than silent.
+
+    `code` IS CAPPED AT 20 CHARACTERS because `subtype` is String(20) on four
+    tables — material_lot, style_material_spec, piece_material_issue and
+    kit_substitution_request — and one of those is a ledger. Capping the source is
+    cheaper and safer than widening four columns.
+
+    THE BUILT-INS IN `MATERIAL_SPEC` REMAIN THE DEFAULTS. This table overlays them
+    (see materials.accessory_catalog.AccessoryCatalog); it does not replace them, so
+    `resolve_spec` stays a pure function that needs no database.
+    """
+    __tablename__ = "accessory_type"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_accessory_type_code"),
+    )
+    code: Mapped[str] = mapped_column(String(20), index=True)      # EYELET, ZIP…
+    label: Mapped[str | None] = mapped_column(String(80))          # "Eyelets"
+
+    # THE MEASUREMENT, in the sense the floor means it: which attribute holds the
+    # stock quantity and what unit it is in. There is no separate "measurement"
+    # column because the quantity field IS the measurement — count for buttons,
+    # mtrs for thread, kg for ribs.
+    qty_field: Mapped[str] = mapped_column(String(20), default="count",
+                                           server_default="count")
+    qty_uom: Mapped[str] = mapped_column(String(20), default="pcs",
+                                         server_default="pcs")
+    # Attribute keys a lot of this kind must carry, and the boxes the stock screen
+    # renders. JSON lists rather than columns: they are read whole and never
+    # filtered on.
+    requires: Mapped[list | None] = mapped_column(JSON_VARIANT)
+    filters: Mapped[list | None] = mapped_column(JSON_VARIANT)
+
+    # THE 85-90% RULE, AS DATA. Most accessories are identical across a style's
+    # SKUs; zip and rib knit trim are the ones whose size changes per SKU. This
+    # drives the recipe form's default (fan out to every SKU vs ask per SKU) and
+    # `copy_from`'s matching, so neither has to hardcode which accessories are
+    # special.
+    size_varies_by_sku: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0")
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="1")
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str | None] = mapped_column(String(120))
+    note: Mapped[str | None] = mapped_column(String(300))
+
+
 class MaterialLot(Base, UUIDMixin, TimestampMixin):
     """A batch of stock. Creating a lot registers a child barcode AND adds stock.
 

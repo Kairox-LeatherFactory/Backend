@@ -491,3 +491,84 @@ said nothing about what had actually happened:
   > regex reads about 70 of the 156 and reports the other 86 as missing their delete
   > rule — 111 false failures. There is a second test, `test_the_baseline_is_parsed_at_all`,
   > whose only job is to catch that happening again.
+
+---
+
+## 11. Revision 2026-09-29 — an accessory belongs to a SKU
+
+The floor hit this posting a perfectly good zip line:
+
+```
+POST /api/v1/styles/{id}/material-spec/lines   {"size": "M", ...}
+422  This line's size is 'M', which is a garment size, but it does not say
+     which garments it is for...
+```
+
+That 422 was ours, and the model behind it was wrong. **A `SKU` is unique on
+`(style_id, color_code, size)` — colour *and* size — so a line that names one has
+already said everything about which garments it is for.** Scoping accessories to the
+SKU deletes the apparatus §4 built rather than patching it further.
+
+### What retired
+
+| Built to police style-wide accessory lines | Now |
+|---|---|
+| `garment_size` on accessories | refused on one — its SKU says the size |
+| the 422 above (`_reads_as_garment_size`) | **gone for accessories**; leather/lining keep it |
+| `accessory_size_gaps` | replaced by `accessory_sku_gaps` |
+| `accessory_size_ambiguities` | retired — the question cannot arise |
+
+`garment_size` the **column** stays: leather and lining can still be style-wide.
+
+### What arrived
+
+- **`accessory_type` — accessory kinds are data.** `MaterialSubtype` had only
+  BUTTON/ZIP/THREAD/OTHER, so eyelets, lace pins and rib knit trim all fell to
+  `OTHER`, whose filters are `article, colour` **with no size** — leaving rib knit
+  trim, whose size varies per SKU, no size field to vary. **It fills itself in from
+  intake:** receiving an unrecognised `subtype` registers it and reports
+  `accessory_type_registered`. `AccessoryCatalog` overlays `MATERIAL_SPEC` so
+  `resolve_spec` stays pure and an unseeded deployment behaves exactly as before.
+- **`size_varies_by_sku`** — the floor's own "85–90% are the same on every garment,
+  zip and rib knit trim are not", as data rather than a hardcoded list.
+- **The fan-out** — `apply_to: "ALL_SKUS"` / `sku_ids` / `per_sku`, on `add_line`
+  (not the PUT, which freezes at release while accessories stay correctable).
+  Idempotent and partially so. **The stored shape is per-SKU either way.**
+
+### Three things the code review turned up that the plan had not
+
+- **`requirement` would have become 8 rows per button.** A purchase order is raised
+  off it. Accessories now aggregate into `ACCESSORY_GROUP` rows by material identity
+  — BLACK and TAN buttons stay separate, and `short_by` is computed on the group
+  because one lot serves every colourway.
+- **`copy_from` would have silently copied zero accessories** — it maps SKUs on
+  (colour, size) and `include_sku_overrides` defaults to false. Accessories are now
+  fanned onto the target's own SKUs.
+- **`subtype` is `String(20)` on four tables**, one a ledger — so `accessory_type.code`
+  is capped at 20 rather than widening them.
+
+### Three pre-existing bugs fixed alongside
+
+- **`patch_line` silently nulled `garment_size`** (a regression from §4): patching a
+  note un-scoped a line, widening a size-specific material to every garment — the
+  direction that *spends* stock. `SpecLinePatch` also had no such field.
+- **`find_duplicate_line` ignored `garment_size`** while the DB constraint and
+  `replace_spec`'s identity both included it.
+- **`kit_required_sql` / `has_accessory_lines` retired** — the "two shapes that
+  cannot disagree" already did (style-scoped vs SKU-scoped), and no application code
+  called either; only tests did.
+
+### Migration
+
+`20260929_accessory_sku_scope` creates and seeds `accessory_type`, and **deactivates
+any accessory line with `sku_id IS NULL`** — such a row can no longer be written and
+could never be satisfied. No back-migration of recipe lines: that data is
+development-only by the owner's decision.
+
+### Tests deliberately deleted
+
+The `garment_size` coverage/ambiguity cases in `test_kit_rules_pure.py`, the
+inference cases in `test_size_matched_accessories.py` (rewritten around SKU scoping,
+keeping the original reported bug), and the two `kit_required_sql` tests. They assert
+a model that has been removed — keeping them green would have been the tests
+protecting the bug.

@@ -67,6 +67,38 @@ Every material screen returns the same block:
 
 Defaults: LEATHER ignores `subtype`. LINING with no subtype means **plain lining**. ACCESSORY **must** have a subtype — there is no generic accessory quantity.
 
+### Accessory kinds are DATA, and the list grows by itself
+
+The four accessory rows above are only the **built-in defaults**. There are far more
+accessories than buttons, zips and thread — eyelets, lace pins, rib knit trim — and
+each one used to fall to `other`, whose spec wants `description` + `count` and whose
+filter boxes are `article, colour`, **with no size at all**. Rib knit trim, an
+accessory whose size genuinely varies from one SKU to the next, therefore had no
+size box to enter one in.
+
+Accessory kinds now live in a table, and **receiving one is what creates it**:
+
+- `POST /materials/arrivals` or `POST /materials/lots` with an unrecognised
+  `subtype` **registers** that kind instead of rejecting it, and returns it as
+  `accessory_type_registered` so a kind that appears by accident is visible rather
+  than silent. There is no "add a kind" form — the moment anybody knows about a new
+  accessory is the moment one turns up at the gate.
+- `GET /materials/accessory-types` lists them; `PATCH /materials/accessory-types/{code}`
+  refines one. `code` and `qty_field` are **not** patchable: every lot, recipe line
+  and ledger row of that kind is keyed to the code, and `qty_field` names the
+  attribute whose value was already added to `on_hand`.
+- A code is UPPERCASE, underscored and **at most 20 characters**, because that is the
+  width of `subtype` on four tables — one of them the issue ledger. Put the full name
+  in `label`.
+- **`size_varies_by_sku`** records what the floor already knows: 85–90% of
+  accessories are the same on every garment, and zip and rib knit trim are the ones
+  whose size follows it. It decides whether the recipe form fans one line across
+  every SKU or asks per SKU, and how `copy-from` matches — so neither hardcodes which
+  accessories are special.
+
+`GET /materials/spec` reports catalogued kinds alongside the built-ins, so the
+Add-New form and the stock filter boxes follow automatically.
+
 ## Hides — why leather is different
 
 A leather lot can be created with `sheets`: one row per **hide**, each with its own `dcm` and its own barcode.
@@ -229,62 +261,59 @@ When stock is short, `GET /materials/stock` and the recipe's requirement view bo
 
 ## The lines
 
-A line names a material by six columns (category, subtype, article, colour, thickness, size) plus `qty_per_piece` and `uom`.
+A line names a material by six columns (category, subtype, article, colour,
+thickness, size) plus `qty_per_piece` and `uom`.
 
-Two `size`-like fields exist and they mean different things — do not mix them up:
+### An ACCESSORY line must name its SKU
+
+**A SKU is unique on (style_id, colour, size)** — colour *and* size together — so a
+line that names one has already said everything about which garments it is for. A
+style-wide accessory line is a **422**.
+
+That one rule removes a whole apparatus that existed only to police style-wide
+lines: `garment_size` on accessories, a size-coverage gate, a size-ambiguity gate,
+and a guess that read any bare number from 30 to 70 as a garment size and so
+confined a 60 cm zip to 4XL jackets.
+
+Two `size`-like fields still exist, and they mean different things:
 
 | Field | Meaning | Matched against |
 |---|---|---|
-| `size` | **the material's** size — a 60 cm zip, an 18L button | `MaterialLot.size`, to find the lot |
-| `garment_size` | **which jackets** this line is for — the size-L line | `SKU.size`, to decide if the line applies at all |
+| `size` | **the material's** size — a 60 cm zip, an 18L button | `material_lot.size`, to find the lot |
+| `garment_size` | **leather and lining only** — which garments a style-wide line is for | `sku.size` |
 
-`garment_size = null` means **every size**. That is what keeps one generic 18L
-button line at one row, and it is why every line entered before the column existed
-still resolves to exactly the recipe it always did.
+`garment_size` sent on an accessory line is **refused, not ignored**: a caller who
+sends it believes it is doing something, and its answer could only ever contradict
+the SKU's. For leather and lining it is explicit and never inferred — send it, or
+leave it NULL for every size.
 
-### `garment_size` is stated, never inferred
+### Covering every SKU in one call
 
-It used to be **guessed** from the material size whenever that size looked like a
-garment size — and any bare number from 30 to 70 looked like one, because those are
-the EU jacket rungs. So a 60 cm zip entered as `size: "60"` was read as a size-60
-garment, mapped to 4XL, and scoped to 4XL jackets only. A 45 cm zip went to XS.
+85–90% of accessories are identical across a style's SKUs; only zip and rib knit
+trim usually vary. So `POST /styles/{id}/material-spec/lines` takes a scope:
 
-**A line that reaches no garment is not a smaller recipe — it is no recipe.** The
-line is dropped, `kit_required` comes back false for that size, completeness
-collapses to leather-and-lining, and every garment of every other size is
-complete, sendable and shipped without its zip. Nothing warns, because from the
-garment's point of view the style simply declares no accessories.
+| Field | Meaning |
+|---|---|
+| `sku_id` | this one colourway-and-size |
+| `apply_to: "ALL_SKUS"` | every **ordered** SKU of the style |
+| `sku_ids: [...]` | a named subset |
+| `per_sku: [{sku_id, size?, qty_per_piece?}]` | one row each, with its own size — the zip case |
 
-So the guess is gone:
+Exactly one of them per request; more than one is a 422, because which garments an
+accessory is for is not something to guess at. It is **idempotent** and reports
+`created` vs `already_present`, so re-posting after a timeout adds the rest rather
+than failing the batch.
 
-- a material size that is **unmistakably** a garment size (`L`, `XXL`) and names no
-  `garment_size` is a **422** telling you to say which garments it is for;
-- a **number** is never read as a garment size — `60` is centimetres until somebody
-  says otherwise;
-- migration **`20260928_garment_size_backfill`** clears the rows the old guess had
-  already mis-scoped — every line whose `garment_size` equals a purely numeric
-  `size`. Alpha ones are left alone: `L` beside `garment_size: "L"` is a line
-  somebody meant.
+**The stored shape is per-SKU either way.** The convenience is in the request, never
+in the data — a row that "applies to everything" is exactly what this removed.
 
-> **The data fix is a module-level function, not inline SQL in `upgrade()`, and it
-> is covered by `tests/integration/test_garment_size_backfill.py`.** It cannot be
-> exercised by running the chain — an alembic-built SQLite database rejects every
-> INSERT, because the baseline puts `server_default=sa.text('now()')` on 138
-> timestamp columns and SQLite has no `now()` — so inline it would have executed
-> for the very first time on production. A one-way UPDATE over live recipe rows is
-> the last place to find out the predicate was wrong, because afterwards a cleared
-> line and a line somebody deliberately left unscoped are the same row.
->
-> **Any database written to before the guess was removed still needs it run once.**
-> This is not hypothetical: the chain was squashed on 2026-09-28 and the squash
-> dropped the fix, because a baseline autogenerated from the models carries the
-> schema and no data migrations at all. It was restored by hand. Check for that
-> before assuming a future squash carried it either.
+> It lives on the **add-line** call and not on the whole-grid PUT, because the PUT
+> is frozen once a style is released while accessories stay correctable — and the
+> wrong button is discovered precisely when somebody goes to fetch it, which is
+> always after release.
 
-A line has a **scope**:
-
-- `STYLE` — every garment of the style.
-- `SKU` — one colourway only. That is how a NAVY jacket gets a navy knit and a PINE GREEN one does not.
+A line still has a **scope**: `SKU` for every accessory, `STYLE` or `SKU` for
+leather and lining.
 
 ## How a line finds real stock — `resolution`
 
@@ -299,47 +328,47 @@ A line has a **scope**:
 
 `POST /styles/{id}/material-spec/confirm` is the sign-off. It is **separate from the release call on purpose**: the DM can finish the recipe days earlier, and the release screen can show `release_blockers` **before** the button is pressed instead of explaining a rejection afterwards.
 
-The five blockers:
+The four blockers:
 
 1. the spec is not confirmed;
 2. there is **no LEATHER line** — the dcm per piece is what the ledger and the costing are built on;
 3. the spec names **no accessories** and nobody declared that it needs none;
-4. **a size-varying accessory has no line for some size the order contains**;
-5. **several material sizes of one accessory, and not one of them says which garments it is for.**
+4. **an accessory is on some of the ordered SKUs but not all of them.**
 
 That third one is a **three-state** field. An empty accessory list on its own is ambiguous: it could be a garment that genuinely takes none, or one whose buttons nobody has entered yet. So it needs an explicit `no_accessories: true`; `null` — nobody asked — does not pass.
 
-### 4 · size coverage
+### 4 · SKU coverage
 
-If **any** line for an article names a `garment_size`, that article is
-**size-varying**, and every size the order actually contains must have its own
-line. Zip lines for M and L on an order that also runs S and XL is a blocker —
-those garments would get no zip at all (see *`garment_size` is stated, never
-inferred* above for why that is silence rather than a shortage).
+For every article the style declares on **any** SKU, every **ordered** SKU must have
+a line for it. A zip on the NAVY colourways and not the PINE ones blocks release,
+and the blocker names the missing ones.
 
-One line for the article with **no** `garment_size` covers every size and closes
-the question, so a generic 18L button never trips this.
+A SKU with no line for an article is not a garment with a shorter recipe — it is a
+garment the store believes needs nothing: `kit_required` comes back false,
+completeness collapses to leather-and-lining, and it ships without its zip.
 
-A per-colourway (`SKU`-scoped) line counts as covering its own SKU's size even
-when it names no `garment_size` — being that SKU's line already means that.
+Only SKUs with `qty_ordered > 0` count, so a zero-quantity row left by an importer
+cannot raise a false blocker — and a gate that fires on the normal case is a gate
+people learn to ignore.
 
-### 5 · size ambiguity
-
-`ZIP 48`, `ZIP 50`, `ZIP 52`, none of them scoped, means **every** garment is
-issued all three zips. But `50` is a garment size on one client's sheet and a
-centimetre length on the next, and nothing in the token can tell you which — so
-this is **asked**, not guessed. One line per article is never ambiguous, however
-its size is labelled: a single 60 cm zip on every garment is exactly what an
-unscoped line means.
-
-> Both checks are pure functions in `app/core/kit_rules.py`
-> (`accessory_size_gaps`, `accessory_size_ambiguities`), and `size_matches` is the
-> single size rule the whole app shares — so `52` and `L` are one garment on the
-> release screen, in the recipe filter and at the store scan alike.
-
-> **A missing LINING line is a warning, not a blocker.** Lining consumption is optional on the cut path, so requiring it here would contradict the ledger rule downstream.
+> This replaced two earlier checks, one for size coverage and one for size
+> ambiguity. Both existed only to police style-wide accessory lines; neither
+> question can be asked of a line that names its SKU.
 
 ## The requirement view — the screen that should stop an order
+
+> **Accessories are AGGREGATED here.** They are SKU-scoped, so one button on a
+> NAVY+PINE order in S/M/L/XL is eight rows of 4 — and a purchase order needs "buy
+> 1,600 buttons", not eight rows to add up. Accessory lines are grouped by their
+> material identity (subtype, article, colour, size) into an `ACCESSORY_GROUP` row
+> carrying the summed `total_required`, with the per-SKU rows under `per_sku`.
+>
+> BLACK and TAN buttons are **two** groups: different materials, different lots, and
+> a combined figure could not be ordered against. `short_by` is computed on the
+> group, because stock is not reserved per SKU — one lot serves every colourway, so
+> comparing each SKU's share against the whole lot would report them all covered
+> while the total was short. A group whose SKUs take different per-piece quantities
+> reports `qty_per_piece: null` rather than picking one.
 
 `GET /styles/{id}/material-spec/requirement` multiplies ordered quantity by per-piece consumption and compares it with what is on the shelf, line by line.
 
@@ -368,6 +397,14 @@ To record something that actually went into a released garment, use **`POST /mat
 - Store Manager can call it, as well as DM and MD: the correction is made **at the store**, and waiting for a DM to record a swapped button is how the correction stops being made at all.
 
 ## Copying a recipe
+
+> **Accessories are copied by FAN-OUT.** Copying maps SKUs on (colour, size) and
+> skips what does not match, and `include_sku_overrides` defaults to false — so with
+> accessories SKU-scoped, the default copy would have carried **zero** accessory
+> lines. Instead an accessory is copied as a recipe for an *article* and fanned onto
+> the target style's own SKUs: matched by size where the kind's
+> `size_varies_by_sku` is true, onto every SKU where it is false. Leather and lining
+> copying is unchanged.
 
 `POST /styles/{id}/material-spec/copy-from` seeds this style's recipe from another. A leather factory repeats styles season after season.
 

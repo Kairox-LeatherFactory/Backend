@@ -72,17 +72,34 @@ SERVICES: list[tuple[str, list[str], str]] = [
      "alerts and one garment's whole life story. READ-ONLY — analytics owns no "
      "tables and never writes."),
     ("procurement", ["Procurement — Stage 1 intake",
-                     "Procurement — Stage 2/3 BOM",
-                     "Procurement — Stage 4 inventory",
                      "Procurement — Stage 5 supplier PO"],
-     "PHASE 2 — the auto-generation pipeline, in the five stages it actually "
-     "runs in: a client submission comes in, a BOM is generated and approved, "
-     "stock is checked against it, and the shortfall becomes supplier POs. "
-     "Folders are ordered by stage, not alphabetically, because the stages only "
-     "work in order — you cannot check inventory against a BOM you have not "
-     "generated."),
-    ("system", ["Health", "Root", "Chatbot"],
-     "Liveness, readiness and the chatbot. `/health` answers without touching "
+     "PHASE 2, THE TWO BUYING ENDS OF THE PIPELINE. Stage 1 is intake: the "
+     "client's order sheet and spec sheet arrive, are classified, and open a "
+     "submission. Stage 5 is the purchase order: the shortfall Stage 4 measured "
+     "becomes one PO per supplier, which is approved, sent, tracked and chased "
+     "until the supplier confirms. Stages 2/3 (the BOM) and Stage 4 (the stock "
+     "check) have documents of their own — BOM_* and INVENTORY_*."),
+    ("bom", ["Procurement — Stage 2/3 BOM"],
+     "PHASE 2, STAGES 2 AND 3 — the bill of materials: generated from the spec "
+     "sheet and the DXF pattern, priced, edited under an optimistic revision "
+     "lock, confirmed by the Cutting Manager, and approved by the Managing "
+     "Director ALONE. Approving it runs the Stage-4 inventory check and advances "
+     "the production board in the same call."),
+    ("inventory", ["Procurement — Stage 4 inventory"],
+     "PHASE 2, STAGE 4 — the reality check. The warehouse spreadsheet is "
+     "normalised into a stock master, every stockable BOM line is matched to it "
+     "(exact key, then curated alias, then an advisory fuzzy suggestion that is "
+     "NEVER auto-applied), and what is missing becomes the shortfall Stage 5 "
+     "buys. A check RESERVES what it can, so two BOMs cannot be promised the "
+     "same stock. NOT the Phase-1 `material` module — see the guide."),
+    ("intelligence", ["Chatbot"],
+     "The factory chatbot. A question in plain English comes back as an answer "
+     "PLUS the structured data behind it, because the arithmetic is done by "
+     "tools against SQL and never by a language model. Runs with no model "
+     "configured and no API key at all; setting CHAT_MODEL swaps in a LangGraph "
+     "ReAct agent that routes and phrases, and still never computes."),
+    ("system", ["Health", "Root"],
+     "Liveness and readiness. `/health` answers without touching "
      "the database and `/ready` does not — that difference is the point of "
      "having both, so a load balancer can tell a slow database from a dead "
      "process. Neither is under /api/v1, and neither needs a token."),
@@ -115,8 +132,11 @@ TITLES: dict[str, str] = {
     "wage": "Wages & Payroll",
     "dashboard": "Manager Dashboards",
     "analytics": "Analytics",
-    "procurement": "Procurement (Phase 2)",
-    "system": "System, Health & Chatbot",
+    "procurement": "Procurement — Intake & Supplier POs (Phase 2)",
+    "bom": "BOM — Generation & Approval (Phase 2)",
+    "inventory": "Inventory — The Stock Check (Phase 2)",
+    "intelligence": "Intelligence — The Factory Chatbot",
+    "system": "System & Health",
 }
 
 # The drawer module is withdrawn; it is not a tag any more. It still gets a

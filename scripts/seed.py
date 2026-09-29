@@ -233,9 +233,15 @@ MOCK_LEATHER_DCM = Decimal("12.500")
 # seed a recipe that resolves NONE and issues nothing, which is exactly the
 # broken state this is here to avoid.
 #
-# `garment_size` is deliberately NULL on all four: these are the trims every
-# jacket takes whatever its size, and a sized line would only reach the SKUs of
-# that size (see StyleSpecService.applies_to_size).
+# EACH TRIM IS FANNED ONTO EVERY ORDERED SKU of the style. An accessory line
+# names the SKU it is for — a SKU being a colour and a size together — so a
+# style-wide accessory row is one the release gate can never satisfy and the
+# 20260929 migration deactivates on sight. These are the trims every jacket takes
+# whatever its size, which is exactly the `apply_to: "ALL_SKUS"` case; the seed
+# writes the rows the API's fan-out would write.
+#
+# `garment_size` stays NULL on all four, and for accessories it always is: the
+# SKU says the size.
 MOCK_ACCESSORIES = [
     dict(subtype="THREAD", article="POLY CORE THREAD", colour="BLACK",
          thickness="TEX 40", size=None, qty_per_piece=Decimal("120.000")),
@@ -479,35 +485,47 @@ def seed_material_specs(db: Session, order_numbers: list[str], *,
             made["leather"] += 1
 
         if with_accessories:
+            # THE SKUs THE TRIMS ARE FANNED ONTO. Only those actually ordered: a
+            # zero-quantity row is a colour/size nobody bought, and putting a line
+            # on it would hand the release gate a garment that will never be made.
+            style_skus = list(db.scalars(select(SKU).where(
+                SKU.style_id == style.id,
+                func.coalesce(SKU.qty_ordered, 0) > 0)).all())
+            if not style_skus:
+                print(f"  !! {style.name}: no ordered SKUs — trims skipped. "
+                      f"An accessory names the SKU it is for, so there is "
+                      f"nothing to attach one to until the breakdown is in.")
             for trim in MOCK_ACCESSORIES:
-                # Matched on the same identity the duplicate rule uses, so a
-                # re-run adds nothing — the seed is run repeatedly against a
-                # half-filled database and must not grow the recipe each time.
-                existing = db.scalar(select(StyleMaterialSpec).where(
-                    StyleMaterialSpec.style_id == style.id,
-                    StyleMaterialSpec.sku_id.is_(None),
-                    StyleMaterialSpec.category == MaterialCategory.ACCESSORY.value,
-                    StyleMaterialSpec.subtype == trim["subtype"],
-                    StyleMaterialSpec.article == trim["article"],
-                    StyleMaterialSpec.is_active.is_(True)))
-                if existing is not None:
-                    continue
-                db.add(StyleMaterialSpec(
-                    style_id=style.id, sku_id=None,
-                    category=MaterialCategory.ACCESSORY.value,
-                    subtype=trim["subtype"], article=trim["article"],
-                    colour=trim["colour"], thickness=trim["thickness"],
-                    size=trim["size"], garment_size=None,
-                    qty_per_piece=trim["qty_per_piece"],
-                    # DERIVED, never typed — buttons are pcs and thread is
-                    # mtrs whatever anyone writes here (StyleSpecService
-                    # discards a sent uom for exactly this reason).
-                    uom=uom_for(MaterialCategory.ACCESSORY.value,
-                                trim["subtype"]),
-                    note="MOCK trim seeded by scripts/seed.py — resolves to the "
-                         "lot scripts/seed_materials.py creates.",
-                    is_active=True))
-                made["accessory"] += 1
+                for sku in style_skus:
+                    # Matched on the same identity the duplicate rule uses, so a
+                    # re-run adds nothing — the seed is run repeatedly against a
+                    # half-filled database and must not grow the recipe each time.
+                    existing = db.scalar(select(StyleMaterialSpec).where(
+                        StyleMaterialSpec.style_id == style.id,
+                        StyleMaterialSpec.sku_id == sku.id,
+                        StyleMaterialSpec.category
+                        == MaterialCategory.ACCESSORY.value,
+                        StyleMaterialSpec.subtype == trim["subtype"],
+                        StyleMaterialSpec.article == trim["article"],
+                        StyleMaterialSpec.is_active.is_(True)))
+                    if existing is not None:
+                        continue
+                    db.add(StyleMaterialSpec(
+                        style_id=style.id, sku_id=sku.id,
+                        category=MaterialCategory.ACCESSORY.value,
+                        subtype=trim["subtype"], article=trim["article"],
+                        colour=trim["colour"], thickness=trim["thickness"],
+                        size=trim["size"], garment_size=None,
+                        qty_per_piece=trim["qty_per_piece"],
+                        # DERIVED, never typed — buttons are pcs and thread is
+                        # mtrs whatever anyone writes here (StyleSpecService
+                        # discards a sent uom for exactly this reason).
+                        uom=uom_for(MaterialCategory.ACCESSORY.value,
+                                    trim["subtype"]),
+                        note="MOCK trim seeded by scripts/seed.py — resolves to "
+                             "the lot scripts/seed_materials.py creates.",
+                        is_active=True))
+                    made["accessory"] += 1
 
         # The three-state accessory answer: NULL ("nobody asked") does not pass
         # the gate, so the seed answers it explicitly — and answers it TRUTHFULLY
@@ -749,6 +767,38 @@ def _count(db: Session, model) -> int:
     return int(db.scalar(select(func.count(model.id))) or 0)
 
 
+def _seed_accessory_types(engine) -> None:
+    """Insert the starting accessory kinds, skipping any already present.
+
+    Reads materials.accessory_catalog.SEED_TYPES so this and the migration cannot
+    drift — one list, two callers. Idempotent, so a re-run against a half-filled
+    database adds nothing.
+    """
+    import uuid as _uuid
+    from datetime import datetime, timezone
+    from sqlalchemy.orm import Session as _Session
+    from app.modules.barcode.models import AccessoryType
+    from app.modules.materials.accessory_catalog import SEED_TYPES
+
+    with _Session(engine) as db:
+        have = {c for (c,) in db.execute(select(AccessoryType.code)).all()}
+        now = datetime.now(timezone.utc)
+        added = 0
+        for t in SEED_TYPES:
+            if t["code"] in have:
+                continue
+            db.add(AccessoryType(
+                id=_uuid.uuid4(), code=t["code"], label=t["label"],
+                qty_field=t["qty_field"], qty_uom=t["qty_uom"],
+                requires=t["requires"], filters=t["filters"],
+                size_varies_by_sku=t["size_varies_by_sku"], is_active=True,
+                first_seen_at=now, created_by="seed",
+                note="Seeded with the accessory catalogue."))
+            added += 1
+        db.commit()
+    print(f"  accessory kinds: {added} seeded, {len(have)} already present")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("PURPOSE")[0].strip())
     ap.add_argument("--no-release", dest="release", action="store_false",
@@ -778,6 +828,14 @@ def main() -> None:
 
     if args.create_all:
         Base.metadata.create_all(engine)
+        # THE ACCESSORY KINDS COME WITH THE SCHEMA ON THIS PATH. Production gets
+        # them from 20260929_accessory_sku_scope, but `--create-all` skips alembic
+        # entirely, so a dev database built that way would start with an empty
+        # catalogue. The overlay falls back to the four built-ins, so nothing
+        # breaks — but EYELET, LACE_PIN and RIB_KNIT_TRIM would be unknown, and
+        # `size_varies_by_sku` (which tells the recipe screen a zip is per-SKU and
+        # a button is not) would read False for everything.
+        _seed_accessory_types(engine)
 
     db = SessionLocal()
     try:

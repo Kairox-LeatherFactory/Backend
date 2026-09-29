@@ -58,6 +58,14 @@ That is the sentence to hold on to. A row is not a style, not a batch and not a 
 
 > `present_cutters` is who is actually checked in today. The grid must not offer a name that cannot legally be logged, because production **refuses to log an absent worker** — a grid that let one be assigned would collect the work and then fail at the scan, after the leather was already handed out.
 
+### The grid is PAGED
+
+`limit` defaults to **50** (max 10,000) and `offset` to **0**, and the response carries `count` (rows on this page), `total` (rows in the whole style+colour), `limit` and `offset`.
+
+**Read `total`, not `count`, for "how many garments is this".** One row is one garment, so a 900-piece style is 900 rows, and a screen that counts what it was handed reports 50.
+
+> **What is paged and what is not.** `count`/`total` describe **`rows`** only. The header figures — every colour of the style, `uncut_pieces`, `present_cutters` — are facts about the whole style and stay whole on every page. So `uncut_pieces` being larger than `count` is correct and is not a paging bug.
+
 ## Step 2 — generate
 
 `POST /cutting/rows/generate` creates one DRAFT row per un-cut garment and allocates roughly ten hides to each, sized to the garment.
@@ -188,7 +196,17 @@ Rows and the grid carry `warnings[]` — short, **non-blocking** notes: short of
 
 ---
 
-# 7. Notes for backend developers
+# 7. Who can call what
+
+**One gate, the whole service: Cutting Manager, plus DM and MD as superusers.** Every route here — the grid, generate, the hide calls, assign, approve, reopen — sits behind the same three roles. There is no read/write split and no reader role.
+
+That is deliberate, and it is the one place in the app where a **read** is this tight. The grid is not a report: it names which cutter was handed which skins, and that is the input to his piece-rate wage. A lining or stitching manager has no reason to see it, and a wider read gate here is a wage sheet on an open screen.
+
+> **The Lining Manager is NOT on this list**, even though there is a lining cut. The lining path logs through `POST /production/log` with the lining cut screen; it has no grid, because lining is cut from rolls by the metre and there are no individual skins to allocate. If you find yourself wanting to add `LINING_MANAGER` here, what is actually being asked for is a lining grid, which does not exist.
+
+---
+
+# 8. Notes for backend developers
 
 - **Allocation is a state on the hide, not a list on the row.** `material_sheet.cutting_row_id` points from the hide to the row, and the hide's status moves to `ALLOCATED`. That makes "one hide on two garments" **unrepresentable** rather than merely forbidden — a list column could hold the same hide twice and send two cutters for one skin.
 - **`total_dcm` is derived**, never typed. Do not add a write path for it.
