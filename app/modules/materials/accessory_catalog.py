@@ -230,7 +230,21 @@ class AccessoryCatalog:
             note="Registered automatically when this material first arrived. "
                  "Review its fields and whether its size varies by SKU.")
         self.db.add(row)
-        self.invalidate()
+        # FLUSH, THEN PUBLISH. Sessions here are `autoflush=False`, so without this
+        # the very next `spec_for()` — which `create_lot` calls immediately — would
+        # reload from the database, MISS this pending row, fall back to the built-in
+        # MATERIAL_SPEC, find nothing for a kind nobody hardcoded, and 422. The
+        # failed request then rolled the registration back too, so receiving a
+        # genuinely new accessory was broken outright: the kind never registered and
+        # the lot was refused as "not an accessory kind".
+        await self.db.flush()
+        # SEEDED, NOT INVALIDATED. `_load()` ran a few lines above, so the cache is
+        # populated and adding this one entry keeps it correct with no second query.
+        # Invalidating would force that reload — which is what went wrong.
+        spec = self._as_spec(row)
+        if self._cache is None:
+            self._cache = {}
+        self._cache[code] = spec
         return {
             "code": code, "label": row.label, "qty_field": "count",
             "qty_uom": "pcs", "requires": required, "filters": filters,

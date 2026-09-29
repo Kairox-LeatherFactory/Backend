@@ -298,3 +298,42 @@ async def test_registering_a_built_in_kind_is_a_no_op(db):
     assert out["accessory_type_registered"] is None
     spec = await AccessoryCatalog(db).spec_for("ACCESSORY", "BUTTON")
     assert spec["qty_field"] == "count" and "size" in spec["required"]
+
+
+@pytest.mark.asyncio
+async def test_a_new_kind_registers_and_validates_in_ONE_call(db):
+    """THE SAME READ-BEFORE-FLUSH BUG, in the catalogue.
+
+    `register_nocommit` adds the kind without committing, then `create_lot` asks
+    `spec_for()` for it — which reloads from the database. With `autoflush=False`
+    that reload MISSES the pending row, falls back to the built-in MATERIAL_SPEC,
+    finds nothing for a kind nobody has hardcoded, and 422s. The failed request then
+    rolls back the registration too, so receiving a genuinely new accessory was
+    broken outright: the kind never registered and the lot was refused as "not an
+    accessory kind".
+
+    `no_autoflush` reproduces production. The existing
+    test_the_strict_lot_path_registers_too_then_validates passes either way, which
+    is exactly why it did not catch this.
+    """
+    with db.no_autoflush:
+        out = await MaterialService(db).create_lot(LotCreate(
+            category="ACCESSORY", subtype="GROMMET", article="GRM-8",
+            colour="BRASS", attributes={"size": "8", "count": 250}))
+
+    assert out["accessory_type_registered"]["code"] == "GROMMET"
+    assert out["uom"] == "pcs"
+    # …and the kind is really there for the next caller, not just in this response.
+    assert await AccessoryCatalog(db).spec_for("ACCESSORY", "GROMMET") is not None
+
+
+# `arrive` IS NOT AFFECTED, and a test here would pass for the wrong reason.
+#
+# It resolves the spec as `spec_for(...) or {}`, so a missed row degrades to the
+# built-in fallback rather than a 422. And an auto-registered kind's unit is `pcs`,
+# which is exactly what `uom_for` returns for any accessory — so the fallback and the
+# registered value COINCIDE and no assertion can tell them apart. The row is still
+# added and still lands at the scan's commit, so nothing is lost either.
+#
+# A test that cannot fail is noise, so there isn't one. The observable bug was
+# create_lot's, above.

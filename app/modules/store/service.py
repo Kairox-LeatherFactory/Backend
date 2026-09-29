@@ -201,8 +201,8 @@ class StoreService:
                 f"waits.")
 
     async def store_scan(self, *, piece_id, employee_id, part=None,
-                         lot_id=None, qty=None, substitution_reason=None,
-                         actor_user_id=None,
+                         lot_id=None, lot_ids=None, qty=None,
+                         substitution_reason=None, actor_user_id=None,
                          entered_by: str | None = None) -> dict:
         """Put one part of one garment into the store. ONE transaction.
 
@@ -224,11 +224,15 @@ class StoreService:
                 f"out of the store; nothing more can be scanned into it.")
 
         done = await self._completed_stages(piece.id)
+        # ONE LIST FROM HERE DOWN. A single `lot_barcode` is a one-element batch, so
+        # the scan-gun door and the batch door run the same code and cannot drift on
+        # what a packet means or which problems are fatal.
+        packets = list(lot_ids or ([lot_id] if lot_id is not None else []))
         # A PACKET LABEL CAN ONLY MEAN ONE THING, so scanning one is the same as
         # saying part=ACCESSORY. `inferred` stays False: the operator chose this by
         # scanning a third barcode, which is not the system guessing.
-        inferred = part is None and lot_id is None
-        if lot_id is not None:
+        inferred = part is None and not packets
+        if packets:
             chosen = StorePart.ACCESSORY
             if part is not None:
                 asked = str(getattr(part, "value", part)).strip().upper()
@@ -261,19 +265,21 @@ class StoreService:
                 raise HTTPException(
                     status.HTTP_422_UNPROCESSABLE_ENTITY,
                     f"Scan the accessory packet's own label. Accessories are "
-                    f"issued one packet at a time — the buttons, then the zip, "
-                    f"then the thread — because the label is what proves the right "
-                    f"size went into {piece.code}.")
+                    f"issued packet by packet — the buttons, then the zip, then "
+                    f"the thread — because the label is what proves the right size "
+                    f"went into {piece.code}. Send `lot_barcode` for one, or "
+                    f"`lot_barcodes` for several in a single call.")
         self._assert_ready_for_store(piece, chosen, done)
 
         now = datetime.now(timezone.utc)
         kit = None
         substitution = None
+        batch = None
         warnings: list[str] = []
 
         if chosen is StorePart.ACCESSORY:
-            kit, substitution = await self._issue_packet(
-                piece=piece, lot_id=lot_id, qty=qty, employee_id=employee_id,
+            kit, substitution, batch = await self._issue_accessories(
+                piece=piece, lot_ids=packets, qty=qty, employee_id=employee_id,
                 entered_by=entered_by, actor_user_id=actor_user_id,
                 reason=substitution_reason)
             piece.accessories_in = bool(kit["complete"])
@@ -385,8 +391,14 @@ class StoreService:
             "lining_reason": lining_reason, "kit": kit,
             # Set only when this scan SPENT a DM-approved wrong-size packet, so
             # the screen can say so out loud rather than looking like a clean
-            # issue. A refused substitution never reaches here — it is a 409.
+            # issue. On a SINGLE-packet scan a refused substitution never reaches
+            # here — it is a 409; in a batch it appears in accessory_batch.refused.
             "substitution": substitution,
+            # PER-PACKET OUTCOMES, null for a leather/lining scan so the existing
+            # response shape is untouched. `issued` vs `scanned` is what a screen
+            # shows when a tray was half good, and `still_owed` is what the garment
+            # is waiting for before it can leave the store.
+            "accessory_batch": batch,
             "next_action": self._next_action(piece, complete, needs_lining,
                                              kit_required),
             "warnings": warnings,
@@ -394,8 +406,23 @@ class StoreService:
 
     # ════════════════════════════════════════════════ the accessory packet
     async def _issue_packet(self, *, piece, lot_id, qty, employee_id,
-                            entered_by, actor_user_id, reason) -> tuple:
-        """Issue ONE accessory packet into one garment. Returns (kit, substitution).
+                            entered_by, actor_user_id, reason,
+                            collect: bool = False) -> tuple:
+        """Issue ONE accessory packet into one garment.
+
+        Returns `(substitution, record)` — `record` describing what happened to this
+        packet, so a batch can report per-packet outcomes.
+
+        `collect` DECIDES WHETHER A PROBLEM IS AN EXCEPTION OR A VALUE, and both
+        callers need it to be one or the other:
+
+          · a SINGLE-packet scan (`collect=False`) raises the 422/409 exactly as it
+            always has — that is the documented contract and what the floor's
+            one-beep-one-request screen reads.
+          · a BATCH (`collect=True`) cannot raise, because an exception would abort
+            the packets that were fine. One bad packet must never lose the good ones
+            scanned with it — the rule `send()` and the production log's per-piece
+            gates already follow.
 
         WHY ONE PACKET AND NOT THE WHOLE KIT. The blanket scan read the recipe and
         decremented every accessory line it named — four buttons, one zip, ten
@@ -418,20 +445,36 @@ class StoreService:
         from app.modules.materials import style_spec_service as spec_mod
         from app.modules.materials.style_spec_service import StyleSpecService
 
+        # ONE PLACE THAT DECIDES raise-or-report, so the two doors cannot drift on
+        # which problems they consider fatal.
+        def refuse(code: int, detail: str, reason_code: str,
+                   headers: dict | None = None, request_id: str | None = None):
+            if not collect:
+                raise HTTPException(code, detail, headers=headers)
+            return {"ok": False, "reason": reason_code, "detail": detail,
+                    "status_code": code, "lot_id": str(lot_id),
+                    "packet": _label[0], "substitution_request_id": request_id}
+
+        # A provisional label, so a refusal about the LOT ITSELF can still name it.
+        _label = [str(lot_id)]
+
         lot = await MaterialRepository(self.db).get_lot(lot_id)
         if lot is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND,
-                                "That accessory packet is not a known lot.")
+            return None, refuse(
+                status.HTTP_404_NOT_FOUND,
+                "That accessory packet is not a known lot.", "UNKNOWN_LOT")
+        _label[0] = self._lot_label(lot)
         if str(lot.category or "").upper() != "ACCESSORY":
-            raise HTTPException(
+            return None, refuse(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 f"{lot.article} is {lot.category}, not an accessory. Leather and "
-                f"lining are consumed at the cut, not issued in the store.")
+                f"lining are consumed at the cut, not issued in the store.",
+                "NOT_AN_ACCESSORY")
         if not lot.is_active:
-            raise HTTPException(
+            return None, refuse(
                 status.HTTP_409_CONFLICT,
                 f"Lot {lot.article} has been retired — its label should not be on "
-                f"a packet in use. Scan the current packet.")
+                f"a packet in use. Scan the current packet.", "RETIRED_LOT")
 
         specs = StyleSpecService(self.db)
         match = await specs.match_packet(piece=piece, lot=lot)
@@ -443,31 +486,33 @@ class StoreService:
             # none, or its lines are all scoped to another colourway or size. A
             # cheerful 201 here would have the operator believe they issued a kit
             # that does not exist.
-            raise HTTPException(status.HTTP_409_CONFLICT, match["no_kit_reason"])
+            return None, refuse(status.HTTP_409_CONFLICT,
+                                match["no_kit_reason"], "NO_KIT")
         if outcome == spec_mod.PACKET_NOT_IN_RECIPE:
-            raise HTTPException(
+            return None, refuse(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 f"{piece.code}'s recipe does not name {label}. Check the packet, "
                 f"or record it as an off-spec issue with POST /materials/issues if "
-                f"it genuinely went into this garment.")
+                f"it genuinely went into this garment.", "NOT_IN_RECIPE")
         if outcome == spec_mod.PACKET_NO_LINE_FOR_SIZE:
             # The release-gate coverage hole, showing up on the floor. A DM has to
             # fix the RECIPE; approving one packet would leave every other garment
             # of this size in the same state.
             expected = ", ".join(match["expected_sizes"]) or "other sizes"
-            raise HTTPException(
+            return None, refuse(
                 status.HTTP_409_CONFLICT,
                 f"{piece.code} is a {match['garment_size'] or 'no-size'} garment "
                 f"and this style's {label} lines are only for {expected} — there "
                 f"is no line for this size at all. The recipe needs a line for "
                 f"{match['garment_size'] or 'this size'} before any of these "
-                f"garments can be kitted.")
+                f"garments can be kitted.", "NO_LINE_FOR_SIZE")
         if outcome == spec_mod.PACKET_AMBIGUOUS:
-            raise HTTPException(
+            return None, refuse(
                 status.HTTP_409_CONFLICT,
                 f"{label} matches {len(match['candidates'])} lines of "
                 f"{piece.code}'s recipe, so this scan cannot tell which one it is "
-                f"issuing. Have the recipe's duplicate lines combined or scoped.")
+                f"issuing. Have the recipe's duplicate lines combined or scoped.",
+                "AMBIGUOUS")
 
         substitution = None
         approved_row = None
@@ -476,11 +521,16 @@ class StoreService:
             if row is not None and row.status == KitSubstitutionStatus.APPROVED.value:
                 approved_row = row
             else:
-                await self._raise_for_substitution(
+                held = await self._hold_for_substitution(
                     row=row, piece=piece, line=line, lot=lot, label=label,
                     garment_size=match["garment_size"], qty=qty,
                     employee_id=employee_id, entered_by=entered_by,
-                    actor_user_id=actor_user_id, reason=reason)
+                    actor_user_id=actor_user_id, reason=reason,
+                    commit=not collect)
+                return None, refuse(
+                    status.HTTP_409_CONFLICT, held["detail"], held["reason"],
+                    headers={"X-Kit-Substitution-Request": held["request_id"]},
+                    request_id=held["request_id"])
 
         request = {"spec_id": str(line.id), "material_lot_id": lot.id,
                    "substitution_approved": approved_row is not None}
@@ -490,30 +540,25 @@ class StoreService:
             piece=piece, requested_lines=[request],
             employee_id=employee_id, entered_by=entered_by)
 
-        # THE WHOLE CHECKLIST, NOT JUST THIS PACKET. A selective issue reports only
-        # the line it was asked about, which was the right shape when one scan did
-        # the whole kit and is the wrong shape now: the operator who just scanned
-        # the zip needs to be told the buttons are still owed, on this response,
-        # while they are still standing at the terminal. So the packet's own result
-        # rides on top of the full read-only view.
-        kit = await specs.kit_view(piece.id)
-        kit["issued_now"] = issued["issued_now"]
-        kit["already_issued"] = issued["already_issued"]
-        kit["stock_warnings"] = issued["stock_warnings"]
-        # ONE SHAPE FOR `unresolved`, WHICHEVER HALF IT CAME FROM. The read view
-        # calls the field `resolution` and the write path calls it `reason`, and
-        # merging the two lists raw would hand the screen rows that answer the same
-        # question under two different keys — so both keys are present on every row.
-        merged_unresolved = [self._normalise_unresolved(r)
-                             for r in kit["unresolved"]]
-        seen = {r.get("spec_id") for r in merged_unresolved}
-        for row in issued["unresolved"]:
-            row = self._normalise_unresolved(row)
-            if row.get("spec_id") not in seen:
-                merged_unresolved.append(row)
-        kit["unresolved"] = merged_unresolved
-        kit["packet"] = label
-        kit["packet_lot_id"] = str(lot.id)
+        # FLUSH, THEN READ. `issue_kit_nocommit` adds the ledger row WITHOUT
+        # committing — the scan owns its single commit — and sessions here are
+        # `autoflush=False` (core/database.py). So the SELECT inside `kit_view`
+        # could not see the row just written: it read 0 issued, `complete` came back
+        # False, `accessories_in` was persisted False, and a garment needing three
+        # accessories could never be completed however many times it was scanned.
+        # LINE_STITCHING is gated on SENDED, which needs that flag, so the floor hit
+        # a wall that looked like "it only lets me scan one accessory".
+        #
+        # IT IS ALSO WHAT MAKES A BATCH IDEMPOTENT. `issue_kit_nocommit` opens with
+        # `issued_by_piece`, its idempotency read; without a flush per packet, the
+        # same packet twice in one request would miss its own first row and spend
+        # the quantity twice.
+        #
+        # Nothing is committed here. The unique constraint on
+        # (piece_id, spec_line_id) now bites at flush rather than at commit, which
+        # is better: a true concurrent double-tap raises where this code can still
+        # reason about it, and still rolls the whole scan back.
+        await self.db.flush()
 
         if approved_row is not None:
             # CONSUMED ONLY WHEN THE LINE IS ACTUALLY SATISFIED. Marking it spent up
@@ -556,7 +601,95 @@ class StoreService:
                            "packet": label, "spec_line": str(line.id),
                            "by_employee": str(employee_id),
                            "substituted": approved_row is not None})
-        return kit, substitution
+        return substitution, {
+            "ok": True, "packet": label, "lot_id": str(lot.id),
+            "spec_line_id": str(line.id),
+            "qty": sum(r["qty"] for r in issued["issued_now"]) or 0.0,
+            "already_issued": bool(issued["already_issued"]),
+            "substituted": approved_row is not None,
+            # Carried so the batch can fold them into the one kit block it builds.
+            "_issued": issued,
+        }
+
+    async def _kit_block(self, piece, records: list) -> dict:
+        """The WHOLE checklist after a scan, with what this scan did folded in.
+
+        NOT PER PACKET. A selective issue reports only the line it was asked about,
+        which was the right shape when one scan did the whole kit and is the wrong
+        shape now: the operator who has just scanned the zip needs to be told the
+        buttons are still owed, on this response, while they are still standing at
+        the terminal. So the packets' own results ride on top of one read-only view
+        taken after all of them — which is also one query instead of N.
+        """
+        from app.modules.materials.style_spec_service import StyleSpecService
+        kit = await StyleSpecService(self.db).kit_view(piece.id)
+
+        issued_now, already, warnings, unresolved = [], [], [], []
+        for rec in records:
+            issued = rec.get("_issued")
+            if not issued:
+                continue
+            issued_now.extend(issued["issued_now"])
+            already.extend(issued["already_issued"])
+            warnings.extend(issued["stock_warnings"])
+            unresolved.extend(issued["unresolved"])
+        kit["issued_now"] = issued_now
+        kit["already_issued"] = already
+        kit["stock_warnings"] = warnings
+
+        # ONE SHAPE FOR `unresolved`, WHICHEVER HALF IT CAME FROM. The read view
+        # calls the field `resolution` and the write path calls it `reason`, and
+        # merging the two lists raw would hand the screen rows that answer the same
+        # question under two different keys — so both keys are present on every row.
+        merged = [self._normalise_unresolved(r) for r in kit["unresolved"]]
+        seen = {r.get("spec_id") for r in merged}
+        for row in unresolved:
+            row = self._normalise_unresolved(row)
+            if row.get("spec_id") not in seen:
+                merged.append(row)
+        kit["unresolved"] = merged
+
+        packets = [r["packet"] for r in records if r.get("ok")]
+        kit["packet"] = packets[0] if len(packets) == 1 else None
+        kit["packets"] = packets
+        return kit
+
+    async def _issue_accessories(self, *, piece, lot_ids, qty, employee_id,
+                                 entered_by, actor_user_id, reason) -> tuple:
+        """Issue one or more accessory packets. Returns (kit, substitution, batch).
+
+        ONE LIST, BOTH DOORS. A single `lot_barcode` arrives here as a one-element
+        list, so the scan-gun path and the batch path run the same code and cannot
+        drift on what a packet means or which problems are fatal.
+
+        PARTIAL ACCEPT IN A BATCH, AND ONLY IN A BATCH. `collect` is True only when
+        more than one packet was sent: a single scan keeps raising its 422/409, which
+        is the contract the one-beep-one-request screen reads. In a batch a refusal
+        becomes a row in `refused[]` and the good packets still issue, because one
+        bad packet must never lose the others scanned with it.
+        """
+        collect = len(lot_ids) > 1
+        records, substitution = [], None
+        for lot_id in lot_ids:
+            sub, record = await self._issue_packet(
+                piece=piece, lot_id=lot_id, qty=qty, employee_id=employee_id,
+                entered_by=entered_by, actor_user_id=actor_user_id,
+                reason=reason, collect=collect)
+            records.append(record)
+            substitution = sub or substitution
+
+        kit = await self._kit_block(piece, records)
+        issued = [r for r in records if r.get("ok")]
+        refused = [r for r in records if not r.get("ok")]
+        batch = {
+            "scanned": len(records), "issued": len(issued),
+            "per_packet": [{k: v for k, v in r.items() if k != "_issued"}
+                           for r in records],
+            "refused": [{k: v for k, v in r.items() if k != "_issued"}
+                        for r in refused],
+            "still_owed": sorted({r["article"] for r in kit["outstanding"]}),
+        }
+        return kit, substitution, batch
 
     @staticmethod
     def _normalise_unresolved(row: dict) -> dict:
@@ -590,38 +723,52 @@ class StoreService:
                 KitSubstitutionRequest.material_lot_id == lot_id)
             .limit(1))).scalar_one_or_none()
 
-    async def _raise_for_substitution(self, *, row, piece, line, lot, label,
-                                      garment_size, qty, employee_id,
-                                      entered_by, actor_user_id, reason) -> None:
-        """Refuse the scan, and leave behind something a DM can answer. ALWAYS RAISES.
+    async def _hold_for_substitution(self, *, row, piece, line, lot, label,
+                                     garment_size, qty, employee_id,
+                                     entered_by, actor_user_id, reason,
+                                     commit: bool) -> dict:
+        """Record the ask a DM can answer, and DESCRIBE the refusal. Never raises.
 
-        THE ROW IS COMMITTED BEFORE THE 409, and that pairing is the point. The
-        scan must fail — nothing may be decremented — but the ask has to survive
-        the failed request, or the operator is told "wait for approval" with
-        nothing anywhere for anyone to approve. Only this row is written, and the
-        garment has not been touched yet at this point in the scan, so the commit
-        cannot leak a half-done merge.
+        It returns `{reason, detail, request_id}` and the caller turns that into a
+        409 or a row in `refused[]`. It used to raise directly; returning lets a
+        batch refuse one packet without losing the others.
+
+        `commit` IS THE WHOLE SUBTLETY, and it differs by door:
+
+          · SINGLE packet (`commit=True`) — the caller is about to raise, and a raise
+            discards the transaction. So the ask is committed here or it is lost, and
+            the operator would be told "wait for approval" with nothing anywhere for
+            anyone to approve. Nothing else has been written at this point in the
+            scan, so the commit cannot leak a half-done merge.
+          · BATCH (`commit=False`) — nothing is raised, so the ask rides the scan's
+            single commit alongside the packets that succeeded. Committing here
+            instead would publish those packets' issues and the garment's
+            half-updated flags early.
         """
         from app.core.enums import KitSubstitutionStatus
         from app.modules.barcode.models import KitSubstitutionRequest
 
         if row is not None and row.status == KitSubstitutionStatus.REJECTED.value:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                f"{label} has already been REFUSED for {piece.code} by "
-                f"{row.decided_by or 'a manager'}"
-                f"{': ' + row.decision_note if row.decision_note else ''}. Fetch "
-                f"the {line.size or garment_size} packet.")
+            return {
+                "reason": "SUBSTITUTION_REFUSED", "request_id": str(row.id),
+                "detail": (
+                    f"{label} has already been REFUSED for {piece.code} by "
+                    f"{row.decided_by or 'a manager'}"
+                    f"{': ' + row.decision_note if row.decision_note else ''}. "
+                    f"Fetch the {line.size or garment_size} packet."),
+            }
         if row is not None and row.status == KitSubstitutionStatus.CONSUMED.value:
             # The approval was one garment's, and it has been spent IN FULL — the
             # status is only set once the line owes nothing, so this really is a
             # re-tap and not a half-finished issue. A re-tap is a no-op anyway, so
             # say which of the two this is rather than silently doing nothing.
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                f"{label} was already issued into {piece.code} in full, on an "
-                f"approved substitution. That approval covered this one garment; a "
-                f"further garment needs its own decision.")
+            return {
+                "reason": "SUBSTITUTION_SPENT", "request_id": str(row.id),
+                "detail": (
+                    f"{label} was already issued into {piece.code} in full, on an "
+                    f"approved substitution. That approval covered this one "
+                    f"garment; a further garment needs its own decision."),
+            }
 
         if row is None:
             row = KitSubstitutionRequest(
@@ -642,19 +789,25 @@ class StoreService:
                  "spec_line": str(line.id), "garment_size": garment_size,
                  "lot_size": lot.size, "spent": False,
                  "by_employee": str(employee_id), "reason": reason})
-            await self.db.commit()
-            await self.db.refresh(row)
+            if commit:
+                await self.db.commit()
+                await self.db.refresh(row)
+            else:
+                # FLUSHED, NOT COMMITTED, so `row.id` is real for the response and
+                # the ask lands with the scan's single commit.
+                await self.db.flush()
 
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            f"WRONG SIZE — NOT ISSUED. {piece.code} is a "
-            f"{garment_size or 'no-size'} garment and this packet is "
-            f"{lot.size or 'unsized'}"
-            f"{'; its recipe asks for ' + str(line.size) if line.size else ''}. "
-            f"Nothing has been taken from stock. Fetch the "
-            f"{line.size or garment_size} packet, or ask a DM/MD to approve this "
-            f"substitution (request {row.id}) and scan it again.",
-            headers={"X-Kit-Substitution-Request": str(row.id)})
+        return {
+            "reason": "WRONG_SIZE", "request_id": str(row.id),
+            "detail": (
+                f"WRONG SIZE — NOT ISSUED. {piece.code} is a "
+                f"{garment_size or 'no-size'} garment and this packet is "
+                f"{lot.size or 'unsized'}"
+                f"{'; its recipe asks for ' + str(line.size) if line.size else ''}. "
+                f"Nothing has been taken from stock. Fetch the "
+                f"{line.size or garment_size} packet, or ask a DM/MD to approve "
+                f"this substitution (request {row.id}) and scan it again."),
+        }
 
     # ══════════════════════════════════════════ the substitution decisions
     async def list_substitutions(self, *, status_filter: str | None = None,
