@@ -333,27 +333,46 @@ The four blockers:
 1. the spec is not confirmed;
 2. there is **no LEATHER line** — the dcm per piece is what the ledger and the costing are built on;
 3. the spec names **no accessories** and nobody declared that it needs none;
-4. **an accessory is on some of the ordered SKUs but not all of them.**
+4. **an ordered SKU has no accessory line at all.**
 
 That third one is a **three-state** field. An empty accessory list on its own is ambiguous: it could be a garment that genuinely takes none, or one whose buttons nobody has entered yet. So it needs an explicit `no_accessories: true`; `null` — nobody asked — does not pass.
 
-### 4 · SKU coverage
+**Three materials, three different rules**, and the asymmetry is deliberate:
 
-For every article the style declares on **any** SKU, every **ordered** SKU must have
-a line for it. A zip on the NAVY colourways and not the PINE ones blocks release,
-and the blocker names the missing ones.
+| Material | Rule at release |
+|---|---|
+| Leather | **required** per style |
+| Lining | **optional** per style — every lining field is optional on the cut path, so requiring it here would contradict the ledger rule downstream |
+| Accessories | **per SKU, and free to differ between them** |
 
-A SKU with no line for an article is not a garment with a shorter recipe — it is a
-garment the store believes needs nothing: `kit_required` comes back false,
-completeness collapses to leather-and-lining, and it ships without its zip.
+### 4 · Each SKU's accessories are its own
+
+**Two colourways of one style may take completely different accessories.** NAVY·L
+takes a horn button; PINE·M takes a metal shank and a zip; they share nothing —
+different kind, article, colour and size. That is the normal case on this floor, and
+nothing requires one SKU's recipe to resemble another's.
+
+So the only thing checked is that no ordered SKU is **empty**: every one must have at
+least one accessory line. `no_accessories: true` silences it, and it stays quiet when
+*no* SKU has any line — that is blocker 3's question, and answering it twice would
+print one sentence per colourway where one about the style is the whole truth.
+
+An empty SKU is worth blocking because it is not a garment with a shorter recipe — it
+is a garment the store believes needs nothing: `kit_required` comes back false,
+completeness collapses to leather-and-lining, and it ships with no accessories at all.
+**A shorter recipe is a choice; no recipe is a silence.**
 
 Only SKUs with `qty_ordered > 0` count, so a zero-quantity row left by an importer
 cannot raise a false blocker — and a gate that fires on the normal case is a gate
 people learn to ignore.
 
-> This replaced two earlier checks, one for size coverage and one for size
-> ambiguity. Both existed only to police style-wide accessory lines; neither
-> question can be asked of a line that names its SKU.
+> **This replaced a gate that had it backwards.** The previous check demanded every
+> ordered SKU carry every article any SKU declared — "the same button has to be for
+> all other SKU" — and blocked a real release for legitimately giving two colourways
+> different buttons. Its own predecessors, one for size coverage and one for size
+> ambiguity, existed only to police style-wide accessory lines; neither question can
+> be asked of a line that names its SKU. Three gates, each found the same way: it
+> fired on the normal case.
 
 ## The requirement view — the screen that should stop an order
 

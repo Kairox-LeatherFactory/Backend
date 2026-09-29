@@ -90,7 +90,7 @@ async def store_scan(
 
     return await StoreService(db).store_scan(
         piece_id=piece_id, employee_id=employee_id, part=body.part,
-        lot_ids=lot_ids, qty=body.qty,
+        lot_ids=lot_ids,
         substitution_reason=body.substitution_reason,
         # The LOGIN signs the audit row; the WORKER is employee_id above.
         actor_user_id=user.id, entered_by=user.name)

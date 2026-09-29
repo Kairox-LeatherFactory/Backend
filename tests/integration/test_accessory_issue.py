@@ -86,7 +86,7 @@ async def spec(db, order_tree, button_lot, zip_lot):
     return rows
 
 
-async def _packet(db, piece, lot_id, employee_id=None, qty=None):
+async def _packet(db, piece, lot_id, employee_id=None):
     """ONE accessory packet into one garment: worker, garment, packet label.
 
     THE THIRD SCAN IS THE PACKET, and it is the whole point. It used to be a
@@ -96,7 +96,7 @@ async def _packet(db, piece, lot_id, employee_id=None, qty=None):
     which is the only thing that can prove an L garment got the L buttons.
     """
     return await StoreService(db).store_scan(
-        piece_id=piece.id, lot_id=lot_id, qty=qty,
+        piece_id=piece.id, lot_id=lot_id,
         employee_id=employee_id, entered_by="TESTER")
 
 
