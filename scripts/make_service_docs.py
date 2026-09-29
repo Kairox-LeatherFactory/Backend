@@ -76,9 +76,11 @@ SOURCES: dict[str, list[str]] = {
     "wage": ["app/modules/wages"],
     "dashboard": ["app/modules/dashboard"],
     "analytics": ["app/modules/analytics"],
-    "procurement": ["app/modules/procurement", "app/modules/bom",
-                    "app/modules/inventory", "app/modules/supplier_po"],
-    "system": ["app/modules/intelligence", "app/main.py"],
+    "procurement": ["app/modules/procurement", "app/modules/supplier_po"],
+    "bom": ["app/modules/bom"],
+    "inventory": ["app/modules/inventory"],
+    "intelligence": ["app/modules/intelligence"],
+    "system": ["app/main.py"],
 }
 
 

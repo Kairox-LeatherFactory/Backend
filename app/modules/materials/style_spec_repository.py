@@ -10,8 +10,9 @@ Two tables, one repository (CLAUDE.md §15: repository = ALL db access):
 EVERY MULTI-PIECE READ IS BATCHED. These rows are read on the two hottest
 surfaces in the app — /barcode/resolve (every scan) and /production/log (up to
 40 pieces per scan) — so a per-piece query here is an N+1 on the floor's
-critical path. `lines_for_styles`, `issued_by_pieces` and `has_accessory_lines`
-all take a list and return a dict for exactly that reason.
+critical path. `lines_for_styles` and `issued_by_pieces` both take a list and
+return a dict for exactly that reason. (`has_accessory_lines` was a third; see the
+note further down for why it and `kit_required_sql` were retired rather than fixed.)
 ================================================================================
 """
 import uuid
@@ -67,7 +68,9 @@ class StyleSpecRepository:
                                   sku_id: uuid.UUID | None, category: str,
                                   subtype: str | None, article: str,
                                   colour: str | None, thickness: str | None,
-                                  size: str | None):
+                                  size: str | None,
+                                  garment_size: str | None = None,
+                                  active_only: bool = True):
         """The existing ACTIVE line with this exact identity, or None.
 
         THIS, NOT THE UNIQUE CONSTRAINT, IS THE DEDUPE. Four of the eight identity
@@ -78,19 +81,34 @@ class StyleSpecRepository:
 
         Same reasoning, same shape as MaterialRepository.find_duplicate_lot; if
         one of them ever grows a rule, the other needs it too.
+
+        `garment_size` IS PART OF THE IDENTITY, and leaving it out was a bug. The DB
+        constraint uq_style_material_spec_line includes it and so does
+        replace_spec's identity tuple — so without it "Thread for L" and "Thread for
+        M" were ONE duplicate to add_line and TWO rows to the whole-grid save, and
+        the two doors disagreed about whether the second line was allowed to exist.
+
+        `active_only=False` FINDS A DEACTIVATED ROW TOO, which the fan-out needs: a
+        line somebody removed still occupies the unique constraint, so re-adding it
+        has to revive that row rather than collide with one nothing can see.
         """
         stmt = select(StyleMaterialSpec).where(
-            StyleMaterialSpec.is_active.is_(True),
             StyleMaterialSpec.style_id == style_id,
             StyleMaterialSpec.category == (category or "").upper(),
             StyleMaterialSpec.article == article,
         )
+        if active_only:
+            stmt = stmt.where(StyleMaterialSpec.is_active.is_(True))
         for col, val in ((StyleMaterialSpec.sku_id, sku_id),
                          (StyleMaterialSpec.subtype, subtype),
                          (StyleMaterialSpec.colour, colour),
                          (StyleMaterialSpec.thickness, thickness),
-                         (StyleMaterialSpec.size, size)):
+                         (StyleMaterialSpec.size, size),
+                         (StyleMaterialSpec.garment_size, garment_size)):
             stmt = stmt.where(col.is_(None) if val is None else col == val)
+        # Prefer an ACTIVE row when both exist, so a revived duplicate never hides
+        # the live one.
+        stmt = stmt.order_by(StyleMaterialSpec.is_active.desc())
         return (await self.db.execute(stmt.limit(1))).scalar_one_or_none()
 
     def add_line_nocommit(self, **kw) -> StyleMaterialSpec:
@@ -98,38 +116,27 @@ class StyleSpecRepository:
         self.db.add(line)
         return line
 
-    async def has_accessory_lines(self, style_ids: list[uuid.UUID]) -> dict:
-        """{style_id: bool} — does this style declare any ACCESSORY at all?
-
-        The release gate asks it for a whole batch of styles, and the drawer
-        completeness predicate asks it for a whole page of drawers, so it is a
-        single grouped count rather than a per-style EXISTS.
-        """
-        if not style_ids:
-            return {}
-        rows = await self.db.execute(
-            select(StyleMaterialSpec.style_id, func.count())
-            .where(StyleMaterialSpec.style_id.in_(style_ids),
-                   StyleMaterialSpec.is_active.is_(True),
-                   StyleMaterialSpec.category == "ACCESSORY")
-            .group_by(StyleMaterialSpec.style_id))
-        found = {sid: int(n or 0) > 0 for sid, n in rows.all()}
-        return {sid: found.get(sid, False) for sid in style_ids}
-
-    @staticmethod
-    def kit_required_sql(style_id_col):
-        """Correlated EXISTS: does the style in `style_id_col` declare accessories?
-
-        The SQL half of the two-shape pattern core/lining_rules.py established —
-        a Python resolver for one object, a SQL expression for a page of them, side
-        by side so they cannot answer differently. Used by the drawer list, which
-        renders up to 2000 rows and must not run a Python resolver per row.
-        """
-        return (select(StyleMaterialSpec.id)
-                .where(StyleMaterialSpec.style_id == style_id_col,
-                       StyleMaterialSpec.is_active.is_(True),
-                       StyleMaterialSpec.category == "ACCESSORY")
-                .exists())
+    # ── RETIRED: the "two-shape pattern" for kit_required ────────────────────
+    # `has_accessory_lines(style_ids)` and `kit_required_sql(style_id_col)` used to
+    # live here as the SQL half of the pattern core/lining_rules.py established: a
+    # Python resolver for one object, a SQL expression for a page of them, side by
+    # side so they could not answer differently.
+    #
+    # THEY ALREADY ANSWERED DIFFERENTLY. Both asked "does this STYLE declare any
+    # accessory", while the Python half `kit_required_for_piece` asks "does this SKU
+    # declare any" — and with accessories now scoped per SKU the two diverge on every
+    # style whose colourways differ. A style-level EXISTS would report a kit owed on
+    # a garment that needs none, and none on one that does.
+    #
+    # AND NOTHING CALLED THEM. The drawer list they were written for is retired; the
+    # release gate computes `has_accessory_lines` inline from the lines it already
+    # holds. Their only callers were their own tests. A wrong answer that nothing
+    # asks for is worth deleting rather than fixing, and leaving them here is an
+    # invitation to write a page-sized read against the wrong scope.
+    #
+    # If a batched form is ever needed again, it must key on SKU:
+    #   EXISTS (SELECT 1 FROM style_material_spec
+    #            WHERE sku_id = <the piece's sku> AND is_active AND category='ACCESSORY')
 
     # ── the ledger ───────────────────────────────────────────────────────────
     def add_issue_nocommit(self, **kw) -> PieceMaterialIssue:

@@ -418,6 +418,27 @@
           "response": []
         },
         {
+          "name": "List Accessory Types",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/accessory-types",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "accessory-types"
+              ]
+            },
+            "description": "Every accessory kind this factory stocks, and what each one carries.\n\nTHIS LIST GROWS BY ITSELF. A kind is created the first time a packet of it is\nRECEIVED \u2014 see POST /materials/arrivals and POST /materials/lots, which register\nan unknown `subtype` rather than rejecting it and report it back as\n`accessory_type_registered`. There is no \"add an accessory kind\" form, because\nthe moment anybody actually knows about a new accessory is the moment one arrives.\n\n`size_varies_by_sku` is the field the recipe screen should read: false means one\nline covers every SKU of a style (a button), true means ask per SKU (a zip)."
+          },
+          "response": []
+        },
+        {
           "name": "List Arrivals",
           "request": {
             "method": "GET",
@@ -633,6 +654,48 @@
               ]
             },
             "description": "The fields to SHOW for a category: which to filter stock by, which are\nrequired to add a lot, and the quantity field + unit. Drives the Add-New form\nand the stock search boxes so the UI matches the material class exactly."
+          },
+          "response": []
+        },
+        {
+          "name": "Patch Accessory Type",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/materials/accessory-types/{{code}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "materials",
+                "accessory-types",
+                "{{code}}"
+              ],
+              "variable": [
+                {
+                  "key": "code",
+                  "value": ""
+                }
+              ]
+            },
+            "description": "Refine a kind \u2014 usually one that registered itself at the gate.\n\n`code` and `qty_field` are NOT patchable: every lot, recipe line and ledger row\nof this kind is keyed to the code, and `qty_field` names the attribute whose\nvalue was already added to `on_hand`. Changing either would re-point history\nwithout saying so.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"label\": \"\",\n  \"qty_uom\": \"\",\n  \"requires\": [\n    \"\"\n  ],\n  \"filters\": [\n    \"\"\n  ],\n  \"size_varies_by_sku\": false,\n  \"is_active\": false,\n  \"note\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": []
         },
@@ -1152,7 +1215,7 @@
             "description": "Add one line. 409 if this style already has that material.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"sku_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"category\": \"\",\n  \"subtype\": \"\",\n  \"article\": \"\",\n  \"colour\": \"\",\n  \"thickness\": \"\",\n  \"size\": \"\",\n  \"garment_size\": \"\",\n  \"qty_per_piece\": 0,\n  \"uom\": \"\",\n  \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"note\": \"\"\n}",
+              "raw": "{\n  \"sku_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"category\": \"\",\n  \"subtype\": \"\",\n  \"article\": \"\",\n  \"colour\": \"\",\n  \"thickness\": \"\",\n  \"size\": \"\",\n  \"garment_size\": \"\",\n  \"apply_to\": \"\",\n  \"sku_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ],\n  \"per_sku\": [\n    {}\n  ],\n  \"qty_per_piece\": 0,\n  \"uom\": \"\",\n  \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"note\": \"\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1377,7 +1440,7 @@
             "description": "Edit one line. Omitted fields keep their current value.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"sku_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"category\": \"\",\n  \"subtype\": \"\",\n  \"article\": \"\",\n  \"colour\": \"\",\n  \"thickness\": \"\",\n  \"size\": \"\",\n  \"qty_per_piece\": 0,\n  \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"note\": \"\"\n}",
+              "raw": "{\n  \"sku_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"category\": \"\",\n  \"subtype\": \"\",\n  \"article\": \"\",\n  \"colour\": \"\",\n  \"thickness\": \"\",\n  \"size\": \"\",\n  \"garment_size\": \"\",\n  \"qty_per_piece\": 0,\n  \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"note\": \"\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1419,7 +1482,7 @@
             "description": "Save the whole grid in one call. Idempotent \u2014 posting it twice is a no-op.\n\n409 once the style is RELEASED: its pieces carry printed barcodes and the\nrecipe is already being spent against them. Correct a released style on the\nfloor with POST /materials/issues instead.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"lines\": [\n    {\n      \"sku_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"category\": \"\",\n      \"subtype\": \"\",\n      \"article\": \"\",\n      \"colour\": \"\",\n      \"thickness\": \"\",\n      \"size\": \"\",\n      \"garment_size\": \"\",\n      \"qty_per_piece\": 0,\n      \"uom\": \"\",\n      \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"note\": \"\"\n    }\n  ]\n}",
+              "raw": "{\n  \"lines\": [\n    {\n      \"sku_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"category\": \"\",\n      \"subtype\": \"\",\n      \"article\": \"\",\n      \"colour\": \"\",\n      \"thickness\": \"\",\n      \"size\": \"\",\n      \"garment_size\": \"\",\n      \"apply_to\": \"\",\n      \"sku_ids\": [\n        \"00000000-0000-0000-0000-000000000000\"\n      ],\n      \"per_sku\": [\n        {}\n      ],\n      \"qty_per_piece\": 0,\n      \"uom\": \"\",\n      \"material_lot_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"note\": \"\"\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"

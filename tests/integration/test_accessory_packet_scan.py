@@ -444,145 +444,94 @@ async def test_a_packet_scan_is_never_read_as_a_cut_part(
 
 # ══════════════════════════════ 5 · the release gate, on real ordered sizes
 @pytest.mark.asyncio
-async def test_a_sized_accessory_missing_an_ordered_size_blocks_release(
+async def test_an_accessory_missing_from_some_skus_blocks_release(
         db, order_tree):
     """THE SAME FAILURE, CAUGHT A DAY EARLIER — at the last moment anyone can be
-    asked. Zip lines for M and L, an order that also runs S: the S garments get
+    asked. A zip on the M colourway and not the L one: those garments get
     kit_required=False and ship with no zip, and nothing else in the system would
-    ever have said so."""
+    ever have said so.
+
+    THIS REPLACED TWO CHECKS. `accessory_size_gaps` asked whether a size-scoped
+    article covered every ordered SIZE and `accessory_size_ambiguities` asked
+    whether several unscoped material sizes had been left to guess between. Both
+    existed only to police style-wide accessory lines. An accessory names its SKU
+    now, so the question is simply "is every ordered garment covered", which is
+    stronger and has nothing left to get wrong.
+    """
     from app.modules.clients.models import SKU
     style = order_tree["style"]
-    for size in ("S", "L"):
-        db.add(SKU(style_id=style.id, color_code="PINE", color_name="PINE GREEN",
-                   size=size, qty_ordered=2, code=f"JP-CLERMONT-PINE-{size}"))
-    for size in ("M", "L"):
-        db.add(StyleMaterialSpec(
-            style_id=style.id, category="ACCESSORY", subtype="ZIP",
-            article="ZIP-N", colour="BLACK", size=size, garment_size=size,
-            qty_per_piece=1, uom="pcs"))
+    large = SKU(style_id=style.id, color_code="PINE", color_name="PINE GREEN",
+                size="L", qty_ordered=2, code="JP-CLERMONT-PINE-L")
+    db.add(large)
+    await db.flush()
+    # The zip is on the M SKU only.
+    db.add(StyleMaterialSpec(
+        style_id=style.id, sku_id=order_tree["sku"].id, category="ACCESSORY",
+        subtype="ZIP", article="ZIP-N", colour="BLACK", size="60",
+        qty_per_piece=1, uom="pcs"))
     await db.commit()
 
     blockers = (await StyleSpecService(db).blockers_for_styles(
         [style.id]))[style.id]
-    sized = [b for b in blockers if "per garment size" in b]
-    assert len(sized) == 1
-    assert "ZIP-N (ZIP)" in sized[0]
-    assert "S" in sized[0]
+    coverage = [b for b in blockers if "but not on" in b]
+    assert len(coverage) == 1
+    assert "ZIP-N (ZIP)" in coverage[0]
+    assert "PINE GREEN · L" in coverage[0]
+    assert "ALL_SKUS" in coverage[0]
 
 
-@pytest.mark.asyncio
-async def test_one_unscoped_line_covers_every_ordered_size(db, order_tree):
-    """A generic 18L button is one row, and must stay one row — a gate that fires
-    on the normal case is a gate people learn to ignore."""
+async def test_an_accessory_on_every_ordered_sku_does_not_block(db, order_tree):
+    """A gate that fires on the normal case is a gate people learn to ignore."""
+    from app.modules.clients.models import SKU
+    style = order_tree["style"]
+    large = SKU(style_id=style.id, color_code="PINE", color_name="PINE GREEN",
+                size="L", qty_ordered=2, code="JP-CLERMONT-PINE-L")
+    db.add(large)
+    await db.flush()
+    for sku_id in (order_tree["sku"].id, large.id):
+        db.add(StyleMaterialSpec(
+            style_id=style.id, sku_id=sku_id, category="ACCESSORY",
+            subtype="BUTTON", article="BTN-18L", colour="BLACK", size="18L",
+            qty_per_piece=4, uom="pcs"))
+    await db.commit()
+
+    blockers = (await StyleSpecService(db).blockers_for_styles(
+        [style.id]))[style.id]
+    assert [b for b in blockers if "but not on" in b] == []
+
+
+async def test_a_sku_nobody_ordered_is_not_a_gap(db, order_tree):
+    """An importer can leave a zero-quantity row for a colour/size the client did
+    not buy. Blocking a release over a garment that will never be made is a false
+    blocker, and those teach people the gate is noise."""
     from app.modules.clients.models import SKU
     style = order_tree["style"]
     db.add(SKU(style_id=style.id, color_code="PINE", color_name="PINE GREEN",
-               size="S", qty_ordered=2, code="JP-CLERMONT-PINE-S"))
+               size="XXL", qty_ordered=0, code="JP-CLERMONT-PINE-XXL"))
     db.add(StyleMaterialSpec(
-        style_id=style.id, category="ACCESSORY", subtype="BUTTON",
-        article="BTN-18L", colour="BLACK", size="18L", garment_size=None,
+        style_id=style.id, sku_id=order_tree["sku"].id, category="ACCESSORY",
+        subtype="BUTTON", article="BTN-18L", colour="BLACK", size="18L",
         qty_per_piece=4, uom="pcs"))
     await db.commit()
 
     blockers = (await StyleSpecService(db).blockers_for_styles(
         [style.id]))[style.id]
-    assert [b for b in blockers if "per garment size" in b] == []
+    assert [b for b in blockers if "but not on" in b] == []
 
 
-@pytest.mark.asyncio
-async def test_several_unscoped_sizes_of_one_article_block_release_as_ambiguous(
-        db, order_tree):
-    """THE HOLE THE FIX FOR THE OTHER HOLE OPENED.
-
-    garment_size is no longer inferred from a numeric material size, because that
-    inference scoped a 60cm zip to 4XL jackets. But the inference was also the only
-    thing stopping ZIP 48 / 50 / 52 — plainly three garment sizes — from becoming
-    three unscoped lines that all land on every jacket. '50' cannot be told from
-    the token, so the DM is asked instead of guessed at.
-    """
-    style = order_tree["style"]
-    for size in ("48", "50", "52"):
-        db.add(StyleMaterialSpec(
-            style_id=style.id, category="ACCESSORY", subtype="ZIP",
-            article="ZIP-N", colour="BLACK", size=size, garment_size=None,
-            qty_per_piece=1, uom="pcs"))
-    await db.commit()
-
-    blockers = (await StyleSpecService(db).blockers_for_styles(
-        [style.id]))[style.id]
-    ambiguous = [b for b in blockers if "none of them says" in b]
-    assert len(ambiguous) == 1
-    assert "48, 50, 52" in ambiguous[0]
-
-
-@pytest.mark.asyncio
-async def test_a_per_colourway_override_covers_its_own_sku_s_size(
-        db, order_tree):
-    """A DM who covered the sizes through per-colourway overrides must not be told
-    they are uncovered. A false blocker on a release teaches people the gate is
-    noise, which is worse than no gate."""
+async def test_a_leather_line_is_not_judged_by_accessory_coverage(db, order_tree):
+    """Leather and lining can still be style-wide, so "every SKU must have one" is
+    not a question that can be asked of them."""
     from app.modules.clients.models import SKU
     style = order_tree["style"]
-    small = SKU(style_id=style.id, color_code="NAVY", color_name="NAVY",
-                size="S", qty_ordered=2, code="JP-CLERMONT-NAVY-S")
-    db.add(small)
-    await db.flush()
+    db.add(SKU(style_id=style.id, color_code="NAVY", color_name="NAVY",
+               size="S", qty_ordered=2, code="JP-CLERMONT-NAVY-S"))
     db.add(StyleMaterialSpec(
-        style_id=style.id, category="ACCESSORY", subtype="ZIP",
-        article="ZIP-N", colour="BLACK", size="M", garment_size="M",
-        qty_per_piece=1, uom="pcs"))
-    # Scoped to the S colourway and saying nothing about garment size: being that
-    # SKU's line already means it is for that SKU's size.
-    db.add(StyleMaterialSpec(
-        style_id=style.id, sku_id=small.id, category="ACCESSORY", subtype="ZIP",
-        article="ZIP-N", colour="NAVY", size="S", garment_size=None,
-        qty_per_piece=1, uom="pcs"))
+        style_id=style.id, sku_id=order_tree["sku"].id, category="LEATHER",
+        article="SUEDE-A32", colour="PINE", thickness="1.2mm",
+        qty_per_piece=12.5, uom="dcm"))
     await db.commit()
 
     blockers = (await StyleSpecService(db).blockers_for_styles(
         [style.id]))[style.id]
-    assert [b for b in blockers if "per garment size" in b] == []
-
-
-@pytest.mark.asyncio
-async def test_a_part_issue_under_an_approval_leaves_it_open_for_the_rest(
-        db, pieces, sized_buttons, cutter, dm):
-    """THE CORNER THAT MARKING IT SPENT UP FRONT GOT WRONG.
-
-    Two of the four buttons go in. If the approval were consumed there, the other
-    two could never be issued from the same packet — and the CONSUMED branch would
-    tell the operator nothing was owed, which is flatly untrue. The approval covers
-    "this packet into this garment", and a part-issue has not finished that.
-    """
-    from fastapi import HTTPException
-    piece = pieces[0]
-    with pytest.raises(HTTPException):
-        await StoreService(db).store_scan(
-            piece_id=piece.id, lot_id=sized_buttons["L"].id,
-            employee_id=cutter[0].id, entered_by="STORE")
-    request = (await _requests(db, piece.id))[0]
-    await StoreService(db).decide_substitution(
-        request.id, approve=True, actor_user_id=dm.id, actor_name="DM")
-
-    part = await StoreService(db).store_scan(
-        piece_id=piece.id, lot_id=sized_buttons["L"].id, qty=2,
-        employee_id=cutter[0].id, entered_by="STORE")
-
-    assert part["kit"]["status"] == KitStatus.PARTIAL.value
-    await db.refresh(request)
-    assert request.status == KitSubstitutionStatus.APPROVED.value, (
-        "two buttons are still owed on the line")
-    assert "still owed" in part["substitution"]["message"]
-    await db.refresh(piece)
-    assert piece.accessories_in is False
-
-    # The rest goes in under the SAME decision, and now it is spent.
-    rest = await StoreService(db).store_scan(
-        piece_id=piece.id, lot_id=sized_buttons["L"].id,
-        employee_id=cutter[0].id, entered_by="STORE")
-    assert rest["kit"]["status"] == KitStatus.ISSUED.value
-    assert await _on_hand(db, sized_buttons["L"].id) == pytest.approx(496)
-    await db.refresh(request)
-    assert request.status == KitSubstitutionStatus.CONSUMED.value
-    await db.refresh(piece)
-    assert piece.accessories_in is True
+    assert [b for b in blockers if "but not on" in b] == []

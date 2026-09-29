@@ -1,20 +1,19 @@
 # 1. What this service is
 
-Three small things that do not belong to any one module:
+Two small things that do not belong to any one module, plus how the whole application is put together.
 
 | Part | Endpoints | Needs a token? |
 |---|---|---|
 | **Health** | `GET /health`, `GET /ready` | **No** |
 | **Root** | `GET /` | **No** |
-| **Chatbot** | `POST /api/v1/chat`, `POST /api/v1/chat/stream` | Yes |
 
-> Note the paths. `/health`, `/ready` and `/` are **not** under `/api/v1`. The chat routes are.
+> Note the paths. `/health`, `/ready` and `/` are **not** under `/api/v1`, and none of them needs a token.
 
 | Part | File |
 |---|---|
 | App assembly, health, root | `app/main.py` |
-| Chatbot routes | `app/modules/intelligence/router.py` |
-| Chatbot logic | `app/modules/intelligence/service.py`, `agent.py`, `langgraph_agent.py` |
+
+> **The chatbot moved out of this document.** `POST /api/v1/chat` and `POST /api/v1/chat/stream` are their own service now — see `INTELLIGENCE_SYSTEM_GUIDE.docx` and `INTELLIGENCE_API_REFERENCE.docx`.
 
 ---
 
@@ -78,51 +77,7 @@ It is reversible: `DOCS_ENABLED=false` on any single deploy turns them dark agai
 
 ---
 
-# 5. The chatbot
-
-`POST /api/v1/chat` — any logged-in user.
-
-```json
-{ "question": "how many pieces are in the store?", "use_llm": false }
-```
-
-```json
-{ "answer": "152 pieces are in the store.",
-  "tool": "store_summary",
-  "data": { "in_store": 152 } }
-```
-
-| Field | Meaning |
-|---|---|
-| `answer` | the sentence to show |
-| `tool` | which internal tool produced it |
-| `data` | the structured result behind the sentence — render a table from this rather than parsing `answer` |
-
-## `use_llm`
-
-| Value | Behaviour |
-|---|---|
-| `false` (default) | a **deterministic router**: the question is matched to a tool and the tool queries the database. Exact answers, no model needed. |
-| `true` | a LangGraph ReAct agent, **if `CHAT_MODEL` is configured**. If it is not, it falls back to the deterministic router — so the endpoint still works with zero setup. |
-
-## `POST /api/v1/chat/stream`
-
-The same answer, delivered as **Server-Sent Events** for a live-typing effect.
-
-```
-data: {"delta": "152 "}
-data: {"delta": "pieces "}
-...
-data: {"done": true, "tool": "store_summary", "data": {"in_store": 152}}
-```
-
-Read it with `EventSource` or a streaming fetch. Append every `delta`; the line with `done: true` carries the same `tool` and `data` the non-streaming call returns.
-
-> Today the backend computes the whole answer first and then chunks it. When a real LLM is wired in, the chunker is swapped for the model's native token stream — **the endpoint shape and the frontend do not change.**
-
----
-
-# 6. How the application is assembled
+# 5. How the application is assembled
 
 | Fact | Why it matters |
 |---|---|
@@ -162,7 +117,7 @@ Both can be switched off with their settings flags.
 
 ---
 
-# 7. Notes for backend developers
+# 6. Notes for backend developers
 
 - **Tables are not created automatically.** `create_all` is deliberately commented out. On a new database run `alembic upgrade head` **before** the first app start.
 - **`config_store` warms inside `lifespan`, not at import time.** Importing `app.main` must not require a live database — tooling (OpenAPI export, test collection, linters) only imports the module. A warm-up failure is logged and non-fatal.

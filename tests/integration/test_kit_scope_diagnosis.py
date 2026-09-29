@@ -111,8 +111,17 @@ async def test_the_same_line_made_style_wide_issues_normally(db, two_colourways,
 
 
 # ══════════════════════════ 2 · the size case — an L zip is not an S zip
-async def test_a_line_for_another_garment_size_says_so(db, two_colourways,
-                                                       cutter):
+async def test_a_LEGACY_line_scoped_by_garment_size_says_so(db, two_colourways,
+                                                            cutter):
+    """A ROW FROM BEFORE ACCESSORIES WERE SCOPED PER SKU.
+
+    This shape cannot be written any more — `_clean_line` refuses a style-wide
+    accessory and refuses `garment_size` on one — so the row is built directly, the
+    way the database still holds them until the migration deactivates them. The
+    diagnosis must still name what it found and say what to do, because "the recipe
+    shows a zip and the scan says there is nothing to issue" is exactly the
+    confusion this whole message exists to end.
+    """
     t = two_colourways                       # the piece is a size S
     await _thread_lot(db)
     db.add(StyleMaterialSpec(
@@ -127,7 +136,8 @@ async def test_a_line_for_another_garment_size_says_so(db, two_colourways,
             piece=t["piece"], drawer=None, employee_id=cutter[0].id)
     detail = str(exc.value.detail)
     assert "garment size(s) L" in detail
-    assert "an L zip is not an S zip" in detail
+    assert "before accessories were scoped per SKU" in detail
+    assert "ALL_SKUS" in detail
 
 
 # ══════════════════════════ 3 · a genuinely bare style keeps the old message

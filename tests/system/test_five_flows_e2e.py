@@ -419,40 +419,47 @@ async def test_flow5_sized_accessories_the_kit_and_the_money(
 
     # order_tree's style is RELEASED, so the LEATHER line is frozen — and must
     # be: it is what the garments were cut and costed against. ACCESSORIES are
-    # correctable after release (fix #12), which is the path used here.
-    # `garment_size` is SAID, not inferred. The inference read any number from 30
-    # to 70 as a garment size, so a 60cm zip was scoped to 4XL jackets and every
-    # other size got no zip line — which is not a short kit, it is no kit.
-    for size in ("S", "M", "L"):
-        _ok(await api_client.post(
-            f"{API}/styles/{style.id}/material-spec/lines",
-            json={"category": "ACCESSORY", "subtype": "ZIP", "article": "ZIP-N",
-                  "colour": "PINE GREEN", "size": size,
-                  "garment_size": size, "qty_per_piece": 1}),
-            200, 201)
+    # correctable after release (fix #12), which is the path used here, and it is
+    # the reason the fan-out lives on the add-line call rather than the whole-grid
+    # PUT: the wrong button is discovered when somebody goes to fetch it.
+    #
+    # ONE CALL, ONE ROW PER SKU. A zip is cut to the garment's length, so its size
+    # follows the SKU — the `per_sku` door. `garment_size` is not sent and would be
+    # refused: a SKU is a colour and a size together, so naming one has already said
+    # which garments this zip is for.
+    fan = _ok(await api_client.post(
+        f"{API}/styles/{style.id}/material-spec/lines",
+        json={"category": "ACCESSORY", "subtype": "ZIP", "article": "ZIP-N",
+              "colour": "PINE GREEN", "qty_per_piece": 1,
+              "per_sku": [{"sku_id": str(skus[sz].id), "size": sz}
+                          for sz in ("S", "M", "L")]}),
+        200, 201)
+    assert fan["created"] == 3
 
     lines = _ok(await api_client.get(f"{API}/styles/{style.id}/material-spec"))
     zips = [l for l in lines["lines"] if l["article"] == "ZIP-N"]
-    assert len(zips) == 3, "three sizes are three lines, not one overwritten"
-    assert {z["garment_size"] for z in zips} == {"S", "M", "L"}, zips
+    assert len(zips) == 3, "three SKUs are three lines, not one overwritten"
+    assert {z["size"] for z in zips} == {"S", "M", "L"}, zips
+    assert all(z["scope"] == "SKU" for z in zips)
+    assert all(z["garment_size"] is None for z in zips)
 
     # ── the requirement must not order three zips per garment ───────────────
-    # `requirement` is a STYLE-WIDE purchase report, so it lists all three lines
-    # — that is correct. What must NOT happen is each sized line being multiplied
-    # by the whole style: a purchase is raised from this number, so the error
-    # would have been bought.
+    # A purchase is raised from this number, so the error would have been bought.
+    # Each zip size is its own MATERIAL — a 55cm zip cannot be swapped for a 65 —
+    # so they stay three purchasable groups rather than being summed into one.
     req = _ok(await api_client.get(
         f"{API}/styles/{style.id}/material-spec/requirement"))
     zip_lines = [l for l in req["lines"] if l["article"] == "ZIP-N"]
     assert len(zip_lines) == 3
+    assert all(l["scope"] == "ACCESSORY_GROUP" for l in zip_lines)
     # A requirement is a PURCHASE report, so it is measured in garments ORDERED
     # (SKU.qty_ordered), not in pieces minted so far.
     ordered = {sz: skus[sz].qty_ordered for sz in skus}
-    for line in zip_lines:
-        want = ordered[line["garment_size"]]
-        assert line["pieces"] == want, (
-            f"the {line['garment_size']} zip line is costed for "
-            f"{line['pieces']} garments, not {want}")
+    by_size = {l["size"]: l for l in zip_lines}
+    for size, want in ordered.items():
+        assert by_size[size]["pieces"] == want, (
+            f"the {size} zip is costed for {by_size[size]['pieces']} garments, "
+            f"not {want}")
     assert sum(l["pieces"] for l in zip_lines) == sum(ordered.values()), (
         "one zip per garment in total, not one per garment per size")
 

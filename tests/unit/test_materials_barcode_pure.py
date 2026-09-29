@@ -29,6 +29,8 @@ from decimal import Decimal
 
 import pytest
 
+from app.core.enums import resolve_spec
+
 from app.modules.barcode.repository import (
     SHORT_CODE_PREFIX, _B30, _norm, decode_short, encode_short,
 )
@@ -265,33 +267,41 @@ class TestFilterFields:
     def test_every_category_reports_its_own_quantity_field_and_unit(
             self, category, subtype, qty_field, uom):
         """The CLAUDE.md §5 table, asserted. The quantity is read from the
-        category's own field — never a generic 'qty'."""
-        spec = MaterialService.filter_fields(category, subtype)
-        assert spec["quantity_field"] == qty_field
-        assert spec["uom"] == uom
+        category's own field — never a generic 'qty'.
+
+        ASSERTED ON `resolve_spec`, NOT THROUGH `MaterialService.filter_fields`.
+        That wrapper is now async and catalogue-backed — an accessory KIND is a row
+        in accessory_type, so rendering its form needs a database. The property this
+        file exists to protect is the pure built-in table underneath, and asserting
+        it through a wrapper that has grown a dependency is how a unit test quietly
+        becomes an integration test. The wrapper's own behaviour is covered in
+        tests/integration/test_accessory_catalogue.py.
+        """
+        spec = resolve_spec(category, subtype)
+        assert spec["qty_field"] == qty_field
+        assert spec["qty_uom"] == uom
 
     def test_leather_and_thread_filter_by_thickness_buttons_by_size(self):
-        assert "thickness" in MaterialService.filter_fields("LEATHER", None)["filters"]
-        assert "thickness" in MaterialService.filter_fields("ACCESSORY", "THREAD")["filters"]
-        assert "size" in MaterialService.filter_fields("ACCESSORY", "BUTTON")["filters"]
+        assert "thickness" in resolve_spec("LEATHER", None)["filters"]
+        assert "thickness" in resolve_spec("ACCESSORY", "THREAD")["filters"]
+        assert "size" in resolve_spec("ACCESSORY", "BUTTON")["filters"]
 
     def test_ribs_and_knit_filter_by_article_and_colour_only(self):
         for subtype in ("RIBS", "KNIT"):
-            assert MaterialService.filter_fields("LINING", subtype)["filters"] \
+            assert resolve_spec("LINING", subtype)["filters"] \
                 == ["article", "colour"]
 
-    def test_an_accessory_with_no_subtype_falls_back_to_the_safe_pair(self):
-        """resolve_spec returns None there — there is no generic accessory
-        quantity — so the form must still render something usable."""
-        spec = MaterialService.filter_fields("ACCESSORY", None)
-        assert spec["filters"] == ["article", "colour"]
-        assert spec["quantity_field"] is None and spec["uom"] is None
+    def test_an_accessory_with_no_subtype_has_no_built_in_spec(self):
+        """There is no generic accessory quantity, so the built-in table has no row
+        for a subtype-less accessory. `filter_fields` is what turns that None into a
+        form the screen can still render — see the integration test."""
+        assert resolve_spec("ACCESSORY", None) is None
 
-    def test_the_category_is_echoed_upper_cased(self):
-        assert MaterialService.filter_fields("leather", None)["category"] == "LEATHER"
+    def test_the_category_is_matched_case_insensitively(self):
+        assert resolve_spec("leather", None) is resolve_spec("LEATHER", None)
 
-    def test_an_empty_category_echoes_none_rather_than_an_empty_string(self):
-        assert MaterialService.filter_fields("", None)["category"] is None
+    def test_an_empty_category_has_no_spec(self):
+        assert resolve_spec("", None) is None
 
 
 # ══════════════════════════════════════════════ which code to scan next
@@ -404,12 +414,34 @@ class TestReadsAsGarmentSize:
 
 # ══════════════════════════════════════════════════ does a line apply?
 def _line(**kw):
+    """A stand-in for one StyleMaterialSpec row.
+
+    `thickness` IS HERE BECAUSE THE REAL MODEL ALWAYS HAS IT. It was missing, and
+    the fake only got away with it while nothing read the column — the moment the
+    accessory merge key started distinguishing materials by their full identity,
+    every test using this blew up with an AttributeError that said nothing about
+    what had actually changed. A fake that is missing a column the model guarantees
+    is a fake that can only mislead.
+    """
     base = {"id": uuid.uuid4(), "sku_id": None, "category": "ACCESSORY",
             "subtype": "BUTTON", "article": "BTN-4H", "colour": "BLACK",
-            "size": None, "garment_size": None, "qty_per_piece": Decimal("4"),
-            "uom": "pcs"}
+            "thickness": None, "size": None, "garment_size": None,
+            "qty_per_piece": Decimal("4"), "uom": "pcs"}
     base.update(kw)
     return types.SimpleNamespace(**base)
+
+
+def _wide(**kw):
+    """A LINING line — the kind that can still be style-wide.
+
+    Accessories name their SKU now, so the style-wide/override merge these tests
+    pin is leather and lining's behaviour. Asserting it through an accessory would
+    be asserting a shape the write path refuses to create.
+    """
+    base = {"category": "LINING", "subtype": "KNIT", "article": "KNIT-1",
+            "colour": "BLACK", "thickness": "0.4mm", "uom": "pcs"}
+    base.update(kw)
+    return _line(**base)
 
 
 class TestAppliesToSize:
@@ -436,23 +468,31 @@ class TestAppliesToSize:
 
 # ══════════════════════════════════════════════════════ the recipe merge
 class TestMergeLines:
+    """THE STYLE-WIDE / OVERRIDE MERGE, which is leather and lining's now.
+
+    An accessory line names the SKU it is for, so there is no style-wide accessory
+    to override and none of the precedence below applies to one. What accessories
+    need from this function is further down: that two materials which differ only
+    by colour do not collapse into one.
+    """
+
     def test_a_style_wide_line_reaches_every_colourway(self):
-        line = _line()
+        line = _wide()
         assert StyleSpecService.merge_lines([line], uuid.uuid4(), "M") == [line]
 
     def test_a_sku_line_replaces_the_style_line_with_the_same_key(self):
         sku = uuid.uuid4()
-        wide = _line(qty_per_piece=Decimal("4"))
-        narrow = _line(sku_id=sku, qty_per_piece=Decimal("6"))
+        wide = _wide(qty_per_piece=Decimal("4"))
+        narrow = _wide(sku_id=sku, qty_per_piece=Decimal("6"))
         merged = StyleSpecService.merge_lines([wide, narrow], sku, "M")
         assert merged == [narrow]
 
     def test_a_sku_line_with_a_different_key_is_added_alongside(self):
         sku = uuid.uuid4()
-        wide = _line(article="BTN-4H")
-        extra = _line(sku_id=sku, article="ZIP-60")
+        wide = _wide(article="KNIT-1")
+        extra = _wide(sku_id=sku, article="KNIT-2")
         merged = StyleSpecService.merge_lines([wide, extra], sku, "M")
-        assert {l.article for l in merged} == {"BTN-4H", "ZIP-60"}
+        assert {l.article for l in merged} == {"KNIT-1", "KNIT-2"}
 
     def test_another_colourways_override_never_reaches_this_garment(self):
         """Issuing it would put the wrong colour in the bag."""
@@ -461,20 +501,60 @@ class TestMergeLines:
 
     def test_a_zeroed_override_removes_the_material_for_that_colourway(self):
         sku = uuid.uuid4()
-        wide = _line()
-        zeroed = _line(sku_id=sku, qty_per_piece=Decimal("0"))
+        wide = _wide()
+        zeroed = _wide(sku_id=sku, qty_per_piece=Decimal("0"))
         assert StyleSpecService.merge_lines([wide, zeroed], sku, "M") == []
 
     def test_garment_size_is_part_of_the_key_so_sized_lines_do_not_collapse(self):
-        """Thread S / M / L used to be one key — the last one silently won."""
-        s = _line(article="THR-40", garment_size="S")
-        m = _line(article="THR-40", garment_size="M")
-        merged_for_m = StyleSpecService.merge_lines([s, m], None, "M")
-        assert merged_for_m == [m]
+        """Thread S / M / L used to be one key — the last one silently won.
+
+        LINING, because garment_size is how a style-wide line is scoped to a size
+        and only leather and lining can still be style-wide.
+        """
+        s_line = _wide(article="KNIT-S", garment_size="S")
+        m_line = _wide(article="KNIT-S", garment_size="M")
+        merged_for_m = StyleSpecService.merge_lines([s_line, m_line], None, "M")
+        assert merged_for_m == [m_line]
 
     def test_a_none_sku_id_ignores_every_override(self):
         theirs = _line(sku_id=uuid.uuid4())
         assert StyleSpecService.merge_lines([theirs], None, "M") == []
+
+
+class TestMergeLinesKeepsAccessoriesApart:
+    """AN ACCESSORY'S KEY IS ITS FULL MATERIAL IDENTITY, and that is not symmetry.
+
+    The leather/lining key deliberately ignores colour, because a NAVY knit line
+    SHOULD override the style-wide knit — same material, one colourway's version of
+    it. Accessories have no overriding to do, so ignoring colour buys nothing and
+    costs a real case: a two-tone garment taking the same button article in two
+    colours is two lines, and a key without colour would silently keep one.
+    """
+
+    def test_two_colours_of_one_button_on_one_sku_are_two_lines(self):
+        sku = uuid.uuid4()
+        black = _line(sku_id=sku, colour="BLACK")
+        navy = _line(sku_id=sku, colour="NAVY")
+        merged = StyleSpecService.merge_lines([black, navy], sku, "M")
+        assert {l.colour for l in merged} == {"BLACK", "NAVY"}
+
+    def test_two_sizes_of_one_button_on_one_sku_are_two_lines(self):
+        sku = uuid.uuid4()
+        small = _line(sku_id=sku, size="18L")
+        large = _line(sku_id=sku, size="20L")
+        merged = StyleSpecService.merge_lines([small, large], sku, "M")
+        assert {l.size for l in merged} == {"18L", "20L"}
+
+    def test_the_same_material_twice_still_collapses(self):
+        """The key is an identity, so a genuine duplicate is still one line."""
+        sku = uuid.uuid4()
+        merged = StyleSpecService.merge_lines(
+            [_line(sku_id=sku), _line(sku_id=sku)], sku, "M")
+        assert len(merged) == 1
+
+    def test_an_accessory_for_another_sku_is_dropped(self):
+        assert StyleSpecService.merge_lines(
+            [_line(sku_id=uuid.uuid4())], uuid.uuid4(), "M") == []
 
 
 class TestLineNotApplicableReason:

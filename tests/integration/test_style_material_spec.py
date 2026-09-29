@@ -37,8 +37,26 @@ async def draft_style(db, order_tree):
 
 LEATHER = {"category": "LEATHER", "article": "SUEDE-A32", "colour": "PINE GREEN",
            "thickness": "1.2mm", "qty_per_piece": 12.5}
+# `sku_id` IS FILLED IN BY THE AUTOUSE FIXTURE BELOW. An accessory line must name
+# the SKU it is for — a SKU being a colour and a size together — and this dict is
+# built at module level, before any fixture could hand it one.
 BUTTON = {"category": "ACCESSORY", "subtype": "BUTTON", "article": "BTN-4H",
           "colour": "BLACK", "size": "18L", "qty_per_piece": 4}
+
+
+@pytest.fixture(autouse=True)
+async def _bind_button_to_the_black_sku(db, draft_style):
+    """Point BUTTON at this style's BLACK/M SKU for the length of one test.
+
+    AUTOUSE so no test can forget, and reset afterwards so a stale id cannot leak
+    into the next one — which would fail as a confusing "SKU does not belong to this
+    style" rather than as the thing actually under test.
+    """
+    sku = await db.scalar(select(SKU).where(SKU.style_id == draft_style.id,
+                                            SKU.color_code == "BLK"))
+    BUTTON["sku_id"] = sku.id
+    yield
+    BUTTON.pop("sku_id", None)
 
 
 # ══════════════════════════════════════════════════════ saving the grid
@@ -81,7 +99,7 @@ async def test_two_lines_for_the_same_colourless_material_are_refused(
     from fastapi import HTTPException
     svc = StyleSpecService(db)
     line = {"category": "ACCESSORY", "subtype": "THREAD", "article": "THR-40",
-            "qty_per_piece": 120}
+            "qty_per_piece": 120, "sku_id": BUTTON["sku_id"]}
     await svc.add_line(draft_style.id, dict(line), actor_name="DM")
 
     with pytest.raises(HTTPException) as exc:
@@ -186,8 +204,11 @@ async def test_zero_is_legal_on_an_override_and_illegal_style_wide(db, draft_sty
                             actor_name="DM")
     assert ok["qty_per_piece"] == 0
 
+    # STYLE-WIDE MEANS LEATHER OR LINING NOW — an accessory always names a SKU, so
+    # the "a line that reaches every garment must consume something" rule can only
+    # be broken by the two categories that can still reach every garment.
     with pytest.raises(HTTPException) as exc:
-        await svc.add_line(draft_style.id, dict(BUTTON, qty_per_piece=0),
+        await svc.add_line(draft_style.id, dict(LEATHER, qty_per_piece=0),
                            actor_name="DM")
     assert exc.value.status_code == 422
 
@@ -227,7 +248,8 @@ async def test_a_released_style_freezes_what_it_was_cut_and_costed_against(
 
 
 @pytest.mark.asyncio
-async def test_an_accessory_may_still_be_corrected_after_release(db, order_tree):
+async def test_an_accessory_may_still_be_corrected_after_release(
+        db, order_tree, draft_style):
     """CHANGED DELIBERATELY (backend fix #12).
 
     Reported: "After release, if the DM finds an incorrect accessory assignment,
@@ -243,7 +265,10 @@ async def test_an_accessory_may_still_be_corrected_after_release(db, order_tree)
     """
     svc = StyleSpecService(db)
     style_id = order_tree["style"].id
-    line = await svc.add_line(style_id, dict(BUTTON), actor_name="DM")
+    # BUTTON is bound to draft_style's SKU, and a line may only name a SKU of its
+    # own style — so this one names the released style's own colourway.
+    line = await svc.add_line(
+        style_id, dict(BUTTON, sku_id=order_tree["sku"].id), actor_name="DM")
     assert line["article"] == BUTTON["article"]
 
     patched = await svc.patch_line(style_id, line["line_id"],
@@ -258,18 +283,22 @@ async def test_an_accessory_may_still_be_corrected_after_release(db, order_tree)
 @pytest.mark.asyncio
 async def test_a_sku_override_replaces_only_its_own_article(db, draft_style):
     """The real case: the TAN colourway takes TAN buttons of the same article.
-    The override replaces that ONE line and leaves the rest of the recipe alone —
-    set-level replacement would mean re-entering the whole recipe per colour."""
+
+    EACH COLOURWAY NAMES ITS OWN ACCESSORY now, so this is no longer an "override"
+    replacing a style-wide line — it is simply two lines, one per SKU, which is the
+    same outcome with nothing left to reason about. The leather line beside them is
+    still style-wide and still reaches both.
+    """
     svc = StyleSpecService(db)
     tan = (await db.execute(select(SKU).where(
         SKU.style_id == draft_style.id, SKU.color_code == "TAN"))).scalar_one()
     await svc.replace_spec(draft_style.id, [
         LEATHER,
-        BUTTON,
+        BUTTON,                                        # the BLACK SKU
         dict(BUTTON, sku_id=tan.id, colour="TAN"),
     ], actor_name="DM")
 
-    black = await svc.effective_lines(draft_style.id, None)
+    black = await svc.effective_lines(draft_style.id, BUTTON["sku_id"])
     tan_lines = await svc.effective_lines(draft_style.id, tan.id)
 
     assert {l.article for l in black} == {"SUEDE-A32", "BTN-4H"}
@@ -288,7 +317,12 @@ async def test_a_zero_override_removes_that_material_for_one_colourway(
         LEATHER, BUTTON, dict(BUTTON, sku_id=tan.id, qty_per_piece=0),
     ], actor_name="DM")
 
+    # effective_lines(…, None) means "no colourway", which now reaches only the
+    # style-wide leather. The BLACK SKU is where its button lives.
     assert {l.article for l in await svc.effective_lines(draft_style.id, None)} \
+        == {"SUEDE-A32"}
+    assert {l.article for l in
+            await svc.effective_lines(draft_style.id, BUTTON["sku_id"])} \
         == {"SUEDE-A32", "BTN-4H"}
     assert {l.article for l in await svc.effective_lines(draft_style.id, tan.id)} \
         == {"SUEDE-A32"}
@@ -301,8 +335,11 @@ async def test_requirement_multiplies_per_piece_by_the_pieces_that_need_it(
     """The screen that should stop an order — read BEFORE release, while a
     shortfall is still a purchase order rather than a stoppage.
 
-    An override's SKU is subtracted from the style-wide line, so the same garment
-    is never counted against two lines for the same material."""
+    LEATHER keeps the style-wide arithmetic: an override's SKU is subtracted from
+    the style line, so the same garment is never counted against two lines for one
+    material. ACCESSORIES ARE AGGREGATED instead — a purchase order needs "buy 64
+    buttons", not one row per colourway to add up by hand, and `short_by` is only
+    meaningful on the total because one lot of buttons serves every colourway."""
     db.add(MaterialLot(category="ACCESSORY", subtype="BUTTON", article="BTN-4H",
                        colour="BLACK", size="18L", uom="pcs", on_hand=30,
                        is_active=True))
@@ -316,12 +353,72 @@ async def test_requirement_multiplies_per_piece_by_the_pieces_that_need_it(
     req = await svc.requirement(draft_style.id)
 
     assert req["qty_ordered"] == 16                    # 10 BLACK + 6 TAN
-    by = {(l["article"], l["scope"]): l for l in req["lines"]}
-    # The style-wide button line serves only the 10 pieces TAN does not override.
-    assert by[("BTN-4H", "STYLE")]["pieces"] == 10
-    assert by[("BTN-4H", "STYLE")]["total_required"] == pytest.approx(40)
-    assert by[("BTN-4H", "SKU")]["pieces"] == 6
+    groups = {(l["article"], l["colour"]): l for l in req["lines"]
+              if l.get("scope") == "ACCESSORY_GROUP"}
+
+    # TWO GROUPS, NOT ONE. A BLACK button and a TAN button are different materials
+    # bought from different lots, so aggregating them would produce a purchase
+    # figure nobody can order against. The grouping key is the material identity —
+    # subtype, article, colour, size — not just the article.
+    assert set(groups) == {("BTN-4H", "BLACK"), ("BTN-4H", "TAN")}
+
+    black = groups[("BTN-4H", "BLACK")]
+    assert black["pieces"] == 10 and black["total_required"] == pytest.approx(40)
     # 30 on hand against 40 required → short by 10, and the screen says so.
-    assert by[("BTN-4H", "STYLE")]["short_by"] == pytest.approx(10)
+    assert black["short_by"] == pytest.approx(10)
+
+    tan = groups[("BTN-4H", "TAN")]
+    assert tan["pieces"] == 6 and tan["total_required"] == pytest.approx(24)
+    # No TAN lot was received at all, so the whole requirement is short.
+    assert tan["short_by"] == pytest.approx(24)
+
     assert req["short_lines"] >= 1
     assert "short" in req["message"]
+
+
+@pytest.mark.asyncio
+async def test_requirement_resolves_one_lot_per_accessory_group(db, draft_style,
+                                                                monkeypatch):
+    """A PERFORMANCE PROPERTY, PINNED, because it regressed the moment accessories
+    became SKU-scoped and nothing would have said so.
+
+    `_line_payload` runs two queries — matching the lot and summing its
+    reservations. Accessories are one row per SKU now, so a six-accessory style on
+    an eight-SKU order is 48 rows; resolving per row would issue ~96 queries on the
+    screen a purchase order is raised from, where it used to issue ~12.
+
+    Every line in a group shares one material identity and therefore one lot, so the
+    first line's answer IS the group's. This asserts the call count rather than a
+    timing, because a timing test that fails on a slow morning teaches people to
+    rerun it.
+    """
+    svc = StyleSpecService(db)
+    tan = (await db.execute(select(SKU).where(
+        SKU.style_id == draft_style.id, SKU.color_code == "TAN"))).scalar_one()
+    # One button on both colourways, plus a thread on both: two groups, four lines.
+    await svc.replace_spec(draft_style.id, [
+        LEATHER,
+        BUTTON,
+        dict(BUTTON, sku_id=tan.id),
+        dict(BUTTON, subtype="THREAD", article="THR-40", size=None,
+             thickness="40", qty_per_piece=120),
+        dict(BUTTON, subtype="THREAD", article="THR-40", size=None,
+             thickness="40", qty_per_piece=120, sku_id=tan.id),
+    ], actor_name="DM")
+
+    fresh = StyleSpecService(db)
+    calls = []
+    real = fresh._line_payload
+
+    async def counted(line, **kw):
+        calls.append(line.article)
+        return await real(line, **kw)
+
+    monkeypatch.setattr(fresh, "_line_payload", counted)
+    out = await fresh.requirement(draft_style.id)
+
+    # 1 leather + 1 per accessory GROUP, not 1 per accessory LINE.
+    assert len(calls) == 3, f"resolved {len(calls)} lots for 5 lines: {calls}"
+    groups = [l for l in out["lines"] if l.get("scope") == "ACCESSORY_GROUP"]
+    assert {g["article"] for g in groups} == {"BTN-4H", "THR-40"}
+    assert all(g["sku_count"] == 2 for g in groups)

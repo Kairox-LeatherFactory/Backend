@@ -130,96 +130,58 @@ def size_matches(want, have) -> bool:
     return na is not None and na == nb
 
 
-def accessory_size_gaps(*, lines, ordered_sizes) -> list[tuple[str, list[str]]]:
-    """Which size-varying accessories have NO line for some size in the order?
+def accessory_sku_gaps(*, lines, ordered_skus) -> list[tuple[str, list[str]]]:
+    """Which accessories are missing from some SKU the order contains?
 
-    THE HOLE THIS CLOSES COSTS A SHIPMENT. A line's garment_size is what scopes it
-    to one size, and a line that reaches no garment is silently absent rather than
-    wrong: `merge_lines` drops it, `kit_required` comes back False for that size,
-    `piece_complete` collapses to leather-and-lining, and the garment is sendable,
-    shippable and missing its zip. Nothing warns, because from the garment's point
-    of view the style simply declares no accessories.
+    THE ONE SIZE RULE THAT REPLACED TWO. An accessory line now names the SKU it is
+    for — a SKU being a colour and a size together — so "does this line reach this
+    garment" is a single equality and the whole class of size-scoping bugs is gone
+    with it. What is left to check is COVERAGE: an article somebody put on one SKU
+    and forgot on another.
 
-    So: if ANY line for an article names a garment size, that article is
-    SIZE-VARYING, and every size the order actually contains must have its own
-    line. One unscoped line for the article covers everything and closes the whole
-    question — that is how a generic 18L button stays one row.
+    WHY THAT IS WORTH A BLOCKER. A SKU with no line for an article is not a garment
+    with a shorter recipe — it is a garment the store believes needs nothing. Its
+    `kit_required` comes back False, completeness collapses to leather-and-lining,
+    and it is sendable, shippable and missing its zip. Nothing downstream complains,
+    because from that garment's point of view the style declares no accessories.
 
-    `lines` are plain dicts (category, subtype, article, garment_size,
-    qty_per_piece) so this stays DB-free and mirrors into run_logic_checks.py.
-    Returns [(article label, [uncovered sizes])], empty when the recipe is sound.
-    """
-    wanted = [l for l in (lines or [])
-              if str(l.get("category") or "").upper() == "ACCESSORY"
-              and float(l.get("qty_per_piece") or 0) > 0]
-    sizes = [s for s in (ordered_sizes or []) if s]
-    if not wanted or not sizes:
-        return []
+    THIS SUPERSEDES `accessory_size_gaps` AND `accessory_size_ambiguities`. Both
+    existed only to police style-wide lines: one asked whether a size-scoped article
+    covered every ordered size, the other whether several unscoped material sizes of
+    one article had been left for the system to guess between. Neither question can
+    be asked of a line that names its SKU, and both are simpler dead than kept.
 
-    groups: dict[tuple, list[dict]] = {}
-    for line in wanted:
-        key = ((line.get("subtype") or "") or None, line.get("article") or "")
-        groups.setdefault(key, []).append(line)
-
-    out: list[tuple[str, list[str]]] = []
-    for (subtype, article), group in groups.items():
-        # An unscoped line covers every size, so the article is not size-varying
-        # and nothing can be missing from it.
-        if any(not l.get("garment_size") for l in group):
-            continue
-        uncovered = [s for s in sizes
-                     if not any(size_matches(l.get("garment_size"), s)
-                                for l in group)]
-        if uncovered:
-            label = f"{article} ({subtype})" if subtype else str(article)
-            out.append((label, uncovered))
-    return sorted(out)
-
-
-def accessory_size_ambiguities(*, lines) -> list[tuple[str, list[str]]]:
-    """Same accessory, several material sizes, and not one of them says which
-    garments it is for.
-
-    THE OTHER HALF OF THE SIZE QUESTION, and it exists because the fix for the
-    first half opened it. `garment_size` used to be GUESSED from the material size
-    whenever that size read as a garment size — which quietly confined a 60cm zip
-    to 4XL garments (60 is on the EU ladder), so the guess had to go. But the guess
-    was also the only thing stopping the opposite failure: a DM entering ZIP 48,
-    ZIP 50 and ZIP 52 meaning three garment sizes now has three UNSCOPED lines,
-    every one of which applies to every garment, and the kit spends all three zips
-    on one jacket.
-
-    Neither reading can be inferred from '50' — it is a garment size on one sheet
-    and a centimetre length on the next — so this asks instead of guessing. One
-    line per article is never ambiguous, however its size is labelled: a single
-    60cm zip on every garment is exactly what an unscoped line means.
-
-    Returns [(article label, [the competing material sizes])].
+    `lines` are plain dicts (category, subtype, article, sku_id, qty_per_piece) and
+    `ordered_skus` a list of (sku_id, label), so this stays DB-free and testable with
+    no fixtures. Returns [(article label, [uncovered SKU labels])].
     """
     wanted = [l for l in (lines or [])
               if str(l.get("category") or "").upper() == "ACCESSORY"
               and float(l.get("qty_per_piece") or 0) > 0
-              and not l.get("garment_size")]
-    groups: dict[tuple, set] = {}
+              and l.get("sku_id")]
+    skus = [(sid, label) for sid, label in (ordered_skus or []) if sid]
+    if not wanted or not skus:
+        return []
+
+    # article -> the SKUs that DO have it
+    covered: dict[tuple, set] = {}
     for line in wanted:
         key = ((line.get("subtype") or "") or None, line.get("article") or "")
-        size = (str(line.get("size") or "").strip().upper()) or None
-        if size:
-            groups.setdefault(key, set()).add(size)
+        covered.setdefault(key, set()).add(line["sku_id"])
 
     out: list[tuple[str, list[str]]] = []
-    for (subtype, article), sizes in groups.items():
-        if len(sizes) > 1:
+    for (subtype, article), have in covered.items():
+        missing = [label for sid, label in skus if sid not in have]
+        if missing:
             label = f"{article} ({subtype})" if subtype else str(article)
-            out.append((label, sorted(sizes)))
+            out.append((label, sorted(missing)))
     return sorted(out)
 
 
 def release_blockers(*, style_name: str, confirmed_at, no_accessories,
                      has_accessory_lines: bool,
                      has_leather_line: bool,
-                     size_coverage_gaps: list | None = None,
-                     size_ambiguities: list | None = None) -> list[str]:
+                     sku_coverage_gaps: list | None = None) -> list[str]:
     """Why this style may NOT be released yet. Empty list = it may.
 
     THE GATE EXISTS BECAUSE RELEASE IS THE LAST MOMENT ANYONE CAN BE ASKED. After
@@ -258,24 +220,16 @@ def release_blockers(*, style_name: str, confirmed_at, no_accessories,
             f"{style_name}'s spec names no accessories and nobody has declared "
             f"that it needs none. Add the accessory lines, or confirm the spec "
             f"with no_accessories: true.")
-    # A SIZE WITH NO LINE IS NOT A SMALLER RECIPE, IT IS NO RECIPE. See
-    # accessory_size_gaps: the uncovered sizes do not get a short kit, they get
+    # A SKU WITH NO LINE IS NOT A SMALLER RECIPE, IT IS NO RECIPE. See
+    # accessory_sku_gaps: the uncovered garments do not get a short kit, they get
     # kit_required=False and ship complete without the accessory at all.
-    for label, uncovered in (size_coverage_gaps or []):
+    for label, uncovered in (sku_coverage_gaps or []):
         out.append(
-            f"{style_name} declares {label} per garment size but has no line "
-            f"for {', '.join(uncovered)}. Every size in this order needs its own "
-            f"line, or add one line with no garment_size to cover them all — "
-            f"the sizes it does cover are the only ones that will get it.")
-    # AMBIGUOUS, SO ASK. '50' is a garment size on one sheet and a centimetre
-    # length on the next, and the two readings differ by a whole kit per garment.
-    for label, sizes in (size_ambiguities or []):
-        out.append(
-            f"{style_name} has {len(sizes)} {label} lines ({', '.join(sizes)}) "
-            f"and none of them says which garment sizes it is for — so every "
-            f"garment would be issued all {len(sizes)}. Set garment_size on each, "
-            f"or combine them into one line if every garment really takes them "
-            f"all.")
+            f"{style_name} declares {label} on some colourways but not on "
+            f"{', '.join(uncovered)}. Every ordered SKU needs its own line — the "
+            f"ones it covers are the only garments that will get it. Add the "
+            f"missing lines, or send the accessory with apply_to: \"ALL_SKUS\" to "
+            f"cover them all at once.")
     return out
 
 
