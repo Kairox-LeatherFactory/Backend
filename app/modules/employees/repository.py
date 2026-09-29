@@ -8,6 +8,8 @@ import uuid
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.pagination import paginate
+
 from app.core.enums import WageType
 from app.modules.employees.models import Employee
 
@@ -16,12 +18,24 @@ class EmployeeRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    async def list_all(self, active_only: bool = True) -> list[Employee]:
-        stmt = select(Employee).order_by(Employee.name)
+    def _all_stmt(self, active_only: bool = True):
+        """The one query behind both the full list and a page of it.
+
+        Ordered by (name, id): name alone is not unique, and paging over a
+        non-deterministic order shows the same row on two pages and skips
+        another.
+        """
+        stmt = select(Employee).order_by(Employee.name, Employee.id)
         if active_only:
             stmt = stmt.where(Employee.is_active.is_(True))
-        res = await self.db.execute(stmt)
+        return stmt
+
+    async def list_all(self, active_only: bool = True) -> list[Employee]:
+        res = await self.db.execute(self._all_stmt(active_only))
         return list(res.scalars())
+
+    async def page_all(self, params, active_only: bool = True) -> tuple[list, int]:
+        return await paginate(self.db, self._all_stmt(active_only), params)
 
     async def get(self, employee_id: uuid.UUID) -> Employee | None:
         return await self.db.get(Employee, employee_id)

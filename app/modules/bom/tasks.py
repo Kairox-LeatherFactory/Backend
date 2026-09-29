@@ -57,7 +57,14 @@ from typing import Any
 from app.core.celery import celery_app
 
 from app.core.config import settings
-from app.core.database import AsyncSessionLocal
+# UPDATED 2026-09-11 (Hamthan): was importing the FastAPI AsyncSessionLocal,
+# whose engine pools asyncpg connections across a single long-lived event
+# loop. Celery tasks open a NEW event loop per task (asyncio.run in
+# _run_async below), so a pooled connection from one task's loop was being
+# handed to the next task's loop and dying on pool_pre_ping with
+# "RuntimeError: Event loop is closed" (seen in worker logs). Use the
+# NullPool-backed CeleryAsyncSessionLocal instead — see app/core/database.py.
+from app.core.database import CeleryAsyncSessionLocal as AsyncSessionLocal
 from app.modules.bom.service import BomService
 from app.modules.users.service import UserService
 
@@ -123,10 +130,19 @@ def build_order_breakdown_for_submission(self, submission_id: str) -> dict:
                     await svc.release_breakdown_claim(submission_id)
                     return {"status": "failed", "reason": "no_accepted_order_document"}
                 data, filename, mime = accepted
+                # UPDATED 2026-09-11 (Hamthan): get_accepted_order_bytes() above already
+                # returned non-None, which only happens when get_submission() found the
+                # row (service.py's get_accepted_order_bytes returns None outright when
+                # sub is None). So if get_submission_client_id() now comes back None, the
+                # submission EXISTS — it just has a null client_id (the column is
+                # nullable, see models.Submission.client_id) — not "missing". The old
+                # reason string "submission_not_found" was misleading operators into
+                # looking for a deleted/wrong submission id when the real issue is an
+                # unlinked client on an otherwise-valid submission.
                 client_id = await svc.procurement.get_submission_client_id(submission_id)
                 if client_id is None:
                     await svc.release_breakdown_claim(submission_id)
-                    return {"status": "failed", "reason": "submission_not_found"}
+                    return {"status": "failed", "reason": "submission_missing_client_id"}
                 result = await svc.build_order_breakdown(
                     submission_id,
                     order_bytes=data, order_filename=filename, order_mime=mime,
@@ -159,10 +175,17 @@ def generate_bom_for_style_task(self, order_style_id: str, user_id: str) -> dict
             return await svc.generate_bom_for_style(user, order_style_id)
 
     result = _run_async(_run())
+    # UPDATED 2026-09-11 (Hamthan): generate_bom_for_style's return shape is
+    # {"bom": {"id": ...}, "flags": [...], "order": {...}, "extraction": {...}}
+    # (service.py:723's own comment even says so) — there is no top-level
+    # "bom_id" or "warnings" key. This push always sent bom_id=None and
+    # warnings=[] regardless of what actually happened, which is exactly what
+    # showed up in the worker log despite a real BOM having been created.
     _run_async(_push_realtime(
         f"order_style:{order_style_id}", "bom_generated",
-        {"order_style_id": order_style_id, "bom_id": result.get("bom_id"),
-         "warnings": result.get("warnings", [])}))
+        {"order_style_id": order_style_id,
+         "bom_id": (result.get("bom") or {}).get("id"),
+         "warnings": result.get("flags", [])}))
     return result
 
 

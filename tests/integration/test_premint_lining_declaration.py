@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.database import Base
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
-from app.modules.imports.premint import bootstrap_drawer_pool, premint_order
+from app.modules.imports.premint import premint_order
 from app.modules.production.models import Piece
 
 
@@ -51,8 +51,8 @@ def sdb(tmp_path):
 
     Base.metadata.create_all(engine)
     with sessionmaker(bind=engine, autoflush=False)() as s:
-        bootstrap_drawer_pool(s, size=20)
-        s.commit()
+        # No drawer pool to bootstrap: premint allocates nothing, because the
+        # store is a state on the garment and a state has no capacity.
         yield s
     engine.dispose()
 

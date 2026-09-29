@@ -21,13 +21,42 @@ class SpecLineIn(BaseModel):
     uom_for(category, subtype). It stays in the contract only so a client can
     round-trip a GET without stripping fields.
     """
-    sku_id: uuid.UUID | None = None     # None = the style-wide default
+    # WHICH GARMENTS THIS LINE IS FOR.
+    #   ACCESSORY  — REQUIRED. A SKU is a colour and a size together, which is what
+    #                decides whether an accessory goes in. Use apply_to / sku_ids /
+    #                per_sku below to cover several in one call.
+    #   LEATHER / LINING — optional; None means the style-wide default and
+    #                garment_size is how such a line is scoped to a size.
+    sku_id: uuid.UUID | None = None
     category: str
     subtype: str | None = None
     article: str | None = None
     colour: str | None = None
     thickness: str | None = None
     size: str | None = None
+    # LEATHER AND LINING ONLY, and never inferred — send it or leave it NULL,
+    # which means every size. It is REFUSED on an accessory line: an accessory says
+    # which garments it is for by naming their SKU, and a second, independent size
+    # scope could only contradict it.
+    #
+    # It used to be guessed from `size` when that read as a garment size. The guess
+    # read any bare number from 30 to 70 as one (the EU jacket rungs), so a 60cm zip
+    # became a size-60 garment's zip and was confined to 4XL — and a line that
+    # reaches no garment is not a shorter recipe, it is no recipe.
+    garment_size: str | None = None
+
+    # ── covering several SKUs in one call ────────────────────────────────────
+    # 85-90% of accessories are identical across a style's SKUs, so the common case
+    # must not be eight requests. Exactly ONE of sku_id / apply_to / sku_ids /
+    # per_sku may be sent; more than one is a 422, because which garments an
+    # accessory is for is not something to guess at. The STORED shape is per-SKU
+    # either way — the convenience is in the request, never in the data.
+    apply_to: str | None = None           # "ALL_SKUS" — every ordered SKU
+    sku_ids: list[uuid.UUID] | None = None
+    # For the accessories whose size follows the garment — zip, rib knit trim.
+    # Each entry may override size / qty_per_piece / colour / thickness /
+    # material_lot_id / note for its own SKU.
+    per_sku: list[dict] | None = None
     qty_per_piece: float
     uom: str | None = None              # derived; see the docstring
     material_lot_id: uuid.UUID | None = None
@@ -48,6 +77,10 @@ class SpecLinePatch(BaseModel):
     colour: str | None = None
     thickness: str | None = None
     size: str | None = None
+    # PATCHABLE, AND IT WAS NOT. Without this field the only way to correct which
+    # garment sizes a leather/lining line is for was to rewrite the whole grid —
+    # and worse, patching any other field silently cleared it. See patch_line.
+    garment_size: str | None = None
     qty_per_piece: float | None = None
     material_lot_id: uuid.UUID | None = None
     note: str | None = None

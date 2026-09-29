@@ -1,0 +1,2285 @@
+{
+  "info": {
+    "name": "Intelligence (Chatbot)",
+    "description": "Intelligence (Chatbot) — Chatbot — deterministic agent with an optional LLM path.\n\nRequest-level test cases for the chatbot API: a JSON question/answer endpoint and an SSE streaming variant. Both run the same agent — a keyword intent router over four production tools (schedule status, bottleneck, plan, overview) — so most of the testable behaviour is intent routing, degradation and auth rather than status codes.\n\nFolders: **Positive / Negative / Boundary / Business Logic**; inside each, one sub-folder per endpoint group.\nRequest names start with the case ID so they map 1:1 to `docs/testcases/intelligence_test_cases.md`.\n\nSETUP\n1. Set `base_url`.\n2. Run **Setup — Tokens**; each login stores its own token variable.\n3. Fill the id variables from seed data or from an earlier response.\n\nNOTES\n- No role gate at all. Both endpoints depend only on `get_current_user`, so every logged-in role reaches them. The only auth case that fails is a missing or invalid token (401). Whether a Viewer should be able to ask for factory-wide numbers is a product question worth raising.\n- Intent routing is keyword matching, in a fixed order: bottleneck words → plan words → overview words → schedule (default when a style is named). The first matching branch wins, so a question containing two intents resolves to whichever appears earlier in that chain, not to the more specific one.\n- The literal word \"leather\" is in the *planning* keyword list. Any question mentioning leather routes to the planner — see A-L3.\n- `use_llm: true` only reaches the LangGraph agent when `CHAT_MODEL` is configured; otherwise the request silently falls back to the deterministic router. The response shape is identical either way, so assert on behaviour, not on which engine ran.\n- `/chat/stream` computes the whole answer first and then chunks it word by word for a typing effect. Time-to-first-token therefore equals full compute time — it is not a real token stream (B-L1).\n- `ChatRequest.question` has no length bound and no minimum; empty and enormous strings are both accepted (A-B1, A-B2).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{dm_token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "md_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "dm_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "cm_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "other_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "viewer_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "hr_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "expired_token",
+      "value": "expired.or.garbage.token",
+      "type": "string"
+    },
+    {
+      "key": "style_name",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Setup — Tokens",
+      "description": "Run these first. Demo accounts use phone = password; each login stores its bearer token in the matching collection variable.",
+      "item": [
+        {
+          "name": "Login · Managing Director → md_token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Login succeeded\", function () { pm.response.to.have.status(200); });",
+                  "try {",
+                  "    const body = pm.response.json();",
+                  "    const token = body.access_token || body.token;",
+                  "    if (token) pm.collectionVariables.set(\"md_token\", token);",
+                  "} catch (e) { /* non-JSON response */ }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Managing Director — demo account, phone = password.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"9000000000\",\n  \"password\": \"9000000000\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login · Direct Manager → dm_token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Login succeeded\", function () { pm.response.to.have.status(200); });",
+                  "try {",
+                  "    const body = pm.response.json();",
+                  "    const token = body.access_token || body.token;",
+                  "    if (token) pm.collectionVariables.set(\"dm_token\", token);",
+                  "} catch (e) { /* non-JSON response */ }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Direct Manager — demo account, phone = password.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"9000000001\",\n  \"password\": \"9000000001\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login · Cutting Manager → cm_token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Login succeeded\", function () { pm.response.to.have.status(200); });",
+                  "try {",
+                  "    const body = pm.response.json();",
+                  "    const token = body.access_token || body.token;",
+                  "    if (token) pm.collectionVariables.set(\"cm_token\", token);",
+                  "} catch (e) { /* non-JSON response */ }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Cutting Manager — demo account, phone = password.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"9000000002\",\n  \"password\": \"9000000002\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login · Stitching Manager → other_token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Login succeeded\", function () { pm.response.to.have.status(200); });",
+                  "try {",
+                  "    const body = pm.response.json();",
+                  "    const token = body.access_token || body.token;",
+                  "    if (token) pm.collectionVariables.set(\"other_token\", token);",
+                  "} catch (e) { /* non-JSON response */ }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Stitching Manager — demo account, phone = password.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"9000000003\",\n  \"password\": \"9000000003\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login · Office Viewer → viewer_token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Login succeeded\", function () { pm.response.to.have.status(200); });",
+                  "try {",
+                  "    const body = pm.response.json();",
+                  "    const token = body.access_token || body.token;",
+                  "    if (token) pm.collectionVariables.set(\"viewer_token\", token);",
+                  "} catch (e) { /* non-JSON response */ }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Office Viewer — demo account, phone = password.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"9000000004\",\n  \"password\": \"9000000004\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login · HR / Accounts → hr_token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Login succeeded\", function () { pm.response.to.have.status(200); });",
+                  "try {",
+                  "    const body = pm.response.json();",
+                  "    const token = body.access_token || body.token;",
+                  "    if (token) pm.collectionVariables.set(\"hr_token\", token);",
+                  "} catch (e) { /* non-JSON response */ }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "HR / Accounts — demo account, phone = password.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"9000000005\",\n  \"password\": \"9000000005\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Positive",
+      "item": [
+        {
+          "name": "A · Ask a question",
+          "description": "POST /chat\n\nRole gate: Any authenticated user",
+          "item": [
+            {
+              "name": "A-P1 · Schedule status for a named style",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-P1 — Schedule status for a named style",
+                      "// Expected: 200 {\"answer\":\"<headline + advice>\",\"tool\":\"schedule_status\",\"data\":{ok, required rate, projected finish, …}} — substitute a style name that exists in your seed data.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-P1 — Schedule status for a named style**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | High |\n| Role | Any authenticated role |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat\n- Body: {\"question\":\"Is CARNABY on schedule?\",\"use_llm\":false}\n\n**Expected result**\n\n200 {\"answer\":\"<headline + advice>\",\"tool\":\"schedule_status\",\"data\":{ok, required rate, projected finish, …}} — substitute a style name that exists in your seed data.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"Is CARNABY on schedule?\",\n  \"use_llm\": false\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-P2 · Bottleneck question",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-P2 — Bottleneck question",
+                      "// Expected: 200 with tool \"bottleneck\" and data naming the slowest stage/department plus a note. Try the synonyms too — \"which department is lagging\", \"what is slowing production\" — they all route here.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-P2 — Bottleneck question**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | High |\n| Role | Any authenticated role |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat — Body: {\"question\":\"Where is the bottleneck right now?\"}\n\n**Expected result**\n\n200 with tool \"bottleneck\" and data naming the slowest stage/department plus a note. Try the synonyms too — \"which department is lagging\", \"what is slowing production\" — they all route here.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"Where is the bottleneck right now?\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-P3 · Planning with a blocked style",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-P3 — Planning with a blocked style",
+                      "// Expected: 200 with tool \"plan\"; the named style is passed as a blocked style, so the returned daily targets route capacity to the other styles. The answer text should say which style was held back.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-P3 — Planning with a blocked style**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | High |\n| Role | Any authenticated role |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat\n- Body: {\"question\":\"Plan production, RICANO leather is late\"}\n\n**Expected result**\n\n200 with tool \"plan\"; the named style is passed as a blocked style, so the returned daily targets route capacity to the other styles. The answer text should say which style was held back.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"Plan production, RICANO leather is late\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-P4 · Factory overview",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-P4 — Factory overview",
+                      "// Expected: 200 with tool \"overview\" and data carrying clients, styles, total ordered and total produced.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-P4 — Factory overview**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | Medium |\n| Role | Any authenticated role |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat — Body: {\"question\":\"Give me an overview of the factory\"}\n\n**Expected result**\n\n200 with tool \"overview\" and data carrying clients, styles, total ordered and total produced.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"Give me an overview of the factory\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-P5 · A daily capacity figure is picked up",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-P5 — A daily capacity figure is picked up",
+                      "// Expected: 200; the parsed capacity (40/day) constrains the answer — the router extracts \"N a day\" / \"N per day\" / \"N jackets a day\" and passes it to the tool as max_daily.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-P5 — A daily capacity figure is picked up**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | Medium |\n| Role | Any authenticated role |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat — Body: {\"question\":\"What rate do we need for CARNABY if we can do 40 a day?\"}\n\n**Expected result**\n\n200; the parsed capacity (40/day) constrains the answer — the router extracts \"N a day\" / \"N per day\" / \"N jackets a day\" and passes it to the tool as max_daily.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"What rate do we need for CARNABY if we can do 40 a day?\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-P6 · Every logged-in role can ask",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-P6 — Every logged-in role can ask",
+                      "// Expected: 200 for both — there is no role gate. Note in your report whether factory-wide numbers should really be readable by a gate/security login.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-P6 — Every logged-in role can ask**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | Low |\n| Role | Office Viewer (9000000004), then Security Gate (9000000007) |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat — Body: {\"question\":\"Give me an overview\"} as each role\n\n**Expected result**\n\n200 for both — there is no role gate. Note in your report whether factory-wide numbers should really be readable by a gate/security login.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{viewer_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"Give me an overview\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "B · Streaming answers",
+          "description": "POST /chat/stream\n\nRole gate: Any authenticated user",
+          "item": [
+            {
+              "name": "B-P1 · Consume the SSE stream",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// B-P1 — Consume the SSE stream",
+                      "// Expected: 200 with content-type text/event-stream: a sequence of `data: {\"delta\":\"<word> \"}` frames, then a final `data: {\"done\":true,\"tool\":\"bottleneck\",\"data\":{…}}` frame. The -N flag is required or curl buffers the whole respon",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat/stream",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat",
+                    "stream"
+                  ]
+                },
+                "description": "**B-P1 — Consume the SSE stream**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | High |\n| Role | Any authenticated role |\n| Endpoint group | B · Streaming answers |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- curl -N -X POST {{base_url}}/api/v1/chat/stream -H \"Authorization: Bearer {token}\" -H \"Content-Type: application/json\" -d '{\"question\":\"Where is the bottleneck?\"}'\n\n**Expected result**\n\n200 with content-type text/event-stream: a sequence of `data: {\"delta\":\"<word> \"}` frames, then a final `data: {\"done\":true,\"tool\":\"bottleneck\",\"data\":{…}}` frame. The -N flag is required or curl buffers the whole response.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"Where is the bottleneck?\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "B-P2 · The streamed text equals the JSON answer",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// B-P2 — The streamed text equals the JSON answer",
+                      "// Expected: The concatenated deltas reproduce the JSON endpoint's `answer` (allowing for the trailing space on each word), and the final frame's tool/data match. The two endpoints must never diverge.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**B-P2 — The streamed text equals the JSON answer**\n\n| | |\n|---|---|\n| Category | POS |\n| Priority | Medium |\n| Role | Any authenticated role |\n| Endpoint group | B · Streaming answers |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat with a question, note `answer`\n- Stream the same question through /api/v1/chat/stream and concatenate every delta\n\n**Expected result**\n\nThe concatenated deltas reproduce the JSON endpoint's `answer` (allowing for the trailing space on each word), and the final frame's tool/data match. The two endpoints must never diverge.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"Where is the bottleneck?\",\n  \"use_llm\": false\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Negative",
+      "item": [
+        {
+          "name": "A · Ask a question",
+          "description": "POST /chat\n\nRole gate: Any authenticated user",
+          "item": [
+            {
+              "name": "A-N1 · No token",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-N1 — No token",
+                      "// Expected: 401 {\"detail\":\"Could not validate credentials\"} with a WWW-Authenticate: Bearer header.",
+                      "pm.test(\"Status is 401\", function () {",
+                      "    pm.response.to.have.status(401);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-N1 — No token**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | High |\n| Role | Unauthenticated |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat with no Authorization header — Body: {\"question\":\"overview\"}\n\n**Expected result**\n\n401 {\"detail\":\"Could not validate credentials\"} with a WWW-Authenticate: Bearer header.",
+                "auth": {
+                  "type": "noauth"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"overview\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-N2 · Missing the question field",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-N2 — Missing the question field",
+                      "// Expected: 422 both times — `question` is required on ChatRequest.",
+                      "pm.test(\"Status is 422\", function () {",
+                      "    pm.response.to.have.status(422);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-N2 — Missing the question field**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | High |\n| Role | Any authenticated role |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat — Body: {}\n- then Body: {\"use_llm\":true}\n\n**Expected result**\n\n422 both times — `question` is required on ChatRequest.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-N3 · Wrong types",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-N3 — Wrong types",
+                      "// Expected: The first 422s (int is not a string under strict coercion — confirm against your Pydantic settings). The second may be accepted, since \"yes\" is a truthy string for bool coercion — record which.",
+                      "pm.test(\"Status is 422\", function () {",
+                      "    pm.response.to.have.status(422);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-N3 — Wrong types**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | Medium |\n| Role | Any authenticated role |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat — Body: {\"question\": 123}\n- then Body: {\"question\":\"overview\",\"use_llm\":\"yes\"}\n\n**Expected result**\n\nThe first 422s (int is not a string under strict coercion — confirm against your Pydantic settings). The second may be accepted, since \"yes\" is a truthy string for bool coercion — record which.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": 123\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-N4 · Expired or garbage token",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-N4 — Expired or garbage token",
+                      "// Expected: 401 — the token is decoded before the user lookup, so a malformed token fails the same way an expired one does.",
+                      "pm.test(\"Status is 401\", function () {",
+                      "    pm.response.to.have.status(401);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-N4 — Expired or garbage token**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | Low |\n| Role | Any role with a bad token |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat with Authorization: Bearer not.a.real.token\n\n**Expected result**\n\n401 — the token is decoded before the user lookup, so a malformed token fails the same way an expired one does.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{expired_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"Where is the bottleneck?\",\n  \"use_llm\": false\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "B · Streaming answers",
+          "description": "POST /chat/stream\n\nRole gate: Any authenticated user",
+          "item": [
+            {
+              "name": "B-N1 · No token on the stream",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// B-N1 — No token on the stream",
+                      "// Expected: 401 before any stream opens — the dependency runs first, so you get a normal JSON error, not an event-stream containing an error.",
+                      "pm.test(\"Status is 401\", function () {",
+                      "    pm.response.to.have.status(401);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat/stream",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat",
+                    "stream"
+                  ]
+                },
+                "description": "**B-N1 — No token on the stream**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | High |\n| Role | Unauthenticated |\n| Endpoint group | B · Streaming answers |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- curl -N -X POST {{base_url}}/api/v1/chat/stream with no Authorization header\n\n**Expected result**\n\n401 before any stream opens — the dependency runs first, so you get a normal JSON error, not an event-stream containing an error.",
+                "auth": {
+                  "type": "noauth"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"Where is the bottleneck?\",\n  \"use_llm\": false\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "B-N2 · Missing question on the stream",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// B-N2 — Missing question on the stream",
+                      "// Expected: 422, again as a normal JSON response rather than an SSE frame.",
+                      "pm.test(\"Status is 422\", function () {",
+                      "    pm.response.to.have.status(422);",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat/stream",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat",
+                    "stream"
+                  ]
+                },
+                "description": "**B-N2 — Missing question on the stream**\n\n| | |\n|---|---|\n| Category | NEG |\n| Priority | Medium |\n| Role | Any authenticated role |\n| Endpoint group | B · Streaming answers |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat/stream — Body: {}\n\n**Expected result**\n\n422, again as a normal JSON response rather than an SSE frame.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Boundary",
+      "item": [
+        {
+          "name": "A · Ask a question",
+          "description": "POST /chat\n\nRole gate: Any authenticated user",
+          "item": [
+            {
+              "name": "A-B1 · Empty question",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-B1 — Empty question",
+                      "// Expected: 200 with the fallback answer (\"I can answer questions about production schedules, bottlenecks, and planning…\"), tool null and data.styles listing up to 8 known styles. No 422 — there is no min_length on the field.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-B1 — Empty question**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | Medium |\n| Role | Any authenticated role |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat — Body: {\"question\":\"\"}\n\n**Expected result**\n\n200 with the fallback answer (\"I can answer questions about production schedules, bottlenecks, and planning…\"), tool null and data.styles listing up to 8 known styles. No 422 — there is no min_length on the field.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-B2 · Very long question",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-B2 — Very long question",
+                      "// Expected: 200, no crash and no timeout — the whole string is lowercased and keyword-scanned. Flag the absence of any length bound: this is the cheapest way to make the endpoint do work.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-B2 — Very long question**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | Medium |\n| Role | Any authenticated role |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat — Body: {\"question\":\"<10,000 characters of text>\"}\n\n**Expected result**\n\n200, no crash and no timeout — the whole string is lowercased and keyword-scanned. Flag the absence of any length bound: this is the cheapest way to make the endpoint do work.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum lorem ipsum\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-B3 · Unknown style name",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-B3 — Unknown style name",
+                      "// Expected: 200 — schedule words are present but no known style matches, so the answer asks which style you mean and data.styles offers real names. Never a 404 or a 500.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-B3 — Unknown style name**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | Medium |\n| Role | Any authenticated role |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat — Body: {\"question\":\"Is NOTASTYLE on schedule?\"}\n\n**Expected result**\n\n200 — schedule words are present but no known style matches, so the answer asks which style you mean and data.styles offers real names. Never a 404 or a 500.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"Is NOTASTYLE on schedule?\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-B4 · Style name in the wrong case or padded",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-B4 — Style name in the wrong case or padded",
+                      "// Expected: 200 with tool schedule_status — matching is done on a lowercased question, so case and trailing punctuation must not matter. If it fails here, the style matcher is stricter than the router and that is worth a bug.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-B4 — Style name in the wrong case or padded**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | Low |\n| Role | Any authenticated role |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat — Body: {\"question\":\"is carnaby on schedule\"}  (lowercase, no punctuation)\n\n**Expected result**\n\n200 with tool schedule_status — matching is done on a lowercased question, so case and trailing punctuation must not matter. If it fails here, the style matcher is stricter than the router and that is worth a bug.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"is carnaby on schedule\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "B · Streaming answers",
+          "description": "POST /chat/stream\n\nRole gate: Any authenticated user",
+          "item": [
+            {
+              "name": "B-B1 · Empty question streams the fallback",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// B-B1 — Empty question streams the fallback",
+                      "// Expected: 200; the fallback sentence arrives word by word and the final frame carries tool null with data.styles. Confirm the stream terminates rather than hanging on an empty answer.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat/stream",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat",
+                    "stream"
+                  ]
+                },
+                "description": "**B-B1 — Empty question streams the fallback**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | Medium |\n| Role | Any authenticated role |\n| Endpoint group | B · Streaming answers |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- Stream Body: {\"question\":\"\"}\n\n**Expected result**\n\n200; the fallback sentence arrives word by word and the final frame carries tool null with data.styles. Confirm the stream terminates rather than hanging on an empty answer.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "B-B2 · Client disconnects mid-stream",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// B-B2 — Client disconnects mid-stream",
+                      "// Expected: The generator stops cleanly; no traceback, no stuck worker. The whole answer was already computed before the first frame, so nothing is left half-done server-side.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat/stream",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat",
+                    "stream"
+                  ]
+                },
+                "description": "**B-B2 — Client disconnects mid-stream**\n\n| | |\n|---|---|\n| Category | BND |\n| Priority | Low |\n| Role | Any authenticated role |\n| Endpoint group | B · Streaming answers |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- Start the stream and kill the client after the first few frames\n- Check the server log for an unhandled exception\n\n**Expected result**\n\nThe generator stops cleanly; no traceback, no stuck worker. The whole answer was already computed before the first frame, so nothing is left half-done server-side.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"Where is the bottleneck?\",\n  \"use_llm\": false\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Business Logic",
+      "item": [
+        {
+          "name": "A · Ask a question",
+          "description": "POST /chat\n\nRole gate: Any authenticated user",
+          "item": [
+            {
+              "name": "A-L1 · Ambiguity produces a question, not a guess",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-L1 — Ambiguity produces a question, not a guess",
+                      "// Expected: 200; schedule words matched but no style was named, so the answer is a clarifying question naming an example style, with tool null and data.styles populated. The agent must not pick a style on the user's behalf.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-L1 — Ambiguity produces a question, not a guess**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | High |\n| Role | Any authenticated role |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat — Body: {\"question\":\"are we late?\"}\n\n**Expected result**\n\n200; schedule words matched but no style was named, so the answer is a clarifying question naming an example style, with tool null and data.styles populated. The agent must not pick a style on the user's behalf.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"are we late?\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-L2 · use_llm with no model configured degrades silently",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-L2 — use_llm with no model configured degrades silently",
+                      "// Expected: 200 with the same deterministic answer as A-P2 — never a 500, never a hang, and no error field telling the caller the LLM was skipped. Confirm; a caller cannot currently tell which engine answered.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-L2 — use_llm with no model configured degrades silently**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | High |\n| Role | Any authenticated role |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat — Body: {\"question\":\"Where is the bottleneck?\",\"use_llm\":true}\n- [in an environment where CHAT_MODEL is unset]\n\n**Expected result**\n\n200 with the same deterministic answer as A-P2 — never a 500, never a hang, and no error field telling the caller the LLM was skipped. Confirm; a caller cannot currently tell which engine answered.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"Where is the bottleneck?\",\n  \"use_llm\": true\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-L3 · \"leather\" hijacks the question into the planner",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-L3 — \"leather\" hijacks the question into the planner",
+                      "// Expected: 200 with tool \"plan\" — \"leather\" is a planning keyword, so a stock question is answered with a production plan. The routing is keyword-order based, not intent-based. Confirmed quirk; file it with this exact example.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-L3 — \"leather\" hijacks the question into the planner**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | High |\n| Role | Any authenticated role |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat — Body: {\"question\":\"How much leather do we have in stock?\"}\n\n**Expected result**\n\n200 with tool \"plan\" — \"leather\" is a planning keyword, so a stock question is answered with a production plan. The routing is keyword-order based, not intent-based. Confirmed quirk; file it with this exact example.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"How much leather do we have in stock?\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-L4 · First matching branch wins",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-L4 — First matching branch wins",
+                      "// Expected: tool \"bottleneck\", not \"overview\" — bottleneck is checked first. Worth documenting for anyone writing UI suggestion chips, so the chips don't collide.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-L4 — First matching branch wins**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | Medium |\n| Role | Any authenticated role |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat — Body: {\"question\":\"Give me an overview of the bottleneck\"}\n\n**Expected result**\n\ntool \"bottleneck\", not \"overview\" — bottleneck is checked first. Worth documenting for anyone writing UI suggestion chips, so the chips don't collide.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"Give me an overview of the bottleneck\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-L5 · The fallback teaches the user",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-L5 — The fallback teaches the user",
+                      "// Expected: 200 with the fallback answer listing the three things it can actually do, tool null, and real style names in data.styles — an unrecognised question must be a helpful dead end, not an error.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-L5 — The fallback teaches the user**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | Medium |\n| Role | Any authenticated role |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat — Body: {\"question\":\"what is the weather\"}\n\n**Expected result**\n\n200 with the fallback answer listing the three things it can actually do, tool null, and real style names in data.styles — an unrecognised question must be a helpful dead end, not an error.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"what is the weather\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "A-L6 · The answer and the data agree",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// A-L6 — The answer and the data agree",
+                      "// Expected: The rendered sentence is built from the same tool result it returns, so the headline verdict, the rate and the dates in the prose must match `data` exactly. A mismatch means a renderer bug and would make the chatbot untr",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat"
+                  ]
+                },
+                "description": "**A-L6 — The answer and the data agree**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | Low |\n| Role | Any authenticated role |\n| Endpoint group | A · Ask a question |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- POST /api/v1/chat — Body: {\"question\":\"Is CARNABY on schedule?\"}\n- Compare the prose in `answer` against the numbers in `data`\n\n**Expected result**\n\nThe rendered sentence is built from the same tool result it returns, so the headline verdict, the rate and the dates in the prose must match `data` exactly. A mismatch means a renderer bug and would make the chatbot untrustworthy.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"Is CARNABY on schedule?\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "B · Streaming answers",
+          "description": "POST /chat/stream\n\nRole gate: Any authenticated user",
+          "item": [
+            {
+              "name": "B-L1 · It is a fake stream, and that shows in the timing",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// B-L1 — It is a fake stream, and that shows in the timing",
+                      "// Expected: Time-to-first-token is roughly the FULL compute time, not a fraction of it — the endpoint computes the whole answer then chunks it at ~20 ms per word. A slow tool therefore looks like a frozen UI, not a slow typist. Docu",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat/stream",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat",
+                    "stream"
+                  ]
+                },
+                "description": "**B-L1 — It is a fake stream, and that shows in the timing**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | High |\n| Role | Any authenticated role |\n| Endpoint group | B · Streaming answers |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- Time the first delta frame of /chat/stream\n- Time the full response of /chat for the same question\n\n**Expected result**\n\nTime-to-first-token is roughly the FULL compute time, not a fraction of it — the endpoint computes the whole answer then chunks it at ~20 ms per word. A slow tool therefore looks like a frozen UI, not a slow typist. Document it; this is the thing to change when a real LLM is wired in.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"Where is the bottleneck?\",\n  \"use_llm\": false\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "B-L2 · Postman's plain Send is the wrong tool here",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "// B-L2 — Postman's plain Send is the wrong tool here",
+                      "// Expected: The request appears to hang or buffers until the whole stream ends. That is a client limitation, not an API defect — use curl -N or a client with SSE support. Same caveat as the BOM module's notification stream.",
+                      "pm.test(\"Status is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "// carry ids forward for the chained requests",
+                      "try {",
+                      "    const body = pm.response.json();",
+                      "    [\"supplier_id\", \"po_id\", \"bom_id\", \"check_id\", \"tracking_id\", \"tracking_token\"]",
+                      "        .forEach(function (k) { if (body && body[k]) pm.collectionVariables.set(k, body[k]); });",
+                      "    if (body && typeof body.revision === \"number\") pm.collectionVariables.set(\"base_revision\", body.revision);",
+                      "} catch (e) { /* non-JSON response */ }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/chat/stream",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat",
+                    "stream"
+                  ]
+                },
+                "description": "**B-L2 — Postman's plain Send is the wrong tool here**\n\n| | |\n|---|---|\n| Category | LGC |\n| Priority | Medium |\n| Role | Any authenticated role |\n| Endpoint group | B · Streaming answers |\n| Role gate | Any authenticated user |\n\n**Request / steps**\n\n- Send /api/v1/chat/stream from Postman's normal request view\n\n**Expected result**\n\nThe request appears to hang or buffers until the whole stream ends. That is a client limitation, not an API defect — use curl -N or a client with SSE support. Same caveat as the BOM module's notification stream.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{dm_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"question\": \"Where is the bottleneck?\",\n  \"use_llm\": false\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

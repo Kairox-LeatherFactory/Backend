@@ -1,0 +1,116 @@
+{
+  "_comment": [
+    "ECS Fargate task definition for the KairoX API. TEMPLATE — every TODO is a",
+    "value only you have, and nothing here has been applied to an AWS account.",
+    "",
+    "THE SAME IMAGE runs api, worker and beat; only `command` differs, which is",
+    "what entrypoint.sh already dispatches on. Copy this file for the other two",
+    "and change the command, the cpu/memory, and drop the portMappings.",
+    "",
+    "SECRETS ARE REFERENCED, NOT INLINED. Anything in `environment` is readable",
+    "by anyone who can call ecs:DescribeTaskDefinition, which is a much wider",
+    "set of people than you think. Connection strings and SECRET_KEY go in",
+    "`secrets` as Secrets Manager ARNs."
+  ],
+
+  "family": "kairox-api",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+
+  "_sizing_comment": [
+    "1 vCPU / 2GB is a starting point, not a measurement. This app is IO-bound",
+    "on the database: CPU stays low while the connection pool saturates. Scale",
+    "on ALBRequestCountPerTarget, not CPU, and raise DB_POOL_SIZE before adding",
+    "tasks — see deploy/aws/README.md."
+  ],
+  "cpu": "1024",
+  "memory": "2048",
+
+  "executionRoleArn": "TODO: arn:aws:iam::<account>:role/ecsTaskExecutionRole",
+  "taskRoleArn": "TODO: arn:aws:iam::<account>:role/kairoxTaskRole (needs s3:GetObject/PutObject/DeleteObject on the uploads bucket)",
+
+  "containerDefinitions": [
+    {
+      "name": "api",
+      "image": "TODO: <account>.dkr.ecr.<region>.amazonaws.com/kairox:<git-sha>",
+      "essential": true,
+      "command": ["api"],
+
+      "portMappings": [
+        { "containerPort": 8000, "protocol": "tcp" }
+      ],
+
+      "environment": [
+        { "name": "ENVIRONMENT", "value": "production" },
+
+        { "_comment": "DEBUG=true would run create_all at boot and drift the schema away from the migrations. Never true here.",
+          "name": "DEBUG", "value": "false" },
+
+        { "_comment": "Swagger/ReDoc stay reachable in production by decision (2026-09-23): they expose the route map, not access. Set false only if this API is ever placed on the open internet.",
+          "name": "DOCS_ENABLED", "value": "true" },
+
+        { "_comment": "MIGRATIONS DO NOT RUN HERE. N tasks would race on the same revision. Run the kairox-migrate task first and wait for it to exit 0 — see README.md.",
+          "name": "RUN_MIGRATIONS", "value": "false" },
+        { "name": "RUN_SEED", "value": "false" },
+
+        { "_comment": "Gunicorn workers PER TASK. Multiply into the pool maths: tasks x WEB_CONCURRENCY x (DB_POOL_SIZE + DB_MAX_OVERFLOW) is what hits Postgres.",
+          "name": "WEB_CONCURRENCY", "value": "2" },
+
+        { "name": "DB_POOL_SIZE", "value": "5" },
+        { "name": "DB_MAX_OVERFLOW", "value": "5" },
+        { "_comment": "Fail fast under saturation rather than making callers wait SQLAlchemy's 30s default.",
+          "name": "DB_POOL_TIMEOUT", "value": "10" },
+        { "_comment": "Below RDS Proxy's idle reaper, so the app never hands out a socket the server has closed.",
+          "name": "DB_POOL_RECYCLE", "value": "1800" },
+
+        { "_comment": "UNSET = EVERY FRONTEND REQUEST BLOCKED. Production fails closed on purpose.",
+          "name": "CORS_ORIGINS",
+          "value": "https://frontend-rust-pi-23.vercel.app,https://stagingpte.vercel.app" },
+
+        { "_comment": "Blank answers to ANY Host header, which is a cache-poisoning vector behind a balancer.",
+          "name": "TRUSTED_HOSTS", "value": "TODO: api.yourdomain.com" },
+
+        { "_comment": "Dashboard read cache. Busted on write (core/cache.py), so a scan shows up immediately rather than after the TTL.",
+          "name": "CACHE_ENABLED", "value": "true" },
+        { "name": "CACHE_TTL_SECONDS", "value": "60" },
+
+        { "_comment": "S3StorageBackend is already implemented (core/storage.py). Local disk breaks the moment there is more than one task.",
+          "name": "STORAGE_BACKEND", "value": "s3" },
+        { "name": "S3_BUCKET", "value": "TODO: kairox-uploads" },
+        { "name": "S3_REGION", "value": "TODO: ap-south-1" }
+      ],
+
+      "secrets": [
+        { "name": "SECRET_KEY", "valueFrom": "TODO: arn:aws:secretsmanager:...:kairox/secret-key" },
+        { "_comment": "Point BOTH at the RDS PROXY endpoint, not the instance.",
+          "name": "DATABASE_URL", "valueFrom": "TODO: arn:aws:secretsmanager:...:kairox/database-url" },
+        { "name": "ASYNC_DATABASE_URL", "valueFrom": "TODO: arn:aws:secretsmanager:...:kairox/async-database-url" },
+        { "name": "CELERY_BROKER_URL", "valueFrom": "TODO: arn:aws:secretsmanager:...:kairox/redis-url" },
+        { "name": "CELERY_RESULT_BACKEND", "valueFrom": "TODO: arn:aws:secretsmanager:...:kairox/redis-result-url" }
+      ],
+
+      "_healthcheck_comment": [
+        "/ready, not /health. /health answers while degraded, which is right for",
+        "the ALB target group but wrong for a liveness decision — a task that",
+        "cannot reach the database should be replaced, not left in rotation."
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -fsS http://localhost:8000/ready || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      },
+
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/kairox-api",
+          "awslogs-region": "TODO: ap-south-1",
+          "awslogs-stream-prefix": "ecs",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ]
+}

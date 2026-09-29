@@ -96,6 +96,12 @@ reportlab==4.2.5         # pure-Python PDF render — the FALLBACK that runs eve
 pytest==9.0.3
 pytest-asyncio==1.4.0
 httpx==0.28.1
+# Coverage. coverage.py's tracer is a C extension and costs roughly 20-30% on
+# this suite; the equivalent pure-Python line hook (stdlib sys.monitoring) was
+# still running after 10 minutes against a suite that finishes in two, which is
+# why this is a dependency rather than a script. Scoping and the CI floor live
+# in .coveragerc.
+pytest-cov==7.0.0
 
 # ── LLM extraction + AI chatbot (LangGraph agent) — verified set (2026-05) ───
 # Two distinct uses share the same providers:
@@ -142,6 +148,13 @@ langchain-google-genai==3.0.1    # Gemini — PRIMARY for BOM extraction (multim
 # Run THREE processes: uvicorn (API), `celery ... worker`, `celery ... beat`.
 celery==5.6.2
 redis==7.3.0             # broker + result backend client (Upstash works: rediss://)
+flower==2.0.1            # Celery monitoring UI — `docker compose --profile monitor up -d flower`
+                         # (http://localhost:5555). Queued/active/failed tasks + tracebacks, which
+                         # is how you see WHY a breakdown produced style_count 0 without tailing logs.
+watchdog==6.0.0          # DEV ONLY: entrypoint.sh runs the worker under `watchmedo auto-restart`
+                         # when CELERY_AUTORELOAD=true. The worker caches your task AND pydantic
+                         # schema code in memory, so without a restart an edit to e.g.
+                         # extraction_schemas.py has no effect and looks like a failed fix.
 
 ezdxf>=1.4,<2.0
 shapely>=2.0,<3.0

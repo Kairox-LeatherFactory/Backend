@@ -4,8 +4,10 @@ load_to_db.py — Take a validated ImportPreview and write it to the database.
 Idempotent: re-running with the same data updates existing rows instead of
 creating duplicates. Uses get-or-create keyed on natural identity:
   Client(name) -> Style(client, name) -> SKU(style, colour, size)
-and for production: Operation(code), Rate(style, op, effective_from),
-ProductionEvent rows tagged with an import_batch so a re-import can replace them.
+
+ORDER SHEETS ONLY. This used to also write Operation and Rate rows from parsed
+production sheets; the importer no longer reads those, so wage rates come from
+the wages module instead.
 
 This module is written against the real SQLAlchemy models in
 app/modules/*, but is import-safe to test on SQLite.
@@ -16,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.modules.clients.utlis import make_style_code   # ← "utlis" typo
 from app.modules.clients.models import Client, ClientOrder, Style, SKU,SkuOrderLine
-from app.modules.production.models import Operation, ProductionEvent
+from app.modules.production.models import ProductionEvent
 from app.modules.wages.models import Rate
 from app.modules.clients.utlis import make_style_code
 
@@ -168,14 +170,6 @@ def _apply_style_commercials(style, line, order, cp) -> None:
             style.delivery_date = earliest
 
 
-def _get_or_create_operation(db: Session, code: str, seq: int) -> Operation:
-    op = db.scalar(select(Operation).where(Operation.code == code))
-    if not op:
-        op = Operation(code=code, label=code.title(), sequence=seq)
-        db.add(op); db.flush()
-    return op
-
-
 # def load_preview(db: Session, preview, country_map: dict | None = None,
 #                  replace: bool = True) -> dict:
 #     """Write a validated preview to the DB. Returns a stats dict.
@@ -321,12 +315,11 @@ def load_preview_into_order(db, preview, *, order_number: str,
     # is nothing to leak and nothing to clean up.
     _acquire_order_import_lock(db, order_number)
 
-    OP_SEQ = {"CUTTING":1,"FUSING":2,"PASTING":3,"SHELL":4,"L/A":5,
-              "LINING STICH":6,"FF":7,"FF-SAMPLE":8,"FF-SMS":9,"FF-SAMPLE ":8}
+    # "operations" and "rates" are kept at 0 so the response shape does not
+    # change for callers; the importer no longer creates either. See the note
+    # further down where the production-card block used to be.
     stats = {"order_number": order_number, "styles": 0,
              "skus_created": 0, "skus_updated": 0, "operations": 0, "rates": 0}
-    op_cache: dict[str, Operation] = {}
-    seen_rates: set = set()
 
     if replace:
         # Guard: never destroy an order that already has production logged against it.
@@ -373,34 +366,17 @@ def load_preview_into_order(db, preview, *, order_number: str,
                 db.add(SkuOrderLine(sku_id=sku.id, order_date=line.order_date,
                                     qty=qty, source_row=line.source_row))
 
-        for card in cp.production_cards:
-            for opcode in card.operations:
-                if opcode not in op_cache:
-                    op_cache[opcode] = _get_or_create_operation(
-                        db, opcode, OP_SEQ.get(opcode, 99))
-                    stats["operations"] += 1
-            tprefix = card.title.split("-")[0].strip().upper()
-            ref_style = None
-            for st in db.scalars(select(Style).where(
-                    Style.client_order_id == order.id)):
-                if st.name.upper() in card.title.upper() or tprefix in st.name.upper():
-                    ref_style = st; break
-            if ref_style:
-                for opcode, rate_val in card.rate.items():
-                    if not rate_val:
-                        continue
-                    op = op_cache[opcode]
-                    if (ref_style.id, op.id) in seen_rates:
-                        continue
-                    existing = db.scalar(select(Rate).where(
-                        Rate.style_id == ref_style.id, Rate.operation_id == op.id,
-                        Rate.effective_from == date(2026, 1, 1)))
-                    if not existing:
-                        db.add(Rate(style_id=ref_style.id, operation_id=op.id,
-                                    rate=rate_val, effective_from=date(2026, 1, 1)))
-                        db.flush(); stats["rates"] += 1
-                    seen_rates.add((ref_style.id, op.id))
-                    
+    # ── NO OPERATIONS OR RATES FROM THE IMPORT ANY MORE ─────────────────────
+    # A block here used to walk `cp.production_cards` — parsed from the weekly
+    # production sheets — and seed Operation rows plus piece-rate Rate rows from
+    # them. Production-sheet support has been removed from the importer, so this
+    # is gone with it.
+    #
+    # WHAT THAT MEANS: an import no longer creates wage rates. Rates are entered
+    # through the wages module, which is the system of record for them; `stats`
+    # still reports "operations" and "rates" keys so the response shape is
+    # unchanged, and they are now always 0.
+
     # ── NO PRE-MINT HERE ANY MORE (change-list item 9) ───────────────────────
     # This used to call premint_order(db, order) and mint a barcode + a drawer
     # for every ordered unit of every SKU, on upload. It no longer does.

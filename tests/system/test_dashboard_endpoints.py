@@ -100,7 +100,7 @@ async def test_the_lining_dashboard_explains_its_own_numbers(
 async def test_every_dashboard_can_follow_one_piece(
     api_client, as_role, operations, pieces, cutter, leather_lot
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     assert (await _cut(api_client, as_role, piece, cutter[0], leather_lot)).status_code == 201
 
     as_role(UserRole.DIRECT_MANAGER)
@@ -137,7 +137,7 @@ async def test_an_unknown_piece_code_is_a_404_that_says_what_to_do(
 async def test_the_consumption_grids_do_not_mix_stages_over_http(
     api_client, as_role, operations, pieces, cutter, leather_lot
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     await _cut(api_client, as_role, piece, cutter[0], leather_lot)
 
     as_role(UserRole.DIRECT_MANAGER)
@@ -161,7 +161,7 @@ async def test_a_non_cut_stage_is_rejected_with_422(api_client, as_role, pieces)
 async def test_the_stage_parameter_works_over_http(
     api_client, as_role, operations, pieces, cutter, leather_lot
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     await _cut(api_client, as_role, piece, cutter[0], leather_lot)
 
     as_role(UserRole.DIRECT_MANAGER)

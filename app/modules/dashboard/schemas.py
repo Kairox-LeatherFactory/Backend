@@ -465,12 +465,14 @@ class PieceTrace(BaseModel):
     in_store: bool
     store_label: str | None
     needs_lining: bool = True
-    # WHERE the garment physically is. The state alone ("holding_leather") does
-    # not tell an operator which drawer to walk to, which is the whole point of
-    # surfacing the drawer outside the store screen.
-    drawer_code: str | None = None
-    drawer_state: str | None = None
-    drawer_holding: str | None = None    # HOLDING LEATHER | LINING | BOTH | EMPTY
+    # WHERE THE GARMENT STANDS IN THE STORE, surfaced outside the store screen
+    # so an operator at any stage can see what it is still waiting for.
+    #
+    # These were `drawer_code` / `drawer_state` / `drawer_holding` and named a
+    # numbered box. There is no box: the garment carries its own state, and the
+    # code an operator can act on is the piece code.
+    store_state: str | None = None
+    store_holding: str | None = None     # HOLDING LEATHER | LINING | BOTH | EMPTY
     # Totals rolled up from the history, so a screen does not re-add them itself
     # and get a different answer.
     total_consumption: float | None = None
@@ -478,31 +480,35 @@ class PieceTrace(BaseModel):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# STORE  (drawer movement — STORE is a drawer state, not an event)
+# STORE  (the merge — a STATE ON THE GARMENT, not an event and not a box)
 # ══════════════════════════════════════════════════════════════════════════
+# THE DRAWER IS GONE FROM THIS SECTION AND SO ARE ITS NAMES. Every figure here
+# was always a count of GARMENTS — a drawer row was only readable because of the
+# piece it held — so the rename changes what these are called, not what they
+# count. Two things genuinely go away: `empty_drawers` (a garment with nothing
+# scanned into it is not in the store, it is simply not there yet) and the
+# drawer's own id/code/seq, replaced by the piece's.
 class StoreKPIs(BaseModel):
-    total_drawers: int
-    drawers_in_store: int             # not yet SENDED and holding something
-    drawers_sent: int                 # state == SENDED
-    empty_drawers: int                # nothing held (leather_in/lining_in both false)
-    held_drawers: int                 # RECEIVED (DM confirmed, awaiting send)
-    leather_drawers: int              # leather_in only
-    lining_drawers: int               # lining_in only
-    leather_lining_drawers: int       # both
+    garments_total: int               # in the store at all
+    garments_in_store: int            # not yet SENDED and holding something
+    garments_sent: int                # state == SENDED
+    garments_held: int                # RECEIVED (DM confirmed, awaiting send)
+    leather_only: int                 # leather_in only
+    lining_only: int                  # lining_in only
+    leather_and_lining: int           # both
 
 
-class DrawerRow(BaseModel):
-    drawer_id: uuid.UUID
-    drawer_code: str
-    seq: int
+class StorePieceRow(BaseModel):
+    """One garment in the store. Was DrawerRow."""
+    piece_id: uuid.UUID | None
+    piece_code: str | None
+    seq: int | None
     state: str
-    status_label: str                 # In Store | Held | Ready to Send | Sent | Empty
+    status_label: str                 # In Store | Held | Ready to Send | Sent
     contents: str                     # HOLDING LEATHER | LINING | BOTH | EMPTY
     material_type: str                # LEATHER | LINING | LEATHER+LINING | NONE
     leather_in: bool
     lining_in: bool
-    piece_id: uuid.UUID | None
-    piece_code: str | None
     style_id: uuid.UUID | None
     style: str | None
     order_id: uuid.UUID | None
@@ -519,30 +525,29 @@ class StoreCurrentStyleRow(BaseModel):
     style: str
     order_id: uuid.UUID | None
     order_number: str | None
-    drawers: int
-    leather_drawers: int
-    lining_drawers: int
-    both_drawers: int
+    garments: int
+    leather_only: int
+    lining_only: int
+    leather_and_lining: int
     ready_to_send: int
     target_date: date | None
 
 
-class DrawerCutterRow(BaseModel):
+class StoreCutterRow(BaseModel):
     material_type: str                # LEATHER | LINING
     employee_id: uuid.UUID | None
     employee: str | None
     work_date: date | None
 
 
-class DrawerDetail(BaseModel):
-    drawer_id: uuid.UUID
-    drawer_code: str
-    seq: int
+class StorePieceDetail(BaseModel):
+    """One garment in the store, opened from the grid. Was DrawerDetail."""
+    piece_id: uuid.UUID | None
+    piece_code: str | None
+    seq: int | None
     state: str
     status_label: str
     contents: str
-    piece_id: uuid.UUID | None
-    piece_code: str | None
     style: str | None
     order_number: str | None
     colour: str | None
@@ -552,23 +557,13 @@ class DrawerDetail(BaseModel):
     date_received: datetime | None
     date_sended: datetime | None
     created_at: datetime | None
-    cutters: list[DrawerCutterRow]    # who cut the leather / lining in this drawer
+    cutters: list[StoreCutterRow]     # who cut this garment's leather / lining
 
 
-class DrawerMovementRow(BaseModel):
+class StoreMovementRow(BaseModel):
     action: str
     at: datetime | None
     actor_user_id: uuid.UUID | None
-
-
-class EmptyDrawerRow(BaseModel):
-    drawer_id: uuid.UUID
-    drawer_code: str
-    seq: int
-    last_style: str | None
-    last_material: str | None
-    last_sent_date: datetime | None
-    availability: str                 # "Yes"
 
 
 class MaterialCutterTrace(BaseModel):
@@ -581,7 +576,10 @@ class MaterialCutterTrace(BaseModel):
     colour: str | None
     size: str | None
     cutting_date: date | None
-    drawer_code: str | None
+    # Where the garment stands in the store. Was the code of the drawer holding
+    # it — a question that only had an answer for a piece that happened to be in
+    # a box; this one has an answer for every piece.
+    store_state: str | None = None
     photo: str | None = None          # flagged
 
 
@@ -590,9 +588,8 @@ class StoreDashboard(BaseModel):
     meta: DashboardMeta
     kpis: StoreKPIs
     current_styles: list[StoreCurrentStyleRow]
-    drawers: list[DrawerRow]
-    held_drawers: list[DrawerRow]
-    empty_drawers: list[EmptyDrawerRow]
+    garments: list[StorePieceRow]
+    held_garments: list[StorePieceRow]
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -697,9 +694,9 @@ class DMAttendance(BaseModel):
 
 
 class DMStore(BaseModel):
-    drawers_in_store: int
-    drawers_sent: int
-    drawers_received: int
+    garments_in_store: int
+    garments_sent: int
+    garments_received: int
 
 
 class DirectManagerDashboard(BaseModel):
@@ -758,3 +755,41 @@ class StyleTracking(BaseModel):
     order_number: str | None
     total_quantity: int
     stages: list[StyleStageRow]
+
+
+# ── the alerts surface (GET /dashboard/alerts) ───────────────────────────────
+class StageSpreadAlert(BaseModel):
+    """A downstream stage lagging the leather cut by more than half.
+
+    The gap is true WIP in flight: cut, but not yet arrived at this stage.
+    """
+    style: str | None = None
+    stage: str
+    cut: int
+    reached_stage: int
+    gap: int
+    severity: str          # "high" | "medium"
+
+
+class FreightRiskAlert(BaseModel):
+    """An order approaching its sea cut-off.
+
+    Missing it means air freight, which is the single biggest margin event in
+    the business — so it is an alert, not a report line.
+    """
+    order_number: str
+    sea_cutoff: str
+    days_left: int
+    ordered: int
+    finished: int
+    pct_complete: float
+    risk: str              # "critical" | "high" | "watch"
+
+
+class FactoryAlerts(BaseModel):
+    """Three blocks, most-actionable first. Empty lists are a good day, not a
+    missing feature; `alert_count` is what a badge should render."""
+    bottleneck: Bottleneck | None = None
+    stage_spread: list[StageSpreadAlert] = Field(default_factory=list)
+    freight_risk: list[FreightRiskAlert] = Field(default_factory=list)
+    alert_count: int

@@ -44,8 +44,16 @@ class ClientService:
                   color_code: str | None, size: str | None) -> str:
         return sku_label(style_name, color_name, color_code, size)
 
-    async def list_clients(self, *, include_inactive: bool = False) -> list[Client]:
-        return await self.repo.list_clients(include_inactive=include_inactive)
+    async def list_clients(self, *, include_inactive: bool = False,
+                           only_client_id=None) -> list[Client]:
+        return await self.repo.list_clients(
+            include_inactive=include_inactive, only_client_id=only_client_id)
+
+    async def page_clients(self, params, *, include_inactive: bool = False,
+                           only_client_id=None) -> tuple[list, int]:
+        return await self.repo.page_clients(
+            params, include_inactive=include_inactive,
+            only_client_id=only_client_id)
 
     async def get_client(self, client_id: uuid.UUID) -> Client:
         client = await self.repo.get_client(client_id)
@@ -87,32 +95,81 @@ class ClientService:
                 status.HTTP_409_CONFLICT,
                 f"Client code '{new_code}' is already used by another client.")
 
+    async def deletion_blockers(self, client_id: uuid.UUID) -> list[dict]:
+        """What stands between this client and a hard delete. [] = nothing does.
+
+        Read by GET /clients/{id}/deletable and by delete_client itself, so the
+        preflight and the refusal can never disagree about the rule.
+        """
+        await self.get_client(client_id)          # 404 for an unknown client
+        return await self.repo.deletion_blockers(client_id)
+
     async def delete_client(self, client_id: uuid.UUID) -> None:
-        """Hard-delete a client — ONLY while it has no orders.
+        """Hard-delete a client that has produced NOTHING.
 
-        WHY THE GUARD. `Client.client_orders` cascades `all, delete-orphan`, so
-        deleting a client that has traded would take its orders, styles and SKUs
-        with it — and every Piece, production event and wage line hangs off those
-        SKUs. That is the same history the barcode module refuses to destroy when
-        a worker leaves (CLAUDE.md §6: "you delete the scannable code, never the
-        person or their record"); a client is no different. The database would
-        stop it anyway (Piece.sku_id is a plain FK), but as a constraint error
-        mid-cascade rather than something a user can act on.
+        FIXED 2026-09-19 (Hamthan): the guard used to be "has no orders", and
+        that made this endpoint impossible to pass. `POST /clients` does not
+        create a client — it creates a client AND its first order in one call
+        (order_number is a required field on the body, see create_client
+        below). So every client born through the API owns exactly one order
+        from the moment it exists, and DELETE answered "has 1 order(s)" for a
+        row created seconds earlier that had never been near the factory. The
+        mistyped-name client the endpoint was written for was the one case it
+        could never actually serve.
 
-        A client that HAS traded is deactivated instead:
-        `PATCH /clients/{id} {"is_active": false}` — they drop off the default
-        list and every row they own stays intact.
+        THE GUARD NOW COUNTS PIECES, which is what the old error message was
+        really talking about ("would destroy their styles, pieces and
+        production history"). A piece is the tracked unit (CLAUDE.md §4): its
+        code is a printed barcode and every production event, inspection and
+        piece-rate wage line hangs off it. No pieces means nothing was ever
+        cut, so the cascade takes an empty order shell and nothing else. One
+        piece means the client has traded, and then this is the same rule the
+        barcode module applies to a worker who leaves (CLAUDE.md §6) — you
+        delete the scannable code, never the record — so it stays a 409 and the
+        answer stays `PATCH /clients/{id} {"is_active": false}`.
+
+        THE PIECE COUNT IS NOT THE WHOLE STORY. `rate`, `style_operation`,
+        `wage_line_detail` and `production_tracking` all reference `style.id`
+        with plain FKs, so a client with no pieces but with (say) a style rate
+        card still cannot be cascaded away.
+
+        SO THE BLOCKERS ARE COUNTED AND NAMED (repo.deletion_blockers) rather
+        than guessed at. The old refusal said "other records (a style rate, a
+        supplier PO, a cutting entry) still reference their styles" — three
+        guesses, none of them confirmed, and nothing the DM could act on. The
+        message now says which table and how many rows. The IntegrityError arm
+        stays as the backstop for anything the list has not learned about yet;
+        the database is still the real authority.
+
+        AN ORDER IS NOT A BLOCKER, and a STYLE on its own is not either. `POST
+        /clients` mints the client's first order in the same call, and a
+        breakdown upload adds styles and SKUs that nothing has been made from
+        yet — those cascade away with the client. Only rows that record real
+        work stop the delete.
         """
         client = await self.get_client(client_id)
-        orders = await self.repo.count_orders_for_client(client_id)
-        if orders:
+        blockers = await self.repo.deletion_blockers(client_id)
+        if blockers:
+            orders = await self.repo.count_orders_for_client(client_id)
+            detail = "; ".join(f"{b['count']} {b['what']}" for b in blockers)
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
-                f"'{client.name}' has {orders} order(s) and cannot be deleted — "
-                f"deleting it would destroy their styles, pieces and production "
-                f"history. Deactivate instead: "
+                f"'{client.name}' has traded and cannot be deleted — {detail} "
+                f"(across {orders} order(s)). That history is what production, "
+                f"inspections and wages hang off, so it is never removed with "
+                f"the customer. Deactivate instead: "
                 f'PATCH /clients/{client_id} {{"is_active": false}}.')
-        await self.repo.delete_client(client)
+        try:
+            await self.repo.delete_client(client)
+        except IntegrityError as exc:
+            await self.db.rollback()
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"'{client.name}' has no garments in production, but the "
+                f"database still holds a row referencing one of their styles, "
+                f"so the customer cannot be removed ({str(exc.orig)[:180]}). "
+                f"Deactivate instead: "
+                f'PATCH /clients/{client_id} {{"is_active": false}}.')
 
     async def add_order(self, *, client_id: uuid.UUID, order_number: str,
                         order_date=None, delivery_deadline=None,
@@ -156,6 +213,9 @@ class ClientService:
 
     async def get_client_orders(self, client_id: uuid.UUID) -> list[ClientOrder]:
         return await self.repo.get_orders_for_client(client_id)
+
+    async def page_client_orders(self, client_id: uuid.UUID, params):
+        return await self.repo.page_orders_for_client(client_id, params)
 
     async def get_style(self, style_id: uuid.UUID) -> Style | None:
         return await self.repo.get_style(style_id)
@@ -220,9 +280,31 @@ class ClientService:
     async def get_style_codes(self, style_ids: list[uuid.UUID]) -> dict:
         return await self.repo.get_style_codes(style_ids)
 
+    async def page_sku_options(self, params, *, order_id=None, style_id=None,
+                               client_scope=None):
+        """One page of the SKU picker.
+
+        `label` is composed HERE, exactly as list_sku_options does — it is a
+        required field on SkuOption and lives nowhere in the database. Paging
+        must not become a second path that skips it.
+        """
+        rows, total = await self.repo.page_sku_options(
+            params, order_id=order_id, style_id=style_id,
+            client_scope=client_scope)
+        for r in rows:
+            r["label"] = sku_label(
+                r["style_name"], r["color_name"], r["color_code"], r["size"]
+            )
+        return rows, total
+
     async def list_style_options(self, *, order_number=None, client_id=None) -> list[dict]:
         return await self.repo.list_style_options(
             order_number=order_number, client_id=client_id)
+
+    async def page_style_options(self, params, *, order_number=None,
+                                 client_id=None):
+        return await self.repo.page_style_options(
+            params, order_number=order_number, client_id=client_id)
 
     async def style_ids_for_order(self, order_id: uuid.UUID) -> list[uuid.UUID]:
         return await self.repo.style_ids_for_order(order_id)

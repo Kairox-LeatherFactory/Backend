@@ -67,8 +67,11 @@ def test_f39_styles_scoped_for_client():
 
 # ── F38/F45/F118: upload handler hardened (structural) ──────────────────────
 def test_f38_f45_f118_upload_hardened():
+    # _save_upload became _validated_upload when the temp-file copy was dropped:
+    # the upload's own spooled stream goes straight to openpyxl. All three guards
+    # moved with it — they were never a property of writing the file to disk.
     from app.modules.imports import router as i_router
-    src = inspect.getsource(i_router._save_upload)
+    src = inspect.getsource(i_router._validated_upload)
     assert "max_upload_mb" in src            # F38 size cap
     assert "is_zipfile" in src               # F45 container validation
     assert "file.filename or" in src         # F118 None-filename guard
@@ -95,14 +98,27 @@ def test_f18_shared_retirement_lookup():
     from app.modules.barcode import service as b_service
     src = inspect.getsource(b_service)
     assert "_get_active_or_410" in src
-    for resolver in ("resolve_piece_id", "resolve_lot_id", "resolve_drawer_id"):
+    # `resolve_drawer_id` was the third here and is deleted with the drawer.
+    for resolver in ("resolve_piece_id", "resolve_lot_id", "resolve_employee_id"):
         rsrc = inspect.getsource(getattr(b_service.BarcodeService, resolver))
         assert "_get_active_or_410" in rsrc, f"F18: {resolver} not retirement-aware"
 
 
 # ── F79: counter fetches one row, not all (structural) ──────────────────────
 def test_f79_counter_single_row():
+    """F79/F99: the common case must transfer ONE row, not the whole prefix.
+
+    Also pins the fallback that sits behind it. Taking only LIMIT 1 and giving
+    up when that row's tail is not all digits left the counter at 0 for ever:
+    the next mint returns PREFIX-000001, and so does the one after, which dies
+    on the unique index — a 500 on every employee create and card reissue from
+    then on. Both halves matter, so both are asserted: an "optimisation" back to
+    a bare LIMIT 1 must fail here rather than in production.
+    """
     from app.modules.barcode import repository as b_repo
-    src = inspect.getsource(b_repo.BarcodeRepository._next_code)
-    assert "limit(1)" in src.lower()
-    assert "order_by" in src.lower()
+    src = inspect.getsource(b_repo.BarcodeRepository._next_code).lower()
+    assert "limit(1)" in src, "the fast path must still transfer a single row"
+    assert "order_by" in src
+    assert "limit(500)" in src, (
+        "the non-numeric fallback is gone — a single letter-tailed code in the "
+        "namespace will jam minting for that prefix permanently")

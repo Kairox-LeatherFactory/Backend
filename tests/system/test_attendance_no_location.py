@@ -124,22 +124,44 @@ async def test_the_manual_door_needs_only_the_employee_ids(client, db):
 
 
 @pytest.mark.asyncio
-async def test_the_config_endpoints_have_no_fence_geometry(client, db):
-    """Read and write both. A PATCH carrying the old keys is accepted (a stray
-    field from an old build is not an error) but must write nothing back."""
-    # Reading is open to any operator; WRITING policy is HR/DM/MD.
-    await _operator(db, name="CONFIG GUARD")
+async def test_the_config_endpoints_are_withdrawn(client, db):
+    """UPDATED 2026-09-19 (Hamthan): GET and PATCH /attendance/config are gone
+    — commented out in attendance/router.py with the reasoning. This asserted
+    they carried no fence geometry; the strongest version of that now is that
+    there is no endpoint to carry any.
 
-    got = await client.get(f"{API}/attendance/config")
-    assert got.status_code == 200, got.text
-    for gone in ("factory_lat", "factory_lon", "radius_m"):
-        assert gone not in got.json()
+    Both are checked, not just the read: leaving the WRITE door open without
+    the read door is the dangerous half, because an edit form that cannot load
+    current policy saves whatever the frontend happened to be holding."""
+    from fastapi.routing import APIRoute
+
+    live = {r.path for r in app.routes if isinstance(r, APIRoute)}
+    assert f"{API}/attendance/config" not in live
+
+    # And over HTTP. NOT 404: `/attendance/{attendance_id}` (the punch
+    # correction routes) is a literal-free path that still matches the string
+    # "config", so the server answers 405 on GET and 422 on PATCH — the UUID
+    # never parses. Either way there is no handler left to run.
+    await _operator(db, name="CONFIG GUARD")
+    assert (await client.get(f"{API}/attendance/config")).status_code != 200
 
     app.dependency_overrides[get_current_user] = lambda: FakeUser(UserRole.HR)
-    patched = await client.patch(
-        f"{API}/attendance/config",
-        json={"shift_start": "08:30", "factory_lat": 1.0, "radius_m": 50})
-    assert patched.status_code == 200, patched.text
-    assert patched.json()["shift_start"] == "08:30", "the real field still saves"
-    for gone in ("factory_lat", "factory_lon", "radius_m"):
-        assert gone not in patched.json()
+    patched = await client.patch(f"{API}/attendance/config",
+                                 json={"shift_start": "08:30"})
+    assert patched.status_code != 200, patched.text
+
+
+@pytest.mark.asyncio
+async def test_the_shift_config_contract_still_carries_no_fence_geometry():
+    """The guarantee the test above used to make, kept where it still applies.
+
+    The shift POLICY did not go anywhere — the service reads it on every punch
+    to set is_late / is_short / is_overtime — so its schemas are still live and
+    must stay free of fence coordinates. If the endpoints are ever restored,
+    they cannot bring the geofence back with them."""
+    from app.modules.attendance import schemas as att_schemas
+
+    for shape in (att_schemas.ShiftConfigRead, att_schemas.ShiftConfigPublicRead,
+                  att_schemas.ShiftConfigUpdate):
+        for gone in ("factory_lat", "factory_lon", "radius_m"):
+            assert gone not in shape.model_fields, f"{shape.__name__}.{gone}"

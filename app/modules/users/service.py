@@ -141,7 +141,11 @@ class UserService:
         raw = body.password          # default password = phone
         return await self.repo.from_user_create(
             name=body.name, phone=body.phone, email=body.email, role=body.role,
-            password_hash=get_password_hash(raw), employee_id=body.employee_id,
+            password_hash=get_password_hash(raw),
+            # NEVER from the request — POST /users no longer accepts an
+            # employee_id (an employee is not a user). A staff login that does
+            # own an employee row is bound on the /employees path instead.
+            employee_id=None,
             must_change_password=body.password is None,
         )
     async def create_client_user(self, body: schemas.ClientUserCreate) -> User:
@@ -170,6 +174,9 @@ class UserService:
     async def list_users(self, active_only: bool = True) -> list[User]:
         return await self.repo.list_all(active_only)
 
+    async def page_users(self, params, active_only: bool = True) -> tuple[list, int]:
+        return await self.repo.page_all(params, active_only)
+
     async def list_by_roles(self, roles, active_only: bool = True) -> list[User]:
         """Active users in any of `roles` — the public interface other modules use
         (e.g. procurement resolving the MD/DM recipients of a BOM-review notice)."""
@@ -180,7 +187,8 @@ class UserService:
         notification recipient's email."""
         return await self.repo.get(user_id)
     
-    async def provision_user(self, body: schemas.UserCreate,must_change_password: bool) -> User:
+    async def provision_user(self, body: "schemas.UserCreate | schemas.StaffUserCreate",
+                             must_change_password: bool) -> User:
         """Validate + stage. Does NOT commit — the caller owns the transaction.
 
         Used by employees.create() when the new person is STAFF (a manager, HR,
@@ -196,6 +204,9 @@ class UserService:
         return await self.repo.create(
             name=body.name, phone=body.phone, email=body.email, role=body.role,
             password_hash=get_password_hash(body.password),
-            employee_id=body.employee_id,
+            # StaffUserCreate carries it; a plain UserCreate no longer has the
+            # attribute at all, so read it defensively rather than requiring
+            # every internal caller to switch class on the same day.
+            employee_id=getattr(body, "employee_id", None),
             must_change_password=must_change_password,
         )

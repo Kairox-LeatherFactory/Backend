@@ -90,6 +90,13 @@ class BarcodeRegistry(Base, UUIDMixin, TimestampMixin):
         GUID(), ForeignKey("drawer.id", ondelete="SET NULL"), nullable=True, index=True)
     material_lot_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("material_lot.id", ondelete="SET NULL"), nullable=True, index=True)
+    # ONE HIDE, not the lot it came from. A LEATHER_SHEET row carries BOTH this
+    # and material_lot_id, because a scan of a sheet has to answer "which hide"
+    # and "what article/colour is it" in one read — the lot is the only place the
+    # second half lives. `type` still says which link is the subject.
+    material_sheet_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("material_sheet.id", ondelete="SET NULL"),
+        nullable=True, index=True)
 
     # Freeform caption for the label (STYLE · COLOUR · SIZE · #seq, etc.)
     caption: Mapped[str | None] = mapped_column(String(200))
@@ -174,7 +181,7 @@ class Drawer(Base, UUIDMixin, TimestampMixin):
     # NOT NULL + server_default "0" so every drawer already in the building reads
     # False, which — combined with `kit_required` being false for any style with
     # no accessory spec — makes the completeness predicate degenerate to exactly
-    # what it computed before this column existed. See DrawerService._kit_required.
+    # what it computed before this column existed. See StoreService._kit_required.
     #
     # NO `kit_issued_at`. leather_in/lining_in carry no timestamps either, and
     # piece_material_issue.issued_at plus last_activity_at below already answer
@@ -211,6 +218,70 @@ class Drawer(Base, UUIDMixin, TimestampMixin):
     # constant is a question the schema should not be asking.
 
 
+class AccessoryType(Base, UUIDMixin, TimestampMixin):
+    """The kinds of accessory this factory stocks — DATA, not an enum.
+
+    WHY A TABLE AND NOT MORE `MaterialSubtype` MEMBERS. There are far more
+    accessories than buttons, zips and thread: eyelets, lace pins, rib knit trim,
+    and a steady trickle of new ones. Every one of those would otherwise be an enum
+    member, a `MATERIAL_SPEC` entry and a deploy — and until it got one it fell to
+    `OTHER`, whose spec requires `description` + `count` and whose filters are
+    `article, colour` with NO SIZE AT ALL. So rib knit trim, an accessory whose size
+    genuinely varies per SKU, had no size field to vary.
+
+    IT POPULATES ITSELF FROM INTAKE. A new accessory becomes known because a packet
+    of it physically ARRIVED, not because somebody remembered to fill in a settings
+    screen — see MaterialService.arrive and .create_lot, which register an unknown
+    subtype instead of rejecting it. `first_seen_at` and `created_by` are how an
+    auto-registered type is told apart from a curated one, because the gate is the
+    least supervised entry in the app and a type appearing by accident must be
+    visible rather than silent.
+
+    `code` IS CAPPED AT 20 CHARACTERS because `subtype` is String(20) on four
+    tables — material_lot, style_material_spec, piece_material_issue and
+    kit_substitution_request — and one of those is a ledger. Capping the source is
+    cheaper and safer than widening four columns.
+
+    THE BUILT-INS IN `MATERIAL_SPEC` REMAIN THE DEFAULTS. This table overlays them
+    (see materials.accessory_catalog.AccessoryCatalog); it does not replace them, so
+    `resolve_spec` stays a pure function that needs no database.
+    """
+    __tablename__ = "accessory_type"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_accessory_type_code"),
+    )
+    code: Mapped[str] = mapped_column(String(20), index=True)      # EYELET, ZIP…
+    label: Mapped[str | None] = mapped_column(String(80))          # "Eyelets"
+
+    # THE MEASUREMENT, in the sense the floor means it: which attribute holds the
+    # stock quantity and what unit it is in. There is no separate "measurement"
+    # column because the quantity field IS the measurement — count for buttons,
+    # mtrs for thread, kg for ribs.
+    qty_field: Mapped[str] = mapped_column(String(20), default="count",
+                                           server_default="count")
+    qty_uom: Mapped[str] = mapped_column(String(20), default="pcs",
+                                         server_default="pcs")
+    # Attribute keys a lot of this kind must carry, and the boxes the stock screen
+    # renders. JSON lists rather than columns: they are read whole and never
+    # filtered on.
+    requires: Mapped[list | None] = mapped_column(JSON_VARIANT)
+    filters: Mapped[list | None] = mapped_column(JSON_VARIANT)
+
+    # THE 85-90% RULE, AS DATA. Most accessories are identical across a style's
+    # SKUs; zip and rib knit trim are the ones whose size changes per SKU. This
+    # drives the recipe form's default (fan out to every SKU vs ask per SKU) and
+    # `copy_from`'s matching, so neither has to hardcode which accessories are
+    # special.
+    size_varies_by_sku: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0")
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="1")
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str | None] = mapped_column(String(120))
+    note: Mapped[str | None] = mapped_column(String(300))
+
+
 class MaterialLot(Base, UUIDMixin, TimestampMixin):
     """A batch of stock. Creating a lot registers a child barcode AND adds stock.
 
@@ -235,10 +306,61 @@ class MaterialLot(Base, UUIDMixin, TimestampMixin):
     size: Mapped[str | None] = mapped_column(String(40), index=True)
     uom: Mapped[str] = mapped_column(String(20))
     on_hand: Mapped[Decimal] = mapped_column(Numeric(14, 3), default=0)
+    used: Mapped[Decimal] = mapped_column(Numeric, nullable=False, default=Decimal(0), server_default="0")
     supplier_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("material_supplier.id", ondelete="SET NULL"), nullable=True, index=True)
     attributes: Mapped[dict | None] = mapped_column(JSON_VARIANT)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class MaterialSheet(Base, UUIDMixin, TimestampMixin):
+    """ONE physical leather hide, individually measured and individually tracked.
+
+    WHY A CHILD TABLE AND NOT MORE LOTS. Material is ONE LOT PER SPEC — a second
+    lot for the same article/colour/thickness is refused with a 409 pointing at
+    the first (MaterialService.create_lot). That rule is what stops stock
+    fragmenting across duplicate rows, and it is right. So a hide cannot BE a lot:
+    ten hides of SUEDE-A32 NAVY are ten rows of one lot, not ten lots.
+
+    WHY THE LOT KEEPS on_hand. `material_lot.on_hand` stays the stock figure in
+    dcm and stays the only thing MaterialService._decrement_nocommit moves, so
+    every existing consumption path, shortfall warning and analytics read keeps
+    working untouched. Sheets are the DETAIL beneath that number, not a
+    replacement for it. The two are reconciled by a reported check
+    (Σ in-store sheet dcm vs on_hand), never by a constraint — a mismatch on a
+    delivery nobody sheeted must be visible, not a blocked receipt.
+
+    A SHEET IS CONSUMED WHOLE. It is issued to one cutter for one garment and its
+    whole dcm is charged to that row; leftover scrap is not tracked back. That is
+    the factory's own rule and it is why `status` is a lifecycle and not a running
+    balance — see SheetStatus.
+    """
+    __tablename__ = "material_sheet"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_material_sheet_code"),
+        # The allocator's hot query: free hides of this lot, cheapest scan.
+        Index("ix_material_sheet_lot_status", "material_lot_id", "status"),
+    )
+    code: Mapped[str] = mapped_column(String(60), index=True)      # "LS-000123"
+    material_lot_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("material_lot.id", ondelete="CASCADE"), index=True)
+
+    # The measurement written on the hide by the tannery. Numeric(12,3) matches
+    # production_event.consumption_qty so a sum of sheets and a logged
+    # consumption are the same scale and never need rounding to compare.
+    dcm: Mapped[Decimal] = mapped_column(Numeric(12, 3))
+    status: Mapped[str] = mapped_column(
+        String(20), index=True, default="IN_STOCK", server_default="IN_STOCK")
+
+    # Which garment's row claimed it. SET NULL, not CASCADE: deleting a cutting
+    # row must return its hides to stock, never delete the hides.
+    cutting_row_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("cutting_row.id", ondelete="SET NULL"),
+        nullable=True, index=True)
+
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    note: Mapped[str | None] = mapped_column(String(300))
 
 
 class MaterialReservation(Base, UUIDMixin, TimestampMixin):
@@ -258,10 +380,31 @@ class MaterialReservation(Base, UUIDMixin, TimestampMixin):
 
 
 class MaterialReceipt(Base, UUIDMixin, TimestampMixin):
-    """One receiving record: approved qty added to a lot, rejected qty logged.
+    """One delivery. Approved qty added to a lot, rejected qty logged.
 
     Rejected quantity is kept for the supplier's quality history — it is the only
     place the factory learns which suppliers ship rejects.
+
+    ── A DELIVERY IS ENTERED IN TWO SITTINGS, BECAUSE THAT IS HOW IT ARRIVES ──
+    The van turns up and somebody has ten seconds: article, colour, total dcm.
+    Splitting that total into approved and rejected, counting the hides and
+    measuring each one is twenty minutes of work that happens when the floor is
+    quiet — sometimes the same afternoon, sometimes the next day. A form that
+    demanded all of it at once got one of two answers: nothing recorded until
+    somebody had twenty minutes, or made-up numbers typed to get past the field.
+
+    So a receipt has a `status`:
+        PENDING    the arrival is recorded and the material is in the building.
+                   `declared_qty` is what was said to have arrived and is what
+                   went into stock provisionally, so the floor can cut from it.
+                   approved/rejected are not known yet.
+        COMPLETED  the QC split and (for leather) the per-hide measurements have
+                   been entered. `approved_qty` is now real and on_hand has been
+                   corrected to it.
+
+    A receipt written before this existed has no status column value in the
+    database and reads COMPLETED via the server default — which is exactly what
+    it was: a delivery entered in one sitting.
     """
     __tablename__ = "material_receipt"
     material_lot_id: Mapped[uuid.UUID] = mapped_column(
@@ -272,6 +415,26 @@ class MaterialReceipt(Base, UUIDMixin, TimestampMixin):
     rejected_qty: Mapped[Decimal] = mapped_column(Numeric(14, 3), default=0)
     received_by: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True)
+
+    # PENDING | COMPLETED — see the class docstring. Indexed because the only
+    # query that reads it is "what is still waiting to be finished", which is the
+    # worklist screen and has to stay cheap as receipts accumulate.
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, index=True,
+        default="COMPLETED", server_default="COMPLETED")
+    # WHAT WAS SAID TO HAVE ARRIVED, kept beside what was later approved. Without
+    # it a completion cannot tell how much of on_hand this delivery provisionally
+    # contributed, so it could not correct it — it would have to trust that
+    # nothing had been cut in between, which on a busy floor is never true.
+    declared_qty: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
+    # OPTIONAL AT ARRIVAL. "Twelve bundles came in" is often known at the gate
+    # even when nobody has measured one yet; it is what the completion's hide
+    # count is checked against, and a mismatch is reported, never enforced.
+    declared_sheet_count: Mapped[int | None] = mapped_column(Integer)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_by: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(300))
 
 
 class MaterialSupplier(Base, UUIDMixin, TimestampMixin):
@@ -345,7 +508,8 @@ class StyleMaterialSpec(Base, UUIDMixin, TimestampMixin):
     __table_args__ = (
         UniqueConstraint(
             "style_id", "sku_id", "category", "subtype", "article",
-            "colour", "thickness", "size", name="uq_style_material_spec_line"),
+            "colour", "thickness", "size", "garment_size",
+            name="uq_style_material_spec_line"),
         Index("ix_style_material_spec_style_active", "style_id", "is_active"),
     )
     # BOTH FKs CASCADE - a deliberate departure from 20260818_fk_setnull_all.
@@ -378,6 +542,21 @@ class StyleMaterialSpec(Base, UUIDMixin, TimestampMixin):
     colour: Mapped[str | None] = mapped_column(String(80))
     thickness: Mapped[str | None] = mapped_column(String(40))
     size: Mapped[str | None] = mapped_column(String(40))            # zip 60cm, button 18L
+    # WHICH GARMENTS THIS LINE APPLIES TO. NULL = all sizes.
+    #
+    # NOT THE SAME THING AS `size` ABOVE, and conflating them is the bug this
+    # column exists to fix. `size` is the MATERIAL's size — a 60cm zip, an 18L
+    # button — and it is matched against MaterialLot.size to find the lot. This
+    # is the GARMENT's size, matched against SKU.size to decide whether the line
+    # belongs on this piece at all.
+    #
+    # Without it, a DM entering "Thread S", "Thread M" and "Thread L" got either
+    # all three lines on every garment of every size (distinct articles) or
+    # silently only the last one (same article, distinct size), because
+    # merge_lines keyed on (category, subtype, article) and never read SKU.size.
+    # The store then showed three sizes of thread for one jacket and the kit
+    # spent all three.
+    garment_size: Mapped[str | None] = mapped_column(String(40), index=True)
 
     # (12,3) - the PER-PIECE scale, matching ProductionEvent.consumption_qty and
     # BomItem.qty_per_garment. Stock TOTALS are (14,3); keep the two distinct.
@@ -457,7 +636,7 @@ class PieceMaterialIssue(Base, UUIDMixin, TimestampMixin):
     uom: Mapped[str] = mapped_column(String(20))
     source: Mapped[str] = mapped_column(String(20), index=True)   # MaterialIssueSource
 
-    # WHO, in the two-identities sense DrawerService.store_scan documents: the
+    # WHO, in the two-identities sense StoreService.store_scan documents: the
     # WORKER whose card was scanned is DATA about the act; the LOGIN that
     # performed it is entered_by (a name, like ProductionEvent.entered_by) plus
     # the audit row. An employee is not an app_user and must never be written as
@@ -466,3 +645,89 @@ class PieceMaterialIssue(Base, UUIDMixin, TimestampMixin):
         GUID(), ForeignKey("employee.id", ondelete="SET NULL"), nullable=True)
     entered_by: Mapped[str | None] = mapped_column(String(120))
     issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class KitSubstitutionRequest(Base, UUIDMixin, TimestampMixin):
+    """An L garment was handed an M packet. The scan was REFUSED; this is the ask.
+
+    WHY A TABLE AND NOT A `force` FLAG ON THE SCAN. A flag puts the decision in
+    the hands of the person holding the wrong packet, at the moment they want to
+    get on with their work, and it is pressed. The decision belongs to a DM/MD who
+    is not standing there, so it has to outlive the scan — which means a row, a
+    status, and a second scan that finds the answer.
+
+    THE STOCK HAS NOT MOVED WHEN THIS ROW IS WRITTEN. The scan that raises it
+    ends in a 409: nothing is decremented, no ledger row is added,
+    `accessories_in` stays False. That is the difference between this and every
+    other warning in the app (the skill gate, the stock shortfall), which record
+    the work and flag it. Here the wrong size IS the failure, and recording it
+    would be recording the thing we are trying to prevent.
+
+    IDEMPOTENT ON (piece, line, lot). The operator re-scans — because the whole
+    protocol is "scan, get refused, wait, scan again" — and each re-scan must find
+    this row rather than pile up a queue of identical asks for the DM to wade
+    through. CONSUMED is terminal for the same reason a wage run freezes: one
+    approval licenses one garment, and a second garment is a second decision.
+    """
+    __tablename__ = "kit_substitution_request"
+    __table_args__ = (
+        UniqueConstraint("piece_id", "spec_line_id", "material_lot_id",
+                         name="uq_kit_substitution_request"),
+    )
+    # CASCADE, unlike the ledger's SET NULL: a pending approval for a deleted
+    # piece is not history worth keeping, it is a question nobody can answer. The
+    # audit_log row written beside it is what survives.
+    piece_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("piece.id", ondelete="CASCADE"), index=True)
+    spec_line_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("style_material_spec.id", ondelete="CASCADE"),
+        index=True)
+    material_lot_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("material_lot.id", ondelete="SET NULL"),
+        nullable=True, index=True)
+
+    # ── what was asked, snapshotted so the DM's screen needs no joins and the
+    # row still reads correctly after a lot is re-articled ───────────────────
+    garment_size: Mapped[str | None] = mapped_column(String(40))
+    lot_size: Mapped[str | None] = mapped_column(String(40))
+    article: Mapped[str | None] = mapped_column(String(120))
+    colour: Mapped[str | None] = mapped_column(String(80))
+    subtype: Mapped[str | None] = mapped_column(String(20))
+    qty: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
+
+    status: Mapped[str] = mapped_column(
+        String(15), nullable=False, default="PENDING",
+        server_default="PENDING", index=True)   # KitSubstitutionStatus
+
+    # The two identities the store already splits: the card that was scanned and
+    # the login that scanned it (see PieceMaterialIssue for why they are not one).
+    requested_by_employee_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("employee.id", ondelete="SET NULL"), nullable=True)
+    requested_by: Mapped[str | None] = mapped_column(String(120))
+    reason: Mapped[str | None] = mapped_column(String(300))
+
+    decided_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(120))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decision_note: Mapped[str | None] = mapped_column(String(300))
+
+
+# ── CROSS-MODULE FK RESOLUTION ───────────────────────────────────────────────
+# `material_sheet.cutting_row_id` names a table defined in app.modules.cutting.
+# SQLAlchemy resolves FK target strings against the SHARED MetaData when mappers
+# are configured, so `cutting_row` has to be REGISTERED by the time anything maps
+# these classes — not merely importable. Without this line, any module that
+# imports barcode.models WITHOUT also importing cutting.models dies with
+#
+#     NoReferencedTableError: Foreign key associated with column
+#     'material_sheet.cutting_row_id' could not find table 'cutting_row'
+#
+# which is what tests/unit/test_fk_delete_rules.py hit: it imports the barcode
+# models directly and never touches main.py's import block.
+#
+# The import is at the BOTTOM and one-directional: cutting.models imports nothing
+# from here, so the module graph stays acyclic. It is the same reason main.py
+# imports every model module — a table SQLAlchemy cannot see is a table Alembic
+# will try to DROP (CLAUDE.md §11).
+from app.modules.cutting import models as _cutting_models  # noqa: E402,F401

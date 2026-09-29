@@ -24,13 +24,17 @@ from pydantic import BaseModel, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.pagination import Page, PageParams
+from decimal import Decimal
+
 from app.core.enums import ScreenContext , UserRole
 from app.modules.barcode.service import BarcodeService
 from app.modules.production.service import ProductionService
 from app.modules.users.deps import get_current_user, require_roles
 from app.modules.users.models import User
 from app.modules.production.schemas import (
-    Consumption, LogRequest, LogResult, PieceState,
+    Consumption, EventDeleteResult, EventReassignResult, LogRequest, LogResult,
+    OperationRead, PieceState, ProductionEventRead, SkuOption,
 )
 from app.core.enums import (ProductionStage, ScreenContext, SCREEN_TO_STAGE,
                             screen_for_role)
@@ -77,7 +81,7 @@ _LOGGERS = require_roles(
 # ══════════════════════════════════════════════════════════════════════════
 # READ endpoints (carried over from the pre-barcode router — unchanged behaviour)
 # ══════════════════════════════════════════════════════════════════════════
-@router.get("/operations")
+@router.get("/operations", response_model=list[OperationRead])
 async def list_operations(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_FLOOR_READERS),
@@ -86,36 +90,55 @@ async def list_operations(
     return await ProductionService(db).list_operations()
 
 
-@router.get("/skus")
+@router.get("/skus", response_model=Page[SkuOption])
 async def list_sku_options(
     order_id: uuid.UUID | None = Query(None),
     style_id: uuid.UUID | None = Query(None),
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     scope: uuid.UUID | None = Depends(client_scope),
 ):
-    """Friendly SKU picker for the log screens (code + style · colour · size)."""
-    return await ProductionService(db).list_sku_options(
-        order_id=order_id, style_id=style_id, client_scope=scope)
+    """Friendly SKU picker for the log screens (code + style · colour · size).
+
+    PAGED. Unfiltered this is every SKU in the factory — one row per colour and
+    size of every style of every order, which is the largest picker here. Pass
+    order_id or style_id to narrow it rather than paging through it."""
+    rows, total = await ProductionService(db).page_sku_options(
+        params, order_id=order_id, style_id=style_id, client_scope=scope)
+    return Page[SkuOption].of(
+        [SkuOption.model_validate(r) for r in rows], total=total, params=params)
 
 
-@router.get("/events")
+@router.get("/events", response_model=Page[ProductionEventRead])
 async def list_events(
     sku_id: uuid.UUID | None = None,
     employee_id: uuid.UUID | None = None,
     start: date | None = Query(None),
     end: date | None = Query(None),
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_FLOOR_READERS),
 ):
     """Raw production events, filterable by sku / employee / date window.
 
     B9: floor/office staff only. This feed names the employee who worked each
-    piece; a CLIENT or VIEWER token has no business in it."""
-    return await ProductionService(db).list_events(
-        sku_id=sku_id, employee_id=employee_id, start=start, end=end)
+    piece; a CLIENT or VIEWER token has no business in it.
+
+    PAGED. production_event grows by one row per piece per stage and never
+    shrinks, so this used to be "serialise the whole production history" when
+    called without filters. Newest first; `total` is the unpaged match count.
+    """
+    out = await ProductionService(db).list_events_page(
+        params=params, sku_id=sku_id, employee_id=employee_id,
+        start=start, end=end)
+    return Page[ProductionEventRead].of(
+        [ProductionEventRead.model_validate(r) for r in out["rows"]],
+        total=out["total"], params=params)
 
 
-@router.get("/styles/{style_id}/progress")
+# {operation_code: completed_qty} — a map, so a new stage needs no schema
+# change. dict[str, int] still gives the frontend a real generated type.
+@router.get("/styles/{style_id}/progress", response_model=dict[str, int])
 async def style_progress(
     style_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
@@ -129,12 +152,25 @@ async def style_progress(
 async def list_pieces(
     sku_id: uuid.UUID,
     operation_id: uuid.UUID | None = Query(None),
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     scope: uuid.UUID | None = Depends(client_scope),
 ):
-    """Every piece of one SKU with its current stage and eligibility."""
+    """The scan checklist for one SKU: every piece, its stage and eligibility.
+
+    PAGED. A SKU is one colour and size of one style, and a real order runs to
+    hundreds or thousands of garments in a single SKU — this used to serialise
+    all of them, with a per-piece store and lining lookup behind each one.
+
+    The header counts (total / done / pending / closed) remain SKU-WIDE, not
+    page-wide. `closed` withdraws the style from the scan screen, so deriving it
+    from one page would tell a manager on page 1 that a 900-piece SKU was
+    finished. `blocked` is the exception and says so: it is a page figure, tagged
+    `blocked_scope`.
+    """
     return await ProductionService(db).list_pieces_for_sku(
-        sku_id=sku_id, operation_id=operation_id, client_scope=scope)
+        sku_id=sku_id, operation_id=operation_id, client_scope=scope,
+        params=params)
 
 @router.get("/piece-state", response_model=PieceState)
 async def piece_state(
@@ -172,7 +208,8 @@ async def piece_state(
                         false -> show `blockers`; each names its gate and reason
                         null  -> no employee sent, so the question is unanswered
 
-    Also carries the piece's drawer (bug #12) and how many pieces of its SKU are
+    Also carries where the garment stands in the store (bug #12) and how many
+    pieces of its SKU are
     still outstanding at the next stage (bug #8).
     """
     if not code and not piece_id:
@@ -217,6 +254,84 @@ async def _spec_dcm(db: AsyncSession, piece_ids: list, screen: ScreenContext):
             f"quantity to record. Send `consumption.dcm` explicitly, or scan the "
             f"pieces in separate batches.")
     return next(iter(values)), "style_spec"
+
+
+async def _approved_cutting(db, piece_ids: list, screen: ScreenContext):
+    """What the cutting grid already decided for these garments, if anything.
+
+    CUTTING V2, THE POINT OF IT. The manager has already entered the hides, their
+    measurements, the article, the colour and the cutter, and signed the row off.
+    Asking the cutter to re-type any of that at the scan gun is the duplicate work
+    the whole feature exists to delete — and re-typing is where the wrong article
+    got recorded (bugs #23/#27).
+
+    LEATHER ONLY. A cutting row is a list of hides; lining is cut by the metre and
+    has no sheet-level record to retrieve.
+
+    Returns (rows_by_piece, lot_id, dcm_by_piece, warnings). Any of the last
+    three may be empty/None, in which case the caller falls straight back to the
+    typed path — a piece with no approved row must behave exactly as it does
+    today.
+
+    TWO GARMENTS MAY TAKE DIFFERENT AMOUNTS, AND THAT IS THE NORMAL CASE.
+    A cutting row is ONE GARMENT cut from 7-12 individually-measured hides, so
+    two jackets of the same size routinely land 40 dcm apart; the grid exists to
+    record exactly that. This used to 409 the whole scan ("approved with
+    different leather totals — scan them separately"), which read to the floor as
+    "the system refuses a garment that took more than the target" and sent the
+    manager back to scanning one piece at a time. Each piece now carries its OWN
+    measured dcm into its own event, and the batch decrement is their sum — so
+    nothing is averaged, nothing is guessed, and nobody is charged what another
+    garment took.
+
+    THE LOT IS STILL ONE PER SCAN, and that 409 stays. A single decrement can
+    only come off a single lot, so two garments approved against different
+    leather really are two different spends.
+    """
+    if screen is not ScreenContext.LEATHER_CUT or not piece_ids:
+        return {}, None, {}, []
+
+    from app.core.enums import CuttingRowStatus
+    from app.modules.cutting.service import CuttingService
+    from app.modules.materials.service import MaterialService
+    svc = CuttingService(db)
+    rows = await svc.repo.rows_for_pieces(piece_ids)
+    approved = {pid: r for pid, r in rows.items()
+                if r.status == CuttingRowStatus.APPROVED.value}
+    if not approved:
+        return {}, None, {}, []
+
+    mats = MaterialService(db)
+    lot_ids, dcm_by_piece, warnings = set(), {}, []
+    for pid, row in approved.items():
+        sheets = await mats.repo.sheets_for_row(row.id)
+        if not sheets:
+            continue
+        lot_ids.add(sheets[0].material_lot_id)
+        dcm_by_piece[pid] = float(Decimal(str(row.total_dcm or 0)))
+
+    if len(lot_ids) > 1:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"These garments were approved against {len(lot_ids)} different "
+            f"leather lots, and one scan can only spend one. Scan each lot's "
+            f"pieces separately.")
+
+    distinct = {round(v, 3) for v in dcm_by_piece.values()}
+    if len(distinct) > 1:
+        # NOT AN ERROR — a fact about the batch, said out loud. Each garment is
+        # charged its own number below; the warning is here so the manager sees
+        # the spread rather than discovering it in the ledger.
+        warnings.append(
+            f"These garments took different amounts of leather "
+            f"({', '.join(f'{v:g}' for v in sorted(distinct))} dcm). Each is "
+            f"charged what its own approved row measured.")
+
+    if len(approved) != len(piece_ids):
+        warnings.append(
+            f"{len(approved)} of {len(piece_ids)} scanned garments have an "
+            f"approved cutting row; the rest fall back to typed consumption.")
+    return approved, next(iter(lot_ids), None), dcm_by_piece, warnings
 
 
 async def _resolve_cut_lot(
@@ -337,7 +452,18 @@ async def log_batch(
     # Bugs #9/#10: the cut screen may name the material by article/colour/
     # thickness instead of by lot id. Resolved to ids HERE so the service still
     # sees ids only, exactly as barcodes are.
+    # ── CUTTING V2 FIRST, THE TYPED PATH AS THE FALLBACK ────────────────────
+    # An approved cutting row already names the lot and the measured total, so
+    # neither is asked for again. Anything the caller DID send still wins: a
+    # manager correcting a row at the gun is making a deliberate choice, and
+    # overriding him from a stored plan would be the system arguing with the
+    # person holding the leather.
+    approved_rows, row_lot_id, row_dcm_by_piece, cut_warnings = \
+        await _approved_cutting(db, piece_ids, screen)
+
     leather_lot_id, lining_lot_id = await _resolve_cut_lot(db, cons, screen)
+    if leather_lot_id is None and row_lot_id is not None:
+        leather_lot_id = row_lot_id
 
     # ── THE DCM, AND WHERE IT CAME FROM ─────────────────────────────────────
     # Resolved HERE, beside the lot, for the same reason: the service must keep
@@ -349,19 +475,91 @@ async def log_batch(
     # other way round: /production/piece-state returns `suggested_dcm_per_piece`
     # and the screen prefills the field, so the operator still confirms the
     # number that reaches the ledger.
+    #
+    # PER PIECE WHEN THE GRID MEASURED IT PER PIECE. `consumption_by_piece` is
+    # the approved rows' own totals, one per garment, and it is what makes a
+    # mixed batch loggable: a jacket that took 412 dcm and one that took 370 are
+    # both true, and neither should be charged the other's number. A typed `dcm`
+    # still overrides everything — the manager at the gun is making a deliberate
+    # choice — and a batch with no rows behaves exactly as it always did.
     dcm, source = cons.dcm, ("typed" if cons.dcm is not None else None)
-    if dcm is None and cons.use_style_spec and screen in SCREEN_TO_STAGE:
+    by_piece = None
+    if dcm is None and row_dcm_by_piece:
+        by_piece = row_dcm_by_piece
+        source = "cutting_row"
+        # The single number stays populated for the uniform case so every
+        # existing consumer of `dcm_per_piece` reads what it always read.
+        distinct = {round(v, 3) for v in row_dcm_by_piece.values()}
+        dcm = next(iter(distinct)) if len(distinct) == 1 else None
+    if dcm is None and by_piece is None and cons.use_style_spec \
+            and screen in SCREEN_TO_STAGE:
         dcm, source = await _spec_dcm(db, piece_ids, screen)
 
-    return await svc.log_batch(
+    result = await svc.log_batch(
         user=user, employee_id=employee_id, piece_ids=piece_ids,
         work_date=body.work_date, screen=screen,
         leather_lot_id=leather_lot_id, lining_lot_id=lining_lot_id,
-        consumption_qty=dcm, consumption_source=source, preview=body.preview)
+        consumption_qty=dcm, consumption_by_piece=by_piece,
+        consumption_source=source, preview=body.preview,
+        cutting_rows=approved_rows)
+    if cut_warnings:
+        result["cutting_warnings"] = cut_warnings
+    return result
 
 
 
 # ── deprecated shims (one release) ───────────────────────────────────────────
+# ══════════════════════════════════════════════ correcting a production record
+# BUG #8 — "Manager Zahoor assigned a piece to the wrong employee during cutting,
+# so we had to delete the record directly from the database." Two operations,
+# because they are two different mistakes; see production/corrections.py.
+_REASSIGNERS = require_roles(
+    UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER, UserRole.HR,
+    UserRole.CUTTING_MANAGER, UserRole.LINING_MANAGER,
+    UserRole.STITCHING_MANAGER)
+# DELETING ERASES EVIDENCE AND MOVES STOCK, so it is DM/MD only.
+_DELETERS = require_roles(UserRole.MANAGING_DIRECTOR, UserRole.DIRECT_MANAGER)
+
+
+@router.patch("/events/{event_id}/reassign",
+              response_model=EventReassignResult)
+async def reassign_event(
+    event_id: uuid.UUID,
+    employee_id: uuid.UUID,
+    reason: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_REASSIGNERS),
+):
+    """Put the right worker's name on work that really happened.
+
+    The stage and the stock are untouched — the garment WAS cut. Only who did it
+    was recorded wrongly, and the wage follows because it is derived from this
+    row rather than stored against it.
+    """
+    from app.modules.production.corrections import CorrectionService
+    return await CorrectionService(db).reassign(
+        event_id, employee_id=employee_id, reason=reason,
+        actor_user_id=user.id, actor_name=user.name)
+
+
+@router.delete("/events/{event_id}", response_model=EventDeleteResult)
+async def delete_event(
+    event_id: uuid.UUID,
+    reason: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(_DELETERS),
+):
+    """Remove a record that should never have existed, and return its stock.
+
+    `reason` is REQUIRED: this is the operation that erases evidence, and why it
+    happened is the only thing that makes it reviewable. The route it replaces —
+    a DELETE in the database — had nowhere to put one.
+    """
+    from app.modules.production.corrections import CorrectionService
+    return await CorrectionService(db).delete(
+        event_id, reason=reason, actor_user_id=user.id, actor_name=user.name)
+
+
 @router.post("/cutting", deprecated=True)
 async def cutting_removed():
     raise HTTPException(

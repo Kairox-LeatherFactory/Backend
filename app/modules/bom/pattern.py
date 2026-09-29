@@ -86,14 +86,30 @@ def _net_qty_for_category(pattern, category: str, size) -> tuple[str | None, flo
 
 
 
+def net_qty_for_labels(pattern, labels, size) -> tuple[str | None, float]:
+    """Σ net_qty_sf of an EXPLICIT set of DXF fabric labels at `size`.
+
+    The per-label split behind _net_qty_for_category: when several BOM lines share one
+    category, each line may claim only the labels attributed to it, so the category
+    total is DIVIDED across them instead of repeated on every one."""
+    fm = pattern.fabric_matrix or {}
+    key = _resolve_size_key(fm, size, pattern.master_size)
+    if key is None:
+        return None, 0.0
+    wanted = {str(l) for l in (labels or []) if l}
+    if not wanted:
+        return None, 0.0
+    net = sum(float(v) for f, v in (fm.get(key, {})).items() if f in wanted)
+    if not net:
+        return None, 0.0
+    return key, round(net, 2)
+
+
 LEATHER_DCM_CATEGORIES = {"main_material", "sub_material"}
 FABRIC_WASTAGE_DEFAULT = Decimal("1.15")   # TODO: move to config_store, like dxf_yield
 
-def dcm_for_category(pattern, *, category, size, species="_default", yields=None,
-                     fabric_wastage=None):
-    key, net_sf = _net_qty_for_category(pattern, category, size)
-    if key is None or not net_sf:
-        return None
+
+def _gross_dcm(net_sf, category, species, yields, fabric_wastage):
     if category in LEATHER_DCM_CATEGORIES:
         mult = (yields or {}).get(species) or (yields or {}).get("_default")
     else:                                   # lining/interlining/pocketing → fabric wastage
@@ -101,6 +117,24 @@ def dcm_for_category(pattern, *, category, size, species="_default", yields=None
     if not mult:
         return None
     return (Decimal(str(net_sf)) * Decimal(str(mult)) * SF_TO_DM2).quantize(Decimal("0.01"))
+
+
+def dcm_for_category(pattern, *, category, size, species="_default", yields=None,
+                     fabric_wastage=None):
+    key, net_sf = _net_qty_for_category(pattern, category, size)
+    if key is None or not net_sf:
+        return None
+    return _gross_dcm(net_sf, category, species, yields, fabric_wastage)
+
+
+def dcm_for_labels(pattern, *, labels, category, size, species="_default", yields=None,
+                   fabric_wastage=None):
+    """dcm_for_category restricted to an explicit label set. `category` still selects the
+    multiplier (leather yield vs fabric wastage); only the measured area changes."""
+    key, net_sf = net_qty_for_labels(pattern, labels, size)
+    if key is None or not net_sf:
+        return None
+    return _gross_dcm(net_sf, category, species, yields, fabric_wastage)
 
 
 def graded_dxf(pattern, *, category: str, sizes, species: str, yields: dict) -> dict:

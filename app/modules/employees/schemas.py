@@ -133,3 +133,15 @@ class EmployeeUpdate(BaseModel):
         if self.role is not None and self.password is None:
             raise ValueError("password is required when creating a staff login")
         return self
+
+class EmployeeDeleteResult(BaseModel):
+    """What a soft-delete reports back.
+
+    `already_inactive` appears only on a repeat call, so it is optional rather
+    than defaulted to False — the two cases are genuinely different and a
+    frontend can tell "we deactivated them" from "they already were".
+    """
+    employee_id: str
+    active: bool
+    history_preserved: bool | None = None
+    already_inactive: bool | None = None

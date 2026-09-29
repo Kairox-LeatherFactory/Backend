@@ -14,8 +14,8 @@ import datetime
 import pytest
 from fastapi import HTTPException
 
-from app.core.enums import DrawerPart, DrawerState, ScreenContext, UserRole
-from app.modules.drawers.service import DrawerService
+from app.core.enums import StorePart, StoreState, DrawerPart, DrawerState, ScreenContext, UserRole
+from app.modules.store.service import StoreService
 from app.modules.production.models import ProductionEvent
 from app.modules.production.service import ProductionService
 
@@ -36,7 +36,7 @@ async def _advance_to_pasted(db, piece, cutter, paster, cutting_mgr, stitching_m
 async def test_line_stitch_blocked_until_sended(db, operations, pieces, cutter, paster,
                                                 tailor, cutting_mgr, stitching_mgr, dm,
                                                 leather_lot):
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     await _advance_to_pasted(db, piece, cutter[0], paster[0], cutting_mgr,
                              stitching_mgr, leather_lot)
 
@@ -54,29 +54,31 @@ async def test_store_scan_and_full_merge_then_line_stitch(db, operations, cut_pi
                                                           cutter, lining_cutter, paster,
                                                           tailor, cutting_mgr, lining_mgr,
                                                           stitching_mgr, dm, leather_lot):
-    piece, drawer = cut_pieces[0]
-    drawers = DrawerService(db)
+    piece = cut_pieces[0]
+    store = StoreService(db)
 
     # store leather → holding_leather
-    r1 = await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                                  part=DrawerPart.LEATHER)
-    assert r1["state"] == DrawerState.HOLDING_LEATHER.value
+    r1 = await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                                  part=StorePart.LEATHER)
+    assert r1["store_state"] == StoreState.HOLDING_LEATHER.value
     assert r1["ready_for_received"] is False
     assert "LINING" in r1["awaiting"]
 
     # store lining → complete, so the drawer auto-advances to RECEIVED (bug #13).
     # Its CONTENTS are still "holding both"; `state` has moved on.
-    r2 = await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                                  part=DrawerPart.LINING)
+    r2 = await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                                  part=StorePart.LINING)
     assert r2["holding"] == "HOLDING BOTH"
-    assert r2["state"] == DrawerState.RECEIVED.value
+    assert r2["store_state"] == StoreState.RECEIVED.value
     assert r2["auto_received"] is True
     assert r2["ready_for_received"] is True
 
     # SEND is still a decision, and it is what opens the merge gate.
-    snd = await drawers.send_batch(drawer_ids=[drawer.id], actor_id=dm.id)
+    snd = await store.send(piece_ids=[piece.id], actor_user_id=dm.id)
     assert snd["count_sent"] == 1
-    assert snd["sent"][0]["state"] == "sended"
+    # `sent` is a list of piece CODES: the thing released is the garment, and
+    # there is no box row to report a state for.
+    assert snd["sent"] == [piece.code]
 
     # now advance leather chain and line-stitch succeeds
     await _advance_to_pasted(db, piece, cutter[0], paster[0], cutting_mgr,
@@ -114,8 +116,8 @@ async def test_role_gate_rejects_only_the_pieces_it_owns_in_a_mixed_batch(
     not the two APPROVAL stages. So the pair is FINAL_FINISH (owned) +
     FINAL_INSPECTION (denied — bypass roles only).
     """
-    piece1, _ = pieces[0]
-    piece2, _ = pieces[1]
+    piece1 = pieces[0]
+    piece2 = pieces[1]
 
     # piece1: done through SHELL_STITCHING -> next is FINAL_FINISH     (allowed)
     # piece2: done through FINAL_FINISH    -> next is FINAL_INSPECTION (denied)
@@ -154,8 +156,8 @@ async def test_role_gate_is_still_a_403_when_no_stage_in_the_batch_is_owned(
     """The documented whole-request 403 survives for the case it was written for:
     every stage in the batch is closed to this role, so the ROLE is what's wrong
     and there is nothing to salvage."""
-    piece1, _ = pieces[0]
-    piece2, _ = pieces[1]
+    piece1 = pieces[0]
+    piece2 = pieces[1]
 
     # both pieces are past FUSING -> both infer PASTING, which cutting_mgr lacks
     for p in (piece1, piece2):
@@ -181,31 +183,43 @@ async def test_role_gate_is_still_a_403_when_no_stage_in_the_batch_is_owned(
 
 @pytest.mark.asyncio
 async def test_leather_only_piece_complete_on_leather(db, operations, pieces, dm,
-                                                     ready_for_store):
-    piece, drawer = pieces[0]
+                                                     cutter, ready_for_store):
+    piece = pieces[0]
     # mark this piece leather-only
     piece.needs_lining = False
     await db.commit()
     # Leather side only: a logged lining cut would outrank needs_lining=False.
     await ready_for_store(piece, lining=False)
-    drawers = DrawerService(db)
-    r = await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                                 part=DrawerPart.LEATHER)
+    store = StoreService(db)
+    r = await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                                 part=StorePart.LEATHER)
     assert r["ready_for_received"] is True   # complete on leather alone
-    rec = await drawers.transition(drawer.id, "RECEIVED", actor_id=dm.id)
-    assert rec["state"] == "received"
+    # THE SCAN IS THE RECEIPT. There is no separate RECEIVE tap: the store
+    # manager scanning the part in IS the act of receiving it, so a leather-only
+    # garment is releasable the moment its leather is in.
+    out = await store.send(piece_ids=[piece.id], actor_user_id=dm.id)
+    assert out["sent"] == [piece.code]
 
 
 @pytest.mark.asyncio
-async def test_received_requires_completeness(db, operations, pieces, dm):
-    piece, drawer = pieces[0]   # needs_lining True, nothing stored
-    with pytest.raises(Exception) as ei:
-        await DrawerService(db).transition(drawer.id, "RECEIVED", actor_id=dm.id)
-    assert "await" in str(ei.value).lower() or "409" in str(ei.value)
+async def test_an_incomplete_garment_cannot_leave_the_store(db, operations,
+                                                            pieces, dm):
+    """Was test_received_requires_completeness.
+
+    The rule is unchanged — nothing incomplete leaves the store — but it is now
+    enforced at the one place a human decides, the SEND, rather than at a
+    separate RECEIVE tap that no longer exists.
+    """
+    piece = pieces[0]   # needs_lining True, nothing stored
+    out = await StoreService(db).send(piece_ids=[piece.id], actor_user_id=dm.id)
+    assert out["sent"] == []
+    assert out["not_ready"][0]["piece"] == piece.code
+    assert out["not_ready"][0]["missing"] == "leather"
 
 
 @pytest.mark.asyncio
-async def test_sended_requires_received(db, operations, pieces, dm, ready_for_store):
+async def test_sended_requires_received(db, operations, pieces, dm, cutter,
+                                        ready_for_store):
     """A drawer that is not complete cannot be sent.
 
     The leather-only shortcut this test used to take no longer works: a piece
@@ -214,35 +228,46 @@ async def test_sended_requires_received(db, operations, pieces, dm, ready_for_st
     "incomplete drawers do not leave the store", so the setup now uses a piece
     that genuinely still needs its lining.
     """
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     piece.needs_lining = True
     await db.commit()
     # Leather pasted, lining NOT cut — exactly the drawer this test is about.
     await ready_for_store(piece, lining=False)
-    await DrawerService(db).store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                                       part=DrawerPart.LEATHER)
+    await StoreService(db).store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                                       part=StorePart.LEATHER)
 
     # Still awaiting lining → not RECEIVED → nothing is sent.
-    out = await DrawerService(db).send_batch(
-        drawer_ids=[drawer.id], actor_id=dm.id)
+    out = await StoreService(db).send(piece_ids=[piece.id], actor_user_id=dm.id)
     assert out["count_sent"] == 0
     assert out["sent"] == []
     assert len(out["not_ready"]) == 1
-    assert out["not_ready"][0]["state"] == DrawerState.HOLDING_LEATHER.value
+    assert out["not_ready"][0]["state"] == StoreState.HOLDING_LEATHER.value
     assert "awaiting its lining" in out["not_ready"][0]["reason"]
 
-    # the deprecated single-drawer route enforces the same order
-    with pytest.raises(Exception) as ei:
-        await DrawerService(db).transition(drawer.id, "SENDED", actor_id=dm.id)
-    assert "RECEIVED" in str(ei.value) or "before" in str(ei.value).lower()
+    # AND THE GARMENT IS STILL WHERE IT WAS. A refused send must not half-move
+    # the piece: SENDED is what the merge gate reads, so a piece left in that
+    # state after a rejected release would open line-stitching on an incomplete
+    # garment — which is the exact failure the gate exists to prevent.
+    await db.refresh(piece)
+    assert piece.store_state == StoreState.HOLDING_LEATHER.value
 
 
 @pytest.mark.asyncio
-async def test_store_scan_wrong_drawer_rejected(db, operations, pieces):
-    piece_a, drawer_a = pieces[0]
-    _, drawer_b = pieces[1]
-    # piece A into drawer B → 409 (merge map is authority)
-    with pytest.raises(Exception) as ei:
-        await DrawerService(db).store_scan(drawer_id=drawer_b.id, piece_id=piece_a.id,
-                                           part=DrawerPart.LEATHER)
-    assert "not merged" in str(ei.value).lower() or "409" in str(ei.value)
+async def test_there_is_no_wrong_place_to_store_a_garment(db, operations, pieces,
+                                                          cutter, ready_for_store):
+    """Was test_store_scan_wrong_drawer_rejected — and its removal is the point.
+
+    That 409 policed an assignment the system invented at upload: a garment could
+    only go in the ONE box premint had picked for it. With 200 boxes and a
+    100-piece style that is what forced the DM to re-allocate by hand, which in
+    practice did not happen. The store is a state now, so any garment can be
+    received anywhere and there is nothing to get wrong.
+    """
+    piece_a = pieces[0]
+    piece_b = pieces[1]
+    store = StoreService(db)
+    for p in (piece_a, piece_b):
+        await ready_for_store(p, lining=False)
+        r = await store.store_scan(piece_id=p.id, employee_id=cutter[0].id,
+                                    part=StorePart.LEATHER)
+        assert r["leather_in"] is True

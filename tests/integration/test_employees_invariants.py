@@ -139,23 +139,35 @@ async def test_a_piece_rate_worker_gets_no_login(db):
 
 
 @pytest.mark.asyncio
-async def test_a_monthly_employee_gets_a_login(db):
+async def test_a_monthly_worker_also_gets_no_login(db):
+    """WAGE TYPE IS A PAYROLL FACT, NOT AN ACCESS DECISION.
+
+    These two tests used to assert the opposite — that a MONTHLY worker is given
+    a login, and that creating one without phone+password is refused. CLAUDE.md
+    s10 records that rule being removed: "a MONTHLY worker used to be auto-given
+    an `employee` login; that was removed". Shop-floor workers get no login
+    whatever they are paid (s3); they are identified by their employee barcode
+    and an operator records their attendance for them.
+
+    A salaried worker therefore does NOT need login details to exist, and passing
+    a password without a staff role is now refused from the other direction.
+    """
     out = await EmployeeService(db).create(schemas.EmployeeCreate(
-        name="SALARIED ONE", designation="TAILOR", wage_type=WageType.MONTHLY,
-        phone="9000000123", password="a-long-enough-password"))
-    assert out.user_created is True
-    assert out.login_phone == "9000000123"
+        name="SALARIED ONE", designation="TAILOR", wage_type=WageType.MONTHLY))
+    assert out.user_created is False
+    assert out.login_phone is None
 
 
 @pytest.mark.asyncio
-async def test_a_monthly_employee_without_login_details_is_refused(db):
-    """`EmployeeCreate._login_fields` (employees/schemas.py:46-53) — a MONTHLY
-    worker whose login could not be created would be a salaried employee who
-    cannot check in."""
+async def test_a_password_without_a_staff_role_is_refused(db):
+    """The replacement guard: a password only means something when a STAFF login
+    is being created (schemas._EMPLOYEE_LOGIN_ROLES). Offering one for a plain
+    worker is a caller mistake, not a silent no-op."""
     import pydantic
-    with pytest.raises(pydantic.ValidationError):
+    with pytest.raises(pydantic.ValidationError, match="workers do not log in"):
         schemas.EmployeeCreate(name="NOPHONE", designation="TAILOR",
-                               wage_type=WageType.MONTHLY)
+                               wage_type=WageType.MONTHLY,
+                               password="a-long-enough-password")
 
 
 @pytest.mark.asyncio
@@ -206,10 +218,19 @@ async def test_update_rejects_a_field_outside_the_allow_list(db):
 def test_the_allow_list_covers_every_field_the_update_schema_declares():
     """The other failure mode of an allow-list: a field the schema OFFERS but the
     list omits is silently dropped, so a manager's edit appears to save and does
-    nothing. Asserted as a pure structural check — no DB needed."""
+    nothing. Asserted as a pure structural check — no DB needed.
+
+    `role` and `password` are excluded on purpose. They are NOT plain attribute
+    writes: EmployeeService.update strips them from `data` and routes them
+    through the staff-login path, which checks them against the actor's
+    `_GRANTABLE` set and 403s on an over-reach. So they are neither dropped nor
+    mass-assigned, and holding them to the attribute allow-list would be
+    asserting the wrong contract. Every OTHER declared field must be writable.
+    """
     allowed = {"name", "designation", "wage_type", "monthly_salary",
                "phone", "email", "is_active"}
-    declared = set(schemas.EmployeeUpdate.model_fields)
+    login_fields = {"role", "password"}
+    declared = set(schemas.EmployeeUpdate.model_fields) - login_fields
     assert declared == allowed, (
         f"schema and allow-list disagree: only-in-schema={declared - allowed}, "
         f"only-in-list={allowed - declared}")

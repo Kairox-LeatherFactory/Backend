@@ -26,8 +26,8 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from app.core.database import Base
-from app.core.enums import DrawerPart, ScreenContext
-from app.modules.drawers.service import DrawerService
+from app.core.enums import StorePart, ScreenContext
+from app.modules.store.service import StoreService
 from app.modules.production.service import ProductionService
 from app.modules.materials.service import MaterialService
 from app.modules.barcode.service import BarcodeService
@@ -83,10 +83,11 @@ async def test_uat2_cutting_logs_consumption_and_drops_stock(
     consumption, THEN the cutting event is logged and stock falls by that much."""
     before = float(leather_lot.on_hand)
     res = await ProductionService(db).log_batch(
-        user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[pieces[0][0].id],
+        user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[pieces[0].id],
         work_date=datetime.date.today(), screen=ScreenContext.LEATHER_CUT,
         leather_lot_id=leather_lot.id, consumption_qty=15.0)
     assert res["count_logged"] == 1
+    assert res["consumption_recorded"]["onused"] == 15.0
     await db.refresh(leather_lot)
     assert float(leather_lot.on_hand) == before - 15.0
 
@@ -103,14 +104,14 @@ async def test_uat3_worker_cannot_work_unskilled_stage(
     backfilled a designation, so the manager-role gate (GATE 1) stays the hard
     authority and the anomaly is surfaced for audit instead."""
     res = await ProductionService(db).log_batch(
-        user=cutting_mgr, employee_id=paster[0].id, piece_ids=[pieces[0][0].id],
+        user=cutting_mgr, employee_id=paster[0].id, piece_ids=[pieces[0].id],
         work_date=datetime.date.today(), screen=ScreenContext.LEATHER_CUT,
         leather_lot_id=leather_lot.id, consumption_qty=10.0)
     assert res["count_logged"] == 1
     assert not res["skill_blocked"]          # nothing is BLOCKED on skill
 
     warning = res["skill_warnings"][0]
-    assert warning["piece"] == pieces[0][0].code
+    assert warning["piece"] == pieces[0].code
     assert warning["designation"] == "PASTER"
     assert warning["stage"] == "LEATHER_CUTTING"
     assert "may not work" in warning["note"]
@@ -123,7 +124,7 @@ async def test_uat4_piece_cannot_skip_ahead(
     """AS the system, WHEN a piece has only been cut, THEN the next PIPELINE scan
     logs FUSING (the immediate next step), never a later stage — no skipping."""
     today = datetime.date.today()
-    p = pieces[0][0]
+    p = pieces[0]
     await ProductionService(db).log_batch(
         user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[p.id],
         work_date=today, screen=ScreenContext.LEATHER_CUT,
@@ -142,7 +143,7 @@ async def test_uat5_lined_jacket_blocks_line_stitch_until_complete(
     """AS a DM, WHEN a jacket needs a lining, THEN it cannot go to line-stitching
     until both leather and lining are in its drawer and I mark it SENDED."""
     today = datetime.date.today()
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     prod = ProductionService(db)
     for screen, emp, mgr in [
         (ScreenContext.LEATHER_CUT, cutter[0], cutting_mgr),
@@ -169,11 +170,10 @@ async def test_uat5_lined_jacket_blocks_line_stitch_until_complete(
     assert blocked["merge_blocked"]
 
     # store both + DM releases
-    drawers = DrawerService(db)
-    await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id, part=DrawerPart.LEATHER)
-    await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id, part=DrawerPart.LINING)
-    await drawers.transition(drawer.id, "RECEIVED", actor_id=dm.id)
-    await drawers.transition(drawer.id, "SENDED", actor_id=dm.id)
+    store = StoreService(db)
+    await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id, part=StorePart.LEATHER)
+    await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id, part=StorePart.LINING)
+    await store.send(piece_ids=[piece.id], actor_user_id=dm.id)
 
     # AFTER: line-stitch succeeds
     ok = await prod.log_batch(user=stitching_mgr, employee_id=tailor[0].id,
@@ -190,7 +190,7 @@ async def test_uat6_leaver_barcode_retired_history_kept(
     stops scanning but every piece they made and every wage line stays intact."""
     emp, bc = cutter
     await ProductionService(db).log_batch(
-        user=cutting_mgr, employee_id=emp.id, piece_ids=[pieces[0][0].id],
+        user=cutting_mgr, employee_id=emp.id, piece_ids=[pieces[0].id],
         work_date=datetime.date.today(), screen=ScreenContext.LEATHER_CUT,
         leather_lot_id=leather_lot.id, consumption_qty=10.0)
 

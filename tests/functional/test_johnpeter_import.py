@@ -64,7 +64,8 @@ def test_johnpeter_preview_service():
 @skip_no_file
 def test_johnpeter_parser():
     wb = openpyxl.load_workbook(JP_FILE, data_only=True)
-    lines, warnings = parse_order_sheet(wb.active)
+    lines, warnings, verdict = parse_order_sheet(wb.active)
+    assert verdict == "ORDER"
     assert warnings == []
     assert len(lines) == EXPECTED_LINES
     assert len({l.style for l in lines}) == EXPECTED_STYLES
@@ -85,7 +86,7 @@ async def test_johnpeter_load_into_clients(db):
     """Mirror seed.py's flat-order load into the async clients graph, then verify
     the numbers survive round-trip through ClientService / AnalyticsService."""
     wb = openpyxl.load_workbook(JP_FILE, data_only=True)
-    lines, _ = parse_order_sheet(wb.active)
+    lines, _, _ = parse_order_sheet(wb.active)
 
     client = cm.Client(name="John Peter", country="Italy")
     db.add(client); await db.flush()

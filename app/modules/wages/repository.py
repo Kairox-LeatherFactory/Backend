@@ -31,12 +31,35 @@ class WageRepository:
     # ── rates ───────────────────────────────────────────────────────────────
     async def effective_rate(
         self, style_id: uuid.UUID, operation_id: uuid.UUID, on: date
-    ) -> float | None:
+    ) -> tuple[float | None, bool]:
         """The rate in force for one operation on one style on `on`.
 
-        Latest row with effective_from <= on. None means no rate was ever
-        configured for that pair — the caller must NOT treat that as zero
+        Returns `(rate, was_backdated)`. `(None, False)` means no rate has EVER
+        been configured for that pair — the caller must not treat that as zero
         silently; compute_run reports it as unpaid work.
+
+        ── WHY THERE IS A FALLBACK, AND WHY IT IS REPORTED ─────────────────────
+        The first query is the real rule: the latest row with
+        `effective_from <= on`, which is what makes a mid-period rate change
+        price each day at the rate that was in force on it.
+
+        But the commonest way a payroll comes out at ZERO has nothing to do with
+        mid-period changes. Work is logged for a fortnight; the manager then sits
+        down and fills in the rate sheet, and the form sends TODAY as
+        `effective_from` because that is the obvious default. Every rate is now
+        dated after every piece, so the strict query matches nothing, every
+        operation lands in `unrated`, and `total_amount` is 0.00 against a sheet
+        that visibly has a rate in every row. That is not a rate that does not
+        exist — it is a rate whose start date is a data-entry artefact.
+
+        So when nothing is effective on or before the work date, the EARLIEST
+        rate ever set for that pair applies, and the second element of the tuple
+        says so. compute_run surfaces every backdated pricing in its diagnostics,
+        because a manager is entitled to know that a rate was applied to work
+        that predates it — the alternative was paying nothing and saying nothing.
+
+        It can only ever turn a 0.00 into a payment: if any rate is effective on
+        the date, the fallback is not consulted at all.
         """
         stmt = (
             select(Rate.rate)
@@ -49,7 +72,16 @@ class WageRepository:
             .limit(1)
         )
         val = await self.db.scalar(stmt)
-        return float(val) if val is not None else None
+        if val is not None:
+            return float(val), False
+
+        earliest = await self.db.scalar(
+            select(Rate.rate)
+            .where(Rate.style_id == style_id, Rate.operation_id == operation_id)
+            .order_by(Rate.effective_from.asc())
+            .limit(1)
+        )
+        return (float(earliest), True) if earliest is not None else (None, False)
 
     async def rates_for_style(
         self, style_id: uuid.UUID, on: date
@@ -126,7 +158,7 @@ class WageRepository:
     ) -> Rate:
         """Single-cell save. Commits."""
         r = await self._upsert_rate_nocommit(style_id, operation_id, rate, effective_from)
-        await self.db.commit()
+        await self.db.flush()
         await self.db.refresh(r)
         return r
 
@@ -147,7 +179,7 @@ class WageRepository:
         """
         for operation_id, rate in lines:
             await self._upsert_rate_nocommit(style_id, operation_id, rate, effective_from)
-        await self.db.commit()
+        await self.db.flush()
         return len(lines)
 
     async def _upsert_rate_nocommit(
@@ -233,7 +265,7 @@ class WageRepository:
             delete(WageLineDetailRow).where(WageLineDetailRow.wage_run_id == run_id))
         d2 = await self.db.execute(
             delete(WageLine).where(WageLine.wage_run_id == run_id))
-        await self.db.commit()
+        await self.db.flush()
         return int(d2.rowcount or 0) + int(d1.rowcount or 0)
     
     async def persist_breakdown(self, run_id: uuid.UUID, breakdown: dict) -> None:
@@ -249,13 +281,13 @@ class WageRepository:
         if not rows:
             return
         self.db.add_all(rows)
-        await self.db.commit()
+        await self.db.flush()
         
     async def stamp_recompute(self, run: WageRun, *, by: str) -> None:
         run.recompute_count = (run.recompute_count or 0) + 1
         run.last_recomputed_at = datetime.now(timezone.utc)
         run.last_recomputed_by = by
-        await self.db.commit()
+        await self.db.flush()
 
     async def stamp_reopen(self, run: WageRun, *, by: str, reason: str) -> None:
         """Unfreeze a CLOSED run, on the record.
@@ -270,7 +302,7 @@ class WageRepository:
         run.last_reopened_at = datetime.now(timezone.utc)
         run.last_reopened_by = by
         run.last_reopen_reason = reason
-        await self.db.commit()
+        await self.db.flush()
 
     async def create_run(self, period_start: date, period_end: date, *,
                          run_kind: str = WageRunKind.COMBINED.value,
@@ -291,7 +323,7 @@ class WageRepository:
                       scope_order_number=scope_order_number,
                       scope_style_code=scope_style_code)
         self.db.add(run)
-        await self.db.commit()
+        await self.db.flush()
         await self.db.refresh(run)
         return run
 
@@ -303,7 +335,7 @@ class WageRepository:
         nothing ever queries across it. A table would buy joins nobody makes and
         cost a migration every time the warning's shape grows a field."""
         run.unrated_snapshot = list(unrated or [])
-        await self.db.commit()
+        await self.db.flush()
 
     async def purge_run(self, run: WageRun) -> None:
         """Delete a run and everything hanging off it.
@@ -317,7 +349,7 @@ class WageRepository:
             delete(WageLineDetailRow).where(
                 WageLineDetailRow.wage_run_id == run.id))
         await self.db.delete(run)
-        await self.db.commit()
+        await self.db.flush()
 
     async def get_run(self, run_id: uuid.UUID) -> WageRun | None:
         stmt = (
@@ -329,17 +361,17 @@ class WageRepository:
 
     async def add_lines(self, lines: list[WageLine]) -> None:
         self.db.add_all(lines)
-        await self.db.commit()
+        await self.db.flush()
 
     async def close_run(self, run: WageRun) -> WageRun | None:
         run.status = RunStatus.CLOSED
-        await self.db.commit()
+        await self.db.flush()
         return await self.get_run(run.id)
 
     async def delete_run(self, run: WageRun) -> None:
         """Only ever used to clean up an OPEN run that failed mid-compute."""
         await self.db.delete(run)
-        await self.db.commit()
+        await self.db.flush()
 
     async def list_runs(self, *, limit: int = 50, offset: int = 0,
                         run_kind: str | None = None,
@@ -390,22 +422,50 @@ class WageRepository:
         if status:
             conds.append(WageRun.status == RunStatus(status.strip().lower()))
 
-        grouped = (
-            WageRun.id, WageRun.period_start, WageRun.period_end, WageRun.status,
-            WageRun.run_kind, WageRun.scope_is_label,
-            WageRun.scope_order_number, WageRun.scope_style_code,
-            WageRun.unrated_snapshot,
-            WageRun.recompute_count, WageRun.reopen_count, WageRun.created_at,
+        # ── AGGREGATE IN A SUBQUERY, DO NOT GROUP BY THE RUN'S COLUMNS ───────
+        # `wage_run.unrated_snapshot` is a **json** column, and PostgreSQL gives
+        # the `json` type no equality operator — there is no way to tell two json
+        # values apart, so it cannot appear in a GROUP BY at all:
+        #
+        #     asyncpg.exceptions.UndefinedFunctionError:
+        #     could not identify an equality operator for type json
+        #
+        # The old query selected twelve run columns beside three aggregates and
+        # therefore had to group by all twelve, snapshot included. That is a hard
+        # 500 on every call to GET /wages/runs on Postgres — and it did not show
+        # up in the tests, because SQLite is permissive about both GROUP BY and
+        # json equality, so the statement ran there exactly as written.
+        #
+        # Summing the lines per run FIRST and left-joining the result means the
+        # run's own columns are never grouped: one row per run comes out of
+        # `wage_run` itself. It is also the cheaper plan — the aggregate is over
+        # `wage_line` alone, which is the big table.
+        #
+        # (`jsonb` would have an equality operator, but changing the column type
+        # is a migration on a live money table to work around a query that should
+        # not have been grouping by it in the first place.)
+        totals = (
+            select(
+                WageLine.wage_run_id.label("run_id"),
+                func.coalesce(func.sum(WageLine.amount), 0).label("amount"),
+                func.coalesce(func.sum(WageLine.pieces), 0).label("pieces"),
+                func.count(WageLine.id).label("employees"),
+            )
+            .group_by(WageLine.wage_run_id)
+            .subquery()
         )
         stmt = (
             select(
-                *grouped,
-                func.coalesce(func.sum(WageLine.amount), 0),
-                func.coalesce(func.sum(WageLine.pieces), 0),
-                func.count(WageLine.id),
+                WageRun.id, WageRun.period_start, WageRun.period_end,
+                WageRun.status, WageRun.run_kind, WageRun.scope_is_label,
+                WageRun.scope_order_number, WageRun.scope_style_code,
+                WageRun.unrated_snapshot,
+                WageRun.recompute_count, WageRun.reopen_count, WageRun.created_at,
+                func.coalesce(totals.c.amount, 0),
+                func.coalesce(totals.c.pieces, 0),
+                func.coalesce(totals.c.employees, 0),
             )
-            .outerjoin(WageLine, WageLine.wage_run_id == WageRun.id)
-            .group_by(*grouped)
+            .outerjoin(totals, totals.c.run_id == WageRun.id)
             .order_by(WageRun.created_at.desc(), WageRun.period_end.desc())
             .limit(limit)
             .offset(offset)

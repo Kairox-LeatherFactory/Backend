@@ -76,16 +76,57 @@ def test_f58_seed_grants_lining_manager_access():
     assert "LINING_CUTTING" in ACCESS["lining_manager"]
 
 
-# ── F32: the insecure default secret key cannot boot outside local ──────────
-def test_f32_default_secret_key_refused_outside_local():
+# ── F32: the insecure default secret key cannot boot ANYWHERE ───────────────
+# The local/debug exemption was removed on 2026-09-23: a placeholder key is
+# forgeable wherever it runs, and the exempted configuration was the DEFAULT
+# one, so the machines that skipped the check were all of them. Note the keys
+# are passed explicitly here — reading them from .env would only assert what
+# that file happens to contain today.
+def test_f32_default_secret_key_refused_in_every_environment():
     from app.core.config import Settings
-    # local + default is allowed (dev convenience)
-    Settings(environment="local")
-    # production/staging + the shipped default must refuse to construct
+    placeholder = "dev-only-insecure-change-me-in-prod"
+    for env in ("local", "staging", "production"):
+        for debug in (True, False):
+            with pytest.raises(Exception):
+                Settings(environment=env, debug=debug, secret_key=placeholder)
+
+
+def test_f32_short_secret_key_refused():
+    from app.core.config import Settings
     with pytest.raises(Exception):
-        Settings(environment="production")
-    with pytest.raises(Exception):
-        Settings(environment="staging")
+        Settings(environment="local", debug=True, secret_key="a" * 31)
+    # 32 is the floor, not a near-miss
+    Settings(environment="local", debug=True, secret_key="a" * 32)
+
+
+# ── CORS: production no longer fails closed (Hamthan, 2026-09-23) ───────────
+def test_cors_falls_back_to_the_known_frontends_in_production():
+    from app.core.config import Settings
+    s = Settings(environment="production", debug=False, cors_origins="",
+                 secret_key="a-real-random-production-secret-value-123456")
+    assert s.cors_origin_list == [
+        "https://frontend-rust-pi-23.vercel.app",
+        "https://stagingpte.vercel.app",
+        "http://localhost:3005",
+        "http://localhost:3012",
+    ]
+
+
+def test_cors_strips_trailing_slashes_so_the_origin_header_matches():
+    # A browser sends `Origin: https://host` — a configured "https://host/"
+    # would silently match nothing.
+    from app.core.config import Settings
+    s = Settings(cors_origins="https://a.vercel.app/, http://localhost:3005/ ",
+                 secret_key="a-real-random-production-secret-value-123456")
+    assert s.cors_origin_list == ["https://a.vercel.app", "http://localhost:3005"]
+
+
+def test_docs_stay_on_in_production_unless_explicitly_disabled():
+    from app.core.config import Settings
+    key = "a-real-random-production-secret-value-123456"
+    assert Settings(environment="production", debug=False, secret_key=key).docs_enabled
+    assert not Settings(environment="production", debug=False, secret_key=key,
+                        docs_enabled=False).docs_enabled
 
 
 def test_f32_real_secret_key_boots_in_production():

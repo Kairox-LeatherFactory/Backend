@@ -1,1 +1,0 @@
-"""drawers-feature module."""

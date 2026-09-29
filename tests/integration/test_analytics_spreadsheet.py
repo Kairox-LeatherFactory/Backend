@@ -29,7 +29,7 @@ from datetime import date
 
 import pytest
 
-from app.core.enums import DrawerState, ProductionStage
+from app.core.enums import ProductionStage, StoreState
 from app.modules.analytics.service import AnalyticsService
 from app.modules.employees.models import Employee
 from app.modules.production.models import Operation, ProductionEvent
@@ -75,7 +75,7 @@ async def test_order_totals_equal_the_sum_of_its_styles(db, order_tree, pieces,
                                                         operations, worker):
     """THE SUBSET GUARANTEE. The order page and the style rows must agree."""
     order, sku = order_tree["order"], order_tree["sku"]
-    piece, _ = pieces[0]
+    piece = pieces[0]
     await _log(db, operations, piece, sku, ProductionStage.PACKAGE_EXPORT.value,
                worker)
 
@@ -97,7 +97,7 @@ async def test_a_cut_piece_awaiting_fusing_is_pending_at_fusing(
     fusing row must show the whole order outstanding, not zero.
     """
     order, sku = order_tree["order"], order_tree["sku"]
-    piece, _ = pieces[0]
+    piece = pieces[0]
     await _log(db, operations, piece, sku, ProductionStage.LEATHER_CUTTING.value,
                worker)
 
@@ -138,13 +138,15 @@ async def test_the_store_block_counts_every_piece_once(db, order_tree, pieces):
     """Store buckets must partition the pieces — no double counting, none lost."""
     order = order_tree["order"]
 
-    # Three distinct store situations across the five fixture pieces.
-    pieces[0][1].leather_in = True
-    pieces[0][1].state = DrawerState.HOLDING_LEATHER.value
-    pieces[1][1].leather_in = pieces[1][1].lining_in = True
-    pieces[1][1].state = DrawerState.HOLDING_BOTH.value
-    pieces[2][1].leather_in = pieces[2][1].lining_in = True
-    pieces[2][1].state = DrawerState.SENDED.value
+    # Three distinct store situations across the five fixture pieces. The store
+    # is a state ON THE GARMENT now, so the situation is set on the piece — there
+    # is no drawer row left to carry it.
+    pieces[0].leather_in = True
+    pieces[0].store_state = StoreState.HOLDING_LEATHER.value
+    pieces[1].leather_in = pieces[1].lining_in = True
+    pieces[1].store_state = StoreState.HOLDING_BOTH.value
+    pieces[2].leather_in = pieces[2].lining_in = True
+    pieces[2].store_state = StoreState.SENDED.value
     await db.commit()
 
     store = (await AnalyticsService(db).order_tree(order.id))["store"]
@@ -152,7 +154,6 @@ async def test_the_store_block_counts_every_piece_once(db, order_tree, pieces):
     assert store["holding_leather"] == 1
     assert store["holding_both"] == 1
     assert store["sended"] == 1
-    assert store["awaiting_parts"] == 2, "the two untouched drawers are MERGED"
     assert store["no_drawer"] == 0
 
     total_in_buckets = sum(b["pieces"] for b in store["buckets"])
@@ -160,16 +161,20 @@ async def test_the_store_block_counts_every_piece_once(db, order_tree, pieces):
         "the store block lost or double-counted a piece")
 
 
-async def test_a_piece_with_no_drawer_shows_in_the_store_block(db, order_tree,
-                                                               pieces):
-    """The waiting list is a store fact, and it has no drawer state to live in."""
-    piece, drawer = pieces[0]
-    drawer.current_piece_id = None
-    piece.drawer_id = None
-    await db.commit()
-
+async def test_the_no_drawer_bucket_is_still_reported_and_is_always_zero(
+        db, order_tree, pieces):
+    """`no_drawer` counted pieces minted while the 200-box pool was full: they had
+    barcodes, could not be stored, and so could not pass the merge gate. A state
+    has no capacity, so that stall cannot happen any more and the bucket can only
+    be 0. THE KEY IS STILL EMITTED — a saved report or a dashboard column reading
+    it must not start throwing because the stall it described became impossible."""
     store = (await AnalyticsService(db).order_tree(order_tree["order"].id))["store"]
-    assert store["no_drawer"] == 1
+    assert store["no_drawer"] == 0
+
+    pieces[0].store_state = StoreState.HOLDING_LEATHER.value
+    await db.commit()
+    store = (await AnalyticsService(db).order_tree(order_tree["order"].id))["store"]
+    assert store["no_drawer"] == 0, "nothing a piece can do puts it back in there"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -179,11 +184,11 @@ async def test_style_detail_carries_totals_stages_store_and_pieces(
     db, order_tree, pieces, operations, worker
 ):
     style, sku = order_tree["style"], order_tree["sku"]
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     await _log(db, operations, piece, sku, ProductionStage.LEATHER_CUTTING.value,
                worker)
-    drawer.leather_in = True
-    drawer.state = DrawerState.HOLDING_LEATHER.value
+    piece.leather_in = True
+    piece.store_state = StoreState.HOLDING_LEATHER.value
     await db.commit()
 
     out = await AnalyticsService(db).style_detail(style.id)
@@ -196,8 +201,8 @@ async def test_style_detail_carries_totals_stages_store_and_pieces(
 
     row = next(p for p in out["pieces"] if p["piece_id"] == str(piece.id))
     assert row["current_stage"] == ProductionStage.LEATHER_CUTTING.value
-    assert row["drawer_code"] == drawer.code
-    # The piece is parked in a drawer, so the board shows STORE rather than the
+    assert row["store_state"] == StoreState.HOLDING_LEATHER.value
+    # The piece is parked in the store, so the board shows STORE rather than the
     # cut stage it last logged.
     assert row["in_store"] is True
     assert row["display_stage"] == "STORE"
@@ -208,7 +213,7 @@ async def test_piece_detail_names_the_employee_at_every_stage(
 ):
     """Per piece, per stage, WHO did it — the leaf of the drill-down."""
     sku = order_tree["sku"]
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     await _log(db, operations, piece, sku, ProductionStage.LEATHER_CUTTING.value,
                worker)
 
@@ -226,7 +231,11 @@ async def test_piece_detail_names_the_employee_at_every_stage(
     checklist = {c["stage"]: c for c in out["checklist"]}
     assert checklist[ProductionStage.LEATHER_CUTTING.value]["state"] == "completed"
     assert checklist[ProductionStage.FUSING.value]["state"] == "pending"
-    assert out["store"]["drawer_code"] == drawer.code
+    # No `drawer_code` here any more: there is no box to name, and every field
+    # in this block now answers for EVERY garment rather than going null for one
+    # the drawer pool had no room for.
+    assert out["store"]["state"] == StoreState.WAITING.value
+    assert out["store"]["awaiting"] == ["LEATHER", "LINING"]
 
 
 async def test_piece_detail_marks_the_lining_cut_not_applicable_when_declared(
@@ -235,7 +244,7 @@ async def test_piece_detail_marks_the_lining_cut_not_applicable_when_declared(
     """A style released leather-only must not show a permanently pending lining cut."""
     style = order_tree["style"]
     style.needs_lining = False
-    piece, _ = pieces[0]
+    piece = pieces[0]
     piece.needs_lining = False
     await db.commit()
 

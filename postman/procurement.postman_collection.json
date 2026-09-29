@@ -1,0 +1,1208 @@
+{
+  "info": {
+    "name": "KairoX \u00b7 Procurement",
+    "description": "PHASE 2, THE TWO BUYING ENDS OF THE PIPELINE. Stage 1 is intake: the client's order sheet and spec sheet arrive, are classified, and open a submission. Stage 5 is the purchase order: the shortfall Stage 4 measured becomes one PO per supplier, which is approved, sent, tracked and chased until the supplier confirms. Stages 2/3 (the BOM) and Stage 4 (the stock check) have documents of their own \u2014 BOM_* and INVENTORY_*.\n\nSETUP\n  1. Import the whole folder and SELECT the KairoX environment\n     (top-right). That is what shares one token across every\n     collection \u2014 a collection variable is visible only to the\n     collection that set it.\n  2. Run `user` \u2192 Login. Its test script stores `access_token` for\n     you; there is nothing to copy and paste.\n  3. Every request here inherits bearer auth from that token.\n\n`base_url` defaults to http://127.0.0.1:8000.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. File uploads are real form-data rows \u2014 click Select Files on\nthe `file` row. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Procurement \u2014 Stage 1 intake",
+      "item": [
+        {
+          "name": "Document Report",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/submissions/{{submission_id}}/documents/{{document_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "submissions",
+                "{{submission_id}}",
+                "documents",
+                "{{document_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "submission_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                },
+                {
+                  "key": "document_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Open Submission",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/submissions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "submissions"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"client_id\": \"00000000-0000-0000-0000-000000000000\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Submission Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/submissions/{{submission_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "submissions",
+                "{{submission_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "submission_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Upload Order Sheet",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/submissions/{{submission_id}}/order-sheet",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "submissions",
+                "{{submission_id}}",
+                "order-sheet"
+              ],
+              "query": [
+                {
+                  "key": "force",
+                  "value": "False",
+                  "description": "",
+                  "disabled": true
+                }
+              ],
+              "variable": [
+                {
+                  "key": "submission_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a file."
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Upload Order Sheet Direct",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/upload/order-sheet",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "upload",
+                "order-sheet"
+              ],
+              "query": [
+                {
+                  "key": "force",
+                  "value": "False",
+                  "description": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Upload an order sheet WITHOUT a pre-existing submission. A new submission is\nauto-created only when the file passes validation; the returned `submission_id`\nmust be used for the paired spec-sheet upload (and vice-versa). A rejected file\nreturns 4xx diagnostics \u2014 no submission is visible to the caller.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a file."
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Upload Spec Sheet",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/submissions/{{submission_id}}/spec-sheet",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "submissions",
+                "{{submission_id}}",
+                "spec-sheet"
+              ],
+              "query": [
+                {
+                  "key": "force",
+                  "value": "False",
+                  "description": "",
+                  "disabled": true
+                }
+              ],
+              "variable": [
+                {
+                  "key": "submission_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a file."
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Upload Spec Sheet Direct",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/upload/spec-sheet",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "upload",
+                "spec-sheet"
+              ],
+              "query": [
+                {
+                  "key": "force",
+                  "value": "False",
+                  "description": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Upload a spec sheet WITHOUT a pre-existing submission. A new submission is\nauto-created only when the file passes validation; the returned `submission_id`\nmust be used for the paired order-sheet upload (and vice-versa). A rejected file\nreturns 4xx diagnostics \u2014 no submission is visible to the caller.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a file."
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Procurement \u2014 Stage 5 supplier PO",
+      "item": [
+        {
+          "name": "Acknowledge Po",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/pos/{{po_id}}/acknowledge",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "pos",
+                "{{po_id}}",
+                "acknowledge"
+              ],
+              "variable": [
+                {
+                  "key": "po_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"channel\": \"manual\",\n  \"confirmed_qty\": 0,\n  \"notes\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Approve Po",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/pos/{{po_id}}/approve",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "pos",
+                "{{po_id}}",
+                "approve"
+              ],
+              "variable": [
+                {
+                  "key": "po_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel Po",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/pos/{{po_id}}/cancel",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "pos",
+                "{{po_id}}",
+                "cancel"
+              ],
+              "variable": [
+                {
+                  "key": "po_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Create Supplier",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/suppliers",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "suppliers"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"\",\n  \"phone\": \"\",\n  \"email\": \"\",\n  \"service\": \"\",\n  \"gstin\": \"\",\n  \"address\": \"\",\n  \"currency\": \"\",\n  \"payment_terms_days\": 0,\n  \"lead_time_days\": 0,\n  \"supplier_type\": \"\",\n  \"whatsapp_phone\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Deactivate Supplier",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/suppliers/{{supplier_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "suppliers",
+                "{{supplier_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "supplier_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Generate Pos",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/boms/{{bom_id}}/generate-pos",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "boms",
+                "{{bom_id}}",
+                "generate-pos"
+              ],
+              "variable": [
+                {
+                  "key": "bom_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Get Po",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/pos/{{po_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "pos",
+                "{{po_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "po_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Get Supplier",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/suppliers/{{supplier_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "suppliers",
+                "{{supplier_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "supplier_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "List Pos",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/pos",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "pos"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "needs_supplier",
+                  "value": "False",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "bom_id",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "supplier_id",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "description": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "List Suppliers",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/suppliers",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "suppliers"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "service",
+                  "value": "",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "active",
+                  "value": "False",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "",
+                  "disabled": false
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "",
+                  "disabled": false
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Patch Po Items",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/pos/{{po_id}}/items",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "pos",
+                "{{po_id}}",
+                "items"
+              ],
+              "variable": [
+                {
+                  "key": "po_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"base_revision\": 0,\n  \"item_edits\": [\n    {\n      \"po_item_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"field\": \"\",\n      \"value\": \"\"\n    }\n  ],\n  \"po_edits\": {},\n  \"add_items\": [\n    {\n      \"description\": \"\",\n      \"color\": \"\",\n      \"uom\": \"\",\n      \"qty\": 0,\n      \"unit_price\": 0,\n      \"bom_item_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"inventory_item_id\": \"00000000-0000-0000-0000-000000000000\"\n    }\n  ],\n  \"remove_item_ids\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Production Board",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/production-tracking",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "production-tracking"
+              ],
+              "query": [
+                {
+                  "key": "client_id",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "order_id",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "description": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Production Transition",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/production-tracking/{{tracking_id}}/transition",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "production-tracking",
+                "{{tracking_id}}",
+                "transition"
+              ],
+              "variable": [
+                {
+                  "key": "tracking_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Reactivate Supplier",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/suppliers/{{supplier_id}}/reactivate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "suppliers",
+                "{{supplier_id}}",
+                "reactivate"
+              ],
+              "variable": [
+                {
+                  "key": "supplier_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Reject Po",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/pos/{{po_id}}/reject",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "pos",
+                "{{po_id}}",
+                "reject"
+              ],
+              "variable": [
+                {
+                  "key": "po_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Send Po",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/pos/{{po_id}}/send",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "pos",
+                "{{po_id}}",
+                "send"
+              ],
+              "variable": [
+                {
+                  "key": "po_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Ses Webhook",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/webhooks/ses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "webhooks",
+                "ses"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Submit Po",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/pos/{{po_id}}/submit",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "pos",
+                "{{po_id}}",
+                "submit"
+              ],
+              "variable": [
+                {
+                  "key": "po_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Suppliers Import Commit",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/suppliers/import/commit",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "suppliers",
+                "import",
+                "commit"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a file."
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Suppliers Import Preview",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/suppliers/import/preview",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "suppliers",
+                "import",
+                "preview"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Pick a file."
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Tracking Click",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/t/c/{{token}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "t",
+                "c",
+                "{{token}}"
+              ],
+              "query": [
+                {
+                  "key": "u",
+                  "value": "",
+                  "description": "",
+                  "disabled": true
+                },
+                {
+                  "key": "s",
+                  "value": "",
+                  "description": "",
+                  "disabled": true
+                }
+              ],
+              "variable": [
+                {
+                  "key": "token",
+                  "value": ""
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Tracking Pixel",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/t/o/{{token}}.gif",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "t",
+                "o",
+                "{{token}}.gif"
+              ],
+              "variable": [
+                {
+                  "key": "token",
+                  "value": ""
+                }
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Twilio Voice Webhook",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/webhooks/twilio/voice",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "webhooks",
+                "twilio",
+                "voice"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Twilio Whatsapp Webhook",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/webhooks/twilio/whatsapp",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "webhooks",
+                "twilio",
+                "whatsapp"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Supplier",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/procurement/suppliers/{{supplier_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "procurement",
+                "suppliers",
+                "{{supplier_id}}"
+              ],
+              "variable": [
+                {
+                  "key": "supplier_id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"\",\n  \"phone\": \"\",\n  \"email\": \"\",\n  \"service\": \"\",\n  \"gstin\": \"\",\n  \"address\": \"\",\n  \"currency\": \"\",\n  \"payment_terms_days\": 0,\n  \"lead_time_days\": 0,\n  \"supplier_type\": \"\",\n  \"whatsapp_phone\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
