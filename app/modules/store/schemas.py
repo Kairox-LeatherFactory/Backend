@@ -33,6 +33,17 @@ class StoreScanRequest(BaseModel):
     # omitted, and a `part` that says anything else is a 422.
     lot_barcode: str | None = None
     lot_id: uuid.UUID | None = None
+    # SEVERAL PACKETS IN ONE CALL. A garment takes everything the DM put on the
+    # release breakdown — button, zip, thread and more — and all of it must be in
+    # before the garment can leave the store, so a screen that has collected the
+    # scans submits them together. A scan gun that fires per beep keeps using the
+    # singular field; it is simply a one-element batch on the way in.
+    #
+    # PARTIAL ACCEPT: if one packet is the wrong size the others still issue and the
+    # bad one comes back in `accessory_batch.refused`, because one bad packet must
+    # never lose the good ones scanned with it.
+    lot_barcodes: list[str] | None = None
+    lot_ids: list[uuid.UUID] | None = None
     # A SHORT ISSUE: the operator put in 2 of the 4 buttons the line asks for.
     # Omitted means the whole outstanding quantity, which is the normal case.
     qty: float | None = None
@@ -46,6 +57,17 @@ class StoreScanRequest(BaseModel):
             raise ValueError("Scan the worker's card first.")
         if not (self.piece_barcode or self.piece_id):
             raise ValueError("Scan the garment.")
+        # EXACTLY ONE WAY OF NAMING THE PACKETS. Two of them cannot be reconciled,
+        # and silently preferring one is how the wrong packet gets issued — the same
+        # rule the recipe fan-out applies to its scopes.
+        named = [n for n, v in (("lot_barcode", self.lot_barcode),
+                                ("lot_id", self.lot_id),
+                                ("lot_barcodes", self.lot_barcodes),
+                                ("lot_ids", self.lot_ids)) if v]
+        if len(named) > 1:
+            raise ValueError(
+                f"This scan names its packets more than once ({', '.join(named)}). "
+                f"Send exactly one of lot_barcode, lot_id, lot_barcodes or lot_ids.")
         return self
 
 
@@ -75,6 +97,8 @@ class StoreScanResult(BaseModel):
     # Set only when this scan spent a DM-APPROVED wrong-size packet. A refused one
     # never reaches a 201 — it is a 409 with the request id to approve.
     substitution: dict | None = None
+    # Per-packet outcomes for an accessory scan; null for leather/lining.
+    accessory_batch: dict | None = None
     next_action: str
     warnings: list[str] = Field(default_factory=list)
 

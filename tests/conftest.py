@@ -92,7 +92,22 @@ async def engine():
 
 @pytest_asyncio.fixture
 async def db(engine) -> AsyncSession:
-    Session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    """A session configured EXACTLY like the live one — see core/database.py.
+
+    `autoflush=False` IS NOT A PREFERENCE, IT IS THE PRODUCTION SETTING, and leaving
+    it at SQLAlchemy's default of True made this harness unable to see a whole class
+    of bug. Service code that adds a row without committing and then SELECTs it back
+    works under autoflush and fails in production; two such bugs shipped green
+    (the store's multi-accessory scan, and the accessory catalogue's
+    auto-registration) while the suite reported 3,032 passing.
+
+    WHAT THIS MEANS WHEN A TEST FAILS ON IT. Either a fixture adds rows and queries
+    them without flushing — add `await db.flush()` — or service code reads back its
+    own unflushed write, which is a real bug and belongs in the service, not papered
+    over in the test.
+    """
+    Session = async_sessionmaker(engine, autoflush=False,
+                                expire_on_commit=False, class_=AsyncSession)
     async with Session() as session:
         yield session
 

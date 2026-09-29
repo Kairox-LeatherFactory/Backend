@@ -366,9 +366,23 @@ class BarcodeRepository:
         reprint); the importer uses max_short_code_counter + encode_short directly
         so it pays one read for the whole batch."""
         code = encode_short(await self.max_short_code_counter() + 1)
-        return self.register_nocommit(
+        row = self.register_nocommit(
             code=code, type_=BarcodeType.PIECE, piece_id=piece_id,
             caption=caption, order_id=order_id, sku_id=sku_id, style_id=style_id)
+        # FLUSHED SO THE NEXT CALL CAN SEE IT. `max_short_code_counter` is a SELECT
+        # and `register_nocommit` only stages the row — and sessions are
+        # `autoflush=False`, so calling this twice in one transaction read the same
+        # maximum twice and minted the SAME code twice. Five pieces in a loop all
+        # came out `PC-222223` and died on the unique index at commit; worse, a
+        # partial success would print one code on two garments.
+        #
+        # The bulk path is unaffected and must stay that way: the importer reads
+        # `max_short_code_counter` ONCE and counts up in Python (see this method's
+        # docstring and imports/premint.py), because one query per piece is the
+        # quadratic behaviour F79/F99 removed. This flush is the price of the
+        # single-piece door being safe to call in a loop.
+        await self.db.flush()
+        return row
 
     async def short_codes_for_pieces(
         self, piece_ids: list[uuid.UUID]

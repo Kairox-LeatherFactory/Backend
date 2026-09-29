@@ -535,3 +535,234 @@ async def test_a_leather_line_is_not_judged_by_accessory_coverage(db, order_tree
     blockers = (await StyleSpecService(db).blockers_for_styles(
         [style.id]))[style.id]
     assert [b for b in blockers if "but not on" in b] == []
+
+
+# ══════════════════════ 7 · A GARMENT WITH SEVERAL ACCESSORIES MUST FINISH
+@pytest.fixture
+async def three_trims(db, order_tree):
+    """CLERMONT takes a button, a zip and thread — all on its one SKU.
+
+    THE SHAPE THE FLOOR REPORTED IT IN. A garment needs everything the DM put on the
+    release breakdown, and none of it is size-specific here: the point is the COUNT,
+    not the sizing. Three packets, three scans, and the garment must then be
+    sendable — which is what unblocks LINE_STITCHING.
+    """
+    style = order_tree["style"]
+    sku_id = order_tree["sku"].id
+    trims = [("BUTTON", "BTN-4H", "18L", 4), ("ZIP", "ZIP-N", "60", 1),
+             ("THREAD", "THR-40", None, 120)]
+    lots = {}
+    for subtype, article, size, _qty in trims:
+        lot = MaterialLot(category="ACCESSORY", subtype=subtype, article=article,
+                          colour="BLACK", size=size, uom="pcs", on_hand=500,
+                          is_active=True)
+        db.add(lot)
+        lots[article] = lot
+    await db.flush()
+    for subtype, article, size, qty in trims:
+        db.add(StyleMaterialSpec(
+            style_id=style.id, sku_id=sku_id, category="ACCESSORY",
+            subtype=subtype, article=article, colour="BLACK", size=size,
+            garment_size=None, qty_per_piece=qty, uom="pcs",
+            material_lot_id=lots[article].id))
+    await db.commit()
+    for lot in lots.values():
+        await db.refresh(lot)
+    return lots
+
+
+@pytest.mark.asyncio
+async def test_THREE_accessories_complete_the_garment_in_three_scans(
+        db, pieces, three_trims, cutter, dm, operations):
+    """THE BUG AS REPORTED: "I can't scan multiple accessories."
+
+    Each scan DID register — stock moved and the ledger row was written — but
+    `accessories_in` was computed from a SELECT that could not see the row just
+    added, because sessions are `autoflush=False` and nothing had flushed. So it was
+    persisted False after every scan, the garment never became sendable, and
+    LINE_STITCHING (gated on SENDED) was unreachable however many times the operator
+    scanned.
+
+    `no_autoflush` IS THE WHOLE POINT OF THIS TEST. The harness used to default to
+    autoflush=True, which flushed the pending row before the read and hid the bug
+    behind a green suite. This block reproduces production exactly, so the test
+    keeps failing if anyone ever makes the harness permissive again.
+    """
+    from tests.conftest import _ready_for_store
+    piece = pieces[0]
+    svc = StoreService(db)
+
+    # The cut parts first, because completeness is leather AND lining AND the kit —
+    # this test is about the kit half, so the other two have to be genuinely in.
+    await _ready_for_store(db, operations, piece, cutter[0].id)
+    await svc.store_scan(piece_id=piece.id, part=StorePart.LEATHER,
+                         employee_id=cutter[0].id)
+    await svc.store_scan(piece_id=piece.id, part=StorePart.LINING,
+                         employee_id=cutter[0].id)
+
+    with db.no_autoflush:
+        for article, lot in three_trims.items():
+            res = await svc.store_scan(
+                piece_id=piece.id, lot_id=lot.id,
+                employee_id=cutter[0].id, entered_by="STORE")
+
+    # The LAST scan completed the set, so it must say so on the spot.
+    assert res["kit"]["status"] == KitStatus.ISSUED.value
+    assert res["kit"]["outstanding"] == []
+    assert res["accessories_in"] is True
+    await db.refresh(piece)
+    assert piece.accessories_in is True
+
+    # …and the garment can now leave the store, which is what unblocks
+    # LINE_STITCHING — the thing the floor could not reach.
+    out = await StoreService(db).send(piece_ids=[piece.id], actor_user_id=dm.id)
+    assert out["sent"] == [piece.code], out
+
+
+@pytest.mark.asyncio
+async def test_each_scan_reports_what_is_still_owed(db, pieces, three_trims,
+                                                   cutter):
+    """The operator is standing at the terminal and needs to know what is left —
+    "2 of 3, the thread is still owed" — not a bare boolean."""
+    piece = pieces[0]
+    svc = StoreService(db)
+    with db.no_autoflush:
+        first = await svc.store_scan(
+            piece_id=piece.id, lot_id=three_trims["BTN-4H"].id,
+            employee_id=cutter[0].id, entered_by="STORE")
+
+    assert first["kit"]["status"] == KitStatus.PARTIAL.value
+    owed = {r["article"] for r in first["kit"]["outstanding"]}
+    assert owed == {"ZIP-N", "THR-40"}, owed
+    assert first["accessories_in"] is False
+    assert "ACCESSORIES" in first["awaiting"]
+
+
+@pytest.mark.asyncio
+async def test_a_batch_issues_every_packet_in_one_call(db, pieces, three_trims,
+                                                      cutter):
+    """THE FLOOR'S OWN SEQUENCE. Three packets collected on the screen, submitted
+    together. The stored shape is still one issue per line — the convenience is in
+    the request, not the data."""
+    piece = pieces[0]
+    befores = {a: await _on_hand(db, lot.id) for a, lot in three_trims.items()}
+
+    with db.no_autoflush:
+        res = await StoreService(db).store_scan(
+            piece_id=piece.id,
+            lot_ids=[lot.id for lot in three_trims.values()],
+            employee_id=cutter[0].id, entered_by="STORE")
+
+    batch = res["accessory_batch"]
+    assert (batch["scanned"], batch["issued"]) == (3, 3)
+    assert batch["refused"] == [] and batch["still_owed"] == []
+    assert res["kit"]["status"] == KitStatus.ISSUED.value
+    assert res["accessories_in"] is True
+    # Each packet spent its own line's quantity, once.
+    assert await _on_hand(db, three_trims["BTN-4H"].id) == pytest.approx(
+        befores["BTN-4H"] - 4)
+    assert await _on_hand(db, three_trims["ZIP-N"].id) == pytest.approx(
+        befores["ZIP-N"] - 1)
+    assert await _on_hand(db, three_trims["THR-40"].id) == pytest.approx(
+        befores["THR-40"] - 120)
+    assert await _issue_rows(db, piece.id) == 3
+
+
+@pytest.mark.asyncio
+async def test_the_same_packet_twice_in_one_batch_spends_once(db, pieces,
+                                                             three_trims, cutter):
+    """THE DOUBLE-SPEND THE PER-PACKET FLUSH PREVENTS.
+
+    `issue_kit_nocommit` opens with `issued_by_piece`, its idempotency read. Without
+    a flush after each packet, the second pass over the same lot would miss the
+    first's unflushed ledger row, compute the full quantity as still owed, and spend
+    it again — four buttons becoming eight inside one request.
+    """
+    piece = pieces[0]
+    button = three_trims["BTN-4H"]
+    before = await _on_hand(db, button.id)
+
+    with db.no_autoflush:
+        res = await StoreService(db).store_scan(
+            piece_id=piece.id, lot_ids=[button.id, button.id],
+            employee_id=cutter[0].id, entered_by="STORE")
+
+    assert res["accessory_batch"]["scanned"] == 2
+    assert await _on_hand(db, button.id) == pytest.approx(before - 4), \
+        "four buttons, not eight"
+    assert await _issue_rows(db, piece.id) == 1, "one ledger row per line"
+
+
+@pytest.fixture
+async def wrong_size_button(db, three_trims):
+    """A 20L button packet, where the recipe asks for 18L.
+
+    ITS OWN FIXTURE, not `sized_buttons`. Combining the two put TWO BTN-4H lines on
+    one garment — `three_trims`' 18L line and `sized_buttons`' M line — so the packet
+    matched both and the verdict was AMBIGUOUS rather than WRONG_SIZE. A test whose
+    fixtures fight each other tests the fight, not the rule.
+    """
+    lot = MaterialLot(category="ACCESSORY", subtype="BUTTON", article="BTN-4H",
+                      colour="BLACK", size="20L", uom="pcs", on_hand=500,
+                      is_active=True)
+    db.add(lot)
+    await db.commit()
+    await db.refresh(lot)
+    return lot
+
+
+@pytest.mark.asyncio
+async def test_a_batch_issues_the_good_packets_and_reports_the_wrong_size_one(
+        db, pieces, three_trims, wrong_size_button, cutter):
+    """PARTIAL ACCEPT — the rule the rest of this codebase follows.
+
+    One bad packet must never lose the good ones a manager scanned with it. The zip
+    and the thread go in; the L-size button against an M garment is refused, carries
+    its approval request id, and the garment stays unsendable until a DM answers.
+    """
+    piece = pieces[0]
+    wrong = wrong_size_button                  # 20L, where the recipe asks 18L
+    zip_lot, thread = three_trims["ZIP-N"], three_trims["THR-40"]
+    wrong_before = await _on_hand(db, wrong.id)
+
+    with db.no_autoflush:
+        res = await StoreService(db).store_scan(
+            piece_id=piece.id, lot_ids=[zip_lot.id, wrong.id, thread.id],
+            employee_id=cutter[0].id, entered_by="STORE")
+
+    batch = res["accessory_batch"]
+    assert (batch["scanned"], batch["issued"]) == (3, 2)
+    assert len(batch["refused"]) == 1
+    bad = batch["refused"][0]
+    assert bad["reason"] == "WRONG_SIZE"
+    assert bad["substitution_request_id"]
+    assert "WRONG SIZE" in bad["detail"]
+
+    # The good two are really in, the bad one really is not.
+    assert await _on_hand(db, wrong.id) == pytest.approx(wrong_before)
+    assert await _issue_rows(db, piece.id) == 2
+
+    # The ask survived the same commit as the issues — that is the whole reason the
+    # batch door does not commit inside the refusal.
+    rows = await _requests(db, piece.id)
+    assert len(rows) == 1
+    assert rows[0].status == KitSubstitutionStatus.PENDING.value
+
+    # And the garment is still owed its button, so it cannot leave the store.
+    assert res["accessories_in"] is False
+    assert "BTN-4H" in batch["still_owed"]
+
+
+@pytest.mark.asyncio
+async def test_naming_the_packets_twice_is_refused(db, pieces, three_trims,
+                                                   cutter):
+    """Two ways of naming the packets cannot be reconciled, and silently preferring
+    one is how the wrong packet gets issued."""
+    from pydantic import ValidationError
+    from app.modules.store import schemas
+    with pytest.raises(ValidationError) as exc:
+        schemas.StoreScanRequest(
+            employee_id=cutter[0].id, piece_id=pieces[0].id,
+            lot_id=three_trims["BTN-4H"].id,
+            lot_ids=[three_trims["ZIP-N"].id])
+    assert "more than once" in str(exc.value)
