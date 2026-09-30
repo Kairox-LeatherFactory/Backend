@@ -28,6 +28,7 @@ import uuid
 from decimal import Decimal
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
 
 from app.core.enums import BarcodeStatus, BarcodeType, UserRole
@@ -96,9 +97,27 @@ async def draft_style(db, order_tree):
 LEATHER_SPEC_LINE = {"category": "LEATHER", "article": "SUEDE-A32",
                      "colour": "PINE", "thickness": "1.2mm",
                      "qty_per_piece": 12.5}
+# `sku_id` IS FILLED IN BY THE AUTOUSE FIXTURE BELOW. An accessory line must name
+# the SKU it is for — a SKU being a colour and a size together — and this dict is
+# built at module level, before any fixture could hand it one. Over HTTP the DM
+# would usually send `apply_to: "ALL_SKUS"` instead; that door has its own tests in
+# tests/integration/test_size_matched_accessories.py.
 BUTTON_SPEC_LINE = {"category": "ACCESSORY", "subtype": "BUTTON",
                     "article": "BTN-4H", "colour": "BLACK", "size": "18L",
                     "qty_per_piece": 4}
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _bind_button_spec_line_to_a_sku(order_tree):
+    """Point BUTTON_SPEC_LINE at the order tree's SKU for one test.
+
+    AUTOUSE so no test can forget, and cleared afterwards so a stale id cannot leak
+    into the next one — which would fail as a confusing "SKU does not belong to this
+    style" rather than as the thing actually under test.
+    """
+    BUTTON_SPEC_LINE["sku_id"] = str(order_tree["sku"].id)
+    yield
+    BUTTON_SPEC_LINE.pop("sku_id", None)
 
 
 # ══════════════════════════════════════════════════════════════════════════

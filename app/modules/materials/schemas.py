@@ -613,6 +613,59 @@ class LotHistory(BaseModel):
     receipts: list[ReceiptRow] = Field(default_factory=list)
 
 
+class AccessoryTypeRow(BaseModel):
+    """One accessory kind, as the stock and recipe screens read it."""
+    code: str
+    label: str | None = None
+    # THE MEASUREMENT: which attribute holds the quantity, and its unit. There is
+    # no separate "measurement" field because the quantity field IS the
+    # measurement — count for buttons, mtrs for thread, kg for ribs.
+    qty_field: str | None = None
+    qty_uom: str | None = None
+    requires: list[str] = Field(default_factory=list)
+    filters: list[str] = Field(default_factory=list)
+    # TRUE means this accessory's size follows the garment (zip, rib knit trim), so
+    # the recipe form asks per SKU and copy-from matches on size. FALSE means one
+    # line covers every SKU — the 85-90% case.
+    size_varies_by_sku: bool = False
+    is_active: bool = True
+    # Set when the kind registered itself at the gate rather than being curated.
+    first_seen_at: str | None = None
+    created_by: str | None = None
+    note: str | None = None
+
+
+class AccessoryTypeList(BaseModel):
+    types: list[AccessoryTypeRow] = Field(default_factory=list)
+
+
+class AccessoryTypeResult(AccessoryTypeRow):
+    """A kind after it has been refined. Carries the sentence the DM reads."""
+    message: str
+
+
+class AccessoryTypePatch(BaseModel):
+    """Refine an accessory kind. Omitted fields keep their current value.
+
+    NEITHER `code` NOR `qty_field` IS HERE, deliberately. The code is what every
+    lot, recipe line and issue-ledger row of this kind stores in `subtype`, so
+    renaming it would orphan all of them silently; `qty_field` names the attribute
+    whose value was already added to `on_hand`, so changing it would read historical
+    stock through a different key. Both are refused by the service too, so a client
+    that sends them gets a sentence rather than a silently ignored field.
+    """
+    label: str | None = None
+    qty_uom: str | None = None
+    requires: list[str] | None = None
+    filters: list[str] | None = None
+    # TRUE means this accessory's size follows the garment (a zip, rib knit trim),
+    # so the recipe form asks per SKU and copy-from matches on size. FALSE means one
+    # line covers every SKU — the 85-90% case.
+    size_varies_by_sku: bool | None = None
+    is_active: bool | None = None
+    note: str | None = None
+
+
 class MaterialSpecRead(BaseModel):
     """Which boxes the Add-New form and the stock filters must render.
 

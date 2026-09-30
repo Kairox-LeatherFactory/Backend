@@ -169,6 +169,11 @@ class MaterialService:
         self.db = db
         self.repo = MaterialRepository(db)
         self.barcodes = BarcodeRepository(db)
+        # ACCESSORY KINDS ARE DATA, NOT AN ENUM. The catalogue overlays
+        # MATERIAL_SPEC for accessories and falls back to it for everything else,
+        # so leather and lining are unaffected — see accessory_catalog.py.
+        from app.modules.materials.accessory_catalog import AccessoryCatalog
+        self.catalog = AccessoryCatalog(db)
         # Set by decrement_for_cut_nocommit when a cut consumed more than was
         # available. Kept off the return value so the float signature (and its
         # existing callers) is unchanged; the caller reads it from the instance
@@ -204,12 +209,26 @@ class MaterialService:
         subtype = (body.subtype or None)
         subtype = subtype.upper() if subtype else None
 
-        spec = resolve_spec(cat, subtype)
+        # A NEW ACCESSORY KIND REGISTERS ITSELF HERE. "There are many and more
+        # accessories" — eyelets, lace pins, rib knit trim — and until this, every
+        # one of them fell to OTHER, whose spec has no size field at all. A kind
+        # becomes known because a packet of it entered the building, which is the
+        # only moment anybody actually knows about it.
+        registered = None
+        if cat == MaterialCategory.ACCESSORY.value:
+            registered = await self.catalog.register_nocommit(
+                subtype, created_by=getattr(body, "entered_by", None),
+                has_size=bool(dict(body.attributes or {}).get("size")))
+        spec = await self.catalog.spec_for(cat, subtype)
         if spec is None:
-            # ACCESSORY with no/unknown subtype, or an unrecognised lining subtype.
-            hint = ("Accessory needs a subtype: BUTTON, ZIP, THREAD or OTHER."
-                    if cat == "ACCESSORY"
-                    else f"Unknown {cat} subtype '{body.subtype}'.")
+            # ACCESSORY with no subtype, or an unrecognised lining subtype.
+            if cat == MaterialCategory.ACCESSORY.value:
+                known = ", ".join(await self.catalog.known_codes())
+                hint = (f"An accessory needs a subtype saying what kind it is. "
+                        f"Known kinds: {known}. A kind not on that list is created "
+                        f"by receiving one — send it as `subtype` and it is added.")
+            else:
+                hint = f"Unknown {cat} subtype '{body.subtype}'."
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, hint)
 
         # article + colour are mandatory for EVERY material (spec: every line has
@@ -337,6 +356,8 @@ class MaterialService:
 
         return {
             "lot_id": lot.id, "lot_barcode": bc.code,
+            # See arrive(): non-null only when this was a new accessory kind.
+            "accessory_type_registered": registered,
             "category": lot.category, "subtype": lot.subtype,
             "article": lot.article, "colour": lot.colour,
             # A brand-new lot has nothing used and nothing reserved, so arrived
@@ -526,7 +547,7 @@ class MaterialService:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Material lot not found.")
         reserved = await self.repo.active_reserved(lot_id)
         barcodes = await self.repo.barcodes_by_lot([lot_id])
-        spec = resolve_spec(lot.category, lot.subtype) or {}
+        spec = await self.catalog.spec_for(lot.category, lot.subtype) or {}
         # BUG #26. `received` was rendering as 0 because no read path ever summed
         # the material_receipt rows — the number had no source, not a wrong one.
         totals = (await self.repo.received_totals([lot_id])).get(lot_id, {})
@@ -1440,12 +1461,17 @@ class MaterialService:
         return float(lot.on_hand - reserved)
 
     # ── which filters apply to a category (drives the search UI) ─────────────
-    @staticmethod
-    def filter_fields(category: str, subtype: str | None) -> dict:
+    async def filter_fields(self, category: str, subtype: str | None) -> dict:
         """The fields the DM may filter this material by — so the frontend shows
         exactly the right search boxes (leather/lining/thread get thickness;
-        buttons/zips get size; ribs/knit/other get just article+colour)."""
-        spec = resolve_spec(category, subtype)
+        buttons/zips get size; ribs/knit/other get just article+colour).
+
+        ASYNC AND CATALOGUE-AWARE. It was a staticmethod over MATERIAL_SPEC, which
+        meant a catalogued accessory kind rendered the OTHER form — article and
+        colour, no size — and the DM could not enter the size of the very accessory
+        whose size varies per SKU.
+        """
+        spec = await self.catalog.spec_for(category, subtype)
         return {
             "category": (category or "").upper() or None,
             "subtype": (subtype or None),
@@ -1692,8 +1718,18 @@ class MaterialService:
                 "total_qty (the quantity that arrived) must be > 0. An arrival "
                 "of nothing is not an arrival.")
 
-        spec = resolve_spec(cat, subtype) or {}
-        uom = spec.get("qty_uom") or uom_for(cat, subtype)
+        # THE GATE IS WHERE NEW ACCESSORIES COME FROM. This path is deliberately
+        # permissive about FIELDS (see the docstring), and it is equally permissive
+        # about KINDS: an accessory nobody has catalogued is registered rather than
+        # refused, because the van is here and the packet is real. It is reported on
+        # the response so a kind appearing by accident is visible, not silent.
+        registered = None
+        if cat == MaterialCategory.ACCESSORY.value:
+            registered = await self.catalog.register_nocommit(
+                subtype, created_by=getattr(body, "entered_by", None),
+                has_size=bool(getattr(body, "size", None)))
+        spec = await self.catalog.spec_for(cat, subtype) or {}
+        uom = spec.get("qty_uom") or await self.catalog.uom_for(cat, subtype)
         thickness = (body.thickness or None)
         size = (body.size or None)
 
@@ -1761,6 +1797,10 @@ class MaterialService:
             "status": IntakeStatus.PENDING.value,
             **stock_numbers(lot.on_hand, lot.used, reserved),
             "outstanding": self._outstanding_fields(lot, body.sheet_count),
+            # Non-null ONLY when this delivery was the first of a new accessory
+            # kind. The gate is the least supervised entry in the app, so a kind
+            # that appears by accident has to be visible rather than silent.
+            "accessory_type_registered": registered,
             "message": (
                 f"{float(qty):g} {lot.uom} of {article}"
                 f"{' · ' + colour if colour else ''} is in stock and cuttable. "

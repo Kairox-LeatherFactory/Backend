@@ -491,3 +491,201 @@ said nothing about what had actually happened:
   > regex reads about 70 of the 156 and reports the other 86 as missing their delete
   > rule — 111 false failures. There is a second test, `test_the_baseline_is_parsed_at_all`,
   > whose only job is to catch that happening again.
+
+---
+
+## 11. Revision 2026-09-29 — an accessory belongs to a SKU
+
+> **Partly superseded — see §12.** The SKU-scoped *storage* model below is right and
+> unchanged. The **release gate** it introduced (`accessory_sku_gaps`, which required
+> every SKU to carry every article) was wrong and has been replaced; §12 says why.
+
+The floor hit this posting a perfectly good zip line:
+
+```
+POST /api/v1/styles/{id}/material-spec/lines   {"size": "M", ...}
+422  This line's size is 'M', which is a garment size, but it does not say
+     which garments it is for...
+```
+
+That 422 was ours, and the model behind it was wrong. **A `SKU` is unique on
+`(style_id, color_code, size)` — colour *and* size — so a line that names one has
+already said everything about which garments it is for.** Scoping accessories to the
+SKU deletes the apparatus §4 built rather than patching it further.
+
+### What retired
+
+| Built to police style-wide accessory lines | Now |
+|---|---|
+| `garment_size` on accessories | refused on one — its SKU says the size |
+| the 422 above (`_reads_as_garment_size`) | **gone for accessories**; leather/lining keep it |
+| `accessory_size_gaps` | replaced by `accessory_sku_gaps` — itself replaced in §12 |
+| `accessory_size_ambiguities` | retired — the question cannot arise |
+
+`garment_size` the **column** stays: leather and lining can still be style-wide.
+
+### What arrived
+
+- **`accessory_type` — accessory kinds are data.** `MaterialSubtype` had only
+  BUTTON/ZIP/THREAD/OTHER, so eyelets, lace pins and rib knit trim all fell to
+  `OTHER`, whose filters are `article, colour` **with no size** — leaving rib knit
+  trim, whose size varies per SKU, no size field to vary. **It fills itself in from
+  intake:** receiving an unrecognised `subtype` registers it and reports
+  `accessory_type_registered`. `AccessoryCatalog` overlays `MATERIAL_SPEC` so
+  `resolve_spec` stays pure and an unseeded deployment behaves exactly as before.
+- **`size_varies_by_sku`** — the floor's own "85–90% are the same on every garment,
+  zip and rib knit trim are not", as data rather than a hardcoded list.
+- **The fan-out** — `apply_to: "ALL_SKUS"` / `sku_ids` / `per_sku`, on `add_line`
+  (not the PUT, which freezes at release while accessories stay correctable).
+  Idempotent and partially so. **The stored shape is per-SKU either way.**
+
+### Three things the code review turned up that the plan had not
+
+- **`requirement` would have become 8 rows per button.** A purchase order is raised
+  off it. Accessories now aggregate into `ACCESSORY_GROUP` rows by material identity
+  — BLACK and TAN buttons stay separate, and `short_by` is computed on the group
+  because one lot serves every colourway.
+- **`copy_from` would have silently copied zero accessories** — it maps SKUs on
+  (colour, size) and `include_sku_overrides` defaults to false. Accessories are now
+  fanned onto the target's own SKUs.
+- **`subtype` is `String(20)` on four tables**, one a ledger — so `accessory_type.code`
+  is capped at 20 rather than widening them.
+
+### Three pre-existing bugs fixed alongside
+
+- **`patch_line` silently nulled `garment_size`** (a regression from §4): patching a
+  note un-scoped a line, widening a size-specific material to every garment — the
+  direction that *spends* stock. `SpecLinePatch` also had no such field.
+- **`find_duplicate_line` ignored `garment_size`** while the DB constraint and
+  `replace_spec`'s identity both included it.
+- **`kit_required_sql` / `has_accessory_lines` retired** — the "two shapes that
+  cannot disagree" already did (style-scoped vs SKU-scoped), and no application code
+  called either; only tests did.
+
+### Migration
+
+`20260929_accessory_sku_scope` creates and seeds `accessory_type`, and **deactivates
+any accessory line with `sku_id IS NULL`** — such a row can no longer be written and
+could never be satisfied. No back-migration of recipe lines: that data is
+development-only by the owner's decision.
+
+### Tests deliberately deleted
+
+The `garment_size` coverage/ambiguity cases in `test_kit_rules_pure.py`, the
+inference cases in `test_size_matched_accessories.py` (rewritten around SKU scoping,
+keeping the original reported bug), and the two `kit_required_sql` tests. They assert
+a model that has been removed — keeping them green would have been the tests
+protecting the bug.
+
+---
+
+## 12. Revision 2026-09-29 (later) — each SKU's accessories are ITS OWN
+
+> **The gate in §11 was wrong, and it blocked a real release.** This section corrects
+> it. Read it *after* §11, not instead of it: the SKU-scoped storage model §11 built is
+> right and unchanged. What was wrong was the rule layered on top of it.
+
+### The rejection
+
+`POST /api/v1/imports/breakdown/1996/release` refused a style whose colourways
+legitimately took different buttons, with one blocker sentence per article:
+
+```
+… declares HORN BROWN (BUTTON) on some colourways but not on PINE GREEN · L, …
+… declares METAL SHANK BUTTON (BUTTON) on some colourways but not on NAVY · M, …
+```
+
+**That is the correct data.** Confirmed by Hamthan, 2026-09-29:
+
+> *"ONE SKU IN ONE STYLE DOESN'T HAVE TO BE CONTAINING THE SAME ACCESSORIES OF ANOTHER
+> SKU, HERE IN SKU ACCESSORIES ASSIGNING IS INDEPENDENT PER SKU NOT LIKE SAME BUTTON
+> HAVE TO BE FOR ALL OTHER SKU, EACH SKU CAN CONTAIN DIFFERENT ARTICLE, COLOR, BUTTON,
+> ZIP, AND MANY MORE."*
+
+`accessory_sku_gaps` took every `(subtype, article)` declared on **any** SKU and
+demanded **every** ordered SKU carry a line for it — precisely "the same button has to
+be for all other SKU". It was built on the assumption that variation between
+colourways was a mistake being caught, when it is the normal case.
+
+**Three gates in a row have now been removed for the same reason** — `accessory_size_gaps`,
+`accessory_size_ambiguities`, `accessory_sku_gaps` — and each was found the same way:
+*it fired on the normal case.* That is the signal to distrust the rule, not the data.
+
+### What replaced it
+
+`kit_rules.skus_without_accessories` asks the one question that is never deliberate:
+**is some ordered SKU empty?** A SKU with nothing gets `kit_required=false` (per-SKU,
+via `kit_required_for_piece`), so `piece_complete` collapses to leather-and-lining and
+the garment ships with no accessories while nothing downstream complains. *A shorter
+recipe is a choice; no recipe is a silence.*
+
+- Returns `[]` when **no** SKU has any line — that is the style-level `no_accessories`
+  question, and answering it twice prints one sentence per colourway where one about
+  the style is the whole truth.
+- Silenced by `no_accessories: true`, the same escape the style-level check honours.
+- The blocker sentence says the missing lines **need not match** the other colourways,
+  or a DM clears it by copying and re-creates the restriction just removed.
+
+Release now asks **three different things of three materials**: leather required per
+style, lining optional per style, accessories per SKU and free to differ.
+
+### The scan carries no quantity
+
+`qty` is **removed** from `POST /store/scan`. The piece code gives the SKU, whose lines
+were declared at the breakdown release; the packet label gives article/colour/size;
+`match_packet` intersects them onto one line whose `qty_per_piece` **is** the number.
+Asking the operator for it asked them to restate something the system holds — and it
+fanned out: `_issue_accessories` passed the same `qty` to **every** packet in a batch,
+so `{"lot_barcodes":[button,zip,thread],"qty":2}` issued 2 of each.
+
+`StoreScanRequest` now sets `extra="forbid"`. Without it the removal would have been
+*silent* — Pydantic's default is `ignore`, so a screen still sending `qty` would get a
+201 with the value dropped and no way to learn it had stopped working.
+
+No service logic changed: `issue_kit_nocommit` already issued the whole outstanding
+amount when given no override, and `_hold_for_substitution` already fell back to
+`line.qty_per_piece`.
+
+### DECLARED / SCANNED / PENDING, in one place
+
+`accessories_in` is a roll-up and cannot say *which* packet is missing — the only thing
+the operator at the terminal needs. `material_requirement_block` now computes the
+three-way split **once**, and both the scan's `kit` block and
+`GET /store/pieces/{code}` read it, so the two screens cannot disagree about a garment:
+
+| On the scan | On the lookup |
+|---|---|
+| `declared` / `scanned` / `pending` | `accessories` / `accessories_scanned` / `accessories_pending` |
+| `progress` | `accessories_progress` |
+| `pending_line` | `pending_line` |
+
+`pending_line` is the sentence: *"Waiting for ZIP · YKK-60 BLACK 60cm. Scanned: BUTTON
+· HORN-4H BROWN 18L, THREAD · T40 BLACK."* Two new pure helpers back it —
+`accessory_line_state` (ISSUED/PARTIAL/PENDING/**UNRESOLVED**) and `accessory_label`.
+UNRESOLVED is deliberately not PENDING: pending means fetch it, unresolved means no lot
+matches the article so the fix is a receipt, not a walk to the shelf.
+
+`accessory_batch.still_owed` carries those rows instead of bare article codes — the one
+field on a row an operator cannot read off the packet in their hand.
+`still_owed_articles` keeps the old flat list.
+
+### Caught during the change
+
+**The `empty` shape in `material_requirement_block` must carry every key the full one
+does.** It did not, and `kit_view` reads them straight through — so the store scan of
+any garment whose style predates the material spec raised `KeyError`, which is most of
+what is already on the floor. Four tests failed on it immediately;
+`test_a_style_that_declares_no_accessories_reads_empty_not_broken` now pins it.
+
+### Breaking change for the frontend
+
+`qty` on `POST /store/scan` is **refused with a 422** naming the field. It is the only
+outward-facing break; `still_owed`, `pending_line` and the three-way split are additive,
+and `still_owed_articles` preserves the old shape.
+
+### Not changed
+
+No migration — this is a gate and a request shape, nothing in the schema.
+`garment_size` still stays on the model for leather and lining. Short issues (2 of 4
+buttons) are no longer recordable on the scan; `POST /materials/issues` remains for
+off-spec corrections.

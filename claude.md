@@ -346,53 +346,136 @@ them; nothing else imports them.
 jacket. It is invisible on the factory floor, it is found by the client in Dubai,
 and it is paid for in return freight plus a remade garment.
 
-### Where accessories live (unchanged)
-An accessory is a `MaterialLot` — `category=ACCESSORY`, `subtype` ∈
-BUTTON/ZIP/THREAD/OTHER — keyed on `(article, colour, thickness, size, subtype)`
+### Where accessories live
+An accessory is a `MaterialLot` — `category=ACCESSORY`, `subtype` = an
+**accessory-kind code** — keyed on `(article, colour, thickness, size, subtype)`
 with a DB unique index, and each lot mints **one `LOT-ACC-000001` barcode**. So the
 "L-size black horn button" packet already is its own lot with its own label,
 separate from the M one. There is deliberately **no per-button barcode**: one
 button out of 5,000 is any other button (`enums_barcode.py` on `ACCESSORY_LOT`).
 
-### The per-style recipe: `size` vs `garment_size`
-`StyleMaterialSpec` carries **two** size columns and confusing them is the bug:
+### The accessory catalogue — kinds are DATA, and it fills itself in
+`MaterialSubtype` offered only BUTTON / ZIP / THREAD / OTHER, so eyelets, lace pins
+and rib knit trim all fell to `OTHER` — whose spec requires `description` + `count`
+and whose filters are `article, colour` **with no size at all**. Rib knit trim, an
+accessory whose size genuinely varies per SKU, had no size field to vary.
+
+`accessory_type` (`barcode/models.py`) makes the kinds data: `code` (≤20 chars, the
+width of `subtype` on four tables — one a ledger), `label`, `qty_field`/`qty_uom`
+(**the measurement** — there is no separate column, the quantity field *is* it),
+`requires`, `filters`, and `size_varies_by_sku`.
+
+**IT POPULATES ITSELF FROM INTAKE.** A kind becomes known because a packet of it
+*arrived* — `MaterialService.arrive` and `.create_lot` register an unrecognised
+`subtype` instead of rejecting it, and return it as `accessory_type_registered` so
+a kind that appears by accident is visible. `GET/PATCH /materials/accessory-types`
+refines one. There is no "add a kind" form: the moment anybody knows about a new
+accessory is the moment one turns up at the gate.
+
+**`resolve_spec` STAYS PURE.** `materials/accessory_catalog.AccessoryCatalog`
+**overlays** the DB rows onto `MATERIAL_SPEC` and falls back to it, so a deployment
+with no catalogue rows behaves exactly as before — which is also the state the test
+harness runs in, since the seed lives in the migration.
+
+**`size_varies_by_sku` is the 85–90% rule as data** (`true` for ZIP and
+RIB_KNIT_TRIM): it decides whether the recipe form fans one line across every SKU
+or asks per SKU, and how `copy_from` matches. Neither hardcodes which accessories
+are special.
+
+### AN ACCESSORY LINE MUST NAME ITS SKU
+**A `SKU` is unique on `(style_id, color_code, size)` — colour *and* size — so a
+line that names one has said everything about which garments it is for.** A
+style-wide accessory line is a 422.
+
+That single rule deletes a whole apparatus that existed only to police style-wide
+lines: `garment_size` on accessories, the size-coverage gate, the size-ambiguity
+gate, the "is this number a garment size" guess (which confined a 60cm zip to 4XL),
+and a PATCH that silently un-scoped a line.
 
 | Column | Means | Matched against |
 |---|---|---|
 | `size` | the **material's** size — a 60cm zip, an 18L button | `MaterialLot.size` (finds the lot) |
-| `garment_size` | which **garments** the line is for | `SKU.size` (decides if the line applies) |
+| `garment_size` | **LEATHER/LINING ONLY** — which garments a style-wide line is for | `SKU.size` |
 
-`garment_size = NULL` means **every size**, which is what keeps one generic 18L
-button line at one row.
+`garment_size` sent on an accessory line is **refused, not ignored** — a caller who
+sends it believes it is doing something, and its answer could only contradict the
+SKU's. It remains explicit-and-never-inferred for leather and lining, which can
+still be style-wide; `_reads_as_garment_size` is only that 422's trigger.
 
-**`garment_size` IS EXPLICIT AND IS NEVER INFERRED.** It used to be guessed from
-the material size, and any bare number 30–70 read as a garment size because those
-are the EU jacket rungs — so a 60cm zip entered as `size: "60"` was scoped to
-**4XL** and a 45cm zip to **XS**. A line scoped to a size no garment has is not a
-smaller recipe, it is **absent**: `merge_lines` drops it, `kit_required` comes back
-False, `piece_complete` collapses to leather-and-lining, and every other size
-ships with no zip and no warning. A material size that is *unmistakably* a garment
-size (`L`, `XXL`) and names no `garment_size` is now a **422** asking which
-garments it is for. `_reads_as_garment_size` is only that 422's trigger; it infers
-nothing. `20260928_garment_size_backfill` clears the rows the old guess had
-already mis-scoped.
+**The fan-out keeps entry cheap.** `POST .../material-spec/lines` takes
+`apply_to: "ALL_SKUS"`, `sku_ids: [...]`, or `per_sku: [{sku_id, size?,
+qty_per_piece?}]` — the last for the accessories whose size follows the garment.
+Exactly one scope per request; more is a 422. It is **idempotent and partially so**
+(`created` vs `already_present`), and it lives on `add_line` rather than the PUT
+because `_assert_editable` leaves accessories correctable after release while
+`replace_spec` freezes the whole grid — and the wrong button is always found after
+release. **The stored shape is per-SKU either way: the convenience is in the
+request, never in the data.**
 
-### The release gate now checks SIZE COVERAGE
-Two new pure checks in `core/kit_rules.py`, folded into `release_blockers` at all
-four call sites:
+### EACH SKU'S ACCESSORIES ARE ITS OWN — and the gate only asks "is it empty?"
 
-- **`accessory_size_gaps`** — if *any* line for an article names a `garment_size`,
-  that article is **size-varying**, so **every ordered size** must have a line.
-  Zip lines for M and L on an order that also runs S/XL blocks release. One
-  unscoped line for the article covers everything and closes the question.
-- **`accessory_size_ambiguities`** — several material sizes on one article and not
-  one of them scoped (`ZIP 48 / 50 / 52`, all unscoped) blocks release, because
-  every garment would be issued all three. `'50'` is a garment size on one sheet
-  and a centimetre length on the next, so it is **asked**, never guessed.
+**CONFIRMED BY HAMTHAN, 2026-09-29. Two colourways of one style may take completely
+different accessories.** NAVY·L takes a horn button; PINE·M takes a metal shank and a
+zip; they share nothing — different kind, article, colour and size — and that is the
+normal case, not a mistake being caught. Nothing may require one SKU's recipe to
+resemble another's.
 
-`kit_rules.size_matches` is the single size rule — `applies_to_size`, the coverage
-gate and the packet scan all delegate to it, so `52` and `L` are one garment
-everywhere.
+The release gate is therefore **three different rules for three materials**:
+
+| Material | Rule at release |
+|---|---|
+| Leather | **required** per style — the dcm is what the ledger and the costing are built on |
+| Lining | **optional** per style (bugs #9/#10: every lining field is optional) |
+| Accessories | **per SKU, free to differ.** Only an *empty* SKU blocks |
+
+One pure check in `core/kit_rules.py`, folded into `release_blockers` at all four call
+sites: **`skus_without_accessories`** — every **ordered** SKU must have *at least one*
+accessory line. It returns `[]` when no SKU has any, because that is the style-level
+`no_accessories` question and answering it twice prints one sentence per colourway
+where one about the style is the whole truth. `no_accessories: true` silences it, and
+`qty_ordered > 0` scopes it so a zero-quantity importer row cannot raise a false
+blocker.
+
+**Why an empty SKU is still worth blocking:** its `kit_required` comes back False
+(`kit_required_for_piece` asks per SKU), `piece_complete` collapses to
+leather-and-lining, and the garment is sendable, shippable and missing its accessories
+entirely — with nothing downstream complaining, because from that garment's point of
+view the style declares none. **A shorter recipe is a choice; no recipe is a silence.**
+
+**It replaced `accessory_sku_gaps`, which had this backwards** and demanded every
+ordered SKU carry every article any SKU declared — "the same button has to be for all
+other SKU". That blocked a real release (order 1996) for doing the correct thing. Its
+own predecessors `accessory_size_gaps` and `accessory_size_ambiguities` only ever made
+sense for style-wide lines. **A gate that fires on the normal case is a gate people
+learn to ignore** — which is how each of these was found.
+
+`kit_rules.size_matches` survives as the single size rule for leather/lining.
+
+### `requirement` AGGREGATES accessories
+A purchase order is raised off `GET .../material-spec/requirement`, and an accessory
+is SKU-scoped — so one button on a NAVY+PINE order in S/M/L/XL is **eight rows of
+4**. Accessory lines are grouped by their **material identity**
+(`subtype, article, colour, size`) into an `ACCESSORY_GROUP` row carrying the summed
+`total_required`, with the per-SKU rows under `per_sku`.
+
+- **BLACK and TAN buttons are two groups**, not one: different materials, different
+  lots, and a combined figure could not be ordered against.
+- **`short_by` is computed on the group**, because stock is not reserved per SKU —
+  one lot serves every colourway, so comparing each SKU's share against the whole
+  lot would report them all covered while the total was short.
+- A group whose SKUs take **different** per-piece quantities reports
+  `qty_per_piece: null` rather than one of them.
+
+Leather and lining keep the style-wide arithmetic (an override's SKU subtracted from
+the style line).
+
+### `copy_from` fans accessories out
+Copying maps SKUs on `(color_code, size)` and skips what does not match — and
+`include_sku_overrides` defaults to **False**. With accessories SKU-scoped the
+default copy would therefore have carried **zero** accessory lines, gutting the
+feature. So an accessory is copied as a recipe for an **article** and fanned onto
+*this* style's SKUs: matching by size where `size_varies_by_sku`, onto all SKUs
+where it does not. Leather/lining copying is unchanged.
 
 ### The store scan: `POST /store/scan` with `lot_barcode`
 ```
@@ -402,16 +485,58 @@ Each scan issues **exactly the one recipe line that packet matches**. Scanning a
 packet *is* the accessory scan, so `part` may be omitted; a `part` naming anything
 else is a 422.
 
+**SEVERAL PACKETS IN ONE CALL.** `lot_barcodes` / `lot_ids` take the whole handful —
+button, zip, thread and more — so a screen that collected three beeps submits them on
+one enter. A scan gun that fires per beep keeps using the singular `lot_barcode`; it
+is a one-element batch on the way in, and there is **one code path** from the router
+down. Exactly one of the four naming fields per request; more is a 422.
+**Partial accept:** a wrong-size packet lands in `accessory_batch.refused` and the
+good ones still issue, because one bad packet must never lose the others.
+
 **`part: "ACCESSORY"` with no packet is a 422 — the blanket kit scan is GONE.** It
 read the recipe and decremented every accessory line from one tap, so no physical
 packet was ever part of the exchange and the wrong size was undetectable *by
-construction*. `lines[]`/`KitLineRequest` went with it; the optional `qty` on the
-scan covers a short issue (2 of 4 buttons).
+construction*. `lines[]`/`KitLineRequest` went with it.
 
-The response's `kit` block is the **whole checklist**, not just the packet scanned
-— the operator who has just done the zip must be told the buttons are still owed
-while they are still at the terminal. `accessories_in` turns true only when every
-declared line is issued.
+**THERE IS NO `qty`, AND NOTHING TO TYPE** (Hamthan, 2026-09-29). The two barcodes
+already determine the quantity: the **piece code** gives its SKU, whose lines were
+declared at `POST /imports/breakdown/{order}/release`, and the **packet label** gives
+article/colour/size. `match_packet` intersects them onto one recipe line, and that
+line's `qty_per_piece` **is** the number. Asking the operator for it asked them to
+restate something the system holds — and let them restate it wrong. It also fanned
+out: one `qty` with three packets issued that quantity of *every* one.
+`StoreScanRequest` sets `extra="forbid"` so a screen still sending it gets a **422
+naming the field** instead of a cheerful 201 with the value silently dropped, which is
+what Pydantic's default `ignore` would have done. A genuine short issue is no longer
+recordable on the scan; `POST /materials/issues` remains for off-spec corrections.
+
+### The scan and the lookup both answer DECLARED / SCANNED / PENDING
+`accessories_in` is a roll-up and cannot say *which* packet is missing — which is the
+only thing the operator at the terminal needs. So both the scan's `kit` block and
+`GET /store/pieces/{code}` carry the same five fields, computed once in
+`material_requirement_block` so the two screens **cannot disagree about one garment**:
+
+| Field | Means |
+|---|---|
+| `declared` / `accessories` | every line the SKU's recipe names, each with `state` and a human `label` |
+| `scanned` / `accessories_scanned` | the lines fully issued |
+| `pending` / `accessories_pending` | what is still owed |
+| `progress` / `accessories_progress` | declared / scanned / pending counts + totals |
+| `pending_line` | the sentence — *"Waiting for ZIP · YKK-60 BLACK. Scanned: BUTTON · HORN-4H, THREAD · T40."* |
+
+Per line, `kit_rules.accessory_line_state` gives **ISSUED / PARTIAL / PENDING /
+UNRESOLVED**, and UNRESOLVED is deliberately not PENDING: pending means go and fetch
+it, unresolved means no lot matches the article so the fix is a *receipt*, not a walk
+to the shelf. `accessory_batch.still_owed` carries those same rows (with
+`still_owed_articles` kept as the old flat list); it used to be bare article codes —
+the one field on a row an operator cannot read off the packet in their hand.
+
+**The empty shape must carry every one of these keys.** Most of what is on the floor
+predates the spec, so `material_requirement_block` returns its `empty` dict for it and
+`kit_view` reads the fields straight through — a missing key there is a KeyError on
+the store scan of those garments, not a cosmetic gap.
+
+`accessories_in` turns true only when every declared line is issued.
 
 `match_packet` matches in **two tiers**, and the split is what makes a wrong size a
 wrong size rather than an unknown packet: tier 1 ignores size (subtype, article,
@@ -591,6 +716,12 @@ them separate now is exactly what makes that connection a bridge instead of a re
   `down_revision = None`). A squashed baseline is autogenerated from the models, so
   it carries the **schema and nothing else** — every data migration the old chain
   performed is absent by construction. Check for one before you squash again.
+- `20260929_accessory_sku_scope` creates `accessory_type` (the accessory kinds, as
+  data — see §9a), seeds the 7 starting kinds, and **deactivates any accessory
+  recipe line with `sku_id IS NULL`**, because an accessory names its SKU now and
+  such a row can never be satisfied. `garment_size` is NOT dropped — leather and
+  lining still use it; it is simply never written for an accessory, the same "keep
+  the column, stop writing it" pattern the retired drawer tables follow.
 - `20260928_garment_size_backfill` is that check having been done once: it **clears
   the inferred `garment_size`** on accessory recipe lines whose `garment_size`
   equals a purely numeric material size — those were the guess, not a human, and
@@ -626,7 +757,7 @@ Priority: **money paths > data-integrity paths > read paths.**
 | Layer | Location | What it proves | Runs on |
 |---|---|---|---|
 | 1 · Unit | `tests/unit/` | pure gate/stage/designation predicates | no DB (ran: 49/49 pass) |
-| 2 · Integration | `tests/integration/` | two-door log, 4 gates, consumption + single decrement, merge gate, barcode lifecycle, strict materials, pre-mint, **accessory packet scan + wrong-size approval** (`test_accessory_packet_scan.py`), **the garment_size backfill** (`test_garment_size_backfill.py`) | SQLite |
+| 2 · Integration | `tests/integration/` | two-door log, 4 gates, consumption + single decrement, merge gate, barcode lifecycle, strict materials, pre-mint, **accessory packet scan + wrong-size approval** (`test_accessory_packet_scan.py`), **SKU-scoped accessories + the fan-out** (`test_size_matched_accessories.py`), **the accessory catalogue** (`test_accessory_catalogue.py`), **the garment_size backfill** (`test_garment_size_backfill.py`) | SQLite |
 | 3 · Functional | `tests/functional/` | one garment cut→export + drawer recycle | SQLite |
 | 4 · System/E2E | `tests/system/` | through the FastAPI routers (status codes, role guards) | httpx |
 | 5 · UAT | `tests/uat/` | 7 business scenarios (upload→pieces, cut→stock, skill block, no-skip, merge gate, leaver history-safe, shortfall→receive) | SQLite |

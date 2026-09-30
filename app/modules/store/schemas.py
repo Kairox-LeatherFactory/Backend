@@ -23,7 +23,22 @@ class StoreScanRequest(BaseModel):
     is a 422: the blanket kit scan spent every accessory line the recipe named
     from a single tap, so nothing in the exchange involved the physical packets
     and an M packet in an L jacket could not be detected at all.
+
+    THERE IS NO `qty`, AND THERE IS NOTHING TO TYPE (Hamthan, 2026-09-29). The two
+    barcodes already determine the quantity: the PIECE code gives its SKU, whose
+    recipe was declared at the breakdown release, and the PACKET label gives the
+    article, colour and size. `match_packet` intersects them to find the one line,
+    and that line's `qty_per_piece` IS the number. Asking the operator for it asked
+    them to restate a number the system holds — and let them restate it wrong. It
+    also fanned out: one `qty` with three packets issued that quantity of EVERY one.
+
+    `extra="forbid"`, SO THE REMOVAL IS LOUD. Pydantic's default is to ignore an
+    unknown field, which would have given a screen still sending `qty` a cheerful
+    201 with the value silently dropped. A 422 naming the field is how the frontend
+    learns.
     """
+    model_config = ConfigDict(extra="forbid")
+
     employee_barcode: str | None = None
     employee_id: uuid.UUID | None = None
     piece_barcode: str | None = None
@@ -33,9 +48,17 @@ class StoreScanRequest(BaseModel):
     # omitted, and a `part` that says anything else is a 422.
     lot_barcode: str | None = None
     lot_id: uuid.UUID | None = None
-    # A SHORT ISSUE: the operator put in 2 of the 4 buttons the line asks for.
-    # Omitted means the whole outstanding quantity, which is the normal case.
-    qty: float | None = None
+    # SEVERAL PACKETS IN ONE CALL. A garment takes everything the DM put on the
+    # release breakdown — button, zip, thread and more — and all of it must be in
+    # before the garment can leave the store, so a screen that has collected the
+    # scans submits them together. A scan gun that fires per beep keeps using the
+    # singular field; it is simply a one-element batch on the way in.
+    #
+    # PARTIAL ACCEPT: if one packet is the wrong size the others still issue and the
+    # bad one comes back in `accessory_batch.refused`, because one bad packet must
+    # never lose the good ones scanned with it.
+    lot_barcodes: list[str] | None = None
+    lot_ids: list[uuid.UUID] | None = None
     # Why this packet, when its size is not the garment's. Carried on the approval
     # request so the DM reading the queue is not guessing.
     substitution_reason: str | None = None
@@ -46,6 +69,17 @@ class StoreScanRequest(BaseModel):
             raise ValueError("Scan the worker's card first.")
         if not (self.piece_barcode or self.piece_id):
             raise ValueError("Scan the garment.")
+        # EXACTLY ONE WAY OF NAMING THE PACKETS. Two of them cannot be reconciled,
+        # and silently preferring one is how the wrong packet gets issued — the same
+        # rule the recipe fan-out applies to its scopes.
+        named = [n for n, v in (("lot_barcode", self.lot_barcode),
+                                ("lot_id", self.lot_id),
+                                ("lot_barcodes", self.lot_barcodes),
+                                ("lot_ids", self.lot_ids)) if v]
+        if len(named) > 1:
+            raise ValueError(
+                f"This scan names its packets more than once ({', '.join(named)}). "
+                f"Send exactly one of lot_barcode, lot_id, lot_barcodes or lot_ids.")
         return self
 
 
@@ -71,10 +105,15 @@ class StoreScanResult(BaseModel):
     sent: bool = False
     needs_lining: bool
     lining_reason: str | None = None
+    # THE WHOLE CHECKLIST, and it rides on every scan — not just the accessory one.
+    # `declared` / `scanned` / `pending` / `progress` / `pending_line` are the same
+    # three-way split GET /store/pieces/{code} returns, from the same computation.
     kit: dict | None = None
     # Set only when this scan spent a DM-APPROVED wrong-size packet. A refused one
     # never reaches a 201 — it is a 409 with the request id to approve.
     substitution: dict | None = None
+    # Per-packet outcomes for an accessory scan; null for leather/lining.
+    accessory_batch: dict | None = None
     next_action: str
     warnings: list[str] = Field(default_factory=list)
 
@@ -162,12 +201,28 @@ class StorePieceRow(BaseModel):
 class StorePieceDetail(StorePieceRow):
     """One garment WITH its accessory checklist, line by line.
 
-    `accessories` is the answer to "how do I verify they took the accessories?".
-    Each declared line — every button, every zip, the thread — comes back with
-    `qty_per_piece`, `issued_qty`, `outstanding` and whether its lot even
-    resolves, so the operator verifies a LIST and not a boolean.
+    THIS IS THE ONE ENDPOINT THAT ANSWERS THE WHOLE ACCESSORY QUESTION — what the
+    garment takes, what has been scanned, and what is still pending — without the
+    caller subtracting anything:
+
+      `accessories`          every line the SKU's recipe declares, each carrying
+                             `qty_per_piece`, `issued_qty`, `outstanding`, a
+                             `state` (ISSUED/PARTIAL/PENDING/UNRESOLVED) and a
+                             human `label`
+      `accessories_scanned`  the ones fully issued
+      `accessories_pending`  what is still owed
+      `accessories_progress` declared / scanned / pending counts and totals
+      `pending_line`         the sentence: "Waiting for ZIP · YKK-60 BLACK."
+
+    A garment is not "accessories: true"; it is five lines, each of which is or is
+    not satisfied. All of it comes from the same `material_requirement_block` the
+    scan response reads, so the two screens cannot disagree about one garment.
     """
     accessories: list[dict] = Field(default_factory=list)
+    accessories_scanned: list[dict] = Field(default_factory=list)
+    accessories_pending: list[dict] = Field(default_factory=list)
+    accessories_progress: dict = Field(default_factory=dict)
+    pending_line: str | None = None
     summary_line: str | None = None
     spec_confirmed: bool = False
 

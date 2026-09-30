@@ -444,145 +444,531 @@ async def test_a_packet_scan_is_never_read_as_a_cut_part(
 
 # ══════════════════════════════ 5 · the release gate, on real ordered sizes
 @pytest.mark.asyncio
-async def test_a_sized_accessory_missing_an_ordered_size_blocks_release(
+async def test_an_accessory_missing_from_some_skus_blocks_release(
         db, order_tree):
-    """THE SAME FAILURE, CAUGHT A DAY EARLIER — at the last moment anyone can be
-    asked. Zip lines for M and L, an order that also runs S: the S garments get
-    kit_required=False and ship with no zip, and nothing else in the system would
-    ever have said so."""
+    """A SKU WITH NOTHING, caught at the last moment anyone can be asked.
+
+    Only the M colourway has a line, so PINE GREEN · L gets kit_required=False,
+    completeness collapses to leather-and-lining, and it ships with no accessories
+    at all. Nothing else in the system would ever have said so.
+
+    THE GATE ASKS "IS THIS SKU EMPTY", NOT "DOES IT MATCH THE OTHERS". Its
+    predecessor `accessory_sku_gaps` demanded every SKU carry every article any SKU
+    declared, which blocked order 1996 for legitimately giving two colourways
+    different buttons — see test_disjoint_accessories_per_sku_release_clean below.
+    """
     from app.modules.clients.models import SKU
     style = order_tree["style"]
-    for size in ("S", "L"):
-        db.add(SKU(style_id=style.id, color_code="PINE", color_name="PINE GREEN",
-                   size=size, qty_ordered=2, code=f"JP-CLERMONT-PINE-{size}"))
-    for size in ("M", "L"):
-        db.add(StyleMaterialSpec(
-            style_id=style.id, category="ACCESSORY", subtype="ZIP",
-            article="ZIP-N", colour="BLACK", size=size, garment_size=size,
-            qty_per_piece=1, uom="pcs"))
+    large = SKU(style_id=style.id, color_code="PINE", color_name="PINE GREEN",
+                size="L", qty_ordered=2, code="JP-CLERMONT-PINE-L")
+    db.add(large)
+    await db.flush()
+    # The zip is on the M SKU only.
+    db.add(StyleMaterialSpec(
+        style_id=style.id, sku_id=order_tree["sku"].id, category="ACCESSORY",
+        subtype="ZIP", article="ZIP-N", colour="BLACK", size="60",
+        qty_per_piece=1, uom="pcs"))
     await db.commit()
 
     blockers = (await StyleSpecService(db).blockers_for_styles(
         [style.id]))[style.id]
-    sized = [b for b in blockers if "per garment size" in b]
-    assert len(sized) == 1
-    assert "ZIP-N (ZIP)" in sized[0]
-    assert "S" in sized[0]
+    coverage = [b for b in blockers if "none at all on" in b]
+    assert len(coverage) == 1
+    assert "PINE GREEN · L" in coverage[0]
+    # It must say the missing lines need NOT match the other colourways, or the DM
+    # clears it by copying and re-creates the restriction this change removed.
+    assert "need not match" in coverage[0]
+    assert "no_accessories: true" in coverage[0]
 
 
-@pytest.mark.asyncio
-async def test_one_unscoped_line_covers_every_ordered_size(db, order_tree):
-    """A generic 18L button is one row, and must stay one row — a gate that fires
-    on the normal case is a gate people learn to ignore."""
+async def test_an_accessory_on_every_ordered_sku_does_not_block(db, order_tree):
+    """A gate that fires on the normal case is a gate people learn to ignore."""
+    from app.modules.clients.models import SKU
+    style = order_tree["style"]
+    large = SKU(style_id=style.id, color_code="PINE", color_name="PINE GREEN",
+                size="L", qty_ordered=2, code="JP-CLERMONT-PINE-L")
+    db.add(large)
+    await db.flush()
+    for sku_id in (order_tree["sku"].id, large.id):
+        db.add(StyleMaterialSpec(
+            style_id=style.id, sku_id=sku_id, category="ACCESSORY",
+            subtype="BUTTON", article="BTN-18L", colour="BLACK", size="18L",
+            qty_per_piece=4, uom="pcs"))
+    await db.commit()
+
+    blockers = (await StyleSpecService(db).blockers_for_styles(
+        [style.id]))[style.id]
+    assert [b for b in blockers if "none at all on" in b] == []
+
+
+async def test_disjoint_accessories_per_sku_release_clean(db, order_tree):
+    """THE RULE THIS WHOLE CHANGE EXISTS FOR (Hamthan, 2026-09-29).
+
+    Each SKU takes whatever it takes. The M colourway gets a horn button, the L one
+    gets a metal shank and a zip, and they share NOTHING — different subtype,
+    different article, different colour, different size. That is the normal case on
+    this floor, and it must release without a word.
+
+    Order 1996 was rejected for exactly this shape, with one blocker sentence per
+    article. Every SKU has SOMETHING, so there is nothing to report.
+    """
+    from app.modules.clients.models import SKU
+    style = order_tree["style"]
+    large = SKU(style_id=style.id, color_code="PINE", color_name="PINE GREEN",
+                size="L", qty_ordered=2, code="JP-CLERMONT-PINE-L")
+    db.add(large)
+    await db.flush()
+    db.add(StyleMaterialSpec(
+        style_id=style.id, sku_id=order_tree["sku"].id, category="ACCESSORY",
+        subtype="BUTTON", article="HORN BROWN", colour="BROWN", size="18L",
+        qty_per_piece=4, uom="pcs"))
+    db.add(StyleMaterialSpec(
+        style_id=style.id, sku_id=large.id, category="ACCESSORY",
+        subtype="BUTTON", article="METAL SHANK", colour="GUNMETAL", size="24L",
+        qty_per_piece=6, uom="pcs"))
+    db.add(StyleMaterialSpec(
+        style_id=style.id, sku_id=large.id, category="ACCESSORY",
+        subtype="ZIP", article="YKK-60", colour="BLACK", size="60",
+        qty_per_piece=1, uom="pcs"))
+    await db.commit()
+
+    blockers = (await StyleSpecService(db).blockers_for_styles(
+        [style.id]))[style.id]
+    # NO accessory blocker of any kind — not the coverage one, not the style one.
+    assert [b for b in blockers if "accessor" in b.lower()] == [], blockers
+
+
+async def test_a_sku_nobody_ordered_is_not_a_gap(db, order_tree):
+    """An importer can leave a zero-quantity row for a colour/size the client did
+    not buy. Blocking a release over a garment that will never be made is a false
+    blocker, and those teach people the gate is noise."""
     from app.modules.clients.models import SKU
     style = order_tree["style"]
     db.add(SKU(style_id=style.id, color_code="PINE", color_name="PINE GREEN",
-               size="S", qty_ordered=2, code="JP-CLERMONT-PINE-S"))
+               size="XXL", qty_ordered=0, code="JP-CLERMONT-PINE-XXL"))
     db.add(StyleMaterialSpec(
-        style_id=style.id, category="ACCESSORY", subtype="BUTTON",
-        article="BTN-18L", colour="BLACK", size="18L", garment_size=None,
+        style_id=style.id, sku_id=order_tree["sku"].id, category="ACCESSORY",
+        subtype="BUTTON", article="BTN-18L", colour="BLACK", size="18L",
         qty_per_piece=4, uom="pcs"))
     await db.commit()
 
     blockers = (await StyleSpecService(db).blockers_for_styles(
         [style.id]))[style.id]
-    assert [b for b in blockers if "per garment size" in b] == []
+    assert [b for b in blockers if "but not on" in b] == []
 
 
-@pytest.mark.asyncio
-async def test_several_unscoped_sizes_of_one_article_block_release_as_ambiguous(
-        db, order_tree):
-    """THE HOLE THE FIX FOR THE OTHER HOLE OPENED.
-
-    garment_size is no longer inferred from a numeric material size, because that
-    inference scoped a 60cm zip to 4XL jackets. But the inference was also the only
-    thing stopping ZIP 48 / 50 / 52 — plainly three garment sizes — from becoming
-    three unscoped lines that all land on every jacket. '50' cannot be told from
-    the token, so the DM is asked instead of guessed at.
-    """
-    style = order_tree["style"]
-    for size in ("48", "50", "52"):
-        db.add(StyleMaterialSpec(
-            style_id=style.id, category="ACCESSORY", subtype="ZIP",
-            article="ZIP-N", colour="BLACK", size=size, garment_size=None,
-            qty_per_piece=1, uom="pcs"))
-    await db.commit()
-
-    blockers = (await StyleSpecService(db).blockers_for_styles(
-        [style.id]))[style.id]
-    ambiguous = [b for b in blockers if "none of them says" in b]
-    assert len(ambiguous) == 1
-    assert "48, 50, 52" in ambiguous[0]
-
-
-@pytest.mark.asyncio
-async def test_a_per_colourway_override_covers_its_own_sku_s_size(
-        db, order_tree):
-    """A DM who covered the sizes through per-colourway overrides must not be told
-    they are uncovered. A false blocker on a release teaches people the gate is
-    noise, which is worse than no gate."""
+async def test_a_leather_line_is_not_judged_by_accessory_coverage(db, order_tree):
+    """Leather and lining can still be style-wide, so "every SKU must have one" is
+    not a question that can be asked of them."""
     from app.modules.clients.models import SKU
     style = order_tree["style"]
-    small = SKU(style_id=style.id, color_code="NAVY", color_name="NAVY",
-                size="S", qty_ordered=2, code="JP-CLERMONT-NAVY-S")
-    db.add(small)
-    await db.flush()
+    db.add(SKU(style_id=style.id, color_code="NAVY", color_name="NAVY",
+               size="S", qty_ordered=2, code="JP-CLERMONT-NAVY-S"))
     db.add(StyleMaterialSpec(
-        style_id=style.id, category="ACCESSORY", subtype="ZIP",
-        article="ZIP-N", colour="BLACK", size="M", garment_size="M",
-        qty_per_piece=1, uom="pcs"))
-    # Scoped to the S colourway and saying nothing about garment size: being that
-    # SKU's line already means it is for that SKU's size.
-    db.add(StyleMaterialSpec(
-        style_id=style.id, sku_id=small.id, category="ACCESSORY", subtype="ZIP",
-        article="ZIP-N", colour="NAVY", size="S", garment_size=None,
-        qty_per_piece=1, uom="pcs"))
+        style_id=style.id, sku_id=order_tree["sku"].id, category="LEATHER",
+        article="SUEDE-A32", colour="PINE", thickness="1.2mm",
+        qty_per_piece=12.5, uom="dcm"))
     await db.commit()
 
     blockers = (await StyleSpecService(db).blockers_for_styles(
         [style.id]))[style.id]
-    assert [b for b in blockers if "per garment size" in b] == []
+    assert [b for b in blockers if "but not on" in b] == []
+
+
+# ══════════════════════ 7 · A GARMENT WITH SEVERAL ACCESSORIES MUST FINISH
+@pytest.fixture
+async def three_trims(db, order_tree):
+    """CLERMONT takes a button, a zip and thread — all on its one SKU.
+
+    THE SHAPE THE FLOOR REPORTED IT IN. A garment needs everything the DM put on the
+    release breakdown, and none of it is size-specific here: the point is the COUNT,
+    not the sizing. Three packets, three scans, and the garment must then be
+    sendable — which is what unblocks LINE_STITCHING.
+    """
+    style = order_tree["style"]
+    sku_id = order_tree["sku"].id
+    trims = [("BUTTON", "BTN-4H", "18L", 4), ("ZIP", "ZIP-N", "60", 1),
+             ("THREAD", "THR-40", None, 120)]
+    lots = {}
+    for subtype, article, size, _qty in trims:
+        lot = MaterialLot(category="ACCESSORY", subtype=subtype, article=article,
+                          colour="BLACK", size=size, uom="pcs", on_hand=500,
+                          is_active=True)
+        db.add(lot)
+        lots[article] = lot
+    await db.flush()
+    for subtype, article, size, qty in trims:
+        db.add(StyleMaterialSpec(
+            style_id=style.id, sku_id=sku_id, category="ACCESSORY",
+            subtype=subtype, article=article, colour="BLACK", size=size,
+            garment_size=None, qty_per_piece=qty, uom="pcs",
+            material_lot_id=lots[article].id))
+    await db.commit()
+    for lot in lots.values():
+        await db.refresh(lot)
+    return lots
 
 
 @pytest.mark.asyncio
-async def test_a_part_issue_under_an_approval_leaves_it_open_for_the_rest(
-        db, pieces, sized_buttons, cutter, dm):
-    """THE CORNER THAT MARKING IT SPENT UP FRONT GOT WRONG.
+async def test_THREE_accessories_complete_the_garment_in_three_scans(
+        db, pieces, three_trims, cutter, dm, operations):
+    """THE BUG AS REPORTED: "I can't scan multiple accessories."
 
-    Two of the four buttons go in. If the approval were consumed there, the other
-    two could never be issued from the same packet — and the CONSUMED branch would
-    tell the operator nothing was owed, which is flatly untrue. The approval covers
-    "this packet into this garment", and a part-issue has not finished that.
+    Each scan DID register — stock moved and the ledger row was written — but
+    `accessories_in` was computed from a SELECT that could not see the row just
+    added, because sessions are `autoflush=False` and nothing had flushed. So it was
+    persisted False after every scan, the garment never became sendable, and
+    LINE_STITCHING (gated on SENDED) was unreachable however many times the operator
+    scanned.
+
+    `no_autoflush` IS THE WHOLE POINT OF THIS TEST. The harness used to default to
+    autoflush=True, which flushed the pending row before the read and hid the bug
+    behind a green suite. This block reproduces production exactly, so the test
+    keeps failing if anyone ever makes the harness permissive again.
     """
-    from fastapi import HTTPException
+    from tests.conftest import _ready_for_store
     piece = pieces[0]
-    with pytest.raises(HTTPException):
-        await StoreService(db).store_scan(
-            piece_id=piece.id, lot_id=sized_buttons["L"].id,
-            employee_id=cutter[0].id, entered_by="STORE")
-    request = (await _requests(db, piece.id))[0]
-    await StoreService(db).decide_substitution(
-        request.id, approve=True, actor_user_id=dm.id, actor_name="DM")
+    svc = StoreService(db)
 
-    part = await StoreService(db).store_scan(
-        piece_id=piece.id, lot_id=sized_buttons["L"].id, qty=2,
-        employee_id=cutter[0].id, entered_by="STORE")
+    # The cut parts first, because completeness is leather AND lining AND the kit —
+    # this test is about the kit half, so the other two have to be genuinely in.
+    await _ready_for_store(db, operations, piece, cutter[0].id)
+    await svc.store_scan(piece_id=piece.id, part=StorePart.LEATHER,
+                         employee_id=cutter[0].id)
+    await svc.store_scan(piece_id=piece.id, part=StorePart.LINING,
+                         employee_id=cutter[0].id)
 
-    assert part["kit"]["status"] == KitStatus.PARTIAL.value
-    await db.refresh(request)
-    assert request.status == KitSubstitutionStatus.APPROVED.value, (
-        "two buttons are still owed on the line")
-    assert "still owed" in part["substitution"]["message"]
-    await db.refresh(piece)
-    assert piece.accessories_in is False
+    with db.no_autoflush:
+        for article, lot in three_trims.items():
+            res = await svc.store_scan(
+                piece_id=piece.id, lot_id=lot.id,
+                employee_id=cutter[0].id, entered_by="STORE")
 
-    # The rest goes in under the SAME decision, and now it is spent.
-    rest = await StoreService(db).store_scan(
-        piece_id=piece.id, lot_id=sized_buttons["L"].id,
-        employee_id=cutter[0].id, entered_by="STORE")
-    assert rest["kit"]["status"] == KitStatus.ISSUED.value
-    assert await _on_hand(db, sized_buttons["L"].id) == pytest.approx(496)
-    await db.refresh(request)
-    assert request.status == KitSubstitutionStatus.CONSUMED.value
+    # The LAST scan completed the set, so it must say so on the spot.
+    assert res["kit"]["status"] == KitStatus.ISSUED.value
+    assert res["kit"]["outstanding"] == []
+    assert res["accessories_in"] is True
     await db.refresh(piece)
     assert piece.accessories_in is True
+
+    # …and the garment can now leave the store, which is what unblocks
+    # LINE_STITCHING — the thing the floor could not reach.
+    out = await StoreService(db).send(piece_ids=[piece.id], actor_user_id=dm.id)
+    assert out["sent"] == [piece.code], out
+
+
+@pytest.mark.asyncio
+async def test_each_scan_reports_what_is_still_owed(db, pieces, three_trims,
+                                                   cutter):
+    """The operator is standing at the terminal and needs to know what is left —
+    "2 of 3, the thread is still owed" — not a bare boolean."""
+    piece = pieces[0]
+    svc = StoreService(db)
+    with db.no_autoflush:
+        first = await svc.store_scan(
+            piece_id=piece.id, lot_id=three_trims["BTN-4H"].id,
+            employee_id=cutter[0].id, entered_by="STORE")
+
+    assert first["kit"]["status"] == KitStatus.PARTIAL.value
+    owed = {r["article"] for r in first["kit"]["outstanding"]}
+    assert owed == {"ZIP-N", "THR-40"}, owed
+    assert first["accessories_in"] is False
+    assert "ACCESSORIES" in first["awaiting"]
+
+
+@pytest.mark.asyncio
+async def test_a_batch_issues_every_packet_in_one_call(db, pieces, three_trims,
+                                                      cutter):
+    """THE FLOOR'S OWN SEQUENCE. Three packets collected on the screen, submitted
+    together. The stored shape is still one issue per line — the convenience is in
+    the request, not the data."""
+    piece = pieces[0]
+    befores = {a: await _on_hand(db, lot.id) for a, lot in three_trims.items()}
+
+    with db.no_autoflush:
+        res = await StoreService(db).store_scan(
+            piece_id=piece.id,
+            lot_ids=[lot.id for lot in three_trims.values()],
+            employee_id=cutter[0].id, entered_by="STORE")
+
+    batch = res["accessory_batch"]
+    assert (batch["scanned"], batch["issued"]) == (3, 3)
+    assert batch["refused"] == [] and batch["still_owed"] == []
+    assert res["kit"]["status"] == KitStatus.ISSUED.value
+    assert res["accessories_in"] is True
+    # Each packet spent its own line's quantity, once.
+    assert await _on_hand(db, three_trims["BTN-4H"].id) == pytest.approx(
+        befores["BTN-4H"] - 4)
+    assert await _on_hand(db, three_trims["ZIP-N"].id) == pytest.approx(
+        befores["ZIP-N"] - 1)
+    assert await _on_hand(db, three_trims["THR-40"].id) == pytest.approx(
+        befores["THR-40"] - 120)
+    assert await _issue_rows(db, piece.id) == 3
+
+
+@pytest.mark.asyncio
+async def test_the_same_packet_twice_in_one_batch_spends_once(db, pieces,
+                                                             three_trims, cutter):
+    """THE DOUBLE-SPEND THE PER-PACKET FLUSH PREVENTS.
+
+    `issue_kit_nocommit` opens with `issued_by_piece`, its idempotency read. Without
+    a flush after each packet, the second pass over the same lot would miss the
+    first's unflushed ledger row, compute the full quantity as still owed, and spend
+    it again — four buttons becoming eight inside one request.
+    """
+    piece = pieces[0]
+    button = three_trims["BTN-4H"]
+    before = await _on_hand(db, button.id)
+
+    with db.no_autoflush:
+        res = await StoreService(db).store_scan(
+            piece_id=piece.id, lot_ids=[button.id, button.id],
+            employee_id=cutter[0].id, entered_by="STORE")
+
+    assert res["accessory_batch"]["scanned"] == 2
+    assert await _on_hand(db, button.id) == pytest.approx(before - 4), \
+        "four buttons, not eight"
+    assert await _issue_rows(db, piece.id) == 1, "one ledger row per line"
+
+
+@pytest.fixture
+async def wrong_size_button(db, three_trims):
+    """A 20L button packet, where the recipe asks for 18L.
+
+    ITS OWN FIXTURE, not `sized_buttons`. Combining the two put TWO BTN-4H lines on
+    one garment — `three_trims`' 18L line and `sized_buttons`' M line — so the packet
+    matched both and the verdict was AMBIGUOUS rather than WRONG_SIZE. A test whose
+    fixtures fight each other tests the fight, not the rule.
+    """
+    lot = MaterialLot(category="ACCESSORY", subtype="BUTTON", article="BTN-4H",
+                      colour="BLACK", size="20L", uom="pcs", on_hand=500,
+                      is_active=True)
+    db.add(lot)
+    await db.commit()
+    await db.refresh(lot)
+    return lot
+
+
+@pytest.mark.asyncio
+async def test_a_batch_issues_the_good_packets_and_reports_the_wrong_size_one(
+        db, pieces, three_trims, wrong_size_button, cutter):
+    """PARTIAL ACCEPT — the rule the rest of this codebase follows.
+
+    One bad packet must never lose the good ones a manager scanned with it. The zip
+    and the thread go in; the L-size button against an M garment is refused, carries
+    its approval request id, and the garment stays unsendable until a DM answers.
+    """
+    piece = pieces[0]
+    wrong = wrong_size_button                  # 20L, where the recipe asks 18L
+    zip_lot, thread = three_trims["ZIP-N"], three_trims["THR-40"]
+    wrong_before = await _on_hand(db, wrong.id)
+
+    with db.no_autoflush:
+        res = await StoreService(db).store_scan(
+            piece_id=piece.id, lot_ids=[zip_lot.id, wrong.id, thread.id],
+            employee_id=cutter[0].id, entered_by="STORE")
+
+    batch = res["accessory_batch"]
+    assert (batch["scanned"], batch["issued"]) == (3, 2)
+    assert len(batch["refused"]) == 1
+    bad = batch["refused"][0]
+    assert bad["reason"] == "WRONG_SIZE"
+    assert bad["substitution_request_id"]
+    assert "WRONG SIZE" in bad["detail"]
+
+    # The good two are really in, the bad one really is not.
+    assert await _on_hand(db, wrong.id) == pytest.approx(wrong_before)
+    assert await _issue_rows(db, piece.id) == 2
+
+    # The ask survived the same commit as the issues — that is the whole reason the
+    # batch door does not commit inside the refusal.
+    rows = await _requests(db, piece.id)
+    assert len(rows) == 1
+    assert rows[0].status == KitSubstitutionStatus.PENDING.value
+
+    # And the garment is still owed its button, so it cannot leave the store.
+    assert res["accessories_in"] is False
+    # STILL OWED, BY NAME. The old flat shape said `BTN-4H` and nothing else — the
+    # one field on the row an operator cannot read off the packet in their hand.
+    # Each row now describes itself, and the sentence is ready to put on screen.
+    assert [r["article"] for r in batch["still_owed"]] == ["BTN-4H"]
+    assert batch["still_owed"][0]["label"] == "BUTTON · BTN-4H BLACK 18L"
+    assert batch["still_owed"][0]["state"] == "PENDING"
+    assert "Waiting for BUTTON · BTN-4H BLACK 18L" in batch["still_owed_line"]
+    # The flat list is kept so nothing already reading it breaks.
+    assert batch["still_owed_articles"] == ["BTN-4H"]
+
+
+@pytest.mark.asyncio
+async def test_naming_the_packets_twice_is_refused(db, pieces, three_trims,
+                                                   cutter):
+    """Two ways of naming the packets cannot be reconciled, and silently preferring
+    one is how the wrong packet gets issued."""
+    from pydantic import ValidationError
+    from app.modules.store import schemas
+    with pytest.raises(ValidationError) as exc:
+        schemas.StoreScanRequest(
+            employee_id=cutter[0].id, piece_id=pieces[0].id,
+            lot_id=three_trims["BTN-4H"].id,
+            lot_ids=[three_trims["ZIP-N"].id])
+    assert "more than once" in str(exc.value)
+
+
+# ══════════════════════ 8 · DECLARED / SCANNED / PENDING, in one answer
+@pytest.mark.asyncio
+async def test_the_scan_says_what_is_declared_scanned_and_pending(
+        db, pieces, three_trims, cutter):
+    """THE OPERATOR'S WHOLE QUESTION, ANSWERED ON THE SCAN THEY WERE ALREADY DOING.
+
+    Button and thread in, zip still owed. `accessories_in` is a roll-up and can only
+    say "not all of them"; it cannot say WHICH — and the person who can fetch the zip
+    is standing at the terminal right now. So the response carries the three lists
+    and the sentence, all from one `material_requirement_block`.
+    """
+    piece = pieces[0]
+    with db.no_autoflush:
+        res = await StoreService(db).store_scan(
+            piece_id=piece.id,
+            lot_ids=[three_trims["BTN-4H"].id, three_trims["THR-40"].id],
+            employee_id=cutter[0].id, entered_by="STORE")
+
+    kit = res["kit"]
+    assert {r["article"] for r in kit["declared"]} == {"BTN-4H", "ZIP-N", "THR-40"}
+    assert {r["article"] for r in kit["scanned"]} == {"BTN-4H", "THR-40"}
+    assert [r["article"] for r in kit["pending"]] == ["ZIP-N"]
+    assert kit["progress"]["declared"] == 3
+    assert kit["progress"]["scanned"] == 2
+    assert kit["progress"]["pending"] == 1
+
+    # EVERY LINE CARRIES ITS OWN STATE, so no screen re-derives the subtraction.
+    states = {r["article"]: r["state"] for r in kit["declared"]}
+    assert states == {"BTN-4H": "ISSUED", "THR-40": "ISSUED", "ZIP-N": "PENDING"}
+
+    # AND THE SENTENCE. This is the user's own example: "if I miss zip then system
+    # says waiting for the zip, button and thread are scanned."
+    line = kit["pending_line"]
+    assert line.startswith("Waiting for ZIP")
+    assert "Scanned:" in line and "BTN-4H" in line and "THR-40" in line
+
+    assert res["accessories_in"] is False
+    batch = res["accessory_batch"]
+    assert [r["subtype"] for r in batch["still_owed"]] == ["ZIP"]
+    assert batch["still_owed_line"] == line
+
+
+@pytest.mark.asyncio
+async def test_the_last_packet_turns_the_sentence_over(db, pieces, three_trims,
+                                                      cutter):
+    """Nothing pending, and it says so rather than going quiet. A blank field where
+    a sentence was is indistinguishable from a screen that failed to load."""
+    piece = pieces[0]
+    with db.no_autoflush:
+        res = await StoreService(db).store_scan(
+            piece_id=piece.id, lot_ids=[l.id for l in three_trims.values()],
+            employee_id=cutter[0].id, entered_by="STORE")
+
+    kit = res["kit"]
+    assert kit["pending"] == [] and len(kit["scanned"]) == 3
+    assert kit["pending_line"].startswith("All accessories scanned:")
+    assert res["accessories_in"] is True
+    assert {r["state"] for r in kit["declared"]} == {"ISSUED"}
+
+
+@pytest.mark.asyncio
+async def test_the_garment_lookup_gives_the_same_answer_as_the_scan(
+        db, pieces, three_trims, cutter):
+    """ONE ENDPOINT ANYONE CAN ASK, LATER. The scan tells the operator mid-scan;
+    this tells a DM at a desk. Both read the same computation, so a garment cannot
+    look half-kitted on one screen and fully kitted on the other — which is exactly
+    what happened while the store screen did its own subtraction."""
+    piece = pieces[0]
+    svc = StoreService(db)
+    with db.no_autoflush:
+        scan = await svc.store_scan(
+            piece_id=piece.id, lot_ids=[three_trims["BTN-4H"].id],
+            employee_id=cutter[0].id, entered_by="STORE")
+
+    detail = await svc.piece_detail(await svc.get_piece(piece.id))
+    assert detail["accessories_progress"] == scan["kit"]["progress"]
+    assert detail["pending_line"] == scan["kit"]["pending_line"]
+    assert ({r["article"] for r in detail["accessories_pending"]}
+            == {r["article"] for r in scan["kit"]["pending"]})
+    assert [r["article"] for r in detail["accessories_scanned"]] == ["BTN-4H"]
+    # And the full checklist is still there, every line with its own state.
+    assert len(detail["accessories"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_style_that_declares_no_accessories_reads_empty_not_broken(
+        db, pieces):
+    """THE EMPTY SHAPE MUST CARRY EVERY KEY THE FULL ONE DOES.
+
+    Most of what is already on the floor was released before the material spec
+    existed, so `material_requirement_block` returns its `empty` dict for it — and
+    `kit_view` reads these fields straight through. A key missing from `empty` is a
+    KeyError on the store scan of those garments, not a cosmetic gap. This caught
+    exactly that during the change.
+
+    Asserted through `kit_view` rather than a scan because it is the shape that is
+    at issue, and a leather scan would first have to satisfy the stage gate.
+    """
+    kit = await StyleSpecService(db).kit_view(pieces[0].id)
+
+    assert kit["declared"] == [] and kit["pending"] == [] and kit["scanned"] == []
+    assert kit["progress"]["declared"] == 0
+    assert kit["progress"]["pending"] == 0
+    # NULL, not "waiting for nothing".
+    assert kit["pending_line"] is None
+    assert kit["status"] == KitStatus.NOT_REQUIRED.value
+    # And a null piece_id takes the same path, for a screen with nothing selected.
+    assert (await StyleSpecService(db).kit_view(None))["pending_line"] is None
+
+
+# ══════════════════════ 9 · THE SCAN CARRIES NO QUANTITY
+def test_the_scan_request_refuses_a_qty():
+    """THE RECIPE ALREADY SAID HOW MANY (Hamthan, 2026-09-29).
+
+    The piece code gives the SKU, whose lines were declared at the breakdown
+    release; the packet label gives article/colour/size. Their intersection is one
+    recipe line and its `qty_per_piece` IS the number — so asking the operator for
+    it asked them to restate something the system holds, and let them restate it
+    wrong. It also fanned out: one `qty` with three packets issued that quantity of
+    EVERY one.
+
+    `extra="forbid"` is why this raises instead of silently dropping the field.
+    Pydantic's default is `ignore`, which would have given a screen still sending
+    `qty` a cheerful 201 and no way to learn it had stopped working.
+    """
+    from pydantic import ValidationError
+
+    from app.modules.store.schemas import StoreScanRequest
+
+    ok = StoreScanRequest(employee_barcode="EMP-1", piece_barcode="PC-1",
+                          lot_barcode="LOT-ACC-000001")
+    assert not hasattr(ok, "qty")
+
+    with pytest.raises(ValidationError) as exc:
+        StoreScanRequest(employee_barcode="EMP-1", piece_barcode="PC-1",
+                         lot_barcode="LOT-ACC-000001", qty=2)
+    assert "qty" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_a_batch_spends_each_line_its_own_quantity_not_one_number(
+        db, pieces, three_trims, cutter):
+    """The defect the removal deletes rather than patches: three packets whose lines
+    ask for 4, 1 and 120 must spend 4, 1 and 120. While the scan carried a `qty` it
+    was passed to every packet in the loop, so one number flattened all three."""
+    piece = pieces[0]
+    befores = {a: await _on_hand(db, lot.id) for a, lot in three_trims.items()}
+
+    with db.no_autoflush:
+        res = await StoreService(db).store_scan(
+            piece_id=piece.id, lot_ids=[l.id for l in three_trims.values()],
+            employee_id=cutter[0].id, entered_by="STORE")
+
+    assert res["accessory_batch"]["issued"] == 3
+    spent = {a: befores[a] - await _on_hand(db, lot.id)
+             for a, lot in three_trims.items()}
+    # Three different numbers, each its own line's — never one repeated.
+    assert spent == pytest.approx({"BTN-4H": 4, "ZIP-N": 1, "THR-40": 120})

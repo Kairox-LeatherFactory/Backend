@@ -14,10 +14,10 @@ import itertools
 import pytest
 
 from app.core.enums import KitStatus
-from app.core.kit_rules import (accessory_size_ambiguities,
-                                accessory_size_gaps, auto_receive_ready,
-                                kit_satisfied, kit_status, piece_complete,
-                                release_blockers, size_matches)
+from app.core.kit_rules import (accessory_label, accessory_line_state,
+                                auto_receive_ready, kit_satisfied, kit_status,
+                                piece_complete, release_blockers, size_matches,
+                                skus_without_accessories)
 
 BOOLS = (False, True)
 
@@ -132,13 +132,32 @@ def test_every_blocker_names_the_style_and_what_to_do():
     assert "material-spec" in joined or "no_accessories" in joined
 
 
-# ══════════════════════════════════════════ the size-coverage gate
-def _acc(article="YKK", subtype="ZIP", garment_size=None, size=None, qty=1.0):
+# ══════════════════════════════════════════ the SKU-coverage gate
+#
+# WHAT WAS HERE BEFORE, AND WHY IT IS GONE. This section tested
+# `accessory_size_gaps` and `accessory_size_ambiguities`: one asked whether a
+# size-scoped accessory covered every ordered SIZE, the other whether several
+# unscoped material sizes of one article had been left for the system to guess
+# between. Both existed only to police STYLE-WIDE accessory lines, and an accessory
+# line now names the SKU it is for — a SKU being a colour and a size together. So
+# neither question can be asked any more, and the model they protected is the one
+# being removed. Deleting them is the point, not an oversight.
+#
+# `size_matches` STAYS. Leather and lining can still be style-wide, so garment_size
+# is still how one of those is scoped to a size, and the Italian-ladder rule is
+# still what decides whether a '52' line reaches an 'L' garment.
+def _acc(article="YKK", subtype="ZIP", sku_id="navy-M", qty=1.0):
     return {"category": "ACCESSORY", "subtype": subtype, "article": article,
-            "garment_size": garment_size, "size": size, "qty_per_piece": qty}
+            "sku_id": sku_id, "qty_per_piece": qty}
+
+
+ALL_SKUS = [("navy-M", "NAVY · M"), ("navy-L", "NAVY · L"),
+            ("pine-M", "PINE · M"), ("pine-L", "PINE · L")]
 
 
 class TestSizeMatches:
+    """Leather and lining still scope by size, so this rule is still load-bearing."""
+
     def test_null_on_either_side_never_drops_a_line(self):
         """NULL garment_size is every size, and a piece of unknown size keeps its
         whole recipe. Both directions, because both are load-bearing."""
@@ -155,107 +174,146 @@ class TestSizeMatches:
         assert size_matches(" l ", "L") is True
 
 
-class TestAccessorySizeGaps:
-    def test_a_sized_article_missing_an_ordered_size_is_a_gap(self):
-        """THE FAILURE THIS GATE EXISTS FOR. Zip lines for M and L, an order that
-        also runs S and XL: those garments get kit_required=False and ship with no
-        zip at all — not a short kit, no kit."""
-        gaps = accessory_size_gaps(
-            lines=[_acc(garment_size="M"), _acc(garment_size="L")],
-            ordered_sizes=["S", "M", "L", "XL"])
-        assert gaps == [("YKK (ZIP)", ["S", "XL"])]
+class TestAccessoriesAreIndependentPerSku:
+    """THE RULE THIS CLASS EXISTS TO DEFEND (Hamthan, 2026-09-29).
 
-    def test_one_unscoped_line_covers_every_size(self):
-        """A generic 18L button is one row and must stay one row."""
-        assert accessory_size_gaps(
-            lines=[_acc(subtype="BUTTON", article="BTN", garment_size=None)],
-            ordered_sizes=["S", "M", "L"]) == []
+    Two colourways of one style may take completely different accessories. The
+    predicate this replaced — `accessory_sku_gaps` — took every article declared on
+    ANY SKU and demanded EVERY SKU carry a line for it, which blocked a real
+    release (order 1996) for doing the correct thing. What is left is the one case
+    that is never deliberate: a SKU with nothing at all.
+    """
 
-    def test_an_unscoped_line_beside_sized_ones_closes_the_question(self):
-        assert accessory_size_gaps(
-            lines=[_acc(garment_size="M"), _acc(garment_size=None)],
-            ordered_sizes=["S", "M", "L"]) == []
+    def test_different_accessories_per_sku_is_NOT_a_gap(self):
+        """The whole point. NAVY takes a horn button, PINE takes a metal shank,
+        neither owes the other anything, and the release must go through."""
+        lines = [_acc(subtype="BUTTON", article="HORN BROWN", sku_id="navy-M"),
+                 _acc(subtype="BUTTON", article="HORN BROWN", sku_id="navy-L"),
+                 _acc(subtype="BUTTON", article="METAL SHANK", sku_id="pine-M"),
+                 _acc(subtype="ZIP", article="YKK", sku_id="pine-L")]
+        assert skus_without_accessories(lines=lines, ordered_skus=ALL_SKUS) == []
 
-    def test_every_ordered_size_covered_is_no_gap(self):
-        assert accessory_size_gaps(
-            lines=[_acc(garment_size="S"), _acc(garment_size="M")],
-            ordered_sizes=["S", "M"]) == []
+    def test_a_sku_with_no_accessory_line_at_all_IS_a_gap(self):
+        """The failure that is worth keeping: PINE · L gets kit_required=False, so
+        completeness collapses to leather-and-lining and it ships with nothing."""
+        lines = [_acc(sku_id=sid) for sid, _ in ALL_SKUS[:3]]
+        assert skus_without_accessories(
+            lines=lines, ordered_skus=ALL_SKUS) == ["PINE · L"]
 
-    def test_coverage_uses_the_ladder_so_52_covers_l(self):
-        assert accessory_size_gaps(lines=[_acc(garment_size="52")],
-                                   ordered_sizes=["L"]) == []
-
-    def test_a_size_nobody_ordered_is_not_a_gap(self):
-        assert accessory_size_gaps(lines=[_acc(garment_size="M")],
-                                   ordered_sizes=["M"]) == []
-
-    def test_a_zeroed_line_is_not_coverage(self):
-        """qty 0 on an override is "this one takes none", so it cannot be what
-        covers a size."""
-        assert accessory_size_gaps(
-            lines=[_acc(garment_size="M", qty=0), _acc(garment_size="L")],
-            ordered_sizes=["M", "L"]) == [("YKK (ZIP)", ["M"])]
-
-    def test_leather_and_lining_are_not_this_gate_s_business(self):
-        assert accessory_size_gaps(
+    def test_a_style_with_no_accessory_lines_anywhere_defers_to_the_style_check(self):
+        """[] rather than every SKU, so the release prints ONE sentence about the
+        style instead of one per colourway saying the same thing."""
+        assert skus_without_accessories(lines=[], ordered_skus=ALL_SKUS) == []
+        assert skus_without_accessories(
             lines=[{"category": "LEATHER", "subtype": None, "article": "COW",
-                    "garment_size": "L", "size": None, "qty_per_piece": 12.5}],
-            ordered_sizes=["S", "L"]) == []
+                    "sku_id": "navy-M", "qty_per_piece": 12.5}],
+            ordered_skus=ALL_SKUS) == []
 
-    def test_each_article_is_judged_on_its_own(self):
-        gaps = accessory_size_gaps(
-            lines=[_acc(garment_size="M"),
-                   _acc(subtype="BUTTON", article="BTN", garment_size=None)],
-            ordered_sizes=["M", "L"])
-        assert gaps == [("YKK (ZIP)", ["L"])]
+    def test_a_zeroed_line_does_not_cover_a_sku(self):
+        """qty 0 is "this colourway takes none of it", which is not a recipe."""
+        lines = [_acc(sku_id=sid) for sid, _ in ALL_SKUS[:3]]
+        lines.append(_acc(sku_id="pine-L", qty=0))
+        assert skus_without_accessories(
+            lines=lines, ordered_skus=ALL_SKUS) == ["PINE · L"]
 
+    def test_a_line_with_no_sku_is_ignored_rather_than_crashing(self):
+        """Legacy rows from before the rule; the migration deactivates them, but a
+        gate that raised on one would take the whole release down with it."""
+        assert skus_without_accessories(
+            lines=[_acc(sku_id=None)], ordered_skus=ALL_SKUS) == []
 
-class TestAccessorySizeAmbiguities:
-    def test_several_material_sizes_and_no_garment_size_is_ambiguous(self):
-        """ZIP 48 / 50 / 52 unscoped means every garment is issued all three.
-        Neither reading can be inferred from '50', so the DM is asked."""
-        out = accessory_size_ambiguities(
-            lines=[_acc(size="48"), _acc(size="50"), _acc(size="52")])
-        assert out == [("YKK (ZIP)", ["48", "50", "52"])]
-
-    def test_one_line_is_never_ambiguous_however_it_is_labelled(self):
-        """A single 60cm zip on every garment is exactly what an unscoped line
-        means — the change must not turn that into a blocker."""
-        assert accessory_size_ambiguities(lines=[_acc(size="60")]) == []
-
-    def test_scoped_lines_are_not_ambiguous(self):
-        assert accessory_size_ambiguities(
-            lines=[_acc(size="48", garment_size="S"),
-                   _acc(size="50", garment_size="M")]) == []
-
-    def test_the_same_size_twice_is_not_ambiguous(self):
-        assert accessory_size_ambiguities(
-            lines=[_acc(size="60"), _acc(size="60")]) == []
+    def test_no_ordered_skus_is_not_a_gap(self):
+        """A style whose breakdown is not uploaded has no garments to cover."""
+        assert skus_without_accessories(lines=[_acc()], ordered_skus=[]) == []
 
 
-class TestTheSizeBlockersReadAsSentences:
-    def test_a_coverage_gap_names_the_style_the_article_and_the_sizes(self):
+class TestTheEmptySkuBlockerReadsAsASentence:
+    def test_it_names_the_style_and_the_empty_skus(self):
         out = _blockers(confirmed_at="now", has_leather_line=True,
                         has_accessory_lines=True,
-                        size_coverage_gaps=[("YKK (ZIP)", ["S", "XL"])])
+                        skus_missing_accessories=["PINE · L", "PINE · M"])
         assert len(out) == 1
-        assert "CLERMONT" in out[0] and "YKK (ZIP)" in out[0]
-        assert "S, XL" in out[0]
+        assert "CLERMONT" in out[0] and "PINE · L, PINE · M" in out[0]
+        # It must say how to clear it, AND that matching the others is not required
+        # — otherwise the DM copies lines across and re-creates the old restriction.
+        assert "need not match" in out[0]
+        assert "no_accessories: true" in out[0]
 
-    def test_an_ambiguity_says_what_would_happen_if_it_shipped(self):
-        out = _blockers(confirmed_at="now", has_leather_line=True,
-                        has_accessory_lines=True,
-                        size_ambiguities=[("YKK (ZIP)", ["48", "50"])])
-        assert len(out) == 1
-        assert "garment_size" in out[0]
-
-    def test_neither_check_fires_on_a_sound_recipe(self):
+    def test_no_empty_skus_is_no_blocker(self):
         assert _blockers(confirmed_at="now", has_leather_line=True,
                          has_accessory_lines=True,
-                         size_coverage_gaps=[], size_ambiguities=[]) == []
+                         skus_missing_accessories=[]) == []
 
-    def test_omitting_them_entirely_is_the_old_behaviour(self):
-        """Both kwargs default to None so the three existing call sites that have
-        not been taught about sizes still compute exactly what they did."""
+    def test_no_accessories_true_silences_it(self):
+        """The same escape the style-level check honours. A DM who has declared the
+        style accessory-free must not then be asked per colourway."""
+        assert _blockers(confirmed_at="now", has_leather_line=True,
+                         has_accessory_lines=True, no_accessories=True,
+                         skus_missing_accessories=["PINE · L"]) == []
+
+    def test_omitting_it_entirely_is_the_old_behaviour(self):
         assert _blockers(confirmed_at="now", has_leather_line=True,
                          has_accessory_lines=True) == []
+
+
+class TestTheThreeMaterialsHaveThreeDifferentRULES:
+    """Leather required, lining optional, accessories per SKU — asserted together
+    because the asymmetry is deliberate and reading it in one place is the only way
+    anyone will remember it (Hamthan, 2026-09-29)."""
+
+    def test_a_missing_leather_line_blocks(self):
+        out = _blockers(confirmed_at="now", has_leather_line=False,
+                        has_accessory_lines=True)
+        assert len(out) == 1 and "LEATHER" in out[0]
+
+    def test_a_missing_lining_line_never_blocks(self):
+        """There is no lining kwarg at all, and that is the assertion: lining
+        consumption is optional on the cut path, so requiring it here would
+        contradict the ledger rule downstream."""
+        assert _blockers(confirmed_at="now", has_leather_line=True,
+                         has_accessory_lines=True) == []
+
+
+class TestAccessoryLineState:
+    """The PER-LINE answer. `kit_status` rolls a garment up and so cannot say which
+    packet is missing, which is the only thing the operator at the terminal needs."""
+
+    def test_nothing_issued_is_pending(self):
+        assert accessory_line_state(qty_per_piece=4, issued_qty=0) == "PENDING"
+
+    def test_some_issued_is_partial(self):
+        assert accessory_line_state(qty_per_piece=4, issued_qty=2) == "PARTIAL"
+
+    def test_all_issued_is_issued(self):
+        assert accessory_line_state(qty_per_piece=4, issued_qty=4) == "ISSUED"
+
+    def test_float_slop_does_not_hold_a_line_at_partial(self):
+        assert accessory_line_state(
+            qty_per_piece=0.3, issued_qty=0.1 + 0.2) == "ISSUED"
+
+    def test_unresolvable_is_not_pending(self):
+        """PENDING means "go and fetch it"; UNRESOLVED means no lot matches the
+        article, so there is nothing to fetch and the fix is a receipt."""
+        assert accessory_line_state(
+            qty_per_piece=4, issued_qty=0, resolvable=False) == "UNRESOLVED"
+        assert accessory_line_state(
+            qty_per_piece=4, issued_qty=4, resolvable=False) == "UNRESOLVED"
+
+
+class TestAccessoryLabel:
+    """"Waiting for the zip" is what the floor says. `still_owed` used to answer in
+    bare article codes, the one field they cannot read off the packet."""
+
+    def test_it_leads_with_the_kind(self):
+        assert accessory_label({"subtype": "ZIP", "article": "YKK-60",
+                                "colour": "BLACK", "size": "60cm"}) == \
+            "ZIP · YKK-60 BLACK 60cm"
+
+    def test_it_drops_the_parts_that_are_absent(self):
+        assert accessory_label({"subtype": "THREAD", "article": "T40"}) == \
+            "THREAD · T40"
+        assert accessory_label({"article": "T40"}) == "T40"
+
+    def test_an_empty_row_never_renders_an_empty_string(self):
+        """It goes into a sentence, so "Waiting for ." must be impossible."""
+        assert accessory_label({}) == "(unnamed accessory)"

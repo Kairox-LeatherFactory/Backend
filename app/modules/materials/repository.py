@@ -533,6 +533,16 @@ class MaterialRepository:
             if reservation.qty == 0:
                 reservation.status = "consumed"
                 reservation.released_at = datetime.now(timezone.utc)
+        # FLUSH BEFORE RE-READING WHAT WE JUST CHANGED. The rows above are mutated
+        # in memory and `active_reserved` is a SELECT SUM — and sessions here are
+        # `autoflush=False` (core/database.py), so without this it summed the OLD
+        # quantities and reported the reservation as still active. `available` came
+        # back understated by exactly the amount just consumed, on every cut.
+        #
+        # Which is the same bug this function was written to fix, one level down:
+        # see the note at its call site about `available` falling monotonically and
+        # never recovering. Nothing is committed — the caller owns that.
+        await self.db.flush()
         return await self.active_reserved(lot_id)
 
     # ── receipts ─────────────────────────────────────────────────────────────

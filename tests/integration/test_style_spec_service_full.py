@@ -24,6 +24,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+import pytest_asyncio
 from fastapi import HTTPException
 from sqlalchemy import select
 
@@ -53,9 +54,20 @@ def leather_line(**kw):
     return base
 
 
+# THE STYLE'S OWN SKU, so `button_line()` can default to it.
+#
+# AN ACCESSORY LINE MUST NAME A SKU now — a SKU is a colour and a size together,
+# which is what decides whether an accessory goes in — and 83 call sites in this
+# file build an accessory body. Threading a sku_id through every one of them would
+# bury the change each test is actually about, so the helper supplies the style's
+# own SKU and any test that cares passes `sku_id=` explicitly to override it.
+_STYLE_SKU: dict = {"id": None}
+
+
 def button_line(**kw):
     base = dict(category="ACCESSORY", subtype="BUTTON", article="BTN-4H",
-                colour="BLACK", size="18L", qty_per_piece=4)
+                colour="BLACK", size="18L", qty_per_piece=4,
+                sku_id=_STYLE_SKU["id"])
     base.update(kw)
     return base
 
@@ -101,6 +113,19 @@ async def draft_style(db, order_tree):
     return style
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _bind_button_line_to_the_styles_sku(order_tree):
+    """Point `button_line()` at this style's SKU for the length of one test.
+
+    AUTOUSE because an accessory body is built at module level, before any fixture
+    could be threaded into it, and because a stale id leaking between tests would be
+    far harder to spot than the one extra `order_tree` build this costs.
+    """
+    _STYLE_SKU["id"] = order_tree["sku"].id
+    yield
+    _STYLE_SKU["id"] = None
+
+
 # ══════════════════════════════════════════════════════ authoring: one line
 class TestAddLine:
     async def test_a_line_is_stored_with_its_unit_derived_from_the_material(
@@ -111,7 +136,8 @@ class TestAddLine:
         out = await StyleSpecService(db).add_line(
             draft_style.id, button_line(uom="dozens"), actor_name=BY)
         assert out["uom"] == "pcs"
-        assert out["scope"] == "STYLE"
+        # SKU, not STYLE: an accessory names the garment it is for.
+        assert out["scope"] == "SKU"
         assert out["qty_per_piece"] == 4.0
         assert out["is_active"] is True
 
@@ -159,10 +185,15 @@ class TestAddLine:
 
     async def test_zero_is_illegal_on_a_style_wide_line(self, db, draft_style):
         """It would be a recipe entry that consumes nothing — a typo with a row
-        in it. Zero is how a per-SKU override says 'not this one'."""
+        in it. Zero is how a SKU-scoped line says 'not this one'.
+
+        LEATHER, because an accessory cannot be style-wide any more. The rule under
+        test is "a line that reaches every garment must consume something", and
+        leather is what can still reach every garment.
+        """
         with pytest.raises(HTTPException) as e:
             await StyleSpecService(db).add_line(
-                draft_style.id, button_line(qty_per_piece=0), actor_name=BY)
+                draft_style.id, leather_line(qty_per_piece=0), actor_name=BY)
         assert e.value.status_code == 422
         assert "must consume something" in e.value.detail
 
@@ -189,25 +220,56 @@ class TestAddLine:
         A material size that read as a garment size set `garment_size` to it —
         and every bare number from 30 to 70 read as one, because those are the EU
         jacket rungs. So a 60cm zip entered as '60' was scoped to 4XL garments,
-        and S/M/L/XL got no zip line at all: not a short kit, NO kit, because a
-        style with no applicable accessory line has kit_required=False and ships
-        complete. A 'zip L' is now refused until the DM says which garments it is
-        for, and it is stored exactly as they said.
+        and S/M/L/XL got no zip line at all: not a short kit, NO kit.
+
+        IT IS LEATHER AND LINING'S CHECK NOW. Only they can still be style-wide, so
+        only they need a second way to say which sizes a line is for. An accessory
+        names its SKU, and a SKU is a colour and a size together.
         """
         with pytest.raises(HTTPException) as e:
             await StyleSpecService(db).add_line(
                 draft_style.id,
-                button_line(subtype="ZIP", article="ZIP-1", size="L"),
+                leather_line(article="SUEDE-L", size="L"),
                 actor_name=BY)
         assert e.value.status_code == 422
         assert "garment_size" in str(e.value.detail)
 
         out = await StyleSpecService(db).add_line(
             draft_style.id,
-            button_line(subtype="ZIP", article="ZIP-1", size="L",
-                        garment_size="L"),
+            leather_line(article="SUEDE-L", size="L", garment_size="L"),
             actor_name=BY)
         assert out["garment_size"] == "L"
+
+    async def test_an_accessory_size_of_M_IS_ACCEPTED_when_it_names_its_sku(
+            self, db, draft_style):
+        """THE REQUEST THE FLOOR REPORTED, as a test.
+
+            POST .../material-spec/lines  {"size": "M", ...}
+            422  This line's size is 'M', which is a garment size...
+
+        It was refused because the line might have been style-wide, in which case
+        'M' could have meant "for M garments" and nothing said so. A line that names
+        its SKU has already said which garment it is for, so 'M' is unambiguously
+        the material's own size — the M-size zip — and the 422 is gone.
+        """
+        out = await StyleSpecService(db).add_line(
+            draft_style.id,
+            button_line(subtype="ZIP", article="ZIP-1", size="M"),
+            actor_name=BY)
+        assert out["size"] == "M"
+        assert out["garment_size"] is None
+        assert out["scope"] == "SKU"
+
+    async def test_garment_size_on_an_accessory_is_refused_not_ignored(
+            self, db, draft_style):
+        """A caller who sends it believes it is doing something. Silently dropping
+        it would leave them thinking the line was scoped when its SKU already
+        decided that — and the two could only ever contradict each other."""
+        with pytest.raises(HTTPException) as e:
+            await StyleSpecService(db).add_line(
+                draft_style.id, button_line(garment_size="L"), actor_name=BY)
+        assert e.value.status_code == 422
+        assert "sku_id" in str(e.value.detail)
 
     async def test_a_material_measurement_is_not_read_as_a_garment_size(
             self, db, draft_style):
@@ -220,7 +282,7 @@ class TestAddLine:
     async def test_an_explicit_garment_size_wins_over_the_inference(
             self, db, draft_style):
         out = await StyleSpecService(db).add_line(
-            draft_style.id, button_line(size="18L", garment_size="S"),
+            draft_style.id, leather_line(size="18L", garment_size="S"),
             actor_name=BY)
         assert out["garment_size"] == "S"
 
@@ -400,14 +462,23 @@ class TestReplaceSpec:
 
     async def test_two_sizes_of_one_article_are_two_lines_not_one(
             self, db, draft_style):
-        """garment_size is part of the identity. Leaving it out is what made the
-        second line silently overwrite the first."""
+        """Two SKUs' worth of one article are two lines, not one overwriting the
+        other. The identity used to need garment_size for this; for an accessory it
+        is the sku_id that keeps them apart, which is the same guarantee with one
+        fewer column involved."""
+        from app.modules.clients.models import SKU as SKUModel
+        second = SKUModel(style_id=draft_style.id, color_code="NAVY",
+                          color_name="NAVY", size="L", qty_ordered=2,
+                          code="JP-CLERMONT-NAVY-L")
+        db.add(second)
+        await db.commit()
+        await db.refresh(second)
         out = await StyleSpecService(db).replace_spec(
             draft_style.id,
             [button_line(subtype="THREAD", article="THR-40",
-                         size=None, thickness="40", garment_size="S"),
+                         size=None, thickness="40"),
              button_line(subtype="THREAD", article="THR-40",
-                         size=None, thickness="40", garment_size="M")],
+                         size=None, thickness="40", sku_id=second.id)],
             actor_name=BY)
         assert len(out["lines"]) == 2
 
@@ -438,13 +509,11 @@ class TestGetSpec:
         out = await StyleSpecService(db).get_spec(order_tree["style"].id)
         assert out["editable"] is False
 
-    async def test_overrides_are_counted_separately(self, db, draft_style,
-                                                    order_tree):
+    async def test_sku_scoped_lines_are_counted_separately(self, db, draft_style):
+        """`sku_overrides_count` counts lines that name a SKU. Every accessory does
+        now, so a leather line beside one is the contrast worth asserting."""
         await StyleSpecService(db).replace_spec(
-            draft_style.id,
-            [button_line(), button_line(sku_id=order_tree["sku"].id,
-                                        qty_per_piece=6)],
-            actor_name=BY)
+            draft_style.id, [leather_line(), button_line()], actor_name=BY)
         out = await StyleSpecService(db).get_spec(draft_style.id)
         assert out["sku_overrides_count"] == 1
 
@@ -612,13 +681,18 @@ class TestCopyFrom:
                       article="SRC", production_status="DRAFT", code="SRC-1")
         db.add(style)
         await db.flush()
-        db.add(SKUModel(style_id=style.id, color_code="PINE",
-                        color_name="PINE GREEN", size="M", qty_ordered=3,
-                        code="SRC-PINE-M"))
+        src_sku = SKUModel(style_id=style.id, color_code="PINE",
+                           color_name="PINE GREEN", size="M", qty_ordered=3,
+                           code="SRC-PINE-M")
+        db.add(src_sku)
         await db.commit()
         await db.refresh(style)
+        await db.refresh(src_sku)
+        # SOURCE's accessory names SOURCE's OWN sku — button_line() defaults to the
+        # order tree's style, and a line may only name a SKU of its own style.
         await StyleSpecService(db).replace_spec(
-            style.id, [leather_line(), button_line()], actor_name=BY)
+            style.id, [leather_line(), button_line(sku_id=src_sku.id)],
+            actor_name=BY)
         return style
 
     async def test_a_recipe_is_seeded_from_another_style(
@@ -640,13 +714,24 @@ class TestCopyFrom:
 
     async def test_overrides_are_skipped_unless_asked_for(
             self, db, draft_style, source_style):
+        """A LINING override, because that rule is leather and lining's now.
+
+        An accessory is copied by FAN-OUT regardless of this flag — see
+        test_accessories_are_fanned_onto_this_styles_own_skus for why they had to
+        be: every accessory line names a SKU, the two styles rarely share
+        colourways, and include_sku_overrides defaults to False, so the default copy
+        would otherwise have carried no accessories at all.
+        """
         sku = await db.scalar(select(SKU).where(SKU.style_id == source_style.id))
         await StyleSpecService(db).add_line(
-            source_style.id, button_line(article="KNIT-PINE", subtype="OTHER",
-                                         size=None, sku_id=sku.id),
+            source_style.id,
+            dict(category="LINING", subtype="KNIT", article="KNIT-PINE",
+                 colour="PINE", thickness="0.4mm", qty_per_piece=1,
+                 sku_id=sku.id),
             actor_name=BY)
         out = await StyleSpecService(db).copy_from(
             draft_style.id, source_style.id, actor_name=BY)
+        # The leather line and the fanned accessory; the lining override is skipped.
         assert out["copied"] == 2 and out["skipped"] == 0
 
     async def test_an_override_copies_where_the_colourways_match(
@@ -671,15 +756,52 @@ class TestCopyFrom:
                        code="SRC-NAVY-XXL")
         db.add(odd)
         await db.commit()
+        await db.refresh(odd)
+        # A LINING override: this rule is leather and lining's now.
         await StyleSpecService(db).add_line(
-            source_style.id, button_line(article="ZIP-NAVY", subtype="ZIP",
-                                         size=None, sku_id=odd.id),
+            source_style.id,
+            dict(category="LINING", subtype="KNIT", article="KNIT-NAVY",
+                 colour="NAVY", thickness="0.4mm", qty_per_piece=1,
+                 sku_id=odd.id),
             actor_name=BY)
         out = await StyleSpecService(db).copy_from(
             draft_style.id, source_style.id, include_sku_overrides=True,
             actor_name=BY)
-        assert out["skipped"] == 1
-        assert out["skipped_detail"][0]["reason"].endswith("for this override.")
+        unmatched = [d for d in out["skipped_detail"]
+                     if d["reason"].endswith("for this override.")]
+        assert len(unmatched) == 1
+
+    async def test_accessories_are_fanned_onto_this_styles_own_skus(
+            self, db, draft_style, source_style):
+        """THE COPY THAT WOULD OTHERWISE HAVE SILENTLY STOPPED WORKING.
+
+        Every accessory line names a SKU, and copy_from maps SKUs by matching
+        (color_code, size) — two styles rarely share colourways, and
+        include_sku_overrides defaults to False. Under the old rule the DEFAULT copy
+        would have carried ZERO accessory lines, gutting the feature whose own
+        docstring calls it "the difference between the gate being used and the gate
+        being resented".
+
+        So an accessory is copied as a recipe for an ARTICLE and fanned onto THIS
+        style's SKUs. A button is the same on every garment, so one source line
+        covers all of them.
+        """
+        from app.modules.clients.models import SKU as SKUModel
+        second = SKUModel(style_id=draft_style.id, color_code="NAVY",
+                          color_name="NAVY", size="L", qty_ordered=2,
+                          code="JP-CLERMONT-NAVY-L")
+        db.add(second)
+        await db.commit()
+
+        out = await StyleSpecService(db).copy_from(
+            draft_style.id, source_style.id, actor_name=BY)
+
+        lines = await StyleSpecService(db).repo.lines_for_style(draft_style.id)
+        buttons = [l for l in lines if l.article == "BTN-4H"]
+        assert len(buttons) == 2, "the button landed on BOTH of this style's SKUs"
+        assert {l.sku_id for l in buttons} == {
+            s.id for s in await StyleSpecService(db)._ordered_skus(draft_style.id)}
+        assert all(l.garment_size is None for l in buttons)
 
     async def test_a_line_this_style_already_has_is_skipped(
             self, db, draft_style, source_style):
@@ -739,7 +861,12 @@ class TestRequirement:
     async def test_an_override_is_counted_against_its_own_sku_only(
             self, db, draft_style, order_tree):
         """The override's SKU is subtracted from the style line, so the same
-        garment is never counted against two lines for one material."""
+        garment is never counted against two lines for one material.
+
+        LEATHER, because that arithmetic is what a style-wide line needs and only
+        leather and lining can still be one. Accessories are aggregated instead —
+        see test_accessories_are_aggregated_for_purchasing.
+        """
         from app.modules.clients.models import SKU as SKUModel
         second = SKUModel(style_id=draft_style.id, color_code="NAVY",
                           color_name="NAVY", size="M", qty_ordered=3,
@@ -748,33 +875,74 @@ class TestRequirement:
         await db.commit()
         await StyleSpecService(db).replace_spec(
             draft_style.id,
-            [button_line(),
-             button_line(sku_id=order_tree["sku"].id, qty_per_piece=6)],
+            [leather_line(),
+             leather_line(sku_id=order_tree["sku"].id, qty_per_piece=6)],
             actor_name=BY)
         out = await StyleSpecService(db).requirement(draft_style.id)
         by_scope = {l["scope"]: l for l in out["lines"]}
         assert by_scope["SKU"]["pieces"] == 5
         assert by_scope["STYLE"]["pieces"] == 3       # 8 ordered − the 5 overridden
 
-    async def test_a_sized_line_reaches_only_garments_of_that_size(
-            self, db, draft_style):
-        """A style with three sized zip lines ordered THREE zips per garment
-        instead of one — and the requirement is what a purchase is raised
-        from, so the error would have been bought."""
+    async def test_accessories_are_aggregated_for_purchasing(
+            self, db, draft_style, order_tree):
+        """A PURCHASE ORDER IS RAISED OFF THIS SCREEN, so it must total the buy.
+
+        An accessory is SKU-scoped, so one zip across two colourways is two rows of
+        the recipe. The DM needs "buy 7 zips", not two rows to add up by hand — and
+        `short_by` is only meaningful on the total, because stock is not reserved
+        per SKU: one lot of zips serves every colourway, so comparing each SKU's
+        share against the whole lot would report both as covered while the total was
+        short.
+
+        This replaced a test that asserted the same arithmetic through
+        `garment_size`, which accessories no longer use.
+        """
         from app.modules.clients.models import SKU as SKUModel
-        db.add(SKUModel(style_id=draft_style.id, color_code="PINE",
-                        color_name="PINE GREEN", size="L", qty_ordered=2,
-                        code="JP-CLERMONT-PINE-L"))
+        second = SKUModel(style_id=draft_style.id, color_code="PINE",
+                          color_name="PINE GREEN", size="L", qty_ordered=2,
+                          code="JP-CLERMONT-PINE-L")
+        db.add(second)
         await db.commit()
+        await db.refresh(second)
         await StyleSpecService(db).replace_spec(draft_style.id, [
-            button_line(subtype="ZIP", article="ZIP-1", size="M",
-                        garment_size="M"),
-            button_line(subtype="ZIP", article="ZIP-1", size="L",
-                        garment_size="L"),
+            button_line(subtype="ZIP", article="ZIP-1", size="60",
+                        qty_per_piece=1),
+            button_line(subtype="ZIP", article="ZIP-1", size="60",
+                        qty_per_piece=1, sku_id=second.id),
         ], actor_name=BY)
         out = await StyleSpecService(db).requirement(draft_style.id)
-        by_size = {l["garment_size"]: l["pieces"] for l in out["lines"]}
-        assert by_size == {"M": 5, "L": 2}
+
+        zips = [l for l in out["lines"] if l["article"] == "ZIP-1"]
+        assert len(zips) == 1, "one purchasable line, not one per SKU"
+        group = zips[0]
+        assert group["scope"] == "ACCESSORY_GROUP"
+        assert group["sku_count"] == 2
+        # 5 ordered on the M SKU + 2 on the L, one zip each.
+        assert group["pieces"] == 7
+        assert group["total_required"] == 7.0
+        # …and the per-SKU detail is still there underneath.
+        assert {r["pieces"] for r in group["per_sku"]} == {5, 2}
+
+    async def test_an_aggregated_group_reports_no_single_qty_when_they_differ(
+            self, db, draft_style):
+        """Saying "4 per garment" when one colourway takes 6 would be worse than
+        saying nothing, so the group reports None and the per-SKU rows carry the
+        real numbers."""
+        from app.modules.clients.models import SKU as SKUModel
+        second = SKUModel(style_id=draft_style.id, color_code="NAVY",
+                          color_name="NAVY", size="L", qty_ordered=2,
+                          code="JP-CLERMONT-NAVY-L")
+        db.add(second)
+        await db.commit()
+        await db.refresh(second)
+        await StyleSpecService(db).replace_spec(draft_style.id, [
+            button_line(qty_per_piece=4),
+            button_line(sku_id=second.id, qty_per_piece=6),
+        ], actor_name=BY)
+        out = await StyleSpecService(db).requirement(draft_style.id)
+        group = next(l for l in out["lines"] if l["article"] == "BTN-4H")
+        assert group["qty_per_piece"] is None
+        assert group["total_required"] == 5 * 4 + 2 * 6
 
     async def test_a_style_with_no_recipe_reports_an_empty_grid(
             self, db, draft_style):
@@ -1195,18 +1363,35 @@ class TestIssueKit:
         assert "scoped to other colourways" in e.value.detail
         assert "NAVY" in e.value.detail
 
-    async def test_lines_for_another_garment_size_say_so_by_name(
+    async def test_lines_for_another_sku_say_so_by_name(
             self, db, draft_style, pieces):
+        """IT USED TO SAY "for another garment SIZE". An accessory is scoped by its
+        SKU now — colour and size together — so the one way it can fail to reach a
+        garment is by belonging to a different colourway, and the message has to
+        name which and say how to fix it.
+
+        The DM's complaint this whole diagnosis exists for was seeing accessory
+        lines on the recipe screen and being told the style had no accessory spec.
+        Both were true: one view is style-wide and a kit is issued per garment.
+        """
+        from app.modules.clients.models import SKU as SKUModel
+        other = SKUModel(style_id=draft_style.id, color_code="NAVY",
+                         color_name="NAVY", size="L", qty_ordered=2,
+                         code="JP-CLERMONT-NAVY-L")
+        db.add(other)
+        await db.commit()
+        await db.refresh(other)
         await StyleSpecService(db).replace_spec(
             draft_style.id,
-            [button_line(subtype="ZIP", article="ZIP-1", size="L",
-                         garment_size="L")],
+            [button_line(subtype="ZIP", article="ZIP-1", size="60",
+                         sku_id=other.id)],
             actor_name=BY)
         with pytest.raises(HTTPException) as e:
             await StyleSpecService(db).issue_kit_nocommit(
                 piece=pieces[0], drawer=None)
-        assert "garment size(s) L" in e.value.detail
-        assert "an L zip is not an S zip" in e.value.detail
+        assert "scoped to other colourways" in e.value.detail
+        # …and it says how to clear it, not merely that it is blocked.
+        assert "ALL_SKUS" in e.value.detail
 
     async def test_a_colourway_that_declares_it_takes_none_says_so(
             self, db, draft_style, pieces, order_tree):
@@ -1349,21 +1534,26 @@ class TestPieceMaterials:
                          code="JP-CLERMONT-NAVY-M")
         db.add(other)
         await db.commit()
+        # `other_size` IS A LINING REASON NOW. Only leather and lining can be
+        # style-wide, so only they still carry a garment_size for a size to be
+        # "other" than — an accessory scoped to another size is simply an accessory
+        # on another SKU, which is `other_sku`.
         await StyleSpecService(db).replace_spec(draft_style.id, [
             button_line(article="BTN-NAVY", sku_id=other.id),
-            button_line(subtype="ZIP", article="ZIP-1", size="L",
-                        garment_size="L"),
+            dict(category="LINING", subtype="KNIT", article="KNIT-L",
+                 colour="BLACK", thickness="0.4mm", qty_per_piece=1,
+                 garment_size="L"),
             button_line(article="BTN-ZERO", sku_id=order_tree["sku"].id,
                         qty_per_piece=0),
         ], actor_name=BY)
 
         out = await StyleSpecService(db).piece_materials(pieces[0].id)
         reasons = {r["article"]: r["reason"] for r in out["not_applicable"]}
-        assert reasons == {"BTN-NAVY": "other_sku", "ZIP-1": "other_size",
+        assert reasons == {"BTN-NAVY": "other_sku", "KNIT-L": "other_size",
                            "BTN-ZERO": "zeroed"}
         notes = {r["article"]: r["reason_note"] for r in out["not_applicable"]}
         assert "NAVY" in notes["BTN-NAVY"]
-        assert "garment size L" in notes["ZIP-1"]
+        assert "garment size L" in notes["KNIT-L"]
         assert "does not take it" in notes["BTN-ZERO"]
 
     async def test_a_manual_correction_appears_in_the_ledger_half(
@@ -1401,23 +1591,26 @@ class TestSpecRepositoryEdges:
     async def test_the_batched_reads_short_circuit_on_an_empty_list(self, db):
         repo = StyleSpecService(db).repo
         assert await repo.lines_for_styles([]) == {}
-        assert await repo.has_accessory_lines([]) == {}
         assert await repo.issued_by_pieces([]) == {}
 
-    async def test_has_accessory_lines_answers_false_for_a_style_with_none(
-            self, db, draft_style):
-        repo = StyleSpecService(db).repo
-        await StyleSpecService(db).replace_spec(
-            draft_style.id, [leather_line()], actor_name=BY)
-        assert await repo.has_accessory_lines([draft_style.id]) \
-            == {draft_style.id: False}
-
-    async def test_has_accessory_lines_answers_true_once_one_exists(
-            self, db, draft_style):
-        await StyleSpecService(db).replace_spec(
-            draft_style.id, [button_line()], actor_name=BY)
-        assert (await StyleSpecService(db).repo.has_accessory_lines(
-            [draft_style.id]))[draft_style.id] is True
+    # `has_accessory_lines` AND `kit_required_sql` WERE TESTED HERE AND ARE GONE.
+    #
+    # They were the SQL half of the two-shape pattern — a Python resolver for one
+    # object, a SQL expression for a page of them, side by side so they could not
+    # answer differently. They already answered differently: both asked "does this
+    # STYLE declare any accessory" while `kit_required_for_piece` asks "does this
+    # SKU", and with accessories scoped per SKU the two diverge on every style whose
+    # colourways differ. A style-level EXISTS would report a kit owed on a garment
+    # that needs none.
+    #
+    # And NOTHING IN app/ CALLED EITHER ONE: the drawer list they were written for
+    # is retired, and the release gate computes has_accessory_lines inline from the
+    # lines it already holds. Their only callers were these tests. A wrong answer
+    # that nothing asks for is worth deleting rather than fixing — keeping them
+    # green would have been the tests protecting the bug.
+    #
+    # The property that matters is still covered, per SKU, by
+    # TestKitSurfaces::test_kit_required_is_true_only_when_accessories_reach_the_garment.
 
     async def test_deactivated_lines_are_hidden_unless_asked_for(
             self, db, draft_style):
@@ -1490,16 +1683,15 @@ class TestSpecRepositoryEdges:
         assert len(rows) == 2
         assert rows[0].issued_at <= rows[1].issued_at
 
-    async def test_the_correlated_exists_matches_the_python_resolver(
-            self, db, draft_style):
-        """The two-shape pattern: a Python resolver for one object, a SQL
-        expression for a page of them, side by side so they cannot disagree."""
-        from app.modules.clients.models import Style
+    async def test_there_is_no_sql_half_to_disagree_with_the_resolver(self):
+        """`kit_required_sql` is GONE, and its absence is the assertion.
+
+        It asked the question per STYLE while `kit_required_for_piece` asks it per
+        SKU, so the "two shapes that cannot disagree" already did. Nothing called it.
+        If a batched form is ever needed again it must key on the SKU — this test
+        exists so that a re-introduction at the wrong scope fails loudly rather than
+        quietly shipping a kit owed on a garment that needs none.
+        """
         from app.modules.materials.style_spec_repository import StyleSpecRepository
-        await StyleSpecService(db).replace_spec(
-            draft_style.id, [button_line()], actor_name=BY)
-        found = await db.scalar(
-            select(Style.id).where(
-                Style.id == draft_style.id,
-                StyleSpecRepository.kit_required_sql(Style.id)))
-        assert found == draft_style.id
+        assert not hasattr(StyleSpecRepository, "kit_required_sql")
+        assert not hasattr(StyleSpecRepository, "has_accessory_lines")

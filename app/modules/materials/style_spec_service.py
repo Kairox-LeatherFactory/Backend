@@ -76,6 +76,12 @@ class StyleSpecService:
         self.db = db
         self.repo = StyleSpecRepository(db)
         self.materials = MaterialRepository(db)
+        # ACCESSORY KINDS ARE DATA. The catalogue overlays MATERIAL_SPEC for
+        # accessories and falls back to it for leather/lining, so a recipe line is
+        # validated against the same table a stock lot is — which is the property
+        # that stops a line being written that no lot could ever match.
+        from app.modules.materials.accessory_catalog import AccessoryCatalog
+        self.catalog = AccessoryCatalog(db)
 
     # ══════════════════════════════════════════════════════════ small helpers
     async def _style(self, style_id: uuid.UUID) -> Style:
@@ -132,21 +138,31 @@ class StyleSpecService:
 
         THE SAME STRICTNESS AS create_lot, ON PURPOSE. A recipe line and a stock
         lot are matched on the same six columns, so a line the lot form would
-        have rejected can never resolve to anything. resolve_spec() is the one
-        table that says which (category, subtype) pairs exist and what each one
-        must carry, and both paths ask it.
+        have rejected can never resolve to anything. The accessory catalogue (plus
+        the built-in MATERIAL_SPEC beneath it) is the one table that says which
+        (category, subtype) pairs exist and what each carries, and both paths ask it.
+
+        AN ACCESSORY LINE MUST NAME A SKU. See the sku_id check below — that is the
+        change this whole module was reshaped around.
         """
         category = (body.get("category") or "").strip().upper()
         subtype = (body.get("subtype") or "").strip().upper() or None
-        spec = resolve_spec(category, subtype)
+        is_accessory = category == MaterialCategory.ACCESSORY.value
+        spec = await self.catalog.spec_for(category, subtype)
         if spec is None:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                f"'{category}"
-                f"{'/' + subtype if subtype else ''}' is not a material kind this "
-                f"factory stocks. Use LEATHER, LINING (PLAIN_LINING / RIBS / "
-                f"KNIT) or ACCESSORY (BUTTON / ZIP / THREAD / OTHER) — the same "
-                f"list GET /materials/spec returns.")
+            if is_accessory:
+                known = ", ".join(await self.catalog.known_codes())
+                detail = (f"'{subtype or '(none)'}' is not an accessory kind this "
+                          f"factory stocks. Known kinds: {known}. A new kind is "
+                          f"created by RECEIVING one — it appears here once a "
+                          f"packet of it has arrived.")
+            else:
+                detail = (f"'{category}"
+                          f"{'/' + subtype if subtype else ''}' is not a material "
+                          f"kind this factory stocks. Use LEATHER or LINING "
+                          f"(PLAIN_LINING / RIBS / KNIT) — the same list "
+                          f"GET /materials/spec returns.")
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail)
 
         article = (body.get("article") or "").strip() or None
         if category == "ACCESSORY" and not article:
@@ -156,21 +172,42 @@ class StyleSpecService:
 
         size = (body.get("size") or "").strip() or None
         garment_size = (body.get("garment_size") or "").strip().upper() or None
-        # SAY IT, DO NOT MAKE US GUESS. This used to be inferred from the material
-        # size whenever that size read as a garment size, and the inference was
-        # wrong in both directions: it confined a 60cm zip to 4XL garments (60 is
-        # on the EU ladder) while a "BUTTON L" meaning an L jacket depended on the
-        # same coin-flip. A material size that is unmistakably a garment size is
-        # the one case where the DM's intent is clear AND the cost of being wrong
-        # is a whole shipment, so it is the one case we refuse to proceed on.
-        if garment_size is None and self._reads_as_garment_size(size):
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                f"This line's size is '{size}', which is a garment size, but it "
-                f"does not say which garments it is for. Set garment_size: "
-                f"'{str(size).strip().upper()}' if it is for {str(size).strip().upper()} "
-                f"garments only, or leave size blank and name the material's own "
-                f"size instead. A line with no garment_size goes on EVERY size.")
+
+        if is_accessory:
+            # AN ACCESSORY SCOPES THROUGH ITS SKU, SO garment_size IS MEANINGLESS
+            # HERE — and refused rather than ignored, because a caller who sends it
+            # believes it is doing something. A SKU is unique on
+            # (style_id, color_code, size), so naming one has already said which
+            # size; a second, independent size scope could only ever contradict it.
+            if garment_size:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    f"garment_size is not used on an accessory line. A SKU already "
+                    f"names a colour AND a size, so `sku_id` is what says which "
+                    f"garments this accessory is for — send the SKU for size "
+                    f"{garment_size}, or `apply_to: \"ALL_SKUS\"` to cover them all.")
+            garment_size = None
+            # AND `size` IS THE MATERIAL'S OWN SIZE AGAIN. It used to be inspected
+            # here and refused when it read as a garment size ('M', 'L'), which is
+            # the 422 the floor kept hitting on a perfectly good zip line. With the
+            # SKU carrying the garment, '60' is centimetres and 'M' is the M-size
+            # zip, and neither is ambiguous any more.
+        else:
+            # LEATHER AND LINING can still be style-wide, so for them garment_size
+            # is the only way to scope a line to a size and the old ambiguity is
+            # still real: a material size that is unmistakably a garment size, with
+            # nothing saying which garments it is for, is refused rather than
+            # guessed at. The guess used to read any number from 30 to 70 as a
+            # garment size and confined a 60cm zip to 4XL.
+            if garment_size is None and self._reads_as_garment_size(size):
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    f"This {category} line's size is '{size}', which is a garment "
+                    f"size, but it does not say which garments it is for. Set "
+                    f"garment_size: '{str(size).strip().upper()}' if it is for "
+                    f"{str(size).strip().upper()} garments only, or leave size "
+                    f"blank and name the material's own size instead. A line with "
+                    f"no garment_size goes on EVERY size.")
 
         thickness = (body.get("thickness") or "").strip() or None
         if category in {"LEATHER", "LINING"} and not thickness:
@@ -185,16 +222,33 @@ class StyleSpecService:
                 raise HTTPException(
                     status.HTTP_422_UNPROCESSABLE_ENTITY,
                     f"SKU {sku_id} does not belong to {style.name}. A per-SKU "
-                    f"override may only name a colour/size of its own style.")
+                    f"line may only name a colour/size of its own style.")
+        elif is_accessory:
+            # THE RULE THIS CHANGE EXISTS FOR. An accessory belongs to a garment,
+            # and a garment is a SKU — colour and size together. A style-wide
+            # accessory line is what forced the `garment_size` column into
+            # existence, and with it the size-coverage gate, the size-ambiguity
+            # gate, the "is this number a garment size" guess and a PATCH that
+            # silently un-scoped a line. None of that is needed once the line names
+            # the garment it is for.
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"An accessory line must name the SKU it is for — a SKU is a "
+                f"colour and a size together, which is what decides whether this "
+                f"accessory goes in. Send `sku_id`, or `apply_to: \"ALL_SKUS\"` "
+                f"(also `sku_ids` / `per_sku`) to cover every colourway of "
+                f"{style.name} in one call.")
 
         try:
             qty = Decimal(str(body.get("qty_per_piece")))
         except Exception as exc:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 "qty_per_piece must be numeric.") from exc
-        # ZERO IS LEGAL ON AN OVERRIDE ONLY, and it is how a colourway says "this
-        # one does not take that". On a style-wide line it would be a recipe
+        # ZERO IS LEGAL ON A SKU-SCOPED LINE ONLY, and it is how one colourway says
+        # "this one does not take that". On a style-wide line it would be a recipe
         # entry that consumes nothing, which is just a typo with a row in it.
+        # Accessories are always SKU-scoped now, so zero is always available to
+        # them — deleting the line says the same thing and is usually clearer.
         if qty < 0:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 "qty_per_piece cannot be negative.")
@@ -202,7 +256,7 @@ class StyleSpecService:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 "A style-wide line must consume something. Use qty_per_piece: 0 "
-                "on a per-SKU override to say that one colourway does NOT take "
+                "on a SKU-scoped line to say that one colourway does NOT take "
                 "this material, or delete the line.")
 
         return {
@@ -214,13 +268,11 @@ class StyleSpecService:
             "colour": (body.get("colour") or "").strip() or None,
             "thickness": thickness,
             "size": size,
-            # WHICH GARMENT SIZES THIS LINE IS FOR — EXPLICIT ONLY, never
-            # inferred. NULL still means every size, which is what keeps one
-            # generic 18L button line at one row and every pre-existing line
-            # behaving exactly as it did. What changed is that the system no
-            # longer decides this for you: see the 422 above, and
-            # kit_rules.accessory_size_ambiguities for the case it cannot see
-            # from one line.
+            # LEATHER AND LINING ONLY, and always NULL for an accessory — an
+            # accessory says which garments it is for by naming their SKU. Explicit,
+            # never inferred: the inference read any number from 30 to 70 as a
+            # garment size and confined a 60cm zip to 4XL jackets, which does not
+            # give the other sizes a shorter recipe, it gives them none.
             "garment_size": garment_size,
             "qty_per_piece": qty,
             # DERIVED, AND A SENT VALUE IS DISCARDED. uom is a property of the
@@ -229,7 +281,7 @@ class StyleSpecService:
             # style measure thread in yards and another in metres while both told
             # the ledger "mtrs" — and the ledger is what the decrement moves.
             # The field stays in the contract only so a GET can be round-tripped.
-            "uom": uom_for(category, subtype),
+            "uom": await self.catalog.uom_for(category, subtype),
             "material_lot_id": body.get("material_lot_id"),
             "note": (body.get("note") or "").strip() or None,
         }
@@ -402,8 +454,9 @@ class StyleSpecService:
         'L' and 'XXL' cannot be anything but a garment size, so they still count —
         not to infer from any more, but to REFUSE the line until the DM says what
         they meant. A number stays ambiguous by nature and is never read here; the
-        recipe-wide check (kit_rules.accessory_size_ambiguities) catches the case
-        where several numbers on one article prove they were garment sizes.
+        It is LEATHER AND LINING'S check now: accessories name their SKU, so the
+        question cannot arise for them. A number stays ambiguous by nature and is
+        never read here.
         """
         token = (str(value or "")).strip().upper()
         if not token or token.isdigit():
@@ -452,14 +505,32 @@ class StyleSpecService:
         this one filter fixes the checklist, the scan payload, the production
         log's kit block and the actual spend together. That is the reason the fix
         belongs here and not in each caller.
+
+        ACCESSORIES ARRIVE PRE-SCOPED and need none of the above. Every accessory
+        line names a SKU, so there are no style-wide accessory lines to override and
+        `garment_size` is always NULL on them — the sku_id filter alone already
+        answers "is this accessory this garment's". The size machinery below is now
+        leather/lining's, which can still be style-wide.
+
+        THEIR KEY IS THE FULL MATERIAL IDENTITY, and that is not symmetry for its
+        own sake. The leather/lining key deliberately ignores colour, because a NAVY
+        knit line SHOULD override the style-wide knit line — same material, one
+        colourway's version of it. Accessories have no overriding to do, so ignoring
+        colour buys nothing and costs a real case: a two-tone garment taking BTN-4H
+        in BLACK and in NAVY is two lines, and a key without colour would silently
+        keep one of them.
         """
         style_lines = [l for l in lines if l.sku_id is None]
         sku_lines = [l for l in lines if sku_id is not None and l.sku_id == sku_id]
 
         def key(l):
-            return ((l.category or "").upper(), (l.subtype or "") or None,
-                    (l.article or ""),
-                    (getattr(l, "garment_size", None) or "") or None)
+            base = ((l.category or "").upper(), (l.subtype or "") or None,
+                    (l.article or ""))
+            if (l.category or "").upper() == MaterialCategory.ACCESSORY.value:
+                return base + ((l.colour or "") or None,
+                               (l.thickness or "") or None,
+                               (l.size or "") or None)
+            return base + ((getattr(l, "garment_size", None) or "") or None,)
 
         merged = {key(l): l for l in style_lines}
         for l in sku_lines:
@@ -576,7 +647,7 @@ class StyleSpecService:
                                     for l in lines),
             has_leather_line=any(l.category == MaterialCategory.LEATHER.value
                                  and (l.qty_per_piece or 0) > 0 for l in lines),
-            **await self.size_checks(style_id, lines))
+            **await self.sku_checks(style_id, lines))
         return {
             "style_id": str(style.id), "style_code": style.code,
             "style_name": style.name,
@@ -666,26 +737,148 @@ class StyleSpecService:
                           f"{f'; {removed} removed' if removed else ''}.")
         return out
 
+    # ══════════════════════════════════════════════════ adding lines (+ fan-out)
+    async def _ordered_skus(self, style_id: uuid.UUID) -> list:
+        """The style's SKUs that were actually ordered, oldest first.
+
+        `qty_ordered > 0` ON PURPOSE. An importer can leave a zero-quantity SKU row
+        behind for a colour/size the client did not buy, and fanning an accessory
+        onto it would put a line on the release gate's coverage check that no
+        garment will ever need.
+        """
+        rows = (await self.db.execute(
+            select(SKU).where(SKU.style_id == style_id,
+                              func.coalesce(SKU.qty_ordered, 0) > 0)
+            .order_by(SKU.color_code, SKU.size))).scalars().all()
+        return list(rows)
+
     async def add_line(self, style_id: uuid.UUID, body: dict, *,
                        actor_name: str, actor_id=None) -> dict:
+        """Add one recipe line, or FAN ONE OUT across a style's SKUs.
+
+        WHY THE FAN-OUT LIVES HERE AND NOT ON THE PUT. `_assert_editable` lets
+        ACCESSORIES be corrected after release and freezes everything else, but
+        `replace_spec` asks it without a category, so the whole-grid PUT is frozen
+        post-release. The wrong button is discovered precisely when somebody goes to
+        fetch it, which is always after release — so the one door that must keep
+        working is this one.
+
+        WHY A FAN-OUT AT ALL. An accessory is SKU-scoped now, so a NAVY+PINE order in
+        S/M/L/XL is 8 rows for one button. The floor says 85-90% of accessories are
+        identical across a style's SKUs and only zip and rib knit trim vary, so the
+        common case must be ONE call: `apply_to: "ALL_SKUS"`. The stored shape stays
+        purely per-SKU either way — the convenience is in the request, never in the
+        data, because a "applies to everything" row is exactly what this change
+        removed.
+        """
         style = await self._style(style_id)
-        self._assert_editable(style, category=(body or {}).get("category"))
-        d = await self._clean_line(style, body)
-        dup = await self.repo.find_duplicate_line(
-            style_id=style.id, sku_id=d["sku_id"], category=d["category"],
-            subtype=d["subtype"], article=d["article"], colour=d["colour"],
-            thickness=d["thickness"], size=d["size"])
-        if dup is not None:
+        body = dict(body or {})
+        self._assert_editable(style, category=body.get("category"))
+
+        apply_to = (body.pop("apply_to", None) or "").strip().upper() or None
+        sku_ids = body.pop("sku_ids", None) or None
+        per_sku = body.pop("per_sku", None) or None
+
+        # EXACTLY ONE SCOPE. Two of them cannot be reconciled, and silently
+        # preferring one is how the wrong button ends up issued.
+        chosen = [n for n, v in (("sku_id", body.get("sku_id")),
+                                 ("apply_to", apply_to),
+                                 ("sku_ids", sku_ids),
+                                 ("per_sku", per_sku)) if v]
+        if len(chosen) > 1:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"This line names its scope more than once ({', '.join(chosen)}). "
+                f"Send exactly one of sku_id, apply_to, sku_ids or per_sku — which "
+                f"garments an accessory is for is not something to be guessed at.")
+        if apply_to and apply_to != "ALL_SKUS":
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"apply_to must be \"ALL_SKUS\". To name a subset, send sku_ids.")
+
+        # ── build the per-SKU bodies ─────────────────────────────────────────
+        rows: list[dict] = []
+        if apply_to == "ALL_SKUS":
+            skus = await self._ordered_skus(style.id)
+            if not skus:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    f"{style.name} has no ordered SKUs to apply this to. Upload the "
+                    f"breakdown first — the quantities are what say which "
+                    f"colourways and sizes exist.")
+            rows = [dict(body, sku_id=s.id) for s in skus]
+        elif sku_ids:
+            rows = [dict(body, sku_id=sid) for sid in sku_ids]
+        elif per_sku:
+            for entry in per_sku:
+                entry = entry if isinstance(entry, dict) else dict(vars(entry))
+                if not entry.get("sku_id"):
+                    raise HTTPException(
+                        status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        "every per_sku entry must name a sku_id.")
+                row = dict(body, sku_id=entry["sku_id"])
+                # A PER-SKU SIZE IS THE WHOLE POINT of this door: the zip is the
+                # accessory whose size follows the garment. qty may differ too — a
+                # bigger garment can take more thread.
+                for field in ("size", "qty_per_piece", "colour", "thickness",
+                              "material_lot_id", "note"):
+                    if entry.get(field) is not None:
+                        row[field] = entry[field]
+                rows.append(row)
+        else:
+            rows = [body]
+
+        # ── write them ───────────────────────────────────────────────────────
+        # IDEMPOTENT, AND PARTIALLY SO. A fan-out of 8 that finds 3 already present
+        # must add the other 5 and say so, not 409 the batch: re-posting after a
+        # timeout is the normal way this endpoint is used twice.
+        created, already = [], []
+        for row in rows:
+            d = await self._clean_line(style, row)
+            dup = await self.repo.find_duplicate_line(
+                style_id=style.id, sku_id=d["sku_id"], category=d["category"],
+                subtype=d["subtype"], article=d["article"], colour=d["colour"],
+                thickness=d["thickness"], size=d["size"],
+                garment_size=d.get("garment_size"), active_only=False)
+            if dup is not None:
+                if not dup.is_active:
+                    # Re-adding a line somebody removed revives it, rather than
+                    # colliding with a row nothing can see.
+                    dup.is_active = True
+                    dup.qty_per_piece = d["qty_per_piece"]
+                    created.append(dup)
+                else:
+                    already.append(dup)
+                continue
+            created.append(self.repo.add_line_nocommit(**d))
+
+        # A SINGLE line keeps its original 409, because there is no batch to
+        # partially accept and a silent no-op would read as success.
+        if not created and len(rows) == 1 and already:
+            dup = already[0]
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
-                f"{style.name} already has a line for {d['article']}"
-                f"{' · ' + d['colour'] if d['colour'] else ''}. Edit that line "
-                f"(PATCH .../lines/{dup.id}) rather than adding a second one — "
-                f"two lines for one material would both be issued.")
-        line = self.repo.add_line_nocommit(**d)
+                f"{style.name} already has a line for {dup.article}"
+                f"{' · ' + dup.colour if dup.colour else ''}"
+                f"{' on ' + await self._sku_label(dup.sku_id) if dup.sku_id else ''}"
+                f". Edit that line (PATCH .../lines/{dup.id}) rather than adding a "
+                f"second one — two lines for one material would both be issued.")
+
         await self.db.commit()
-        await self.db.refresh(line)
-        return await self._line_payload(line)
+        for line in created:
+            await self.db.refresh(line)
+
+        # A single un-fanned add keeps its original single-object response, so
+        # every existing client is unaffected.
+        if len(rows) == 1 and not (apply_to or sku_ids or per_sku):
+            return await self._line_payload(created[0])
+        return {
+            "created": len(created), "already_present": len(already),
+            "lines": [await self._line_payload(l) for l in created],
+            "message": (
+                f"{len(created)} line(s) added for {style.name}"
+                f"{f'; {len(already)} were already there' if already else ''}."),
+        }
 
     async def patch_line(self, style_id: uuid.UUID, line_id: uuid.UUID,
                          patch: dict, *, actor_name: str, actor_id=None) -> dict:
@@ -705,6 +898,16 @@ class StyleSpecService:
             "size": line.size, "qty_per_piece": line.qty_per_piece,
             "uom": line.uom, "material_lot_id": line.material_lot_id,
             "note": line.note,
+            # `garment_size` IS IN THIS DICT for the same reason every other field
+            # is: a PATCH keeps what it was not told to change. Leaving it out did
+            # NOT leave the column alone — _clean_line returns garment_size=None
+            # when the body has no key for it, and the loop below writes every key
+            # it returns. So patching a line's note silently un-scoped it, widening
+            # a size-specific material to every garment, which is the direction that
+            # SPENDS stock. On a line whose size was an alpha rung it 422'd instead,
+            # making the line unpatchable at all. Accessories no longer use this
+            # column, but leather and lining still do.
+            "garment_size": getattr(line, "garment_size", None),
         }
         merged.update({k: v for k, v in patch.items() if v is not None})
         d = await self._clean_line(style, merged)
@@ -772,7 +975,7 @@ class StyleSpecService:
             no_accessories=style.material_spec_no_accessories,
             has_accessory_lines=bool(accessory_lines),
             has_leather_line=has_leather,
-            **await self.size_checks(style_id, lines))
+            **await self.sku_checks(style_id, lines))
 
         # WARNINGS, NOT BLOCKERS. Lining consumption has been optional on the cut
         # path since the client confirmed every lining field is optional, so
@@ -819,7 +1022,28 @@ class StyleSpecService:
         SKU OVERRIDES ONLY COPY WHERE THE COLOURWAYS MATCH on (color_code, size).
         Two styles rarely share SKU ids, and copying an override onto the wrong
         colourway would silently issue the wrong colour button — so unmatched
-        overrides are REPORTED in `skipped_detail` rather than guessed at.
+        overrides are REPORTED in `skipped_detail` rather than guessed at. That is
+        LEATHER AND LINING's rule, and it is unchanged.
+
+        ACCESSORIES ARE COPIED BY FAN-OUT, and they had to be. Every accessory line
+        names a SKU now, so under the rule above they would be copied only where the
+        two styles happened to share a (colour, size) — and `include_sku_overrides`
+        defaults to False, so the DEFAULT copy would have carried ZERO accessory
+        lines. That silently guts the feature this method exists for.
+
+        So an accessory is copied as a RECIPE FOR AN ARTICLE and fanned onto THIS
+        style's own SKUs:
+
+          · the accessory kind's `size_varies_by_sku` says which way to match. A
+            button is the same on every garment, so one source line covers all of
+            this style's SKUs. A zip follows the garment, so each source line lands
+            only on the SKUs whose size matches its own.
+          · the SOURCE's colourways are irrelevant to the target's. A button article
+            copied from last season's jacket belongs on all of this one's SKUs
+            regardless of what colours either style came in.
+
+        The quantity per piece is carried across; a source line whose size matches
+        none of this style's sizes is reported, not guessed.
         """
         style = await self._style(style_id)
         self._assert_editable(style)
@@ -838,35 +1062,73 @@ class StyleSpecService:
                 if target:
                     sku_map[s.id] = target
 
+        # THIS style's ordered SKUs, which is what an accessory is fanned onto.
+        my_skus = await self._ordered_skus(style.id)
+
         copied, skipped_detail = 0, []
         for line in src_lines:
-            if line.sku_id is not None:
-                if not include_sku_overrides:
-                    continue
-                target_sku = sku_map.get(line.sku_id)
-                if target_sku is None:
+            is_accessory = ((line.category or "").upper()
+                            == MaterialCategory.ACCESSORY.value)
+
+            if is_accessory:
+                if not my_skus:
                     skipped_detail.append({
-                        "article": line.article, "scope": "SKU",
-                        "reason": f"{style.name} has no matching colour/size for "
-                                  f"this override."})
+                        "article": line.article, "scope": "ACCESSORY",
+                        "reason": f"{style.name} has no ordered SKUs yet — upload "
+                                  f"its breakdown before copying accessories."})
                     continue
+                if await self.catalog.size_varies_by_sku(line.subtype):
+                    # A zip follows the garment: this source line is for ONE size.
+                    want = (line.size or getattr(line, "garment_size", None))
+                    targets = [k for k in my_skus
+                               if kit_rules.size_matches(want, k.size)]
+                    if not targets:
+                        skipped_detail.append({
+                            "article": line.article, "scope": "ACCESSORY",
+                            "reason": f"{line.article} is for size "
+                                      f"{want or '(unspecified)'} and {style.name} "
+                                      f"has no garments that size."})
+                        continue
+                else:
+                    # A button is the same on every garment.
+                    targets = list(my_skus)
             else:
-                target_sku = None
-            dup = await self.repo.find_duplicate_line(
-                style_id=style.id, sku_id=target_sku, category=line.category,
-                subtype=line.subtype, article=line.article, colour=line.colour,
-                thickness=line.thickness, size=line.size)
-            if dup is not None:
-                skipped_detail.append({"article": line.article,
-                                       "reason": "Already on this style."})
-                continue
-            self.repo.add_line_nocommit(
-                style_id=style.id, sku_id=target_sku, category=line.category,
-                subtype=line.subtype, article=line.article, colour=line.colour,
-                thickness=line.thickness, size=line.size,
-                qty_per_piece=line.qty_per_piece, uom=line.uom,
-                material_lot_id=line.material_lot_id, note=line.note)
-            copied += 1
+                if line.sku_id is not None:
+                    if not include_sku_overrides:
+                        continue
+                    mapped = sku_map.get(line.sku_id)
+                    if mapped is None:
+                        skipped_detail.append({
+                            "article": line.article, "scope": "SKU",
+                            "reason": f"{style.name} has no matching colour/size "
+                                      f"for this override."})
+                        continue
+                    targets = [mapped]
+                else:
+                    targets = [None]
+
+            for target in targets:
+                target_sku = getattr(target, "id", target)
+                dup = await self.repo.find_duplicate_line(
+                    style_id=style.id, sku_id=target_sku, category=line.category,
+                    subtype=line.subtype, article=line.article, colour=line.colour,
+                    thickness=line.thickness, size=line.size,
+                    garment_size=(None if is_accessory
+                                  else getattr(line, "garment_size", None)))
+                if dup is not None:
+                    skipped_detail.append({"article": line.article,
+                                           "reason": "Already on this style."})
+                    continue
+                self.repo.add_line_nocommit(
+                    style_id=style.id, sku_id=target_sku, category=line.category,
+                    subtype=line.subtype, article=line.article, colour=line.colour,
+                    thickness=line.thickness, size=line.size,
+                    # An accessory carries no garment_size — its SKU says the size.
+                    garment_size=(None if is_accessory
+                                  else getattr(line, "garment_size", None)),
+                    qty_per_piece=line.qty_per_piece, uom=line.uom,
+                    material_lot_id=line.material_lot_id, note=line.note)
+                copied += 1
         await self.db.commit()
         return {
             "copied": copied, "skipped": len(skipped_detail),
@@ -891,6 +1153,16 @@ class StyleSpecService:
         unit of the style, an override only by its own SKU — and the override's
         SKU is subtracted from the style line so the same garment is never counted
         against two lines for the same material.
+
+        ACCESSORIES ARE AGGREGATED, and that is not cosmetic. They are SKU-scoped
+        now, so one button on a NAVY+PINE order in S/M/L/XL is EIGHT rows of 4. A
+        purchase order is raised off this screen and the DM needs "buy 1,600
+        buttons", not eight rows of 200 to add up by hand — and `short_by` and the
+        suggested supplier are only meaningful on the total, because stock is not
+        reserved per SKU. So accessory lines are grouped by their material identity
+        (subtype, article, colour, size), the group carries the summed requirement
+        and the shortfall, and the per-SKU rows ride underneath it in `per_sku`.
+        Leather and lining keep their existing one-row-per-line shape.
         """
         style = await self._style(style_id)
         lines = await self.repo.lines_for_style(style_id)
@@ -919,8 +1191,28 @@ class StyleSpecService:
                 overridden.setdefault(key, set()).add(l.sku_id)
 
         out_lines, short_lines = [], 0
+        # {material identity: the group payload}, in first-seen order.
+        acc_groups: dict[tuple, dict] = {}
+
         for line in lines:
-            payload = await self._line_payload(line)
+            is_accessory = ((line.category or "").upper()
+                            == MaterialCategory.ACCESSORY.value)
+            gkey = None
+            if is_accessory:
+                gkey = ((line.subtype or "") or None, line.article,
+                        (line.colour or "") or None, (line.size or "") or None)
+
+            # THE LOT IS RESOLVED ONCE PER GROUP, NOT ONCE PER LINE, and on this
+            # screen that is the difference between a page and a stall.
+            # `_line_payload` runs two queries — the lot match and its reservations
+            # — so with accessories fanned across eight SKUs a six-accessory style
+            # would issue ~96 of them where it used to issue ~12. Every line in a
+            # group shares one material identity and therefore one lot, so the
+            # first line's answer IS the group's answer.
+            payload = None
+            if not is_accessory or gkey not in acc_groups:
+                payload = await self._line_payload(line)
+
             gsize = (getattr(line, "garment_size", None) or "").strip().upper()
             if line.sku_id is not None:
                 pieces = qty_by_sku.get(line.sku_id, 0)
@@ -932,8 +1224,47 @@ class StyleSpecService:
                 pieces = total_qty - sum(qty_by_sku.get(s, 0)
                                          for s in overridden.get(key, ()))
             required = Decimal(str(line.qty_per_piece or 0)) * pieces
-            payload["pieces"] = pieces
-            payload["total_required"] = float(required)
+            if payload is not None:
+                payload["pieces"] = pieces
+                payload["total_required"] = float(required)
+
+            if is_accessory:
+                # GROUPED, NOT LISTED. See the docstring: eight rows of one button
+                # is not a purchase order.
+                group = acc_groups.get(gkey)
+                if group is None:
+                    group = {
+                        "category": line.category, "subtype": line.subtype,
+                        "article": line.article, "colour": line.colour,
+                        "thickness": line.thickness, "size": line.size,
+                        "uom": line.uom, "scope": "ACCESSORY_GROUP",
+                        # The lot is the same for every SKU of one material, so the
+                        # first line's resolution describes the group.
+                        "resolution": payload.get("resolution"),
+                        "lot": payload.get("lot"),
+                        "candidate_lot_ids": payload.get("candidate_lot_ids", []),
+                        "qty_per_piece": float(line.qty_per_piece or 0),
+                        "pieces": 0, "total_required": 0.0,
+                        "sku_count": 0, "per_sku": [],
+                    }
+                    acc_groups[gkey] = group
+                group["pieces"] += pieces
+                group["total_required"] += float(required)
+                group["sku_count"] += 1
+                group["per_sku"].append({
+                    "line_id": str(line.id),
+                    "sku_id": str(line.sku_id) if line.sku_id else None,
+                    "sku_label": (await self._sku_label(line.sku_id)
+                                  if line.sku_id else None),
+                    "qty_per_piece": float(line.qty_per_piece or 0),
+                    "pieces": pieces, "total_required": float(required),
+                })
+                # A GROUP WITH DIFFERING PER-PIECE QUANTITIES cannot report one, and
+                # saying "4" when one SKU takes 6 would be worse than saying nothing.
+                if group["qty_per_piece"] != float(line.qty_per_piece or 0):
+                    group["qty_per_piece"] = None
+                continue
+
             available = Decimal(str((payload["lot"] or {}).get("available", 0)))
             short = required - available if payload["lot"] else required
             payload["short_by"] = float(short) if short > 0 else 0.0
@@ -947,6 +1278,25 @@ class StyleSpecService:
                 payload["suggested_supplier"] = None
             out_lines.append(payload)
 
+        # THE SHORTFALL IS COMPUTED ON THE GROUP, because stock is not reserved per
+        # SKU: one lot of buttons serves every colourway, so comparing each SKU's
+        # share against the whole lot would report every one of them as covered while
+        # the total was short.
+        for group in acc_groups.values():
+            required = Decimal(str(group["total_required"]))
+            available = Decimal(str((group["lot"] or {}).get("available", 0)))
+            short = required - available if group["lot"] else required
+            group["short_by"] = float(short) if short > 0 else 0.0
+            if short > 0:
+                short_lines += 1
+                supplier = await self.materials.suggest_supplier(group["article"])
+                group["suggested_supplier"] = (
+                    {"id": str(supplier.id), "name": supplier.name}
+                    if supplier else None)
+            else:
+                group["suggested_supplier"] = None
+            out_lines.append(group)
+
         blockers = kit_rules.release_blockers(
             style_name=style.name,
             confirmed_at=style.material_spec_confirmed_at,
@@ -955,7 +1305,7 @@ class StyleSpecService:
                                     for l in lines),
             has_leather_line=any(l.category == MaterialCategory.LEATHER.value
                                  and (l.qty_per_piece or 0) > 0 for l in lines),
-            **await self.size_checks(style_id, lines))
+            **await self.sku_checks(style_id, lines))
         return {
             "style_id": str(style.id), "style_code": style.code,
             "style_name": style.name, "qty_ordered": total_qty,
@@ -971,65 +1321,55 @@ class StyleSpecService:
         }
 
     # ══════════════════════════════════════════════ the size-coverage checks
-    async def _sku_facts(self, style_ids: list[uuid.UUID]) -> tuple[dict, dict]:
-        """({style_id: [ordered size, ...]}, {sku_id: size}) in one query.
+    async def _ordered_sku_labels(self, style_ids: list[uuid.UUID]) -> dict:
+        """{style_id: [(sku_id, "NAVY · L"), ...]} for the SKUs actually ordered.
 
-        ORDERED SIZES ARE THE YARDSTICK for the coverage gate: a style whose order
-        runs S/M/L must have an accessory line reaching each of those three, and a
-        size nobody ordered is not a gap. Only SKUs with a quantity count, so a
-        zero-quantity row left by an importer cannot block a release.
+        WHAT THE COVERAGE GATE NEEDS, and all it needs. It replaced a pair of
+        helpers that assembled ordered SIZES and a {sku_id: size} map, because the
+        question changed: an accessory line names its SKU, so "is every ordered
+        garment covered" is asked of SKUs directly and no size arithmetic is
+        involved at all.
+
+        `qty_ordered > 0` ON PURPOSE. An importer can leave a zero-quantity row for
+        a colour/size nobody bought, and blocking a release over a garment that will
+        never be made is a false blocker — which teaches people the gate is noise.
+
+        The label is what the DM reads in the blocker sentence, so it is built the
+        same way _sku_label builds it.
         """
         if not style_ids:
-            return {}, {}
+            return {}
         rows = (await self.db.execute(
-            select(SKU.id, SKU.style_id, SKU.size,
-                   func.coalesce(SKU.qty_ordered, 0))
-            .where(SKU.style_id.in_(list(style_ids))))).all()
-        by_style: dict = {}
-        sku_size: dict = {}
-        for sku_id, style_id, size, qty in rows:
-            token = (size or "").strip().upper()
-            sku_size[sku_id] = token or None
-            if token and int(qty or 0) > 0:
-                by_style.setdefault(style_id, set()).add(token)
-        return ({k: sorted(v) for k, v in by_style.items()}, sku_size)
+            select(SKU.id, SKU.style_id, SKU.color_name, SKU.color_code, SKU.size)
+            .where(SKU.style_id.in_(list(style_ids)),
+                   func.coalesce(SKU.qty_ordered, 0) > 0))).all()
+        out: dict = {}
+        for sku_id, style_id, colour_name, colour_code, size in rows:
+            colour = (colour_name or colour_code or "?").strip()
+            label = f"{colour} · {size}" if size else colour
+            out.setdefault(style_id, []).append((sku_id, label))
+        return {k: sorted(v, key=lambda p: p[1]) for k, v in out.items()}
 
     @staticmethod
-    def _coverage_dicts(lines, sku_size: dict) -> list[dict]:
-        """Recipe lines as the plain dicts kit_rules' pure checks take.
+    def _coverage_dicts(lines) -> list[dict]:
+        """Recipe lines as the plain dicts kit_rules' pure coverage check takes."""
+        return [{
+            "category": line.category, "subtype": line.subtype,
+            "article": line.article, "sku_id": line.sku_id,
+            "qty_per_piece": float(line.qty_per_piece or 0),
+        } for line in lines]
 
-        A SKU-SCOPED LINE COVERS ITS OWN SKU'S SIZE even when it names no
-        garment_size — that is what scoping it to one colourway already means.
-        Without this, a DM who covered every size through per-colourway overrides
-        would be told the sizes were uncovered, and a false blocker on a release is
-        worse than no blocker: it teaches people the gate is noise.
-        """
-        out = []
-        for line in lines:
-            gsize = getattr(line, "garment_size", None)
-            if not gsize and line.sku_id is not None:
-                gsize = sku_size.get(line.sku_id)
-            out.append({
-                "category": line.category, "subtype": line.subtype,
-                "article": line.article, "size": line.size,
-                "garment_size": gsize,
-                "qty_per_piece": float(line.qty_per_piece or 0),
-            })
-        return out
-
-    async def size_checks(self, style_id: uuid.UUID, lines: list) -> dict:
-        """The two size kwargs release_blockers takes, for ONE style.
+    async def sku_checks(self, style_id: uuid.UUID, lines: list) -> dict:
+        """The coverage kwarg release_blockers takes, for ONE style.
 
         Returned as a dict so every call site spreads it — `**await
-        self.size_checks(...)` — rather than each one remembering two argument
-        names. There are four of them and the gate is only a gate if all four ask.
+        self.sku_checks(...)` — rather than each one remembering the argument name.
+        There are four of them and the gate is only a gate if all four ask.
         """
-        by_style, sku_size = await self._sku_facts([style_id])
-        dicts = self._coverage_dicts(lines, sku_size)
+        labels = (await self._ordered_sku_labels([style_id])).get(style_id, [])
         return {
-            "size_coverage_gaps": kit_rules.accessory_size_gaps(
-                lines=dicts, ordered_sizes=by_style.get(style_id, [])),
-            "size_ambiguities": kit_rules.accessory_size_ambiguities(lines=dicts),
+            "skus_missing_accessories": kit_rules.skus_without_accessories(
+                lines=self._coverage_dicts(lines), ordered_skus=labels),
         }
 
     # ══════════════════════════════════════ surfaces other modules call
@@ -1045,14 +1385,13 @@ class StyleSpecService:
         rows = (await self.db.execute(
             select(Style).where(Style.id.in_(style_ids)))).scalars().all()
         by_style = await self.repo.lines_for_styles([s.id for s in rows]) # LINE STYLE ONLY
-        # ONE query for every style's ordered sizes, for the same reason the lines
-        # are batched: a release names a dozen styles and the gate must not become
-        # a dozen more round trips.
-        sizes_by_style, sku_size = await self._sku_facts([s.id for s in rows])
+        # ONE query for every style's ordered SKUs, for the same reason the lines are
+        # batched: a release names a dozen styles and the gate must not become a
+        # dozen more round trips.
+        labels_by_style = await self._ordered_sku_labels([s.id for s in rows])
         out: dict = {}
         for style in rows:
             lines = by_style.get(style.id, [])
-            dicts = self._coverage_dicts(lines, sku_size)
             out[style.id] = kit_rules.release_blockers(
                 style_name=style.name,
                 confirmed_at=style.material_spec_confirmed_at,
@@ -1062,18 +1401,23 @@ class StyleSpecService:
                 has_leather_line=any(
                     l.category == MaterialCategory.LEATHER.value
                     and (l.qty_per_piece or 0) > 0 for l in lines),
-                size_coverage_gaps=kit_rules.accessory_size_gaps(
-                    lines=dicts, ordered_sizes=sizes_by_style.get(style.id, [])),
-                size_ambiguities=kit_rules.accessory_size_ambiguities(lines=dicts))
+                skus_missing_accessories=kit_rules.skus_without_accessories(
+                    lines=self._coverage_dicts(lines),
+                    ordered_skus=labels_by_style.get(style.id, [])))
         return out
 
     async def kit_required_for_piece(self, piece_id: uuid.UUID) -> bool:
         """Does the garment behind this piece take any accessories at all?
 
-        The Python half of the two-shape pattern (the SQL half is
-        StyleSpecRepository.kit_required_sql). FALSE for every style that predates
-        the spec feature, which is what makes the completeness predicate collapse
-        to its pre-existing form for everything already on the floor.
+        THERE IS NO SQL HALF ANY MORE. It asked the question per STYLE while this
+        asks it per SKU, so the two diverged on every style whose colourways differ —
+        and nothing called it. See the note where it used to live in
+        StyleSpecRepository. If a batched form is needed, it must key on SKU; a
+        style-level EXISTS would report a kit owed on a garment that needs none.
+
+        FALSE for every style that predates the spec feature, which is what makes the
+        completeness predicate collapse to its pre-existing form for everything
+        already on the floor.
         """
         _piece, sku, style = await self._piece_context(piece_id)
         if style is None:
@@ -1142,9 +1486,18 @@ class StyleSpecService:
         A null piece_id returns the NOT_REQUIRED shape rather than None, so a
         screen always has something to render.
         """
+        # THE EMPTY SHAPE MUST CARRY EVERY KEY THE FULL ONE DOES. A screen renders
+        # whichever it is handed, and `kit_view` reads these straight through — a
+        # missing key here is a KeyError on the store scan of any garment whose style
+        # predates the spec, which is most of what is already on the floor.
         empty = {"kit_status": KitStatus.NOT_REQUIRED.value, "kit_required": False,
                  "spec_confirmed": False, "summary_line": None,
-                 "leather": None, "lining": None, "accessories": []}
+                 "leather": None, "lining": None, "accessories": [],
+                 "accessories_scanned": [], "accessories_pending": [],
+                 "accessories_progress": {
+                     "declared": 0, "scanned": 0, "pending": 0,
+                     "required_total": 0.0, "issued_total": 0.0, "unresolved": 0},
+                 "pending_line": None}
         if piece_id is None:
             return empty
         try:
@@ -1189,9 +1542,18 @@ class StyleSpecService:
                 issued_total += got
                 if resolution in (RESOLUTION_NONE, RESOLUTION_AMBIGUOUS):
                     unresolved += 1
+                # `state` AND `label` ON EVERY LINE, so no screen has to re-derive
+                # either. accessories_in is a roll-up and cannot say WHICH packet is
+                # missing; this is the per-line answer, in the same four words
+                # wherever it is read (kit_rules.accessory_line_state).
                 accessories.append(dict(
                     base, issued_qty=got,
                     outstanding=max(0.0, round(need - got, 3)),
+                    state=kit_rules.accessory_line_state(
+                        qty_per_piece=need, issued_qty=got,
+                        resolvable=resolution not in (RESOLUTION_NONE,
+                                                      RESOLUTION_AMBIGUOUS)),
+                    label=kit_rules.accessory_label(base),
                     short=bool(available is not None and available < need)))
             elif line.category == MaterialCategory.LEATHER.value and leather is None:
                 leather = base
@@ -1204,6 +1566,14 @@ class StyleSpecService:
         if leather is not None:
             leather["consumed"] = await self._consumed_at_cut(piece.id)
 
+        # THE THREE-WAY SPLIT, COMPUTED ONCE HERE. Every surface that answers "what
+        # does this garment need, what has been scanned, what is still pending"
+        # reads it from this one place — the scan response, the garment lookup and
+        # the store list — so the three can never disagree about which packet is
+        # outstanding. Doing it in each of them is three implementations of one
+        # subtraction, and the store screen had already grown its own.
+        scanned = [a for a in accessories if a["outstanding"] <= 0]
+        pending = [a for a in accessories if a["outstanding"] > 0]
         return {
             "kit_status": kit_rules.kit_status(
                 kit_required=bool(accessories), required_total=required_total,
@@ -1212,7 +1582,40 @@ class StyleSpecService:
             "spec_confirmed": style.material_spec_confirmed_at is not None,
             "summary_line": self._summary_line(accessories),
             "leather": leather, "lining": lining, "accessories": accessories,
+            # DECLARED / SCANNED / PENDING, spelled out rather than implied by a
+            # boolean. `accessories_in` says only "all of them or not".
+            "accessories_scanned": scanned,
+            "accessories_pending": pending,
+            "accessories_progress": {
+                "declared": len(accessories),
+                "scanned": len(scanned),
+                "pending": len(pending),
+                "required_total": round(required_total, 3),
+                "issued_total": round(issued_total, 3),
+                "unresolved": unresolved,
+            },
+            "pending_line": self._pending_line(scanned, pending),
         }
+
+    @staticmethod
+    def _pending_line(scanned: list, pending: list) -> str | None:
+        """"Waiting for ZIP · YKK-60 BLACK. Scanned: BUTTON · HORN-4H, THREAD · T40."
+
+        THE SENTENCE THE OPERATOR IS OWED. They have just scanned two of three
+        packets and the response has to tell them, in words, which one is still
+        missing — not hand them a boolean and a list to diff. Null when the style
+        declares no accessories, so the screen renders nothing rather than "waiting
+        for nothing".
+        """
+        if not scanned and not pending:
+            return None
+        if not pending:
+            return ("All accessories scanned: "
+                    + ", ".join(a["label"] for a in scanned) + ".")
+        out = "Waiting for " + ", ".join(a["label"] for a in pending) + "."
+        if scanned:
+            out += " Scanned: " + ", ".join(a["label"] for a in scanned) + "."
+        return out
 
     @staticmethod
     def _summary_line(accessories: list) -> str | None:
@@ -1407,27 +1810,34 @@ class StyleSpecService:
                 f"other colourways ({', '.join(owners)}) and this garment is "
                 f"{mine}. A per-SKU "
                 f"line is deliberately not issued to another colourway — that "
-                f"would put the wrong colour in the bag. Either add the lines "
-                f"for this SKU, or make them style-wide by clearing `sku_id` "
-                f"(PUT /styles/{style.id}/material-spec). "
+                f"would put the wrong colour in the bag. Add the lines for THIS "
+                f"SKU — POST /styles/{style.id}/material-spec/lines with its "
+                f"`sku_id`, or with apply_to: \"ALL_SKUS\" to cover every "
+                f"colourway at once. (An accessory cannot be made style-wide any "
+                f"more: a SKU is what says which colour and size it is for.) "
                 f"GET /store/pieces/{piece.code}/materials shows exactly which "
                 f"lines reach this garment and which do not.")
         if by_reason.get("other_size"):
+            # LEGACY ROWS ONLY. An accessory line carries no garment_size any more —
+            # its SKU says the size — so this can only be reached by a row written
+            # before that rule, and the fix is to re-enter it against its SKU rather
+            # than to go on scoping accessories two different ways.
             blocked = by_reason["other_size"]
             sizes = sorted({str(getattr(l, "garment_size", "")) for l in blocked})
             return (
-                f"{style.name}'s {len(blocked)} accessory line(s) are for "
+                f"{style.name}'s {len(blocked)} accessory line(s) are scoped to "
                 f"garment size(s) {', '.join(s for s in sizes if s)}, and "
-                f"{piece.code} is a {size or 'garment of unknown size'}. A sized "
-                f"line is not issued to another size — an L zip is not an S zip. "
-                f"Add the line for this size, or clear `garment_size` to make it "
-                f"apply to every size.")
+                f"{piece.code} is a {size or 'garment of unknown size'}. Those are "
+                f"lines from before accessories were scoped per SKU. Re-enter them "
+                f"against their SKUs — POST /styles/{style.id}/material-spec/lines "
+                f"with apply_to: \"ALL_SKUS\", or per_sku for one whose size "
+                f"follows the garment.")
         if by_reason.get("zeroed"):
             return (
                 f"{style.name} declares that {mine} takes none of its "
                 f"{len(acc)} accessory line(s) — every one of them is set to "
-                f"qty_per_piece 0 for this colourway, which is how a per-SKU "
-                f"override says 'not this one'. There is nothing to kit for "
+                f"qty_per_piece 0 for this colourway, which is how a SKU-scoped "
+                f"line says 'not this one'. There is nothing to kit for "
                 f"{piece.code}, and that is the spec working as written.")
         return (
             f"{style.name} has {len(acc)} accessory line(s) but none resolves "
@@ -1637,6 +2047,16 @@ class StyleSpecService:
         return {
             "status": block["kit_status"],
             "summary_line": block["summary_line"],
+            # THE WHOLE CHECKLIST, THREE WAYS. `declared` is every line the SKU's
+            # recipe names, `scanned` the ones fully issued, `pending` what is still
+            # owed — so the operator at the terminal reads the answer instead of
+            # diffing two lists. All three come from material_requirement_block, so
+            # this view and the garment lookup cannot drift.
+            "declared": block["accessories"],
+            "scanned": block["accessories_scanned"],
+            "pending": block["accessories_pending"],
+            "progress": block["accessories_progress"],
+            "pending_line": block["pending_line"],
             "issued_now": [], "already_issued": [],
             "outstanding": [a for a in block["accessories"]
                             if a["outstanding"] > 0],

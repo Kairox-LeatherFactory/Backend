@@ -63,7 +63,65 @@ It is now also **one packet at a time**, identified by the packet's own `LOT-ACC
   "lot_barcode":      "LOT-ACC-000007" }
 ```
 
-Scanning a packet **is** the accessory scan — `part` may be omitted, and a `part` that says anything else is a 422. Optional `qty` issues a short quantity (2 of the 4 buttons); omitted means the whole outstanding amount.
+Scanning a packet **is** the accessory scan — `part` may be omitted, and a `part` that says anything else is a 422.
+
+**There is no `qty`, and there is nothing to type.** The two barcodes already determine the quantity: the **piece code** gives its SKU, whose accessory lines were declared at `POST /imports/breakdown/{order}/release`, and the **packet label** gives the article, colour and size. Those two intersect onto exactly one recipe line, and that line's `qty_per_piece` *is* the number. Asking the operator for it asked them to restate something the system already holds — and let them restate it wrong. It also fanned out: one `qty` sent with three packets issued that quantity of *every* one.
+
+A screen still sending `qty` gets a **422 naming the field**, not a silent drop: the request model sets `extra="forbid"`, because Pydantic's default would have returned a cheerful 201 with the value thrown away and no way for the frontend to learn it had stopped working. A genuine short issue is no longer recordable on the scan — `POST /materials/issues` remains for off-spec corrections.
+
+### Several packets in one call
+
+A garment takes everything the DM put on the release breakdown — button, zip, thread and more — and **all of it must be in before the garment can leave the store**, which is what unblocks line-stitching. A screen that has collected the scans submits them together:
+
+```json
+{ "employee_barcode": "EMP-000123", "piece_barcode": "PC-23456A",
+  "lot_barcodes": ["LOT-ACC-000007", "LOT-ACC-000009", "LOT-ACC-000012"] }
+```
+
+A scan gun that fires per beep keeps using the singular `lot_barcode` — it is a one-element batch on the way in, so both doors run the same code and cannot drift. Send **exactly one** of `lot_barcode` / `lot_id` / `lot_barcodes` / `lot_ids`; more than one is a 422, because which packets went in is not something to guess at.
+
+The response carries `accessory_batch`, null for a leather/lining scan:
+
+| Field | Meaning |
+|---|---|
+| `scanned` / `issued` | how many packets were presented, and how many went in |
+| `per_packet` | one row per packet, in the order sent, each `ok` or not |
+| `refused` | just the ones that did not go in, each with its `reason` and `detail` |
+| `still_owed` | what the garment is **still** waiting for, one self-describing row each |
+| `still_owed_line` | that as a sentence, ready to put on screen |
+| `still_owed_articles` | the old flat list of article codes, kept so nothing breaks |
+| `progress` | declared / scanned / pending counts and totals |
+
+**PARTIAL ACCEPT.** If one packet is the wrong size, the others still issue and the bad one comes back in `refused` with its `substitution_request_id` — one bad packet must never lose the good ones scanned with it, the same rule `send()` and the production log's per-piece gates follow. The garment stays unsendable until a DM answers, and `still_owed` names what is missing.
+
+### What is declared, what is scanned, what is pending
+
+`accessories_in` is a roll-up: it says "not all of them" and cannot say **which**. The person who can fetch the missing zip is standing at the terminal right now, so the scan's `kit` block answers the whole question — and `GET /store/pieces/{piece_code}` answers it identically later, from the same computation, so the two screens cannot disagree about one garment.
+
+| On the scan (`kit`) | On the lookup | Means |
+|---|---|---|
+| `declared` | `accessories` | every line the SKU's recipe names, each with a `state` and a human `label` |
+| `scanned` | `accessories_scanned` | the lines fully issued |
+| `pending` | `accessories_pending` | what is still owed |
+| `progress` | `accessories_progress` | declared / scanned / pending counts, plus `required_total`, `issued_total`, `unresolved` |
+| `pending_line` | `pending_line` | the sentence |
+
+```json
+"pending_line": "Waiting for ZIP · YKK-60 BLACK 60cm. Scanned: BUTTON · HORN-4H BROWN 18L, THREAD · T40 BLACK."
+```
+
+Per line, `state` is one of:
+
+| State | Means |
+|---|---|
+| `PENDING` | nothing issued — go and fetch it |
+| `PARTIAL` | some issued, some still owed |
+| `ISSUED` | the line is satisfied |
+| `UNRESOLVED` | **no lot matches the article at all** — so there is nothing to fetch and the fix is a *receipt*, not a walk to the shelf |
+
+`UNRESOLVED` is deliberately not `PENDING`: telling them apart is what stops an operator hunting a packet the factory does not have.
+
+> A **single**-packet scan still raises its 409/422, because that is what the one-beep-one-request screen reads. Only a batch turns a refusal into a row.
 
 **`"part": "ACCESSORY"` with no packet is a 422.** The blanket kit scan is gone, and removing it is the feature: it read the recipe and decremented every accessory line at once, so no physical packet was ever part of the exchange and an M-size button in an L-size jacket was undetectable by construction. That mistake is invisible on the floor, found by the client in Dubai, and paid for in return freight plus a remade garment.
 

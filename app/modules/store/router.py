@@ -77,13 +77,20 @@ async def store_scan(
     piece_id = body.piece_id
     if piece_id is None:
         piece_id = await barcodes.resolve_piece_id(body.piece_barcode)
-    lot_id = body.lot_id
-    if lot_id is None and body.lot_barcode:
-        lot_id = await barcodes.resolve_lot_id(body.lot_barcode)
+    # EVERY barcode is resolved HERE, so the service sees ids only (CLAUDE.md §15).
+    # One packet or several: the singular field becomes a one-element list on the way
+    # in, and there is no second code path downstream.
+    lot_ids = list(body.lot_ids or [])
+    for code in (body.lot_barcodes or []):
+        lot_ids.append(await barcodes.resolve_lot_id(code))
+    if body.lot_id is not None:
+        lot_ids.append(body.lot_id)
+    elif body.lot_barcode:
+        lot_ids.append(await barcodes.resolve_lot_id(body.lot_barcode))
 
     return await StoreService(db).store_scan(
         piece_id=piece_id, employee_id=employee_id, part=body.part,
-        lot_id=lot_id, qty=body.qty,
+        lot_ids=lot_ids,
         substitution_reason=body.substitution_reason,
         # The LOGIN signs the audit row; the WORKER is employee_id above.
         actor_user_id=user.id, entered_by=user.name)
