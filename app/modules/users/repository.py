@@ -11,6 +11,8 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.pagination import paginate
+
 from app.modules.users.models import User
 
 
@@ -34,12 +36,19 @@ class UserRepository:
             select(User).where(User.employee_id == employee_id))
         return res.scalar_one_or_none()
 
-    async def list_all(self, active_only: bool = True) -> list[User]:
-        stmt = select(User).order_by(User.name)
+    def _all_stmt(self, active_only: bool = True):
+        """The one query behind both the full list and a page of it."""
+        stmt = select(User).order_by(User.name, User.id)
         if active_only:
             stmt = stmt.where(User.is_active.is_(True))
-        res = await self.db.execute(stmt)
+        return stmt
+
+    async def list_all(self, active_only: bool = True) -> list[User]:
+        res = await self.db.execute(self._all_stmt(active_only))
         return list(res.scalars())
+
+    async def page_all(self, params, active_only: bool = True) -> tuple[list, int]:
+        return await paginate(self.db, self._all_stmt(active_only), params)
 
     async def list_by_roles(self, roles, active_only: bool = True) -> list[User]:
         """Active users whose role is in `roles`. Used by the procurement

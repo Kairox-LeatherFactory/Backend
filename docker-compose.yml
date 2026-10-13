@@ -25,11 +25,18 @@
 # entrypoint.sh — so you do NOT write a systemd gunicorn.service in Docker.
 # Docker keeps them alive via `restart: unless-stopped`. Nginx is still the
 # public front door.
+#
+# ── WHY THE WORKER IS NOT OPTIONAL ──────────────────────────────────────────
+# The whole bom module runs through Celery: build_order_breakdown_for_submission
+# (Gemini extraction, 30-200s), parse_pattern_dxf (ezdxf), generate_bom, plus two
+# beat jobs (freight-risk scan every 2h, notification escalation every 15m).
+# POST .../order-breakdown returns 202 and enqueues — with no worker running, the
+# API answers 202 forever and NOTHING is ever extracted. worker up == BOM works.
 # ──────────────────────────────────────────────────────────────
 
 # ── shared log-rotation, applied to every app container ──────────────────────
-# Caps each container's logs so they never fill the disk over weeks
-# (max 3 files × 10MB = 30MB per container). Referenced by api/worker/beat below.
+# Caps each container logs so they never fill the disk over weeks
+# (max 3 files x 10MB = 30MB per container). Referenced by api/worker/beat below.
 x-logging: &default-logging
   driver: "json-file"
   options:
@@ -53,9 +60,22 @@ x-app-env: &app-env
   ASYNC_DATABASE_URL: "${ASYNC_DATABASE_URL:-postgresql+asyncpg://factory:factory@db:5432/factory}"
   DEBUG: "${DEBUG:-false}"
   SECRET_KEY: "${SECRET_KEY:-dev-only-insecure-change-me-in-prod}"
+  # Broker = where tasks queue. Backend = where results land. Two DBs on purpose
+  # so a flushdb of results can never drop queued work.
+  # Upstash / Redis Cloud: use the rediss:// (TLS) URL — same vars, no code change.
   CELERY_BROKER_URL: "${CELERY_BROKER_URL:-redis://redis:6379/0}"
   CELERY_RESULT_BACKEND: "${CELERY_RESULT_BACKEND:-redis://redis:6379/1}"
-  CELERY_DEFAULT_QUEUE: "${CELERY_DEFAULT_QUEUE:-default}"
+  # entrypoint.sh resolves these; beat app differs from the worker app ON PURPOSE
+  # (app/core/beat_schedule.py is what registers conf.beat_schedule — pointing
+  # beat at app.core.celery would give it an empty schedule). See entrypoint.sh.
+  CELERY_APP: "${CELERY_APP:-app.core.celery:celery_app}"
+  CELERY_BEAT_APP: "${CELERY_BEAT_APP:-app.core.beat_schedule:celery_app}"
+  CELERY_BEAT_SCHEDULE_FILE: "/app/var/celerybeat/celerybeat-schedule"
+  # Leave CELERY_QUEUES UNSET unless you also add task_routes/task_default_queue
+  # in app/core/celery.py. Tasks currently publish to the default queue "celery";
+  # a worker started with -Q anything-else consumes nothing while the API happily
+  # keeps returning 202. entrypoint.sh only passes -Q when this is non-empty.
+  CELERY_QUEUES: "${CELERY_QUEUES:-}"
   WEB_CONCURRENCY: "${WEB_CONCURRENCY:-4}"
   GUNICORN_TIMEOUT: "${GUNICORN_TIMEOUT:-120}"
   VIRUS_SCAN_ENABLED: "${VIRUS_SCAN_ENABLED:-false}"
@@ -89,11 +109,23 @@ services:
       start_period: 10s
 
   # ── LOCAL-DEV ONLY: bundled Redis (profile: dev) ────────────────────────────
+  # This is the CELERY BROKER, not a cache. Two settings matter:
+  #   --appendonly yes  : queued tasks survive a redis restart.
+  #   --maxmemory-policy noeviction : a broker must NEVER evict. The default
+  #     policy would silently drop queued BOM jobs under memory pressure, and the
+  #     API would still have returned 202 for every one of them.
+  # On the server this service does not run at all — CELERY_BROKER_URL points at
+  # Upstash / Redis Cloud, which should be configured with noeviction too.
   redis:
     image: redis:7-alpine
     profiles: ["dev"]
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
+    command:
+      - "redis-server"
+      - "--appendonly"
+      - "yes"
+      - "--maxmemory-policy"
+      - "noeviction"
     ports:
       - "${REDIS_HOST_PORT:-6379}:6379"
     volumes:
@@ -137,7 +169,7 @@ services:
       retries: 5
       start_period: 90s
 
-  # ── Celery worker ───────────────────────────────────────────────────────────
+  # ── Celery worker — the BOM pipeline actually runs HERE ─────────────────────
   worker:
     <<: *app-base
     command: ["worker"]
@@ -147,11 +179,27 @@ services:
       RUN_SEED: "false"
       CELERY_CONCURRENCY: "${CELERY_CONCURRENCY:-4}"
       CELERY_LOGLEVEL: "${CELERY_LOGLEVEL:-info}"
+      # ezdxf/shapely hold memory across a big DXF; recycle the child process.
+      CELERY_MAX_TASKS_PER_CHILD: "${CELERY_MAX_TASKS_PER_CHILD:-100}"
     depends_on:
       api:
         condition: service_healthy
+    # app/core/celery.py sets task_time_limit=300. Docker default 10s stop grace
+    # would SIGKILL a running Gemini extraction; with acks_late the task is then
+    # redelivered and the whole 200s call is paid twice. Give it room to finish.
+    stop_grace_period: "${CELERY_STOP_GRACE:-310s}"
+    healthcheck:
+      # Ping THIS worker by name (--hostname is worker@%h => worker@<container id>).
+      # A bare "inspect ping" answers for any worker on the broker, so a dead
+      # container would look healthy as long as a sibling was alive.
+      test: ["CMD-SHELL", "celery -A $${CELERY_APP} inspect ping -d worker@$$HOSTNAME --timeout 10 || exit 1"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
 
-  # ── Celery beat ─────────────────────────────────────────────────────────────
+  # ── Celery beat — the scheduler (freight-risk scan, notification escalation) ─
+  # EXACTLY ONE of these per stack. Two beats = every periodic task fires twice.
   beat:
     <<: *app-base
     command: ["beat"]
@@ -163,6 +211,36 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    volumes:
+      - procurement_docs:/app/var/procurement-documents
+      # Persist "when did each entry last fire" so a restart does not replay them.
+      - celerybeat:/app/var/celerybeat
+    healthcheck:
+      # beat has no "inspect ping" (it consumes nothing) — liveness is simply
+      # "is the scheduler process still up". pgrep comes from procps (Dockerfile).
+      test: ["CMD-SHELL", "pgrep -f '[c]elery.*beat' > /dev/null || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── Flower — Celery monitoring UI (profile: monitor) ────────────────────────
+  #   docker compose --profile monitor up -d flower   =>  http://localhost:5555
+  # Shows queued/active/failed tasks and their tracebacks — the fastest way to
+  # see WHY a build_order_breakdown_for_submission run produced style_count 0
+  # without tailing worker logs. Requires flower in requirements.txt.
+  # Do NOT expose this publicly without FLOWER_BASIC_AUTH — it can revoke tasks.
+  flower:
+    <<: *app-base
+    profiles: ["monitor"]
+    command: ["flower"]
+    environment:
+      <<: *app-env
+      RUN_MIGRATIONS: "false"
+      RUN_SEED: "false"
+      FLOWER_BASIC_AUTH: "${FLOWER_BASIC_AUTH:-}"
+    ports:
+      - "${FLOWER_HOST_PORT:-5555}:5555"
 
 volumes:
   pgdata:
@@ -171,3 +249,5 @@ volumes:
     name: ${COMPOSE_PROJECT_NAME:-factory}_redis_data
   procurement_docs:
     name: ${COMPOSE_PROJECT_NAME:-factory}_procurement_docs
+  celerybeat:
+    name: ${COMPOSE_PROJECT_NAME:-factory}_celerybeat

@@ -69,7 +69,7 @@ async def test_pending_is_the_balance_not_the_queue(
 ):
     """Two of five pieces cut. Fusing must show 5 pending, not 2."""
     sku = order_tree["sku"]
-    for piece, _ in pieces[:2]:
+    for piece in pieces[:2]:
         await _log(db, operations, piece, sku,
                    ProductionStage.LEATHER_CUTTING.value, worker)
 
@@ -101,7 +101,7 @@ async def test_completed_counts_only_a_logged_event_at_that_stage(
     """A piece PAST a stage still counts it as completed; a piece merely
     approaching it does not."""
     sku = order_tree["sku"]
-    piece, _ = pieces[0]
+    piece = pieces[0]
     await _log(db, operations, piece, sku,
                ProductionStage.LEATHER_CUTTING.value, worker)
     await _log(db, operations, piece, sku, ProductionStage.FUSING.value, worker)
@@ -123,7 +123,7 @@ async def test_stitching_block_separates_balance_from_queue(
     The defect was reporting the first under the name of the second.
     """
     sku = order_tree["sku"]
-    for piece, _ in pieces[:3]:
+    for piece in pieces[:3]:
         await _log(db, operations, piece, sku,
                    ProductionStage.FUSING.value, worker)
 
@@ -142,7 +142,7 @@ async def test_all_four_dashboards_report_the_same_stage_numbers(
 ):
     """ONE SOURCE. If these ever diverge, every screen becomes untrustworthy."""
     sku = order_tree["sku"]
-    piece, _ = pieces[0]
+    piece = pieces[0]
     await _log(db, operations, piece, sku,
                ProductionStage.LEATHER_CUTTING.value, worker)
 

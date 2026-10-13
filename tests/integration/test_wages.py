@@ -34,16 +34,6 @@ async def _setup(db):
     return ops, carnaby, cutter, monthly
 
 
-@pytest.mark.xfail(
-    reason="AUDIT F139 (BLOCKER, docs/audit/pass-01-business-logic.md): "
-           "app/modules/production/repository.py:213,222 GROUP/ORDER BY "
-           "Piece.style_id, a column Piece does not have (models.py:71-94); "
-           "the SELECT correctly projects SKU.style_id. Constructing the "
-           "statement raises AttributeError, so EVERY piece-rate wage run "
-           "fails before emitting SQL. Not fixed here: audit rule is that "
-           "application code is never edited to make a test pass. "
-           "Flips to XPASS the moment the two-line fix lands.",
-    raises=AttributeError, strict=False)
 @pytest.mark.asyncio
 async def test_carnaby_wage_matches_card(db):
     ops, carnaby, cutter, monthly = await _setup(db)
@@ -80,16 +70,6 @@ async def test_carnaby_wage_matches_card(db):
     assert amounts["Monthly1"] == 18000       # monthly independent of production
 
 
-@pytest.mark.xfail(
-    reason="AUDIT F139 (BLOCKER, docs/audit/pass-01-business-logic.md): "
-           "app/modules/production/repository.py:213,222 GROUP/ORDER BY "
-           "Piece.style_id, a column Piece does not have (models.py:71-94); "
-           "the SELECT correctly projects SKU.style_id. Constructing the "
-           "statement raises AttributeError, so EVERY piece-rate wage run "
-           "fails before emitting SQL. Not fixed here: audit rule is that "
-           "application code is never edited to make a test pass. "
-           "Flips to XPASS the moment the two-line fix lands.",
-    raises=AttributeError, strict=False)
 @pytest.mark.asyncio
 async def test_compute_run_returns_employee_level_lines(db):
     ops, carnaby, cutter, monthly = await _setup(db)

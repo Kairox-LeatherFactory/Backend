@@ -121,30 +121,27 @@ async def test_the_store_manager_may_record_an_off_spec_issue(client):
 
 
 # ═══════════════════════════════════════════ THE ADDITIVITY CONTRACT
-# The promise made to the two frontend devs was that this feature adds keys and
-# removes none. These two tests are that promise, machine-checked — the key sets
-# below are what the API returned BEFORE the material spec existed.
-
+# The promise made to the two frontend devs was that the material spec adds keys
+# and removes none. These tests are that promise, machine-checked.
+#
+# THE DRAWER IS THE ONE DELIBERATE EXCEPTION, and it is not this feature's doing:
+# `drawer` and `drawer_code` named a numbered box that no longer exists. They are
+# replaced by `store` / `store_state`, which answer the question the drawer code
+# was being read FOR — what the garment is holding and what it is still owed —
+# and which have an answer for every piece rather than only for one that happened
+# to be in a box. `_DRAWER_KEYS_BEFORE` is gone with the payload it described:
+# there is no drawer barcode left to resolve.
 _PIECE_KEYS_BEFORE = {
     "piece_id", "code", "short_code", "sku_id", "sku_code", "style_id",
     "style_name", "article", "serial", "colour", "size", "seq", "order_id",
-    "order_number", "client", "current_stage", "drawer_code", "drawer",
+    "order_number", "client", "current_stage",
     "leather_consumption_dcm", "needs_lining", "label_line",
-}
-_DRAWER_KEYS_BEFORE = {
-    "drawer_id", "drawer_code", "seq", "state", "current_piece_id",
-    "leather_in", "lining_in", "holding",
-}
-_STORE_SCAN_KEYS_BEFORE = {
-    "drawer_code", "piece_code", "state", "needs_lining", "lining_reason",
-    "awaiting", "ready_for_received", "part", "part_inferred", "employee_id",
-    "holding", "auto_received", "sent", "next_action",
 }
 
 
 @pytest.mark.asyncio
 async def test_barcode_resolve_keeps_every_key_it_had(client, pieces):
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     _as(UserRole.DIRECT_MANAGER)
 
     r = await client.get(f"{API}/barcode/resolve", params={"code": piece.code})
@@ -154,14 +151,11 @@ async def test_barcode_resolve_keeps_every_key_it_had(client, pieces):
         "the piece payload LOST keys a current client may be reading: "
         f"{sorted(_PIECE_KEYS_BEFORE - set(body))}")
     assert "material_requirement" in body          # and gained exactly this
-
-    r = await client.get(f"{API}/barcode/resolve", params={"code": drawer.code})
-    assert r.status_code == 200, r.text
-    body = r.json()["drawer"]
-    assert _DRAWER_KEYS_BEFORE <= set(body), (
-        "the drawer payload LOST keys: "
-        f"{sorted(_DRAWER_KEYS_BEFORE - set(body))}")
-    assert {"accessories_in", "material_requirement"} <= set(body)
+    # WHAT REPLACED THE DRAWER. The two keys that went are `drawer` (a box id and
+    # code) and `drawer_code`; what a client was reading them FOR is here, and
+    # unlike them it is populated for every garment.
+    assert {"store", "store_state"} <= set(body)
+    assert {"state", "holding", "leather_in", "lining_in", "accessories_in"}         <= set(body["store"])
 
 
 @pytest.mark.asyncio
@@ -170,7 +164,7 @@ async def test_a_style_with_no_spec_reports_not_required_not_an_empty_checklist(
     """The difference the screen depends on: NOT_REQUIRED means hide the panel,
     PENDING means show it with outstanding counts. Every style released before
     this feature must read NOT_REQUIRED."""
-    piece, _drawer = pieces[0]
+    piece = pieces[0]
     _as(UserRole.DIRECT_MANAGER)
     r = await client.get(f"{API}/barcode/resolve", params={"code": piece.code})
     block = r.json()["piece"]["material_requirement"]

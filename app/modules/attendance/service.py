@@ -166,6 +166,11 @@ class AttendanceService:
             id=log.id, employee_id=log.employee_id, name=name,
             work_date=log.work_date, check_in_at=log.check_in_at,
             check_out_at=log.check_out_at, source=log.source,
+            # The operator who wrote this row. _open_or_reject has always stored
+            # it, but this hand-built payload dropped it, so the operator trail
+            # was real in the database and absent from every API response — the
+            # half that matters when someone disputes a day's attendance.
+            recorded_by_user_id=log.recorded_by_user_id,
             is_late=log.is_late, is_short=log.is_short,
             is_overtime=log.is_overtime, distance_m=log.distance_m,
         )
@@ -414,8 +419,18 @@ class AttendanceService:
     # ══════════════════════════════════════════════════════════════════
     # Reads (dashboards / history)
     # ══════════════════════════════════════════════════════════════════
-    async def history(self, employee_id: uuid.UUID, start: date, end: date) -> list[AttendanceLog]:
-        return await self.repo.for_employee(employee_id, start, end)
+    async def history(self, employee_id: uuid.UUID, start: date, end: date
+                      ) -> list[schemas.AttendanceRead]:
+        """Every row goes through _as_read — returning the raw ORM rows here is
+        what made /attendance/history a 500: AttendanceRead.name lives on
+        Employee, not on the log. One name lookup covers the window because
+        every row belongs to the same employee."""
+        rows = await self.repo.for_employee(employee_id, start, end)
+        if not rows:
+            return []
+        emp = await self.employees.get(employee_id)
+        name = emp.name if emp else ""
+        return [self._as_read(log, name) for log in rows]
 
     async def today_roster(self) -> list[schemas.AttendanceRead]:
         rows = await self.repo.by_day(await self._local_today())

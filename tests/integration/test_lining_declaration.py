@@ -25,7 +25,7 @@ WHAT CHANGED, AND WHY IT NEEDS ITS OWN REGRESSION FILE
 
 THE SECOND HALF OF THIS FILE is the merge gate. "Only after HOLDING BOTH may a
 piece move to line-stitching" — enforced at the gate itself, not merely inherited
-from the store's send check, because DrawerState.SENDED is reachable by more than
+from the store's send check, because StoreState.SENDED is reachable by more than
 one route (transition(), the deprecated single-drawer endpoint, a repair script)
 and every one of those was a door into LINE_STITCHING on an unlined garment.
 
@@ -37,10 +37,10 @@ arriving by a different route.
 """
 import pytest
 
-from app.core.enums import DrawerState, ProductionStage
+from app.core.enums import StoreState, ProductionStage
 from app.core.lining_rules import lining_required
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
-from app.modules.drawers.service import DrawerService
+from app.modules.store.service import StoreService
 from app.modules.production.models import Piece
 
 pytestmark = pytest.mark.asyncio
@@ -74,7 +74,7 @@ async def _tree(db, *, style_name: str, declared: bool | None, tag: str,
     await db.flush()
 
     drawer = Drawer(code=f"DRW-8{tag[-3:]}", seq=8000 + abs(hash(tag)) % 900,
-                    state=DrawerState.MERGED.value)
+                    state=StoreState.MERGED.value)
     db.add(drawer)
     await db.flush()
     piece = Piece(code=f"{sku.code}-001", seq=1, sku_id=sku.id,
@@ -103,15 +103,15 @@ async def test_declared_no_lining_beats_a_knit_style_name(db):
     _, _, _, piece, drawer = await _tree(
         db, style_name="ADELE KNIT", declared=False, tag="d001")
 
-    drawer.leather_in = True
-    drawer.state = DrawerState.HOLDING_LEATHER.value
+    piece.leather_in = True
+    piece.store_state = StoreState.HOLDING_LEATHER.value
     await db.commit()
 
-    svc = DrawerService(db)
-    needs, _why = await svc._needs_lining(piece)
+    svc = StoreService(db)
+    needs, _why = await svc.needs_lining(piece)
     assert needs is False, "the DM's explicit 'no' lost to the style name"
 
-    result = await svc.send_batch(drawer_ids=[drawer.id], actor_id=None)
+    result = await svc.send(piece_ids=[piece.id], actor_user_id=None)
     assert result["count_sent"] == 1, result["not_ready"]
 
 
@@ -125,16 +125,16 @@ async def test_declared_lining_beats_a_plain_style_name(db):
     _, _, _, piece, drawer = await _tree(
         db, style_name="CLERMONT", declared=True, tag="d002")
 
-    drawer.leather_in = True
-    drawer.state = DrawerState.HOLDING_LEATHER.value
+    piece.leather_in = True
+    piece.store_state = StoreState.HOLDING_LEATHER.value
     await db.commit()
 
-    svc = DrawerService(db)
-    needs, why = await svc._needs_lining(piece)
+    svc = StoreService(db)
+    needs, why = await svc.needs_lining(piece)
     assert needs is True
     assert why and "Direct Manager" in why
 
-    result = await svc.send_batch(drawer_ids=[drawer.id], actor_id=None)
+    result = await svc.send(piece_ids=[piece.id], actor_user_id=None)
     assert result["count_sent"] == 0, "a declared-lined garment sent without lining"
     assert "lining" in result["not_ready"][0]["reason"].lower()
 
@@ -150,16 +150,16 @@ async def test_an_unanswered_style_still_falls_back_to_inference(db):
     _, _, _, piece, drawer = await _tree(
         db, style_name="REESE WOOL", declared=None, tag="d003")
 
-    drawer.leather_in = True
-    drawer.state = DrawerState.HOLDING_LEATHER.value
+    piece.leather_in = True
+    piece.store_state = StoreState.HOLDING_LEATHER.value
     await db.commit()
 
-    svc = DrawerService(db)
-    needs, why = await svc._needs_lining(piece)
+    svc = StoreService(db)
+    needs, why = await svc.needs_lining(piece)
     assert needs is True, "an unanswered style stopped requiring its lining"
     assert why and "WOOL" in why
 
-    result = await svc.send_batch(drawer_ids=[drawer.id], actor_id=None)
+    result = await svc.send(piece_ids=[piece.id], actor_user_id=None)
     assert result["count_sent"] == 0
 
 
@@ -188,7 +188,7 @@ async def test_a_logged_lining_cut_outranks_a_declared_no(db, operations):
                            work_date=date.today(), qty=1, piece_id=piece.id))
     await db.commit()
 
-    needs, why = await DrawerService(db)._needs_lining(piece)
+    needs, why = await StoreService(db).needs_lining(piece)
     assert needs is True, "a physically-cut lining was cancelled by paperwork"
     assert why and "lining cut" in why.lower()
 
@@ -220,9 +220,9 @@ async def test_merge_gate_rejects_a_sended_drawer_that_never_held_the_lining(db)
         db, style_name="CLERMONT", declared=True, tag="m001")
 
     # Forced past the store without the lining ever arriving.
-    drawer.leather_in = True
-    drawer.lining_in = False
-    drawer.state = DrawerState.SENDED.value
+    piece.leather_in = True
+    piece.lining_in = False
+    piece.store_state = StoreState.SENDED.value
     await db.commit()
 
     from app.modules.production.service import ProductionService
@@ -230,7 +230,7 @@ async def test_merge_gate_rejects_a_sended_drawer_that_never_held_the_lining(db)
         piece, ProductionStage.LINE_STITCHING)
 
     assert ok is False, "an unlined garment entered LINE_STITCHING via a forced SENDED"
-    assert drawer.code in why
+    assert piece.code in why
     assert "lining" in why.lower()
 
 
@@ -239,9 +239,9 @@ async def test_merge_gate_opens_on_holding_both_and_sended(db):
     _, _, _, piece, drawer = await _tree(
         db, style_name="CLERMONT", declared=True, tag="m002")
 
-    drawer.leather_in = True
-    drawer.lining_in = True
-    drawer.state = DrawerState.SENDED.value
+    piece.leather_in = True
+    piece.lining_in = True
+    piece.store_state = StoreState.SENDED.value
     await db.commit()
 
     from app.modules.production.service import ProductionService
@@ -260,9 +260,9 @@ async def test_merge_gate_still_requires_the_send_after_holding_both(db):
     _, _, _, piece, drawer = await _tree(
         db, style_name="CLERMONT", declared=True, tag="m003")
 
-    drawer.leather_in = True
-    drawer.lining_in = True
-    drawer.state = DrawerState.HOLDING_BOTH.value
+    piece.leather_in = True
+    piece.lining_in = True
+    piece.store_state = StoreState.HOLDING_BOTH.value
     await db.commit()
 
     from app.modules.production.service import ProductionService
@@ -283,9 +283,9 @@ async def test_a_declared_leather_only_piece_clears_the_gate_on_leather(db):
     _, _, _, piece, drawer = await _tree(
         db, style_name="ADELE KNIT", declared=False, tag="m004")
 
-    drawer.leather_in = True
-    drawer.lining_in = False
-    drawer.state = DrawerState.SENDED.value
+    piece.leather_in = True
+    piece.lining_in = False
+    piece.store_state = StoreState.SENDED.value
     await db.commit()
 
     from app.modules.production.service import ProductionService
@@ -294,21 +294,26 @@ async def test_a_declared_leather_only_piece_clears_the_gate_on_leather(db):
     assert ok is True, why
 
 
-async def test_a_piece_with_no_drawer_is_refused_and_told_why(db):
-    """A piece minted while the drawer pool was full has nowhere to be stored.
+async def test_a_garment_is_never_refused_for_having_nowhere_to_be_stored(db):
+    """Was test_a_piece_with_no_drawer_is_refused_and_told_why.
 
-    It is not broken and not lost — it has a barcode — but it cannot pass a gate
-    whose whole subject is what is in its drawer. The message has to say that
-    rather than naming a drawer that does not exist.
+    THE CASE IT DESCRIBED NO LONGER EXISTS, and that is the point of the change.
+    A piece minted while the 200-drawer pool was full had nowhere to be stored,
+    so it failed a gate whose whole subject was what was in its drawer — through
+    no fault of its own, and with no fix available to the floor short of the DM
+    re-allocating boxes by hand.
+
+    The store is a state now, so a garment is only ever refused for something it
+    is actually missing.
     """
-    _, _, _, piece, drawer = await _tree(
+    _, _, _, piece, _drawer = await _tree(
         db, style_name="CLERMONT", declared=False, tag="m005")
-    drawer.current_piece_id = None
-    piece.drawer_id = None
-    await db.commit()
 
     from app.modules.production.service import ProductionService
     ok, why = await ProductionService(db)._merge_ok(
         piece, ProductionStage.LINE_STITCHING)
     assert ok is False
-    assert "no drawer" in why.lower()
+    # Refused for its LEATHER — a real, fixable thing — not for lacking a box.
+    assert "leather" in why.lower()
+    assert "drawer" not in why.lower()
+

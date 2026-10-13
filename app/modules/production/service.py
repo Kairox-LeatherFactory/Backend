@@ -21,7 +21,7 @@ FOUR GATES, cheapest / most-likely-to-fail first:
                    warning: skill_blocked; whole batch when the actor is wrong)
     3. SEQUENCE  — has this piece completed the previous leather-chain stage?
                    (per-piece: sequence_blocked)
-    4. MERGE     — for LINE_STITCHING only: is the piece's drawer SENDED (leather
+    4. MERGE     — for LINE_STITCHING only: has the piece been SENDED (leather
                    + lining merged)? (per-piece: merge_blocked)
 
     Gate 1 is a 403 because it is not per-piece — the role is wrong for the whole
@@ -48,9 +48,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.enums import (
     MERGE_GATE_ENTRY, MULTI_STAGE_DESIGNATIONS, SCREEN_EXPECTED_ROLE,
     SCREEN_TO_STAGE, STAGE_DESIGNATIONS, STAGE_ROLE_ACCESS, Designation,
-    DrawerState, ProductionStage, ScreenContext, UserRole, next_chain_stage,
+    ProductionStage, ScreenContext, StoreState, UserRole, next_chain_stage,
 )
-from app.core.store_display import display_stage
+from app.core.store_display import display_stage, holding_label
 from app.modules.clients.service import ClientService
 from app.modules.employees.service import EmployeeService
 from app.modules.production.models import Operation, Piece, ProductionEvent
@@ -75,6 +75,10 @@ class ProductionService:
         self.repo = ProductionRepository(db)
         self.clients = ClientService(db)
         self.employees = EmployeeService(db)
+        # Set by _prefetch_sequence on the batch log path as
+        # (covered_piece_ids, covered_op_ids, pairs); None everywhere else, where
+        # _sequence_ok falls back to its original single lookup.
+        self._seq_prefetch: tuple[set, set, set] | None = None
 
     async def list_operations(self) -> list[Operation]:
         return await self.repo.list_operations()
@@ -100,10 +104,71 @@ class ProductionService:
         # event at. The loop itself lives in core.enums_barcode.next_chain_stage
         # because /barcode/resolve now answers the same question on the read side,
         # and two copies of it would eventually disagree.
-        done = await self.repo.completed_stage_codes(piece.id)
+        done = await self._effective_done(piece)
         return next_chain_stage(done)
 
-    # ══════════════════════════════════════════════════════════ GATE 1: role
+    async def _effective_done(self, piece: Piece) -> set:
+        """Which stages still COUNT as done, after any rework this piece has had.
+
+        WHY THE RAW EVENT LIST IS NOT THE ANSWER. `next_chain_stage` is "furthest
+        completed, plus one". Redo FUSING on a garment that had reached
+        LINE_STITCHING and the raw list STILL contains LINE_STITCHING, so the
+        next scan jumps the piece to SHELL_STITCHING — with the PASTING done on
+        the badly-fused panel still counted, and the defect sewn in.
+
+        THE RULE: a stage is done if it has been logged MORE TIMES than it has
+        been invalidated, and a redo invalidates every stage AFTER its target.
+
+            initial walk            LC¹ FUS¹ PAS¹ LINE¹     all done
+            redo → FUSING           FUS² ; PAS and LINE are each invalidated once
+                                    PAS 1 event vs 1 invalidation → NOT done
+            so the garment must be pasted again, then line-stitched again.
+
+        COUNTING, NOT TIMESTAMPS. The obvious implementation — "events logged
+        after the redo" — cannot work here: created_at comes from the database
+        (naive, one-second resolution) while the redo's resolved_at is a Python
+        aware datetime with microseconds, so an event written in the same second
+        as the redo sorted before it and the re-walk stalled, re-logging one
+        stage forever. A count has no clock in it.
+
+        NOTHING IS DELETED. The old events stay: the work happened and the wage
+        was earned, and erasing it would take money off somebody for a defect
+        that may not even be theirs. Only the READING changes.
+
+        LINING_CUTTING IS NEVER INVALIDATED — it is off the leather chain
+        entirely (the parallel path that rejoins at the store), so a redo on the
+        leather side says nothing about whether a lining was cut.
+        """
+        counts = await self.repo.event_counts_by_stage(piece.id)
+        from app.modules.production.inspection import InspectionService
+        spans = await InspectionService(self.db).resolved_redo_spans(piece.id)
+        if not spans:
+            return {code for code, n in counts.items() if n > 0}
+
+        chain = [st.value for st in ProductionStage.leather_chain()]
+        index = {code: i for i, code in enumerate(chain)}
+
+        done = set()
+        for code, n in counts.items():
+            if code not in index:
+                # Off-chain (LINING_CUTTING): no redo on the leather side can
+                # invalidate it.
+                if n > 0:
+                    done.add(code)
+                continue
+            here = index[code]
+            # A REDO INVALIDATES A SPAN — from just after its target through the
+            # stage where the defect was FOUND. Beyond that the piece had not
+            # been, so there is nothing to invalidate; counting it would make
+            # every remaining stage demand a second event on the way out.
+            invalidations = sum(
+                1 for target, found in spans
+                if target in index and found in index
+                and index[target] < here <= index[found])
+            if n > invalidations:
+                done.add(code)
+        return done
+
     async def _assert_role(self, user: User, stage: ProductionStage | None,
                            op: Operation) -> None:
         if user.role in _STAGE_BYPASS_ROLES:
@@ -164,78 +229,128 @@ class ProductionService:
         prev_op = await self.repo.get_operation_by_code(prev.value)
         if prev_op is None:
             return True, None
-        if await self.repo.has_event_at_op(piece.id, prev_op.id):
+        # ONE QUERY FOR THE WHOLE BATCH, not one per piece. `_seq_prefetch` holds
+        # the (piece, operation) pairs that already have an event, loaded once
+        # before the gate loop — see _prefetch_sequence.
+        #
+        # IT IS ONLY AUTHORITATIVE INSIDE THE DOMAIN IT WAS BUILT FOR, which is
+        # why it carries that domain with it. A prefetch covers the batch's
+        # pieces and the predecessors of the batch's stages, and ABSENCE from the
+        # set means "no event" only for a pair inside those two. The read path
+        # (piece_state) asks this same question about every stage of one piece,
+        # so a pair outside the domain would otherwise read as "not done" and
+        # every downstream stage would report falsely locked. Outside the domain,
+        # ask the database.
+        if await self._has_event(piece.id, prev_op.id):
             return True, None
         return False, (f"{piece.code} has not completed {prev.value} — "
                        f"log {prev.value} before {stage.value}.")
 
+    async def _prefetch_sequence(self, pieces, stage_by_piece, op_by_stage=None) -> None:
+        """Load every (piece, op) event the gate loop will ask about, in ONE
+        round-trip, and stash it for `_sequence_ok` and the rework check.
+
+        WHY: the gate loop ran `has_event_at_op` per piece, so a 100-piece scan
+        made 100 serial database round-trips just to decide what it was allowed
+        to write — each one holding the request's pooled connection open. With
+        the pool being the service's real concurrency ceiling, that time is the
+        expensive part, not the CPU.
+
+        TWO QUESTIONS, ONE QUERY. The loop asks about two different operations
+        per piece: the PREDECESSOR (has this piece completed the stage before —
+        gate 3) and the TARGET (does it already have an event here, which makes
+        this write rework). Both are "does (piece, op) have an event", so both
+        are answered by the same prefetch as long as the domain covers both sets
+        of operation ids.
+        """
+        op_ids = set()
+        prevs = {st.predecessor() for st in stage_by_piece.values()
+                 if st is not None and st.predecessor() is not None}
+        for prev in prevs:
+            op = await self.repo.get_operation_by_code(prev.value)   # memoised
+            if op is not None:
+                op_ids.add(op.id)
+        # the stages actually being written — for the rework flag
+        for op in (op_by_stage or {}).values():
+            if op is not None:
+                op_ids.add(op.id)
+        if not op_ids:
+            self._seq_prefetch = None
+            return
+        piece_ids = list(pieces.keys())
+        pairs = await self.repo.events_at_ops(piece_ids, list(op_ids))
+        # Carry the domain alongside the pairs: absence only means "no event"
+        # for a pair this query actually looked at.
+        self._seq_prefetch = (set(piece_ids), op_ids, pairs)
+
+    async def _has_event(self, piece_id, operation_id) -> bool:
+        """Does this (piece, op) already have an event? Prefetch-aware.
+
+        Reads the batch prefetch when the pair is inside its domain, and asks the
+        database otherwise. Same contract as repo.has_event_at_op — see
+        _prefetch_sequence for why absence is only meaningful inside the domain.
+        """
+        if self._seq_prefetch is not None:
+            pieces_covered, ops_covered, pairs = self._seq_prefetch
+            if piece_id in pieces_covered and operation_id in ops_covered:
+                return (piece_id, operation_id) in pairs
+        return await self.repo.has_event_at_op(piece_id, operation_id)
+
     # ═════════════════════════════════════════════════════════ GATE 4: merge
     async def _merge_ok(self, piece: Piece,
                         stage: ProductionStage) -> tuple[bool, str | None]:
-        """Only LINE_STITCHING is gated on completeness. The drawer must BOTH
-        hold everything the garment needs AND have been sent by the store.
+        """GATE 4 — is this garment complete and released? LINE_STITCHING only.
 
-        TWO CONDITIONS, CHECKED SEPARATELY — and that is the fix, not belt-and-
-        braces. This used to test `state == SENDED` alone and take it as proof of
-        completeness, on the reasoning that a drawer can only reach SENDED by
-        passing the completeness check in send_batch. That reasoning holds only
-        as long as send_batch is the sole way into the state, and it is not:
-        `transition()` sets it, the deprecated single-drawer route reaches that,
-        and a repair script or a stale row can leave it there. Every one of those
-        is a path to LINE_STITCHING on a garment whose lining was never cut —
-        which is the bug this whole gate exists to stop, arriving by a different
-        door.
+        THE ONLY GATE ON LINE_STITCHING, WHICH IS WHY IT CANNOT BE WEAKENED.
+        `_sequence_ok` returns True early here — LINE_STITCHING.predecessor() is
+        None by design, because the two cut paths run in parallel and there is no
+        single previous stage. So if this returns True for everything, a garment
+        can be line-stitched having never been cut at all.
 
-        So the parts are re-read here, at the gate, from the drawer's own
-        leather_in / lining_in booleans:
+        READ FROM THE PIECE. The facts are identical — leather in,
+        lining in, released — and they were always facts about the garment; the
+        drawer was merely where they used to be written. What changes is that a
+        piece with no drawer is no longer a piece that cannot be line-stitched:
+        there are no drawers to run out of.
 
-            leather_in AND (lining_in OR this garment needs no lining)
-
-        For a LINED garment that is HOLDING_BOTH, exactly as asked: both parts
-        physically in the drawer before the piece may enter line-stitching. For a
-        garment declared leather-only at release, leather alone completes it —
-        HOLDING_BOTH is unreachable for it, and requiring it would strand the
-        drawer forever.
-
-        THE LINING QUESTION IS ANSWERED BY DrawerService._needs_lining, not by
-        `piece.needs_lining`. One resolver for the store gate, the send queue and
-        this gate, so a piece cannot be sendable in the store and blocked here.
-
-        THE MESSAGE NAMES THE DRAWER. "its drawer must hold leather + lining" told
-        an operator holding a garment nothing they could act on — the whole point
-        of bug #12 is that the drawer is the thing they cannot see from the
-        production screen. The drawer is already loaded here to answer the gate,
-        so naming it costs nothing and turns the rejection into an instruction.
+        COMPLETENESS, THEN RELEASE, IN THAT ORDER. They are different failures
+        with different fixes — "scan the missing part in" vs "send it" — and
+        collapsing them into one message sends the floor looking for the wrong
+        thing.
         """
         if stage is not MERGE_GATE_ENTRY:
             return True, None
-        from app.modules.drawers.service import DrawerService
-        drawers = DrawerService(self.db)
-        drawer = await drawers.drawer_for_piece(piece.id)
-        if drawer is None:
-            return False, (
-                f"{piece.code} is not ready for {stage.value} — it has no drawer, "
-                f"so its parts were never stored. It is on the waiting list until "
-                f"a drawer frees up or DM/MD grows the pool.")
 
-        needs_lining, lining_reason = await drawers._needs_lining(piece)
-        complete = drawer.leather_in and (drawer.lining_in or not needs_lining)
+        needs_lining, lining_reason = await self._piece_needs_lining(piece)
+        complete = piece.leather_in and (piece.lining_in or not needs_lining)
         if not complete:
-            missing = "leather" if not drawer.leather_in else "lining"
+            missing = "leather" if not piece.leather_in else "lining"
             because = (f" This garment takes a lining because {lining_reason}."
                        if missing == "lining" and lining_reason else "")
             return False, (
-                f"{piece.code} is not ready for {stage.value} — drawer "
-                f"{drawer.code} is still awaiting its {missing}. Scan the missing "
-                f"part into the drawer before line-stitching.{because}")
+                f"{piece.code} is not ready for {stage.value} — the store is "
+                f"still awaiting its {missing}. Scan the missing part in before "
+                f"line-stitching.{because}")
 
-        if drawer.state != DrawerState.SENDED.value:
-            held = "holding both parts" if drawer.lining_in else "complete"
+        if piece.store_state != StoreState.SENDED.value:
+            held = "holding both parts" if piece.lining_in else "complete"
             return False, (
-                f"{piece.code} is not ready for {stage.value} — drawer "
-                f"{drawer.code} is {held} but has not been sent. Select it in the "
-                f"Drawers List and send it to release the piece.")
+                f"{piece.code} is not ready for {stage.value} — it is {held} in "
+                f"the store but has not been sent. Release it from the store "
+                f"screen to open line-stitching.")
         return True, None
+
+    async def _piece_needs_lining(self, piece) -> tuple:
+        """Does this garment take a lining? The single resolver.
+
+        THIS USED TO LIVE ON DrawerService and be called from here, which made
+        production depend on that module for a question that has nothing to
+        do with storage. The stored flag is EVIDENCE, not the verdict:
+        `piece.needs_lining` is written once at upload and was wrong for 925 of
+        1,425 pieces in one live order.
+        """
+        from app.modules.store.service import StoreService
+        return await StoreService(self.db).needs_lining(piece)
 
     # ═══════════════════════════════════════════════════════════════ presence
     async def _assert_present(self, employee_id: uuid.UUID, work_date: date) -> None:
@@ -253,8 +368,10 @@ class ProductionService:
                         leather_lot_id: uuid.UUID | None = None,
                         lining_lot_id: uuid.UUID | None = None,
                         consumption_qty: float | None = None,
+                        consumption_by_piece: dict | None = None,
                         consumption_source: str | None = None,
-                        preview: bool = False) -> dict:      # NEW param
+                        preview: bool = False,
+                        cutting_rows: dict | None = None) -> dict:
         """Log one stage for a batch of pieces. Stage inferred, never sent.
  
         preview=True → run ALL gates, compute the result buckets, and return them
@@ -295,12 +412,47 @@ class ProductionService:
                 "stage": stage.value if stage is not None else None,
             })
 
+        # ── AN APPROVED REDO OVERRIDES THE INFERRED STAGE ───────────────────
+        # `_infer_stage_for_piece` answers "furthest completed, plus one", which
+        # is right for a garment walking forward and wrong for one the DM has
+        # sent back: it would propose the NEXT stage while the floor is standing
+        # there to redo an earlier one. The permission is read once for the whole
+        # batch so a 40-piece tray is not 40 round-trips.
+        from app.modules.production.inspection import InspectionService
+        inspections = InspectionService(self.db)
+        rework_by_piece: dict = {}
+        for pid in pieces:
+            target, row = await inspections.rework_target(pid)
+            if target is not None:
+                rework_by_piece[pid] = (target, row)
+        # A GARMENT SOMEBODY HAS CALLED DEFECTIVE STOPS MOVING. One query for the
+        # whole batch — this runs on every scan.
+        pending_rejects = await inspections.pending_for_pieces(list(pieces))
+        # GARMENTS THAT ARE PHYSICALLY SOMEWHERE ELSE. One query for the batch.
+        from app.modules.jobwork.service import JobWorkService
+        away = await JobWorkService(self.db).out_pieces(list(pieces))
+        # WHAT STILL COUNTS AS DONE, per piece, after any rework. Computed once
+        # here because TWO decisions below need the same answer and they must not
+        # disagree: which stage this scan logs, and whether that stage has
+        # already been done. Asking the raw event list for the second while
+        # asking this for the first is what stalled a re-walk after one stage —
+        # the invalidated PASTING still looked "already logged", so re-logging it
+        # fell into the rework no-op and wrote nothing.
+        effective_done: dict = {pid: await self._effective_done(p)
+                                for pid, p in pieces.items()}
+
         # resolve each piece's stage
         stage_by_piece: dict = {}
         uncut_on_pipeline: list[str] = []
         completed: list[str] = []
         for pid, piece in pieces.items():
-            stage = screen_stage or await self._infer_stage_for_piece(piece, screen)
+            redo = rework_by_piece.get(pid)
+            if redo is not None:
+                # The DM approved this garment going back to exactly this stage.
+                stage = redo[0]
+            else:
+                stage = (screen_stage
+                         or next_chain_stage(effective_done.get(pid, set())))
             if stage is None:
                 # The piece is past the END of the chain. It is emphatically NOT
                 # "not found" — its barcode resolved, its history is complete —
@@ -386,26 +538,48 @@ class ProductionService:
         #
         # Supplying consumption on a lining cut still behaves exactly as before —
         # it is optional, not ignored.
+        #
+        # ONE NUMBER OR ONE PER GARMENT. `consumption_by_piece` carries each
+        # piece's OWN measured dcm, straight from its approved cutting row — a
+        # cutting row is one garment cut from 7-12 individually-measured hides,
+        # so two jackets of the same size routinely differ by 40 dcm and the grid
+        # exists to record exactly that. Requiring a single batch number forced
+        # the scan to 409 on any mixed batch, which the floor read as "the system
+        # refuses a garment that took more than its target". Each piece now
+        # carries its own quantity onto its own event, and the batch decrement is
+        # their sum.
         lining_only = cut_stages == {ProductionStage.LINING_CUTTING}
+        per_piece_qty: dict = {}
+        for pid, qty in (consumption_by_piece or {}).items():
+            try:
+                value = Decimal(str(qty))
+            except Exception as exc:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    "Consumption quantity must be numeric.") from exc
+            if value > 0:
+                per_piece_qty[pid] = value
         consumption_value = None
-        if is_cut and (consumption_qty is not None or not lining_only):
-            if consumption_qty is None:
+        if is_cut and (consumption_qty is not None or per_piece_qty
+                       or not lining_only):
+            if consumption_qty is None and not per_piece_qty:
                 raise HTTPException(
                     status.HTTP_422_UNPROCESSABLE_ENTITY,
                     "Consumption quantity (dcm) is required at leather cutting — "
                     "it is what the material ledger and the costing are built on. "
                     "Send `consumption.dcm` with `consumption.article` (+ colour, "
                     "and thickness if it narrows the lot), or a lot id directly.")
-            try:
-                consumption_value = Decimal(str(consumption_qty))
-            except Exception as exc:
-                raise HTTPException(
-                    status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    "Consumption quantity must be numeric.") from exc
-            if consumption_value <= 0:
-                raise HTTPException(
-                    status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    "Consumption quantity must be > 0 at cutting.")
+            if consumption_qty is not None:
+                try:
+                    consumption_value = Decimal(str(consumption_qty))
+                except Exception as exc:
+                    raise HTTPException(
+                        status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        "Consumption quantity must be numeric.") from exc
+                if consumption_value <= 0:
+                    raise HTTPException(
+                        status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        "Consumption quantity must be > 0 at cutting.")
             if not (leather_lot_id or lining_lot_id):
                 raise HTTPException(
                     status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -422,13 +596,24 @@ class ProductionService:
  
         logged, rework, sequence_blocked, skill_blocked, merge_blocked =  [], [], [], [], []
         role_blocked: list[str] = []
+        assignment_blocked: list[str] = []   # GATE 5 — approved for someone else
+        rejected_blocked: list[str] = []     # GATE 6 — a rejection awaits the DM
+        offsite_blocked: list[str] = []      # GATE 7 — the garment is at a vendor
         sequence_blocked += uncut_on_pipeline   # never cut → can't be past cutting
         skill_warnings: list[dict] = []   # GATE 2 anomalies (non-blocking now)
         fresh_cut_count = 0
+        # Σ of what the freshly-cut garments individually took. Accumulated in
+        # the loop rather than multiplied afterwards, because a mixed batch has
+        # no single per-piece number to multiply.
+        fresh_cut_consumption = Decimal(0)
         # The stage each piece was ACTUALLY resolved to. The single top-level
         # `stage` cannot describe a mixed pipeline batch, and guessing one from
         # dict order reported a stage no piece was written at — see below.
         stage_by_code: dict[str, str] = {}
+
+        # Load the sequence gate's whole question set in one query before the
+        # loop, instead of asking the database once per piece inside it.
+        await self._prefetch_sequence(pieces, stage_by_piece, op_by_stage)
 
         # GATES 2-4 per piece + (write, IF NOT preview)
         for pid, piece in pieces.items():
@@ -447,7 +632,7 @@ class ProductionService:
                 continue
 
             # GATE 2 — SKILL
-            # GATE 2 — SKILL: DEMOTED to a recorded warning (drawer-redesign
+            # GATE 2 — SKILL: DEMOTED to a recorded warning (store-redesign
             # build). Any employee may be recorded at any stage; the anomaly is
             # surfaced for audit but never blocks the log. The manager-role gate
             # (GATE 1) remains the hard authority on WHO may enter the log.
@@ -475,12 +660,85 @@ class ProductionService:
                 merge_blocked.append(piece.code)
                 _block(piece.code, "merge", why_merge or "", stage)
                 continue
-            # already logged at this op? → rework
-            if await self.repo.has_event_at_op(piece.id, op.id):
+            # GATE 7 — THE GARMENT IS NOT IN THE BUILDING. It was dispatched to
+            # an outside factory, so it cannot be worked here: without this the
+            # system happily records line-stitching done in-house on a jacket
+            # sitting at another factory twenty miles away, and nothing would
+            # ever contradict it. The vendor's work is logged when the pieces are
+            # booked back in — see jobwork/service.receive.
+            out = away.get(pid)
+            if out is not None:
+                job, vendor = out
+                since = (job.dispatched_at.date().isoformat()
+                         if job.dispatched_at else "dispatch")
+                offsite_blocked.append(piece.code)
+                _block(piece.code, "offsite",
+                       f"{piece.code} is out at {vendor or 'an outside factory'} "
+                       f"for {job.stage} since {since}. Book it back in before "
+                       f"logging anything on it here.", stage)
+                continue
+
+            # GATE 6 — AN OPEN REJECTION. A piece somebody has just called
+            # defective must not walk on to the next stage while the DM decides
+            # what to do with it: the defect would travel down the line, more
+            # work would be spent on a garment that is going back anyway, and by
+            # the time the rejection is approved the piece would be three stages
+            # past where it was rejected.
+            #
+            # PER-PIECE, like every gate after the role one: one rejected garment
+            # must not lose the tray it was scanned with.
+            reject = pending_rejects.get(pid)
+            if reject is not None:
+                rejected_blocked.append(piece.code)
+                _block(piece.code, "rejected",
+                       f"{piece.code} was rejected at {reject.found_at_stage} and "
+                       f"is waiting for the DM to decide. It cannot move on until "
+                       f"that is settled.", stage)
+                continue
+
+            # GATE 5 — ASSIGNMENT. The cutting row was approved FOR somebody.
+            #
+            # The manager approves one row, for one garment, naming one cutter.
+            # That name is who the leather was handed to and who the piece-rate
+            # wage is paid to, so the scan has to be THAT person: the employee
+            # barcode is the verification half of the two-scan flow, not a free
+            # field. Without this check any card resolves any approved piece and
+            # the wage silently follows the scan instead of the work.
+            #
+            # PER-PIECE, like gates 2-4 and for the same reason: a manager
+            # sweeping a tray must not lose forty good pieces because one
+            # belongs to another cutter.
+            row = (cutting_rows or {}).get(pid)
+            if (row is not None and row.cutter_employee_id is not None
+                    and row.cutter_employee_id != employee_id):
+                assignment_blocked.append(piece.code)
+                _block(piece.code, "assignment",
+                       f"{piece.code} was approved for a different cutter. The "
+                       f"row names who was given the leather, and the wage "
+                       f"follows it — have that cutter scan it, or reopen the "
+                       f"row and reassign it first.", stage)
+                continue
+
+            # ALREADY LOGGED HERE? Normally that is a duplicate scan and writes
+            # nothing. But when the DM has APPROVED a redo of this exact stage,
+            # re-logging it is the entire point — so the permission turns the
+            # no-op back into a real event, flagged as rework so its cost stays
+            # separable from the original.
+            redo = rework_by_piece.get(pid)
+            is_redo = redo is not None and redo[0] is stage
+            # "Already done" means done AND STILL VALID. A stage a redo
+            # invalidated has an event but no longer counts, so re-logging it is
+            # the re-walk doing its job rather than a duplicate scan.
+            already = stage.value in effective_done.get(pid, set())
+            if not is_redo and already:
                 rework.append(piece.code)
                 continue
  
             logged.append(piece.code)
+            # WHAT THIS GARMENT TOOK, not what the batch averaged. Its own
+            # approved row wins; the batch number is the fallback for a piece
+            # that has no row (the typed path, unchanged).
+            piece_consumption = per_piece_qty.get(pid, consumption_value)
             if not preview:
                 # REAL write only
                 await self.repo.add_event_nocommit(
@@ -489,41 +747,98 @@ class ProductionService:
                     entered_by=user.name,
                     leather_lot_id=leather_lot_id if is_cut and leather_lot_id is not None else None,
                     lining_lot_id=lining_lot_id if is_cut and lining_lot_id is not None else None,
-                    consumption_qty=consumption_value if is_cut else None)
+                    consumption_qty=piece_consumption if is_cut else None,
+                    # A RE-WALK EVENT IS REWORK TOO. The redo itself is obvious;
+                    # so is the pasting that has to be done again on top of it.
+                    # Both are work performed a second time on one garment, and
+                    # the cost split is only honest if it counts both.
+                    is_rework=is_redo or await self._has_event(piece.id, op.id))
                 # advance the piece's current operation pointer
                 piece.current_operation_id = op.id
+                if is_redo:
+                    # SPEND THE PERMISSION. An approved redo is consent for ONE
+                    # re-log; leaving it open would let the same stage be redone
+                    # forever, and every one of those would count as rework.
+                    await inspections.mark_resolved_nocommit(redo[1])
+                    rework.append(piece.code)
                 if is_cut:
                     fresh_cut_count += 1
-                # RECYCLE THE DRAWER at PACKAGE_EXPORT: the piece has shipped, so
-                # its drawer returns to WAITING for the next merge. This is the
-                # ONLY point a drawer frees (Hamthan #4: empty only after PACKAGE).
-                # release_nocommit clears both sides of the piece<->drawer link.
+                    # SUM THE GARMENTS' OWN NUMBERS. `qty * count` was only ever
+                    # right because the batch was forced to one quantity; with
+                    # per-piece totals it would charge every jacket the first
+                    # one's dcm.
+                    if piece_consumption is not None:
+                        fresh_cut_consumption += piece_consumption
+                # THE GARMENT LEAVES THE STORE at PACKAGE_EXPORT, and this is
+                # the only place it does (Hamthan #4: empty only after PACKAGE).
+                # There is no pool to return to: a drawer recycled because the
+                # BOX was reused, and a garment ships once.
                 if stage is ProductionStage.PACKAGE_EXPORT:
-                    from app.modules.drawers.service import DrawerService
-                    await DrawerService(self.db).release_nocommit(piece.id)
- 
+                    from app.modules.store.service import StoreService
+                    await StoreService(self.db).release_nocommit(piece.id)
+                # CUTTING V2 — the approved plan becomes a fact. Same
+                # transaction as the event and the stock decrement, so a hide
+                # marked CONSUMED against an event that rolled back cannot
+                # exist: that would be leather the system believes is gone.
+                row = (cutting_rows or {}).get(pid)
+                if row is not None and stage.is_cut_entry:
+                    from app.modules.cutting.service import CuttingService
+                    await CuttingService(self.db).mark_logged_nocommit(row)
+
+        # THE PREFETCH DIES WITH THE LOOP THAT OWNED IT.
+        #
+        # It is a snapshot of which (piece, op) pairs had an event BEFORE this
+        # batch ran, and the loop above has just written more. Anything that asks
+        # the same question afterwards on this service instance — the piece_state
+        # read path calls _sequence_ok for every stage of a piece — would be
+        # answered from a snapshot that is now one batch out of date, and would
+        # report a stage the loop just completed as still outstanding.
+        #
+        # Clearing it sends every later question back to the database, which is
+        # the correct answer and costs nothing: the saving was only ever inside
+        # the loop, where the question is asked once per piece.
+        self._seq_prefetch = None
+
         consumption_recorded = None
         stock_warning = None
         # NO MEASUREMENT → NO DECREMENT. An unmeasured lining cut (bug #10) writes
         # its events and stops there: there is no quantity to take off any lot, and
         # inventing one would corrupt the ledger this block exists to keep honest.
         if (is_cut and not preview and fresh_cut_count > 0
-                and consumption_value is not None
+                and fresh_cut_consumption > 0
                 and (leather_lot_id or lining_lot_id)):
             lot_id = leather_lot_id or lining_lot_id
             from app.modules.materials.service import MaterialService
-            total_consumption = consumption_value * fresh_cut_count
+            # ONE DECREMENT PER BATCH, still — it is the sum of what each garment
+            # actually took rather than one number times a count.
+            total_consumption = fresh_cut_consumption
             # Hold the instance: the shortfall warning comes back on it, not in
             # the return value (which stays a float for existing callers).
             materials = MaterialService(self.db)
             avail = await materials.decrement_for_cut_nocommit(
                 lot_id, float(total_consumption))
             stock_warning = materials.last_decrement_warning
+            # NULL WHEN THE BATCH IS MIXED, and that is the honest answer: there
+            # is no one per-piece number. `dcm_by_piece` carries the truth, and a
+            # caller that reads `dcm_per_piece` on a mixed batch gets nothing
+            # rather than one garment's figure presented as everyone's.
+            uniform = (float(consumption_value) if consumption_value is not None
+                       and not per_piece_qty else None)
+            if uniform is None and per_piece_qty:
+                distinct = {round(float(v), 3) for v in per_piece_qty.values()}
+                uniform = next(iter(distinct)) if len(distinct) == 1 else None
             consumption_recorded = {
                 "lot_id": str(lot_id),
                 "pieces_consuming": fresh_cut_count,
+                "dcm_per_piece": uniform,
+                "reserved_per_piece": uniform,
+                "dcm_by_piece": {str(k): float(v)
+                                 for k, v in per_piece_qty.items()} or None,
                 "qty": float(total_consumption),
                 "dcm": float(total_consumption),
+                "onused": materials.last_used_after,
+                "reserved": materials.last_used_after,
+                "available_before": materials.last_available_before,
                 "available_after": avail,
                 # True when the ledger went short. The cut is still recorded —
                 # see decrement_for_cut_nocommit for why this warns, not blocks.
@@ -552,14 +867,14 @@ class ProductionService:
         else:
             rep_stage = None
 
-        # BUG #12 — the drawer for every piece in this batch, on the response the
-        # scan screen already reads. One query for the whole batch. Without it the
-        # operator has to leave the production screen to find out where the
-        # garment they just logged actually lives.
-        drawers_by_id = await self.repo.drawers_for_pieces(list(pieces))
-        drawer_by_piece = {
-            piece.code: drawers_by_id[pid]
-            for pid, piece in pieces.items() if pid in drawers_by_id
+        # BUG #12 — where every piece in this batch stands in the store, on the
+        # response the scan screen already reads. One query for the whole batch.
+        # Without it the operator has to leave the production screen to find out
+        # what the garment they just logged is still waiting for.
+        store_by_id = await self.repo.store_for_pieces(list(pieces))
+        store_by_piece = {
+            piece.code: store_by_id[pid]
+            for pid, piece in pieces.items() if pid in store_by_id
         }
 
         result = {
@@ -571,6 +886,9 @@ class ProductionService:
             "completed": completed,
             "sequence_blocked": sequence_blocked, "skill_blocked": skill_blocked,
             "merge_blocked": merge_blocked, "role_blocked": role_blocked,
+            "assignment_blocked": assignment_blocked,
+            "rejected_blocked": rejected_blocked,
+            "offsite_blocked": offsite_blocked,
             "blocked": blocked,
             "message": self._log_message(
                 rep_stage=rep_stage, logged=logged, rework=rework,
@@ -584,9 +902,9 @@ class ProductionService:
             "consumption_source": consumption_source if is_cut else None,
             "preview": bool(preview),
             "skill_warnings": skill_warnings,
-            # BUG #12 — where each scanned garment lives, on the response the scan
-            # screen already reads. {piece_code: {code, state, holding, …}}.
-            "drawer_by_piece": drawer_by_piece,
+            # BUG #12 — where each scanned garment stands, on the response the
+            # scan screen already reads. {piece_code: {state, holding, …}}.
+            "store_by_piece": store_by_piece,
             # BUG #8 — filled in after the commit; see below.
             "sku_progress": None,
             # The accessory kit, per scanned piece. Lean by design (three fields)
@@ -601,6 +919,15 @@ class ProductionService:
             return result
 
         await self.db.commit()
+        # THE DASHBOARDS ARE NOW STALE — say so immediately.
+        #
+        # Bust the read cache in the same breath as the commit, not on a timer.
+        # A cutting manager who logs a cut expects to see it on the dashboard at
+        # once; a minute of TTL reads on the floor as "the system lost my scan",
+        # and the operator scans again. One INCR, and every cached aggregate
+        # becomes unreachable. No-op when caching is off or Redis is away.
+        from app.core.cache import invalidate as _invalidate_read_cache
+        await _invalidate_read_cache()
         result["consumption_recorded"] = consumption_recorded
         result["stock_warning"] = stock_warning
 
@@ -677,7 +1004,8 @@ class ProductionService:
                   only inferred at WRITE time — the UI cannot see it in advance.
               #6  later stage cards can be scanned into before their predecessor
                   is done, because the UI has no way to know which are locked.
-              #12 the drawer is invisible outside the Store hub.
+              #12 where the garment stands in the store is invisible outside
+                  the Store hub.
 
             All three are answered by asking the server, at scan time, "what is
             true about this piece?" — which is what this returns.
@@ -707,8 +1035,8 @@ class ProductionService:
         # the store gate will then (correctly) refuse to send without a lining —
         # the screen and the gate disagreeing about the same piece, which is the
         # exact failure the shared resolver exists to prevent.
-        from app.modules.drawers.service import DrawerService
-        needs_lining, lining_reason = await DrawerService(self.db)._needs_lining(piece)
+        from app.modules.store.service import StoreService
+        needs_lining, lining_reason = await StoreService(self.db).needs_lining(piece)
 
         # ── the stage card map (bug #6) ──────────────────────────────────────
         # Every stage the UI draws a card for, with the reason it is not open.
@@ -755,10 +1083,12 @@ class ProductionService:
         # ── how much of this SKU is left at that stage (bug #8) ──────────────
         sku_block = await self._sku_progress_at_stage(piece.sku_id, next_stage)
 
-        drawer = card.get("drawer")
+        # THE STORE OVERLAY READS THE GARMENT. Feeding it a drawer's state
+        # left every stored piece showing its last cut stage instead of STORE,
+        # would show nothing: the drawer table is retired and unwritten.
         disp = display_stage(
             current_event_stage=card.get("current_stage"),
-            drawer_state=(drawer or {}).get("state"),
+            store_state=getattr(piece, "store_state", None),
             needs_lining=needs_lining,
         )
 
@@ -803,7 +1133,17 @@ class ProductionService:
 
         return {
             "piece": card,
-            "drawer": drawer,                                   # bug #12
+            # BUG #12 — where the garment lives, on the screen that just logged
+            # it. The answer is the store's own state now, not a box number.
+            "store": {
+                "state": getattr(piece, "store_state", None),
+                "holding": holding_label(
+                    leather_in=getattr(piece, "leather_in", False),
+                    lining_in=getattr(piece, "lining_in", False)),
+                "leather_in": bool(getattr(piece, "leather_in", False)),
+                "lining_in": bool(getattr(piece, "lining_in", False)),
+                "accessories_in": bool(getattr(piece, "accessories_in", False)),
+            },
             # The EFFECTIVE lining requirement + why, so the scan screen shows the
             # same answer the store gate will enforce.
             "needs_lining": needs_lining,
@@ -960,7 +1300,17 @@ class ProductionService:
     async def list_pieces_for_sku(self, *, sku_id: uuid.UUID | None = None,
                                   sku_code: str | None = None,
                                   operation_id: uuid.UUID | None = None,
-                                  client_scope: uuid.UUID | None = None) -> dict:
+                                  client_scope: uuid.UUID | None = None,
+                                  params=None) -> dict:
+        """The scan checklist for one SKU.
+
+        `params` (a PageParams) pages the `pieces` array. The HEADER COUNTS DO
+        NOT PAGE: total / done / pending / blocked / closed are computed over the
+        whole SKU in SQL, because they are facts about the SKU rather than about
+        the rows the caller asked for. `closed` in particular withdraws the style
+        from the scan screen, so computing it from one page would stop the floor
+        working on garments that are not finished.
+        """
         sku_id = await self._resolve_sku_id(sku_id, sku_code)
         if not sku_id:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Provide sku_id or sku_code.")
@@ -979,7 +1329,11 @@ class ProductionService:
                 raise HTTPException(status.HTTP_404_NOT_FOUND, "Operation not found")
 
         # rows are 4-tuples: (piece, stage_code, stage_label, client_order_id).
-        rows = await self.repo.list_pieces_for_sku(sku_id)
+        if params is not None:
+            rows, sku_total = await self.repo.page_pieces_for_sku(sku_id, params)
+        else:
+            rows = await self.repo.list_pieces_for_sku(sku_id)
+            sku_total = len(rows)
         piece_ids = [p.id for p, _, _, _ in rows]
 
         done_ids: set[uuid.UUID] = set()
@@ -997,18 +1351,14 @@ class ProductionService:
                     prev_stage = None
 
         order_id = rows[0][3] if rows else None
-        # Live drawer per piece → drives the STORE overlay AND (bug #12) puts the
-        # drawer code on every checklist row, so a manager on any stage can see
-        # where the garment is without opening the Store hub.
-        drawers = await self.repo.drawers_for_pieces(piece_ids)
         # THE EFFECTIVE LINING REQUIREMENT, batched — not `p.needs_lining`. The
         # stored flag is a per-piece copy taken at mint time; the style's
         # declaration is the authority and can have been corrected since. Reading
         # the flag here drew "awaiting lining" captions on garments the store gate
         # considers complete, which is the screen and the gate disagreeing about
         # the same piece. Two queries for the whole checklist, not per row.
-        from app.modules.drawers.service import DrawerService
-        lining_map = await DrawerService(self.db)._needs_lining_map(piece_ids)
+        from app.modules.store.service import StoreService
+        lining_map = await StoreService(self.db).needs_lining_map(piece_ids)
 
         pieces = []
         for p, scode, slabel, _ in rows:
@@ -1017,13 +1367,12 @@ class ProductionService:
             if op and prev_stage and not done and p.id not in prev_done_ids:
                 eligible, reason = False, f"{prev_stage.value} not completed"
 
-            # STORE overlay: if the piece has cleared the cut side and its drawer
-            # is holding, SHOW store (+ sub-status). Never show LINE_STITCHING
-            # until a real line-stitching event exists.
-            drawer = drawers.get(p.id)
+            # STORE overlay: once the piece has cleared the cut side and the
+            # store is holding a part, SHOW store (+ sub-status). Never show
+            # LINE_STITCHING until a real line-stitching event exists.
             disp = display_stage(
                 current_event_stage=scode,
-                drawer_state=(drawer or {}).get("state"),
+                store_state=getattr(p, "store_state", None),
                 needs_lining=lining_map.get(p.id, True),
             )
             pieces.append({
@@ -1042,9 +1391,21 @@ class ProductionService:
                 # checklist can grey out the lining column for a style released
                 # as leather-only instead of showing it as perpetually pending.
                 "needs_lining": lining_map.get(p.id, True),
-                # bug #12: the assigned drawer, on every row.
-                "drawer": drawer,
-                "drawer_code": (drawer or {}).get("code"),
+                # BUG #12 was "the operator has to leave the production screen
+                # to find out where the garment they just logged lives". That is
+                # still the requirement; the answer is no longer a drawer number
+                # but the garment's own store state, which is strictly more
+                # useful — it says what the store is holding and what it is
+                # waiting for, not merely which box it is in.
+                "store": {
+                    "state": getattr(p, "store_state", None),
+                    "holding": holding_label(
+                        leather_in=getattr(p, "leather_in", False),
+                        lining_in=getattr(p, "lining_in", False)),
+                    "leather_in": bool(getattr(p, "leather_in", False)),
+                    "lining_in": bool(getattr(p, "lining_in", False)),
+                    "accessories_in": bool(getattr(p, "accessories_in", False)),
+                },
                 "done_at_op": done, "eligible": eligible, "blocked_reason": reason,
             })
 
@@ -1052,24 +1413,51 @@ class ProductionService:
         # dropped it (the checklist screen reads total/done/pending/blocked from
         # here; without the return the endpoint answered `null`).
         done_count = sum(1 for x in pieces if x["done_at_op"])
+        # SKU-wide when paging; identical to the page when not (one page = all).
+        if params is not None and op is not None:
+            done_count = await self.repo.count_done_at_op_for_sku(sku_id, op.id)
+        page_blocked = sum(1 for x in pieces if not x["eligible"])
         return {
             "sku_id": sku_id, "sku_code": sku.code,
             "colour": sku.color_name or sku.color_code, "size": sku.size,
             "order_id": order_id,
             "operation_id": op.id if op else None,
             "operation_code": op.code if op else None,
-            "total": len(pieces), "done": done_count,
-            "pending": len(pieces) - done_count,
-            "blocked": sum(1 for x in pieces if not x["eligible"]),
+            "total": sku_total, "done": done_count,
+            "pending": sku_total - done_count,
+            # Blocked is counted over THIS PAGE and named so. Eligibility depends
+            # on the previous stage per piece, which cannot be summarised in one
+            # count without re-running the whole gate for the SKU; reporting a
+            # page figure honestly beats reporting a whole-SKU figure that is
+            # actually a page figure.
+            "blocked": page_blocked,
+            "blocked_scope": "page" if params is not None else "sku",
+            "limit": params.limit if params is not None else None,
+            "offset": params.offset if params is not None else None,
+            "count": len(pieces),
+            "has_more": ((params.offset + len(pieces)) < sku_total
+                         if params is not None else False),
             # BUG #8: every piece of this SKU is logged at the requested operation,
             # so the style must stop being offered for scanning here. False when no
             # operation was named — "closed" is meaningless without a stage.
-            "closed": bool(op) and done_count == len(pieces) and bool(pieces),
+            "closed": bool(op) and sku_total > 0 and done_count == sku_total,
             "pieces": pieces,
         }
 
     async def list_events(self, **filters) -> list[ProductionEvent]:
         return await self.repo.list_events(**filters)
+
+    async def list_events_page(self, *, params, **filters) -> dict:
+        """One page of events plus the total, for the HTTP surface.
+
+        The COUNT is a second query. That is the cost of telling a list screen
+        how many rows it is paging through, and it is trivial next to what the
+        unbounded version did.
+        """
+        rows = await self.repo.list_events(
+            limit=params.limit, offset=params.offset, **filters)
+        total = await self.repo.count_events(**filters)
+        return {"rows": rows, "total": total}
 
     async def style_progress(self, style_id: uuid.UUID,
                              client_scope: uuid.UUID | None = None) -> dict[str, int]:
@@ -1092,6 +1480,12 @@ class ProductionService:
                                client_scope: uuid.UUID | None = None) -> list[dict]:
         return await self.clients.list_sku_options(
             order_id=order_id, style_id=style_id, client_scope=client_scope)
+
+    async def page_sku_options(self, params, *, order_id=None, style_id=None,
+                               client_scope: uuid.UUID | None = None):
+        return await self.clients.page_sku_options(
+            params, order_id=order_id, style_id=style_id,
+            client_scope=client_scope)
 
     async def piece_counts(self, start: date, end: date, *,
                            style_ids=None, order_id=None):

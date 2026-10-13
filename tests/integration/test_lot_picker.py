@@ -291,7 +291,7 @@ async def test_the_log_response_carries_the_shortfall(db, order_tree, pieces,
                                                       cutting_mgr):
     """End-to-end: the warning has to reach the floor, not just the service."""
     created = await _make_lot(db, attributes={"thickness": "0.8-1.0", "dcm": 10})
-    piece, _ = pieces[0]
+    piece = pieces[0]
 
     res = await ProductionService(db).log_batch(
         user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[piece.id],
@@ -309,7 +309,7 @@ async def test_a_healthy_cut_reports_no_stock_warning(db, order_tree, pieces,
                                                       operations, cutter,
                                                       cutting_mgr):
     created = await _make_lot(db, attributes={"thickness": "0.8-1.0", "dcm": 500})
-    piece, _ = pieces[0]
+    piece = pieces[0]
 
     res = await ProductionService(db).log_batch(
         user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[piece.id],

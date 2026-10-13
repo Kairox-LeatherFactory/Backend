@@ -46,7 +46,7 @@ async def _on_hand(db, lot_id) -> float:
 async def test_a_lining_cut_logs_with_no_consumption_at_all(
     db, operations, pieces, lining_cutter, lining_mgr
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
 
     res = await ProductionService(db).log_batch(
         user=lining_mgr, employee_id=lining_cutter[0].id, piece_ids=[piece.id],
@@ -64,7 +64,7 @@ async def test_an_unmeasured_lining_cut_never_touches_stock(
     db, operations, pieces, lining_cutter, lining_mgr, leather_lot
 ):
     """THE MONEY PATH. A cut with no quantity must not invent one."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     before = await _on_hand(db, leather_lot.id)
 
     await ProductionService(db).log_batch(
@@ -79,7 +79,7 @@ async def test_a_lining_cut_that_DOES_measure_still_decrements(
     db, operations, pieces, lining_cutter, lining_mgr, leather_lot
 ):
     """Optional is not ignored: supply a quantity and it behaves as before."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     before = await _on_hand(db, leather_lot.id)
 
     res = await ProductionService(db).log_batch(
@@ -97,7 +97,7 @@ async def test_a_leather_cut_still_demands_a_measurement(
     db, operations, pieces, cutter, cutting_mgr
 ):
     """The asymmetry is the point — leather keeps its requirement."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     with pytest.raises(HTTPException) as exc:
         await ProductionService(db).log_batch(
             user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[piece.id],
@@ -110,7 +110,7 @@ async def test_a_leather_cut_still_demands_a_measurement(
 async def test_a_measured_cut_with_no_material_named_is_rejected(
     db, operations, pieces, cutter, cutting_mgr
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     with pytest.raises(HTTPException) as exc:
         await ProductionService(db).log_batch(
             user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[piece.id],

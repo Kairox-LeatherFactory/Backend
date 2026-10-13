@@ -1,24 +1,54 @@
-var/procurement-documents/
-# Keep secrets, git history, caches, and the big sample spreadsheets OUT of the image.
-.git
-.gitignore
+# The image needs: app/, alembic/, alembic.ini, config/, scripts/, entrypoint.sh,
+# requirements.txt. Everything else stays OUT — secrets, client data, tests, docs.
+
+# Secrets
 .env
 .env.*
 !.env.*.example
-__pycache__/
-*.pyc
+aws.txt
+
+# VCS / editor / tooling
+.git
+.gitignore
+.gitattributes
+.github/
+.vscode/
+.claude/
+.importlinter
+.coveragerc
+.coverage
+htmlcov/
 .pytest_cache/
 .mypy_cache/
+__pycache__/
+*.pyc
 .venv/
 venv/
 node_modules/
 
-# Big Excel/PDF sample files are not needed at runtime — exclude them.
+# Not runtime: tests, docs, API collections, specs, deploy templates, compose files
+tests/
+docs/
+postman/
+_specs/
+deploy/
+docker-compose*.yml
+*.md
+requirements-dev.txt
+
+# Client data and generated output. Nothing under app/ reads data/ at runtime;
+# the CSV loaders in scripts/ are one-shot and run from a workstation.
+data/
+!data/clean_leather_lots.csv
+var/
 *.xlsx
 *.xls
 *.pdf
+*.dxf
+*.log
+celerybeat-schedule*
 
-# NOTE: we do NOT exclude *.csv, because the seed loader needs
-# data/clean_leather_lots_finalZZ.csv inside the image. If you have other large
-# throwaway CSVs, exclude them individually instead of a blanket *.csv rule, e.g.:
-# some_big_export.csv
+# Per-module source dumps
+app/**/*.txt
+alembic/*.txt
+*.postman_collection.json

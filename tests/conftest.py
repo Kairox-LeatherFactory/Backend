@@ -13,7 +13,9 @@ Money/data-integrity paths get the deepest coverage: the merge gate, cutting
 consumption + stock decrement, skill/sequence gates, and barcode retire-without-
 history-loss.
 
-DB: in-memory SQLite via aiosqlite. GUID() degrades to CHAR(32) off Postgres,
+DB: in-memory SQLite via aiosqlite by default; set TEST_DATABASE_URL to run the
+same fixtures on a throwaway Postgres (see `engine` below — it WIPES that DB).
+GUID() degrades to CHAR(32) off Postgres,
 JSON_VARIANT to plain JSON — both already handled by core/models, so the schema
 creates cleanly. Anything Postgres-only (a real ON CONFLICT, JSONB operators) is
 NOT used by the feature, so SQLite is a faithful stand-in for these tests.
@@ -25,13 +27,15 @@ RUN:
     pytest -k merge_gate -v         # a single concern across layers
 """
 import asyncio
+import os
+import re
 import uuid
 from datetime import date, timedelta
 
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool, StaticPool
 
 # Import Base + every model module so metadata is complete before create_all.
 from app.core.database import Base
@@ -60,9 +64,10 @@ import app.modules.bom.models               # noqa: F401
 import app.modules.inventory.models         # noqa: F401
 
 from app.core.enums import (
-    BarcodeStatus, BarcodeType, DrawerState, ProductionStage, UserRole, WageType,
+    StoreState,
+    BarcodeStatus, BarcodeType, ProductionStage, UserRole, WageType,
 )
-from app.modules.barcode.models import BarcodeRegistry, Drawer, MaterialLot, MaterialSupplier
+from app.modules.barcode.models import BarcodeRegistry, MaterialLot, MaterialSupplier
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
 from app.modules.employees.models import Employee
 from app.modules.production.models import Operation, OperationAccess, Piece
@@ -76,24 +81,215 @@ def event_loop():
     loop.close()
 
 
+# ── THE SAME SUITE, ON POSTGRES ──────────────────────────────────────────────
+# Unset (the default): in-memory SQLite, a fresh schema per test, as always.
+# Set TEST_DATABASE_URL=postgresql+asyncpg://... to run against a real server.
+# SQLite silently passes what Postgres enforces — the native `user_role` enum,
+# FK delete rules (SQLite ignores FKs), SELECT ... FOR UPDATE (a no-op there),
+# timezone-aware comparisons — and the CI postgres job exists to catch those.
+#
+# THE DATABASE IS WIPED. The schema is dropped and rebuilt once per run, so point
+# this at a throwaway database, NEVER at one holding data. The guard below
+# refuses an obviously-live URL.
+#
+# ISOLATION: REAL COMMITS, THEN A FAST WIPE. Each commit stays a real
+# transaction, as in production. Wrapping the test in one outer transaction and
+# rolling back was tried and rejected: inside one transaction Postgres's now()
+# is frozen, every created_at ties, and anything ordered by time (a piece's
+# history) comes back in arbitrary order — a failure production cannot have.
+# TRUNCATE of ~100 tables costs ~1s per test (25 min for tests/integration), so
+# the wipe is DELETE with FK triggers suspended (session_replication_role, which
+# needs a superuser — CI's postgres service is one); TRUNCATE is the fallback.
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "").strip()
+_pg_schema_built = False
+_pg_fast_wipe = True
+
+
+def pytest_collection_modifyitems(config, items):
+    """`sqlite_only` tests forge a dangling foreign key to prove a read degrades
+    gracefully. Postgres refuses to store that row, so on Postgres the state the
+    test needs cannot exist — skip it rather than report a false failure."""
+    if not TEST_DATABASE_URL:
+        return
+    skip = pytest.mark.skip(reason="forges a dangling FK that Postgres refuses")
+    for item in items:
+        if "sqlite_only" in item.keywords:
+            item.add_marker(skip)
+
+
+def _assert_throwaway(url: str) -> None:
+    lowered = url.lower()
+    if any(h in lowered for h in ("supabase", "rds.amazonaws", "pooler")):
+        raise RuntimeError(
+            "TEST_DATABASE_URL points at a hosted database. The test harness "
+            "drops and truncates every table — use a local throwaway database.")
+
+
+async def _reset_postgres(eng) -> None:
+    """First test of the run: rebuild the schema. Every later test: wipe rows.
+
+    DROP SCHEMA, not drop_all: drop_all walks FK order and trips on the
+    use_alter cycles; a schema drop also clears native enum types."""
+    global _pg_schema_built, _pg_fast_wipe
+    if not _pg_schema_built:
+        async with eng.begin() as conn:
+            await conn.exec_driver_sql("DROP SCHEMA IF EXISTS public CASCADE")
+            await conn.exec_driver_sql("CREATE SCHEMA public")
+            await conn.run_sync(Base.metadata.create_all)
+        _pg_schema_built = True
+        return
+
+    if not _pg_dirty:
+        return
+    from sqlalchemy.exc import DBAPIError
+    quote = eng.dialect.identifier_preparer.quote
+    tables = [quote(t) for t in sorted(_pg_dirty)]
+    _pg_dirty.clear()
+    if _pg_fast_wipe:
+        try:
+            # ONE statement: asyncpg prepares what it sends, and a prepared
+            # statement cannot hold several commands — a DO block is one.
+            async with eng.begin() as conn:
+                await conn.exec_driver_sql(
+                    "DO $wipe$ BEGIN "
+                    "PERFORM set_config('session_replication_role', 'replica', true); "
+                    + " ".join(f"DELETE FROM {t};" for t in tables)
+                    + " END $wipe$")
+            return
+        except DBAPIError:          # not a superuser: fall back, once
+            _pg_fast_wipe = False
+    async with eng.begin() as conn:
+        await conn.exec_driver_sql(
+            f"TRUNCATE {', '.join(tables)} RESTART IDENTITY CASCADE")
+
+
+# Tables written since the last wipe. Filled by an engine hook (below), so it
+# sees ORM flushes, core inserts and the actor-user bridge alike; a test that
+# touches 10 of the ~75 tables pays for 10.
+_pg_dirty: set[str] = set()
+_INSERT_TABLE = re.compile(r'^\s*INSERT\s+INTO\s+"?(\w+)"?', re.IGNORECASE)
+
+
+def _seen_insert(_conn, _cursor, statement, *_args):
+    m = _INSERT_TABLE.match(statement)
+    if m:
+        _pg_dirty.add(m.group(1))
+
+
+def _track_inserts(eng) -> None:
+    from sqlalchemy import event
+    event.listen(eng.sync_engine, "before_cursor_execute", _seen_insert)
+
+
+def _track_app_engines() -> None:
+    """The breakdown release path writes through the APP's own sync
+    `SessionLocal`, not the test session. In the CI postgres job DATABASE_URL
+    is the same database, so those rows need wiping too."""
+    from sqlalchemy import event
+    from app.core import database as appdb
+    for eng in (appdb.engine, appdb.async_engine.sync_engine,
+                appdb.celery_async_engine.sync_engine):
+        if not event.contains(eng, "before_cursor_execute", _seen_insert):
+            event.listen(eng, "before_cursor_execute", _seen_insert)
+
+
+if TEST_DATABASE_URL:
+    _track_app_engines()
+
+
 @pytest_asyncio.fixture
 async def engine():
-    eng = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    if TEST_DATABASE_URL:
+        _assert_throwaway(TEST_DATABASE_URL)
+        # NullPool: pytest-asyncio gives each test its own event loop, and an
+        # asyncpg connection pooled on one loop cannot be used from the next.
+        eng = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool)
+        await _reset_postgres(eng)
+        _track_inserts(eng)
+    else:
+        eng = create_async_engine(
+            "sqlite+aiosqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        async with eng.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
     yield eng
     await eng.dispose()
 
 
 @pytest_asyncio.fixture
 async def db(engine) -> AsyncSession:
-    Session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    """A session configured EXACTLY like the live one — see core/database.py.
+
+    `autoflush=False` IS NOT A PREFERENCE, IT IS THE PRODUCTION SETTING, and leaving
+    it at SQLAlchemy's default of True made this harness unable to see a whole class
+    of bug. Service code that adds a row without committing and then SELECTs it back
+    works under autoflush and fails in production; two such bugs shipped green
+    (the store's multi-accessory scan, and the accessory catalogue's
+    auto-registration) while the suite reported 3,032 passing.
+
+    WHAT THIS MEANS WHEN A TEST FAILS ON IT. Either a fixture adds rows and queries
+    them without flushing — add `await db.flush()` — or service code reads back its
+    own unflushed write, which is a real bug and belongs in the service, not papered
+    over in the test.
+    """
+    Session = async_sessionmaker(engine, autoflush=False,
+                                expire_on_commit=False, class_=AsyncSession)
     async with Session() as session:
+        if TEST_DATABASE_URL:
+            _provision_actor_users(session)
         yield session
+
+
+# ── ON POSTGRES, AN ACTOR ID IS A LOGGED-IN USER ─────────────────────────────
+# Tests name the actor with a FakeUser or a bare uuid4() — fine on SQLite, which
+# never checks a foreign key, and a ForeignKeyViolation on Postgres for every
+# audit_log / created_by / received_by row. In production the actor IS always a
+# real app_user (the JWT dependency loads it), so the faithful harness is: any
+# id written into a column that REFERENCES app_user gets that user created just
+# before the flush. Only app_user FKs are bridged — every other foreign key
+# stays fully enforced, which is the point of running on Postgres at all.
+def _actor_fk_columns() -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for table in Base.metadata.sorted_tables:
+        for fk in table.foreign_keys:
+            if fk.column.table.name == "app_user" and table.name != "app_user":
+                out.setdefault(table.name, []).append(fk.parent.name)
+    return out
+
+
+def _provision_actor_users(session: AsyncSession) -> None:
+    from sqlalchemy import event, select
+    from app.modules.users.models import User
+
+    columns = _actor_fk_columns()
+    known: set = set()
+
+    @event.listens_for(session.sync_session, "before_flush")
+    def _before_flush(sess, _ctx, _instances):
+        wanted = set()
+        for obj in list(sess.new) + list(sess.dirty):
+            table = getattr(obj, "__table__", None)
+            if table is None or isinstance(obj, User):
+                continue
+            for col in columns.get(table.name, ()):
+                attr = obj.__mapper__.get_property_by_column(table.c[col]).key
+                value = getattr(obj, attr, None)
+                if value is not None and value not in known:
+                    wanted.add(value)
+        if not wanted:
+            return
+        conn = sess.connection()
+        present = set(conn.execute(
+            select(User.id).where(User.id.in_(wanted))).scalars())
+        for uid in wanted - present:
+            tag = str(uid).replace("-", "")[:12]
+            conn.execute(User.__table__.insert().values(
+                id=uid, name=f"TEST ACTOR {tag}", phone=f"T{tag}",
+                email=None, password_hash="!", role=UserRole.DIRECT_MANAGER,
+                is_active=True, must_change_password=False))
+        known.update(wanted)
 
 
 # ── canonical operations (the pipeline) ──────────────────────────────────────
@@ -180,7 +376,7 @@ async def _make_employee(db, name, designation, wage_type=WageType.PIECE_RATE,
 
 
 # ── put a piece in the state the STORE actually accepts ──────────────────────
-# The store is the merge point of the two cut paths, and DrawerService now
+# The store is the merge point of the two cut paths, and StoreService now
 # enforces that at the WRITE (core/store_display.STORE_ENTRY_STAGE):
 #
 #     leather may enter a drawer only after PASTING
@@ -203,7 +399,7 @@ async def _log_stage(db, operations, piece, employee_id, code):
 
 async def _ready_for_store(db, operations, piece, employee_id, *,
                            leather=True, lining=True):
-    """Log the cut-side stages that let `piece` be scanned into its drawer.
+    """Log the cut-side stages that let `piece` be scanned into the store.
 
     leather=True  → LEATHER_CUTTING, FUSING, PASTING (the whole leather side, so
                     the piece's history is realistic and not just the one stage
@@ -232,16 +428,56 @@ async def ready_for_store(db, operations, cutter):
 
 
 @pytest_asyncio.fixture
+async def in_store(db, operations, cutter):
+    """`await in_store(piece)` → both parts scanned in, garment complete.
+
+    The store replaced the drawer, so the prerequisite for a merge-gate test is
+    no longer "put it in a box" but "scan its parts in". This runs the real
+    StoreService so the test exercises the same path the floor does.
+    """
+    from app.modules.store.service import StoreService
+
+    async def _f(piece, *, leather=True, lining=True):
+        svc = StoreService(db)
+        await _ready_for_store(db, operations, piece, cutter[0].id,
+                               leather=leather, lining=lining)
+        from app.core.enums import StorePart
+        if leather:
+            await svc.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                                 part=StorePart.LEATHER.value)
+        if lining:
+            await svc.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                                 part=StorePart.LINING.value)
+        await db.refresh(piece)
+        return piece
+    return _f
+
+
+@pytest_asyncio.fixture
+async def sent_from_store(db, in_store, dm):
+    """`await sent_from_store(piece)` → complete AND released, so the merge gate
+    is open. Completeness and release are different things; this does both."""
+    from app.modules.store.service import StoreService
+
+    async def _f(piece):
+        await in_store(piece)
+        await StoreService(db).send(piece_ids=[piece.id], actor_user_id=dm.id)
+        await db.refresh(piece)
+        return piece
+    return _f
+
+
+@pytest_asyncio.fixture
 async def cut_pieces(db, operations, cutter, pieces):
     """`pieces`, but every one of them already through BOTH cut paths.
 
     The drawer/store tests are asserting what a drawer does with parts that
     arrive; they are not asserting how a piece gets to the store. This is that
     prerequisite as a fixture, so those tests read `cut_pieces` and stay about
-    drawers. Tests that are specifically probing the store-entry gate should take
+    the store. Tests that are specifically probing the store-entry gate should take
     `pieces` + `ready_for_store` instead and control each side themselves.
     """
-    for piece, _drawer in pieces:
+    for piece in pieces:
         await _ready_for_store(db, operations, piece, cutter[0].id)
     return pieces
 
@@ -319,34 +555,32 @@ def stitching_mgr():
 # ── helper: mint pieces the way premint does (for tests that need pieces) ────
 @pytest_asyncio.fixture
 async def pieces(db, order_tree):
-    """5 pieces of the SKU, each merged to a drawer, needs_lining=True — the
-    state after breakdown upload, before any cutting."""
+    """5 pieces of the SKU, needs_lining=True — the state after breakdown upload.
+
+    A LIST OF PIECES, not a list of (piece, drawer) tuples. The fixture used to
+    mint a vestigial drawer per piece purely to keep that tuple shape alive for
+    the call sites that unpacked it; the drawer module is gone, so the scaffolding
+    went with it. A freshly minted piece is WAITING — not in the store yet —
+    which is exactly what premint writes.
+    """
     sku = order_tree["sku"]
     out = []
     for seq in range(1, 6):
-        drawer = Drawer(code=f"DRW-{seq:04d}", seq=seq, state=DrawerState.MERGED.value)
-        db.add(drawer)
-        await db.flush()
         p = Piece(code=f"JP-CLERMONT-PINE-M-{seq:03d}", seq=seq, sku_id=sku.id,
                   current_operation_id=None)
         if hasattr(p, "needs_lining"):
             p.needs_lining = True
-        if hasattr(p, "drawer_id"):
-            p.drawer_id = drawer.id
+        if hasattr(p, "store_state"):
+            p.store_state = StoreState.WAITING.value
         db.add(p)
         await db.flush()
-        drawer.current_piece_id = p.id
         db.add(BarcodeRegistry(code=p.code, type=BarcodeType.PIECE.value,
                                status=BarcodeStatus.ACTIVE.value, piece_id=p.id,
                                caption=p.code))
-        db.add(BarcodeRegistry(code=drawer.code, type=BarcodeType.DRAWER.value,
-                               status=BarcodeStatus.ACTIVE.value, drawer_id=drawer.id,
-                               caption=drawer.code))
-        out.append((p, drawer))
+        out.append(p)
     await db.commit()
-    for p, d in out:
+    for p in out:
         await db.refresh(p)
-        await db.refresh(d)
     return out
 
 
@@ -496,3 +730,154 @@ async def seed_min(db, operations):
         "client": client, "order": order, "style": style, "sku": sku,
         "employee": emp, "operations": operations,
     }
+
+# ══════════════════════════════════════════════════════════════════════════════
+# REAL LOGINS AND REAL TOKENS
+# ══════════════════════════════════════════════════════════════════════════════
+# Most tests here override `get_current_user` (see `as_role`) because they are
+# about AUTHORIZATION, not about signing. A handful are not: they drive
+# /attendance/proxy/* and /employees over HTTP with a real `Authorization: Bearer`
+# header, because the thing under test IS the operator gate as the router sees it.
+#
+# Those tests referenced `client`, `security_user`, `hr_token`, `md_token`,
+# `dm_token`, `employee_token`, `security_token`, `emp_id`, `other_emp_id`,
+# `monthly_emp` and `monthly_card` — none of which existed. Every one of them
+# errored at COLLECTION, so ten tests covering attendance integrity and employee
+# RBAC silently never ran. They are the tests that should have caught the payroll
+# and proxy-attendance holes. Fixtures below; do not let this rot again.
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest_asyncio.fixture
+async def client(db):
+    """Alias of `api_client`.
+
+    Kept as its own name because the HTTP tests in tests/system/ each define a
+    local `client`, and a local fixture shadows this one — so adding it here is
+    additive and changes nothing that already worked.
+    """
+    from httpx import ASGITransport, AsyncClient
+    from app.core.database import get_db
+    from app.main import app
+
+    async def _db():
+        yield db
+
+    app.dependency_overrides[get_db] = _db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+async def _make_login(db, role, name, phone, employee_id=None):
+    """A real app_user row — `get_current_user` does a live lookup and requires
+    is_active, so a signed token alone is not enough."""
+    from app.core.security import get_password_hash
+    from app.modules.users.models import User
+
+    user = User(name=name, phone=phone, email=f"{phone}@test.local",
+                password_hash=get_password_hash("test-password-123"),
+                role=role, is_active=True, must_change_password=False,
+                employee_id=employee_id)
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+def _token_for(user):
+    from app.core.security import create_access_token
+    return create_access_token(user_id=user.id, role=user.role, name=user.name)
+
+
+async def _make_worker(db, name, wage_type, designation="CUTTER"):
+    from app.core.enums import WageType
+    from app.modules.employees.models import Employee
+
+    emp = Employee(name=name, designation=designation,
+                   wage_type=wage_type, monthly_salary=0, is_active=True)
+    db.add(emp)
+    await db.commit()
+    await db.refresh(emp)
+    return emp
+
+
+# ── operator logins (the four roles that may record attendance) ──────────────
+@pytest_asyncio.fixture
+async def security_user(db):
+    return await _make_login(db, UserRole.SECURITY, "GATE ONE", "9700000001")
+
+
+@pytest_asyncio.fixture
+async def hr_token(db):
+    return _token_for(await _make_login(db, UserRole.HR, "HR ONE", "9700000002"))
+
+
+@pytest_asyncio.fixture
+async def md_token(db):
+    return _token_for(
+        await _make_login(db, UserRole.MANAGING_DIRECTOR, "MD ONE", "9700000003"))
+
+
+@pytest_asyncio.fixture
+async def dm_token(db):
+    return _token_for(
+        await _make_login(db, UserRole.DIRECT_MANAGER, "DM ONE", "9700000004"))
+
+
+@pytest_asyncio.fixture
+async def security_token(security_user):
+    return _token_for(security_user)
+
+
+@pytest_asyncio.fixture
+async def cutting_mgr_token(db):
+    return _token_for(
+        await _make_login(db, UserRole.CUTTING_MANAGER, "CUT ONE", "9700000005"))
+
+
+@pytest_asyncio.fixture
+async def employee_token(db):
+    """A LEGACY `employee` login.
+
+    Workers get no login (CLAUDE.md s3), so this role is never minted any more —
+    but `app_user.role` is a native PG enum and pre-change rows may still carry
+    it, which is exactly what `block_employees` still guards. This fixture exists
+    to prove that guard, so it deliberately mints the role nothing else mints.
+    """
+    return _token_for(
+        await _make_login(db, UserRole.EMPLOYEE, "LEGACY ONE", "9700000006"))
+
+
+# ── workers being recorded (no logins — they are scanned, not users) ─────────
+@pytest_asyncio.fixture
+async def monthly_emp(db):
+    from app.core.enums import WageType
+    return await _make_worker(db, "MONTHLY WORKER", WageType.MONTHLY, "TAILOR")
+
+
+@pytest_asyncio.fixture
+async def monthly_card(db, monthly_emp):
+    """The monthly worker's employee barcode — how the gate identifies them."""
+    from app.core.enums import BarcodeType
+    from app.modules.barcode.models import BarcodeRegistry
+
+    card = BarcodeRegistry(code=f"EMP-{str(monthly_emp.id)[:8].upper()}",
+                           type=BarcodeType.EMPLOYEE, status="ACTIVE",
+                           employee_id=monthly_emp.id)
+    db.add(card)
+    await db.commit()
+    await db.refresh(card)
+    return card
+
+
+@pytest_asyncio.fixture
+async def emp_id(db):
+    from app.core.enums import WageType
+    return (await _make_worker(db, "PIECE WORKER A", WageType.PIECE_RATE)).id
+
+
+@pytest_asyncio.fixture
+async def other_emp_id(db):
+    from app.core.enums import WageType
+    return (await _make_worker(db, "PIECE WORKER B", WageType.PIECE_RATE)).id

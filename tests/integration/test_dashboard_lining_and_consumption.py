@@ -22,10 +22,10 @@ import datetime
 
 import pytest
 
-from app.core.enums import ScreenContext
+from app.core.enums import ScreenContext, StoreState
 from app.modules.clients.models import SKU, Client, ClientOrder, Style
 from app.modules.dashboard.service import DashboardService
-from app.modules.drawers.service import DrawerService
+from app.modules.store.service import StoreService
 from app.modules.production.service import ProductionService
 
 pytestmark = pytest.mark.integrity
@@ -91,7 +91,7 @@ async def test_a_stale_needs_lining_flag_announces_itself(db, pieces):
     exactly the live situation.
     """
     svc = DashboardService(db)
-    for piece, _ in pieces:
+    for piece in pieces:
         piece.needs_lining = False
     await db.commit()
 
@@ -102,7 +102,7 @@ async def test_a_stale_needs_lining_flag_announces_itself(db, pieces):
 
     # Give the SKU an explicit knit colour — a signal premint would act on today,
     # but which cannot retro-flag pieces already minted.
-    sku_id = pieces[0][0].sku_id
+    sku_id = pieces[0].sku_id
     sku = await db.get(SKU, sku_id)
     sku.knit_color = "ECRU"
     await db.commit()
@@ -126,7 +126,7 @@ async def test_the_derived_count_follows_the_style_name_markers(db, pieces, orde
 
     style = order_tree["style"]
     style.name = f"CLERMONT {LINING_NAME_MARKERS[0]}"      # e.g. "CLERMONT KNIT"
-    for piece, _ in pieces:
+    for piece in pieces:
         piece.needs_lining = False
     await db.commit()
 
@@ -144,7 +144,7 @@ async def test_the_cutting_grid_never_shows_lining_cuts(
     """THE REGRESSION. Both a leather cut and a lining cut exist; each grid must
     show only its own."""
     svc = ProductionService(db)
-    a, b = pieces[0][0], pieces[1][0]
+    a, b = pieces[0], pieces[1]
     await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
                         piece_ids=[a.id], work_date=TODAY,
                         screen=ScreenContext.LEATHER_CUT,
@@ -175,7 +175,7 @@ async def test_the_stage_parameter_selects_the_matching_lot_column(
     column — stage and lot are one choice, not two."""
     await ProductionService(db).log_batch(
         user=lining_mgr, employee_id=lining_cutter[0].id,
-        piece_ids=[pieces[0][0].id], work_date=TODAY,
+        piece_ids=[pieces[0].id], work_date=TODAY,
         screen=ScreenContext.LINING_CUT,
         lining_lot_id=leather_lot.id, consumption_qty=6.0)
 
@@ -197,7 +197,7 @@ async def test_an_unmeasured_lining_cut_is_hidden_by_default_and_findable_on_req
     but it must be reachable, or the work looks like it never happened."""
     await ProductionService(db).log_batch(
         user=lining_mgr, employee_id=lining_cutter[0].id,
-        piece_ids=[pieces[0][0].id], work_date=TODAY,
+        piece_ids=[pieces[0].id], work_date=TODAY,
         screen=ScreenContext.LINING_CUT)          # no consumption at all
 
     dash = DashboardService(db)
@@ -226,11 +226,11 @@ async def test_per_lot_totals_only_count_their_own_cut_stage(
     stages pointing at the same lot is the case that exposes it."""
     svc = ProductionService(db)
     await svc.log_batch(user=cutting_mgr, employee_id=cutter[0].id,
-                        piece_ids=[pieces[0][0].id], work_date=TODAY,
+                        piece_ids=[pieces[0].id], work_date=TODAY,
                         screen=ScreenContext.LEATHER_CUT,
                         leather_lot_id=leather_lot.id, consumption_qty=10.0)
     await svc.log_batch(user=lining_mgr, employee_id=lining_cutter[0].id,
-                        piece_ids=[pieces[1][0].id], work_date=TODAY,
+                        piece_ids=[pieces[1].id], work_date=TODAY,
                         screen=ScreenContext.LINING_CUT,
                         lining_lot_id=leather_lot.id, consumption_qty=3.0)
 
@@ -242,10 +242,10 @@ async def test_per_lot_totals_only_count_their_own_cut_stage(
 
 # ══════════════════════════════════════════════ #5 — shared piece tracking
 @pytest.mark.asyncio
-async def test_the_piece_trace_carries_consumption_and_the_drawer(
+async def test_the_piece_trace_carries_consumption_and_the_store_standing(
     db, operations, pieces, cutter, cutting_mgr, leather_lot, ready_for_store
 ):
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     await ProductionService(db).log_batch(
         user=cutting_mgr, employee_id=cutter[0].id, piece_ids=[piece.id],
         work_date=TODAY, screen=ScreenContext.LEATHER_CUT,
@@ -253,16 +253,19 @@ async def test_the_piece_trace_carries_consumption_and_the_drawer(
     # Leather side only: the trace below asserts HOLDING LEATHER, and a cut
     # lining would both open the other bucket and make it the inferred one.
     await ready_for_store(piece, lining=False)
-    await DrawerService(db).store_scan(drawer_id=drawer.id, piece_id=piece.id)
+    await StoreService(db).store_scan(piece_id=piece.id,
+                                      employee_id=cutter[0].id)
 
     t = await DashboardService(db).piece_trace(piece_code=piece.code)
 
     # identity, matching every other piece payload
     assert t.piece_code == piece.code and t.serial == "001"
     assert t.article == "CL1"
-    # WHERE it is — the code, not just the state
-    assert t.drawer_code == drawer.code
-    assert t.drawer_holding == "HOLDING LEATHER"
+    # WHERE it is. This used to assert a drawer CODE — the box to walk to.
+    # There is no box; what the operator needs is what the store is holding and
+    # what it is still owed, which is what these two now carry.
+    assert t.store_state == StoreState.HOLDING_LEATHER.value
+    assert t.store_holding == "HOLDING LEATHER"
     # WHAT it consumed — the field the cutting and lining screens exist for
     cut_row = next(h for h in t.history if h.stage == "LEATHER_CUTTING")
     assert cut_row.consumption == pytest.approx(12.5)
@@ -275,7 +278,7 @@ async def test_an_unmeasured_cut_still_appears_in_the_piece_story(
     db, operations, pieces, lining_cutter, lining_mgr
 ):
     """A piece's own history must never omit work that happened."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     await ProductionService(db).log_batch(
         user=lining_mgr, employee_id=lining_cutter[0].id, piece_ids=[piece.id],
         work_date=TODAY, screen=ScreenContext.LINING_CUT)

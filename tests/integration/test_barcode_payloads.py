@@ -29,10 +29,13 @@ pytestmark = pytest.mark.integrity
 async def test_piece_payload_carries_the_whole_traveler_card(
     db, pieces, operations, cutter, leather_lot
 ):
-    """Piece → order/style/colour/size/seq + stage + drawer + consumption. The
-    drawer and the consumption are LEFT joins: null before merge / before cutting
-    is a normal state, never an error."""
-    p, drawer = pieces[0]
+    """Piece → order/style/colour/size/seq + stage + store + consumption.
+
+    The consumption is a LEFT join: null before cutting is a normal state, never
+    an error. The STORE block used to be one too — a join to the box claiming the
+    piece — and so was null for any garment no box was claiming. It is columns on
+    the piece now, so it is always there."""
+    p = pieces[0]
     out = await BarcodeService(db).resolve(p.code)
     assert out["type"].upper() == "PIECE"
 
@@ -47,7 +50,8 @@ async def test_piece_payload_carries_the_whole_traveler_card(
     assert pl["order_number"] == "JP-PO"
     assert pl["client"] == "John Peter"
     assert pl["current_stage"] is None          # not yet logged at any stage
-    assert pl["drawer_code"] == drawer.code
+    assert pl["store_state"] == p.store_state
+    assert pl["store"]["leather_in"] is False
     assert pl["leather_consumption_dcm"] is None
     assert pl["needs_lining"] is True
 
@@ -64,14 +68,21 @@ async def test_piece_payload_carries_the_whole_traveler_card(
 
 
 @pytest.mark.asyncio
-async def test_drawer_payload_reports_state_and_contents(db, pieces):
-    p, drawer = pieces[2]
-    d = (await BarcodeService(db).resolve(drawer.code))["drawer"]
-    assert d["drawer_code"] == drawer.code
-    assert d["seq"] == 3
-    assert d["state"].upper() == "MERGED"
-    assert d["current_piece_id"] == str(p.id)
-    assert d["leather_in"] is False and d["lining_in"] is False
+async def test_the_store_block_reports_state_and_contents(db, pieces):
+    """WAS `test_drawer_payload_reports_state_and_contents`, which resolved a
+    DRW- label and read the box's state, contents and the piece it held.
+
+    There is no drawer label. The same four facts — where it stands, what it
+    holds, and which garment they are about — hang off the PIECE code, which is
+    the thing an operator physically has in their hand.
+    """
+    p = pieces[2]
+    out = (await BarcodeService(db).resolve(p.code))["piece"]
+    assert out["piece_id"] == str(p.id)
+    assert out["store"]["state"].upper() == p.store_state.upper()
+    assert out["store"]["leather_in"] is False
+    assert out["store"]["lining_in"] is False
+    assert out["store"]["holding"] is not None
 
 
 @pytest.mark.asyncio
@@ -100,7 +111,7 @@ async def test_lot_payload_available_is_on_hand_minus_active_reservations(
 @pytest.mark.asyncio
 async def test_detail_print_and_order_helpers(db, pieces, order_tree):
     svc = BarcodeService(db)
-    p, _ = pieces[0]
+    p = pieces[0]
 
     # /detail returns the same payload as /resolve
     assert (await svc.barcode_detail(p.code))["piece"]["code"] == p.code

@@ -15,12 +15,22 @@ class BarcodeResolve(BaseModel):
     caption: str | None = None
     piece: dict | None = None
     employee: dict | None = None
-    drawer: dict | None = None
     lot: dict | None = None
+    # ONE HIDE, when a LEATHER_SHEET label is scanned. Declared explicitly
+    # because this model is a response_model: FastAPI SERIALISES THROUGH IT and
+    # silently drops any key it does not name. The service returned `sheet`
+    # correctly and the operator still saw nothing — a scan that answered "552
+    # dcm of SUEDE-A32" (true of the LOT) and said nothing about the skin in
+    # their hand. A missing field here is invisible at the service layer and only
+    # shows up through the HTTP door, which is why this model gets an entry for
+    # every block resolve() can return.
+    sheet: dict | None = None
     # True when this is a legacy long piece code kept scannable after the
     # compact-code switch (bug #19) — the scan works, the label wants reprinting.
     is_alias: bool = False
-    # "PIECE" / "DRAWER" / null — which code to present next. Answered for EVERY
+    # "PIECE" / null — which code to present next. There is no third code: the
+    # store scan is the worker and the garment, so a PIECE is the END of the
+    # scan rather than the middle of it. Answered for EVERY
     # barcode type, including EMPLOYEE (the first scan of every workflow, which
     # used to come back null). Guidance; store_scan remains the authority.
     next_expected_scan: str | None = None
@@ -29,7 +39,8 @@ class BarcodeResolve(BaseModel):
     # finished the chain, or for a code that names no piece.
     next_stage: str | None = None
     next_stage_label: str | None = None
-    # Set when that stage cannot be logged yet — e.g. the drawer has not been sent.
+    # Set when that stage cannot be logged yet — e.g. the garment has not been
+    # released from the store.
     # The stage is still reported: the screen shows where the piece is going AND
     # what is holding it there.
     next_stage_blocked_reason: str | None = None
@@ -54,7 +65,7 @@ class PrintLabel(BaseModel):
     caption: str
     known: bool
     # {order_number, article, style, colour, size, serial, piece_code}. Null for
-    # non-piece labels (drawer / employee / lot), which name no garment.
+    # non-piece labels (employee / lot / hide), which name no garment.
     details: dict | None = None
     label_line: str | None = None   # the same fields pre-joined, ready to typeset
 
@@ -144,3 +155,38 @@ class OrderSkuOption(BaseModel):
     size: str | None = None
     style_id: uuid.UUID
     style_name: str | None = None
+
+class MaterialBarcodeRow(BaseModel):
+    """One material label on the reprint screen — a LOT or a single HIDE.
+
+    `code` is encoded as Code128; `label_line` is typeset underneath as text —
+    the same convention as POST /barcode/print. A row whose `status` is retired
+    belongs to a retired lot or hide: show it greyed, do not print it.
+
+    BRANCH ON `kind`, NOT ON `type`. "LOT" carries the lot's running `on_hand`
+    and is the sticker for the shelf; "SHEET" carries that one skin's `dcm` and
+    is the sticker for the hide. They are the same screen because they are
+    printed in the same breath — a delivery of four hides needs one lot label
+    and four hide labels — but they say different things and the layout differs.
+    """
+    kind: str = "LOT"
+    code: str
+    type: str
+    status: str
+    caption: str | None = None
+    lot_id: uuid.UUID | None = None
+    category: str | None = None
+    subtype: str | None = None
+    article: str | None = None
+    colour: str | None = None
+    thickness: str | None = None
+    size: str | None = None
+    uom: str | None = None
+    on_hand: float = 0.0
+    # SHEET rows only — null on a LOT row, because a lot has no single
+    # measurement and no cutting row of its own.
+    sheet_id: uuid.UUID | None = None
+    dcm: float | None = None
+    sheet_status: str | None = None
+    cutting_row_id: uuid.UUID | None = None
+    label_line: str | None = None

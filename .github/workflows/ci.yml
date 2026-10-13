@@ -1,16 +1,202 @@
 name: CI
-on: [push, pull_request]
+# `on: [push, pull_request]` ran every job twice for a PR's own pushes. Push
+# builds the long-lived branches; pull_request covers everything else.
+on:
+  push:
+    branches: [main, Hamthan-Dev]
+  pull_request:
+
+# A newer push to the same branch makes the running build obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# PYTHON MUST MATCH THE DOCKERFILE (`FROM python:3.13-slim`). CI used to test on
+# 3.12 and ship 3.13 — green here proved nothing about the image.
+env:
+  PYTHON_VERSION: "3.13"
+
 jobs:
+  # ── The fast job: logic, boundaries and the published contract ────────────
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: pip install -r requirements.txt pytest import-linter
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+
       - name: Enforce module boundaries
         env: { DATABASE_URL: "sqlite://" }
         run: lint-imports
-      - name: Run tests
+
+      # COVERAGE IS MEASURED AND GATED, not merely reported.
+      #
+      # The floor lives in .coveragerc (fail_under), set just under the measured
+      # baseline so it ratchets: it cannot be regressed past, and it is raised
+      # deliberately as tests land. It is NOT 100 on purpose — a line-coverage
+      # target is satisfied by executing a line, not by asserting anything about
+      # it, so at 100 the cheapest way to go green is assertion-free tests. The
+      # reasoning is written out in .coveragerc.
+      #
+      # Scope is the 15 Phase-1 modules plus core and main. bom, procurement,
+      # supplier_po, inventory and intelligence are excluded from the
+      # denominator — included, ~18k untested lines swamp the figure and a real
+      # improvement in the code we own barely moves it.
+      - name: Run tests with coverage
         env: { DATABASE_URL: "sqlite://" }
-        run: pytest -q
+        run: pytest -q --cov --cov-report=term-missing --cov-report=html
+
+      - uses: actions/upload-artifact@v4
+        if: always()          # the report is most useful when the gate FAILED
+        with:
+          name: coverage-html
+          path: htmlcov/
+          retention-days: 30
+
+      # PUBLISH THE SPEC AS A BUILD ARTIFACT.
+      #
+      # openapi.json is in .gitignore, so it is NOT a committed contract — the
+      # copy sitting in a developer's working tree is whatever they last
+      # generated, and the one found during this audit was 36 operations behind
+      # the running app. Nothing regenerates it on a schedule, so "the spec" is
+      # only ever as fresh as someone's memory.
+      #
+      # Diffing it against a committed copy is therefore not an option. What IS
+      # possible, and is what the frontend actually needs, is a spec built from
+      # THIS commit on every push, downloadable from the run. Generating it also
+      # catches the schema errors that only appear at build time — a duplicate
+      # operation id, a response model that will not serialise — which is why
+      # this runs even though nothing is compared.
+      #
+      # If the frontend would rather consume it from the repo than from a CI
+      # artifact, remove openapi.json from .gitignore and add a diff step here.
+      - name: Build the OpenAPI spec
+        env:
+          DATABASE_URL: "sqlite+pysqlite:///:memory:"
+          SECRET_KEY: "ci-openapi-export-only-not-a-real-signing-key"
+        run: |
+          python -m scripts.export_openapi
+          python - <<'PY'
+          import json
+          spec = json.load(open("openapi.json"))
+          ops = sum(1 for p, v in spec["paths"].items()
+                    for m in v if m in ("get","post","put","patch","delete"))
+          print(f"{len(spec['paths'])} paths, {ops} operations")
+          assert ops > 0, "the spec built with no operations"
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openapi-spec
+          path: openapi.json
+          retention-days: 30
+
+  # ── The slow job: everything SQLite cannot tell us ────────────────────────
+  #
+  # CLAUDE.md s14 asks for this and s13 says why. SQLite silently hides:
+  #   - the native PG enum (`user_role`), where adding the lowercase VALUE
+  #     instead of the uppercase member NAME produces a label the ORM never
+  #     emits and a role that stays unusable
+  #   - foreign-key delete rules (SQLite ignores FKs unless PRAGMA is on)
+  #   - row locks — every SELECT ... FOR UPDATE in this codebase is a no-op on
+  #     SQLite, so the concurrency protections are untested without this job
+  #   - the migration chain against a real server
+  #
+  # It runs the migration chain, its reversibility, model/migration drift, and
+  # then the integration + functional layers ON POSTGRES (TEST_DATABASE_URL —
+  # see the `engine` fixture in tests/conftest.py). The first such run found 165
+  # tests that only passed because SQLite never checks a foreign key.
+  # Not covered yet: two-connection row-lock races — every test uses one session.
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17     # match the server production runs
+        env:
+          POSTGRES_USER: factory
+          POSTGRES_PASSWORD: factory
+          POSTGRES_DB: factory
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: "postgresql+psycopg2://factory:factory@localhost:5432/factory"
+      ASYNC_DATABASE_URL: "postgresql+asyncpg://factory:factory@localhost:5432/factory"
+      SECRET_KEY: "ci-postgres-only-not-a-real-signing-key"
+      ENVIRONMENT: "local"
+      DEBUG: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+
+      # The migration chain is the point of this job: it proves the schema can
+      # actually be built from empty, on the engine production runs on.
+      - name: Run migrations from empty
+        run: alembic upgrade head
+
+      # MODELS AND MIGRATIONS MUST AGREE. A model change with no revision
+      # passes every SQLite test (they build from create_all) and then fails in
+      # production on the first query that touches the missing column.
+      # `alembic check` exits non-zero if autogenerate would emit anything.
+      - name: No drift between models and migrations
+        run: alembic check
+
+      # And that it is reversible far enough to roll back a bad deploy.
+      - name: Migrations are reversible one step
+        run: |
+          alembic downgrade -1
+          alembic upgrade head
+
+      # MUST STAY LAST IN THIS JOB: the harness drops and rebuilds the schema.
+      # `sqlite_only` tests (they forge a dangling FK Postgres refuses) skip here.
+      - name: Integration + functional tests on Postgres
+        env:
+          TEST_DATABASE_URL: "postgresql+asyncpg://factory:factory@localhost:5432/factory"
+        run: pytest -q tests/integration tests/functional
+
+  # ── The image: what actually ships ─────────────────────────────────────────
+  # Nothing above builds the Dockerfile, so a broken COPY, a package missing
+  # from requirements.txt (but present in requirements-dev.txt), or an import
+  # that only fails on the slim base image was found at deploy time.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: kairox:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image imports, runs as non-root, ships no secrets or test data
+        run: |
+          docker run --rm --entrypoint sh \
+            -e SECRET_KEY=ci-docker-smoke-only-not-a-real-signing-key \
+            -e DATABASE_URL=postgresql+psycopg2://u:p@localhost:5432/x \
+            -e ASYNC_DATABASE_URL=postgresql+asyncpg://u:p@localhost:5432/x \
+            kairox:ci -c '
+              set -e
+              python -c "import app.main, boto3, gunicorn; print(\"imports ok\")"
+              test "$(id -u)" != "0" || { echo "image runs as root"; exit 1; }
+              for p in .env tests docs var postman; do
+                test ! -e "/app/$p" || { echo "/app/$p must not be in the image"; exit 1; }
+              done
+              echo "image ok"'
+          docker image ls kairox:ci --format "image size: {{.Size}}"

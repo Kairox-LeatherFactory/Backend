@@ -26,13 +26,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 import shutil
 import sys
 import uuid
 from pathlib import Path
 
 # ── env MUST be set before importing app.core.config (it caches settings) ─────
-os.environ.setdefault("SECRET_KEY", "demo-secret")
+# A real random key: this was "demo-secret" (11 chars) and config.py requires 32
+# with no environment exempt (F32/H5), so the demo could not boot. An os.environ
+# value beats .env, so the placeholder won even where a good key was configured.
+os.environ.setdefault("SECRET_KEY", secrets.token_urlsafe(48))
 os.environ.setdefault("VIRUS_SCAN_ENABLED", "false")     # no clamd in this demo
 os.environ.setdefault("EMAIL_BACKEND", "noop")
 os.environ.setdefault("NOTIFICATION_SWEEPER_ENABLED", "false")

@@ -18,15 +18,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # System tools the app needs:
 #   gcc + libpq-dev : build psycopg2 (Postgres driver) if no wheel
-#   curl            : used by the HEALTHCHECK
+#   curl            : used by the api HEALTHCHECK (defined per-service in compose)
 #   dos2unix        : normalise entrypoint line endings (Windows-edited files)
 #   tesseract-ocr   : OCR binary for scanned-PDF identity checks
+#   procps          : pgrep — the celery BEAT healthcheck in compose (beat has no
+#                     `inspect ping`, so liveness is "is the process still there")
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc \
         libpq-dev \
         curl \
         dos2unix \
         tesseract-ocr \
+        procps \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -42,11 +45,34 @@ COPY . .
 RUN dos2unix entrypoint.sh 2>/dev/null || true \
     && chmod +x entrypoint.sh
 
+# Celery beat's schedule state ("when did each crontab entry last fire"). compose
+# mounts a named volume here so a restart doesn't re-fire everything beat thinks
+# it missed; this mkdir keeps the `beat` role working even without that volume.
+RUN mkdir -p /app/var/celerybeat /app/var/procurement-documents
+
+# RUN AS A NON-ROOT USER. A root process that is compromised owns the container.
+# --create-home: sentence-transformers / HuggingFace cache models under ~/.cache.
+# /app/var is the only path the app writes to (local storage + beat schedule).
+# NOTE: a named volume created by an OLDER root image keeps root ownership —
+# on an existing server, `docker volume rm` the celerybeat volume once, or chown it.
+RUN useradd --create-home --uid 1000 app \
+    && chown -R app:app /app/var
+USER app
+
+# 8000 only. Flower (5555) is an opt-in compose profile and must never be
+# published in production — it shows every task's arguments, unauthenticated.
 EXPOSE 8000
 
-# The box checks its own health every 30s by hitting /health.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=5 \
-    CMD curl -f http://localhost:8000/health || exit 1
+# UPDATED 2026-09-12 (Hamthan): the image-wide HEALTHCHECK that lived here
+# (curl localhost:8000/health) is GONE. It is baked into every container built
+# from this image, but only the `api` role serves HTTP — so the `worker` and
+# `beat` containers, which are working perfectly, were reported `unhealthy`
+# forever. That is not cosmetic: docker-compose.dev.yml gates the worker on
+# `api: condition: service_healthy`, and anything that later gates on the worker
+# would never start. Health is now declared PER SERVICE in docker-compose.yml:
+#   api    -> curl /health
+#   worker -> celery inspect ping
+#   beat   -> pgrep the beat process
 
 ENTRYPOINT ["./entrypoint.sh"]
 CMD ["api"]

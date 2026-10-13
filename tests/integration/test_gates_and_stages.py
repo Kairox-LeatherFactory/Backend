@@ -164,13 +164,13 @@ async def test_preview_writes_nothing(db, operations, cutting_mgr, cutter, piece
     before = await db.scalar(select(func.count(ProductionEvent.id)))
     res = await ProductionService(db).log_batch(
         user=cutting_mgr, employee_id=cutter[0].id,
-        piece_ids=[pieces[0][0].id], work_date=datetime.date.today(),
+        piece_ids=[pieces[0].id], work_date=datetime.date.today(),
         screen=ScreenContext.LEATHER_CUT, leather_lot_id=leather_lot.id,
         consumption_qty=10.0, preview=True)
     after = await db.scalar(select(func.count(ProductionEvent.id)))
  
     assert res["preview"] is True
-    assert pieces[0][0].code in res["logged"]     # would-be logged
+    assert pieces[0].code in res["logged"]     # would-be logged
     assert before == after                        # NOTHING written
     # material not decremented in preview
     assert res["consumption_recorded"] is None
@@ -184,7 +184,7 @@ async def test_commit_after_preview_writes(db, operations, cutting_mgr, cutter, 
     # commit for real
     res = await ProductionService(db).log_batch(
         user=cutting_mgr, employee_id=cutter[0].id,
-        piece_ids=[pieces[0][0].id], work_date=datetime.date.today(),
+        piece_ids=[pieces[0].id], work_date=datetime.date.today(),
         screen=ScreenContext.LEATHER_CUT, leather_lot_id=leather_lot.id,
         consumption_qty=10.0, preview=False)
     assert res["preview"] is False and res["count_logged"] == 1

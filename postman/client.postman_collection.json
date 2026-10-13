@@ -1,0 +1,359 @@
+{
+  "info": {
+    "name": "KairoX \u00b7 Client",
+    "description": "Buyers, their orders, and the styles under them.\n\nSETUP\n  1. Import the whole folder and SELECT the KairoX environment\n     (top-right). That is what shares one token across every\n     collection \u2014 a collection variable is visible only to the\n     collection that set it.\n  2. Run `user` \u2192 Login. Its test script stores `access_token` for\n     you; there is nothing to copy and paste.\n  3. Every request here inherits bearer auth from that token.\n\n`base_url` defaults to http://127.0.0.1:8000.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. File uploads are real form-data rows \u2014 click Select Files on\nthe `file` row. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Add Order",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/clients/{{client_id}}/orders",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "clients",
+            "{{client_id}}",
+            "orders"
+          ],
+          "variable": [
+            {
+              "key": "client_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Add another order (new unique order_number) to an existing client.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"order_number\": \"\",\n  \"order_date\": \"2026-08-01\",\n  \"delivery_deadline\": \"2026-08-01\",\n  \"sea_cutoff_date\": \"2026-08-01\",\n  \"ship_mode\": \"sea\",\n  \"currency\": \"\",\n  \"agent\": \"\",\n  \"line\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Client Orders",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/clients/{{client_id}}/orders",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "clients",
+            "{{client_id}}",
+            "orders"
+          ],
+          "query": [
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "Rows to return (1-200).",
+              "disabled": false
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
+              "disabled": false
+            }
+          ],
+          "variable": [
+            {
+              "key": "client_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "One client's orders. PAGED \u2014 each row eager-loads its styles and their\nSKUs, so an unpaged call on a long-standing customer pulled their whole\ncatalogue three levels deep."
+      },
+      "response": []
+    },
+    {
+      "name": "Create Client",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/clients",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "clients"
+          ]
+        },
+        "description": "",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"\",\n  \"country\": \"\",\n  \"order_number\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Deletable",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/clients/{{client_id}}/deletable",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "clients",
+            "{{client_id}}",
+            "deletable"
+          ],
+          "variable": [
+            {
+              "key": "client_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "CAN this client be deleted, and if not, what exactly is in the way?\n\nThe same check DELETE runs, without doing anything \u2014 so a screen can grey\nthe button out and say why, instead of offering it and then explaining a\n409. `blockers` is [{table, count, what}]; empty means the delete will go\nthrough."
+      },
+      "response": []
+    },
+    {
+      "name": "Delete Client",
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/clients/{{client_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "clients",
+            "{{client_id}}"
+          ],
+          "variable": [
+            {
+              "key": "client_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Delete a client that has produced NOTHING \u2014 a mistyped or duplicate row.\n\nNEITHER AN ORDER NOR A STYLE IS A REASON TO REFUSE. Creating a client also\ncreates its first order (order_number is required on POST /clients), and a\nbreakdown upload adds styles and SKUs that may never have been made from;\nall of those cascade away with the customer. What refuses the delete is a\nrow recording real WORK \u2014 a minted garment, a logged production event, a\nwage rate or a paid wage line \u2014 and the 409 now names which and how many,\nrather than guessing at \"a style rate, a supplier PO, a cutting entry\".\n\nAsk GET /clients/{id}/deletable first if you want to know before pressing it.\n\nDM only, matching client creation. MD passes as superuser."
+      },
+      "response": []
+    },
+    {
+      "name": "Get Client",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/clients/{{client_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "clients",
+            "{{client_id}}"
+          ],
+          "variable": [
+            {
+              "key": "client_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "One client \u2014 what an edit form loads before it saves.\n\nA CLIENT login may read only itself, matching /{client_id}/orders."
+      },
+      "response": []
+    },
+    {
+      "name": "List Clients",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/clients",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "clients"
+          ],
+          "query": [
+            {
+              "key": "include_inactive",
+              "value": "False",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "Rows to return (1-200).",
+              "disabled": false
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
+              "disabled": false
+            }
+          ]
+        },
+        "description": "H1: a CLIENT login sees only its own row. The sibling endpoints in this\nfile already pin the caller; this one did not, so a customer could read the\nwhole customer list.\n\nDeactivated clients are hidden by default \u2014 that is what deactivation is\nfor. Pass `include_inactive=true` to get them back (an admin screen listing\neveryone, or a lookup by a client who has since been switched off).\n\nPAGED. The CLIENT-role narrowing is now part of the QUERY rather than a\nfilter applied to the result: paging a list and then filtering it would\nreturn one row alongside a `total` that counted every other customer."
+      },
+      "response": []
+    },
+    {
+      "name": "List Styles",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/clients/styles",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "clients",
+            "styles"
+          ],
+          "query": [
+            {
+              "key": "order_number",
+              "value": "",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "client_id",
+              "value": "00000000-0000-0000-0000-000000000000",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "Rows to return (1-200).",
+              "disabled": false
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
+              "disabled": false
+            }
+          ]
+        },
+        "description": ""
+      },
+      "response": []
+    },
+    {
+      "name": "Update Client",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/clients/{{client_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "clients",
+            "{{client_id}}"
+          ],
+          "variable": [
+            {
+              "key": "client_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Edit a client. PARTIAL \u2014 only the fields present in the request body are\nwritten, so a form that posts one field cannot blank the rest.\n\nThis is also the DEACTIVATE door: `{\"is_active\": false}` retires a client\nthat has traded, which is what you want instead of DELETE once they have\norders. `code` is unique across clients; a collision is a 409.\n\nDM only, matching client creation.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"\",\n  \"country\": \"\",\n  \"code\": \"\",\n  \"currency\": \"\",\n  \"default_size_system\": \"\",\n  \"brand\": \"\",\n  \"label\": \"\",\n  \"contact_email\": \"\",\n  \"contact_phone\": \"\",\n  \"address\": \"\",\n  \"is_active\": false\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    }
+  ]
+}

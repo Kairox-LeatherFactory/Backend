@@ -279,11 +279,14 @@ re-assignment. The part (LEATHER / LINING) is **inferred** from the piece's
 history and the drawer's contents — there is no Hold Leather / Hold Lining
 button, because a hand-picked bucket is only ever a chance to pick the wrong one.
 
-**The accessory kit is the third bucket** and is **never inferred** — it is an
-explicit `part: "ACCESSORY"` scan, because a mis-inferred kit would *spend stock*
-nobody asked to spend. Issuing it decrements every accessory lot on the style's
-recipe, writes a ledger row per line, and is **idempotent**: a second tap issues
-nothing.
+**The accessory kit is the third bucket** and is **never inferred** — it is
+scanned **one packet at a time**, by the packet's own `LOT-ACC-…` label, because a
+mis-inferred kit would *spend stock* nobody asked to spend. Each scan decrements
+that one lot, writes its ledger row, and is **idempotent**: a second tap on the same
+packet issues nothing. `part: "ACCESSORY"` with no packet is a 422 — the blanket
+scan it used to mean spent every line from the recipe alone, so an M packet in an L
+jacket could not be detected. A wrong-size packet is **refused** (409) and waits for
+a DM/MD approval.
 
 **Completeness, not sequence**, governs the drawer:
 

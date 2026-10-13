@@ -151,12 +151,16 @@ async def test_stock_aggregates_and_reserves(db):
 # ── FILTER SPEC: the UI hint matches the spec ────────────────────────────────
 @pytest.mark.asyncio
 async def test_filter_fields_per_category(db):
+    # AWAITED: filter_fields is catalogue-backed now, because an accessory KIND is a
+    # row in accessory_type rather than an enum member. With no catalogue rows it
+    # still answers from the built-in MATERIAL_SPEC, which is what these assertions
+    # pin — the fallback is what makes the catalogue safe to deploy unseeded.
     svc = MaterialService(db)
-    assert svc.filter_fields("LEATHER", None)["filters"] == ["article", "colour", "thickness"]
-    assert svc.filter_fields("ACCESSORY", "BUTTON")["filters"] == ["article", "colour", "size"]
-    assert svc.filter_fields("ACCESSORY", "THREAD")["filters"] == ["article", "colour", "thickness"]
-    assert svc.filter_fields("LINING", "RIBS")["filters"] == ["article", "colour"]
-    assert set(svc.filter_fields("ACCESSORY", "BUTTON")["required_to_add"]) == {"size", "count"}
+    assert (await svc.filter_fields("LEATHER", None))["filters"]         == ["article", "colour", "thickness"]
+    assert (await svc.filter_fields("ACCESSORY", "BUTTON"))["filters"]         == ["article", "colour", "size"]
+    assert (await svc.filter_fields("ACCESSORY", "THREAD"))["filters"]         == ["article", "colour", "thickness"]
+    assert (await svc.filter_fields("LINING", "RIBS"))["filters"]         == ["article", "colour"]
+    assert set((await svc.filter_fields("ACCESSORY", "BUTTON"))["required_to_add"])         == {"size", "count"}
     
 @pytest.mark.asyncio
 async def test_order_rejects_supplier_without_article(db, dm):

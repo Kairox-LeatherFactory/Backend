@@ -22,6 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette import status
 
 from app.core.database import get_db
+# ONE SHAPE FOR BOTH DOORS. The store screen and the scan gun answer "what is in
+# this garment" from the same service call, so they must publish the same
+# contract — a second copy here is a second copy to keep in step.
+from app.modules.store.schemas import PieceMaterials as StorePieceMaterials
+from app.core.pagination import Page, PageParams
 from app.core.enums import UserRole
 from app.modules.barcode import schemas
 from app.modules.barcode.service import BarcodeService
@@ -77,38 +82,62 @@ async def employee_barcode_action(
     return await svc.deactivate_employee_barcode(employee_id, actor_id=user.id)
 
 
-@router.get("/materials")
+@router.get("/materials", response_model=Page[schemas.MaterialBarcodeRow])
 async def material_barcodes(
     category: str | None = Query(None, description="LEATHER | LINING | ACCESSORY"),
-    active_only: bool = Query(True, description="Hide retired lot labels."),
+    active_only: bool = Query(True, description="Hide retired labels."),
+    kind: str | None = Query(
+        None, pattern="^(LOT|SHEET|lot|sheet)$",
+        description="LOT = shelf labels only · SHEET = hide labels only · "
+                    "omit for both, each lot followed by its own hides."),
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_SCREEN_READERS),
 ):
-    """THE MATERIAL-BARCODE SCREEN (change-list item 7).
+    """THE MATERIAL-BARCODE SCREEN — lot labels AND hide labels.
 
-    The barcode section had screens for pieces, drawers and employee cards but
+    The barcode section had screens for pieces and employee cards but
     none for material lots — so a lot minted a code at creation and nobody could
     reprint it once the first label was lost or damaged.
 
+    HIDE LABELS ARE HERE TOO. Creating a leather lot with `sheets` mints a
+    LEATHER_SHEET barcode per skin (POST /materials/lots returns them in
+    `sheets`), and this screen used to list only the three LOT types — so those
+    codes existed in the registry and no screen could ever reprint them. Branch
+    on `kind`:
+
+        LOT     one sticker for the shelf: article · colour · thickness · total
+        SHEET   one sticker per skin:      article · colour · that hide's dcm
+
+    A SHEET row carries `sheet_id`, `dcm`, `sheet_status` (IN_STOCK / ALLOCATED
+    / ISSUED / CONSUMED …) and `cutting_row_id`; all four are null on a LOT row.
     Each row carries `code` (encode as Code128) and `label_line` (typeset
     underneath as text), the same convention as POST /barcode/print. A row with
-    `status: retired` belongs to a retired lot: show it greyed, do not print it.
+    `status: retired` belongs to a retired lot or hide: show it greyed, do not
+    print it.
+"""
+    rows, total = await BarcodeService(db).page_lot_barcodes(
+        params, category=category, active_only=active_only, kind=kind)
+    return Page[schemas.MaterialBarcodeRow].of(
+        [schemas.MaterialBarcodeRow.model_validate(r) for r in rows],
+        total=total, params=params)
 
-    NOTE FOR THE UI: the drawer screen's label reads "bucket barcode" and should
-    read "drawer barcode". The backend has only ever called it DRAWER — there is
-    no `bucket` anywhere in the API — so that rename is frontend-only."""
-    return await BarcodeService(db).list_lot_barcodes(
-        category=category, active_only=active_only)
 
-
-@router.get("/orders", response_model=list[schemas.OrderPickerRow])
+@router.get("/orders", response_model=Page[schemas.OrderPickerRow])
 async def list_barcode_orders(
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_SCREEN_READERS),
 ):
     """Orders that have generated barcodes — the picker. Unique per order_number.
-    Shows minted count + generated date range so the user picks the right order."""
-    return await BarcodeService(db).list_orders()
+    Shows minted count + generated date range so the user picks the right order.
+
+    PAGED, newest minting first: this grows by one row per order for the life of
+    the factory."""
+    rows, total = await BarcodeService(db).page_orders(params)
+    return Page[schemas.OrderPickerRow].of(
+        [schemas.OrderPickerRow.model_validate(r) for r in rows],
+        total=total, params=params)
  
 @router.get("/orders/{order_id}/skus", response_model=list[schemas.OrderSkuOption])
 async def list_order_sku_options(
@@ -162,6 +191,37 @@ async def barcode_detail(
     """Full detail for one barcode (click-through from the history list). Same
     rich payload as /resolve, tenancy-scoped for CLIENT logins."""
     return await BarcodeService(db).barcode_detail(code)
+
+@router.get("/pieces/{code}/materials",
+            response_model=StorePieceMaterials)
+async def piece_materials(
+    code: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_SCREEN_READERS),
+):
+    """Scan a garment: WHAT GOES INTO IT, and what does not.
+
+    THE SCAN-GUN DOOR onto the same answer GET /store/pieces/{code}/materials
+    gives, and it is the same service call — so the store screen and the gun
+    cannot disagree about what is in a garment. `/resolve` carries a compact
+    `material_requirement` for the scan toast; this is the full record:
+
+      `applies`        leather, lining and every accessory line that reaches
+                       THIS colourway at THIS size, with issued / outstanding
+      `not_applicable` the style's other lines and why each one is not this
+                       garment's — `other_sku`, `other_size`, `zeroed`
+      `issued`         the ledger: lot, quantity, time, card, MANUAL included
+      `consumed`       the dcm actually recorded at the cut
+
+    Read `not_applicable` when a kit scan reports nothing to issue while the
+    style's `/material-spec/requirement` shows a full recipe — that view is
+    style-wide, a kit is per garment.
+    """
+    from app.modules.materials.style_spec_service import StyleSpecService
+    svc = BarcodeService(db)
+    piece_id = await svc.resolve_piece_id(code)
+    return await StyleSpecService(db).piece_materials(piece_id)
+
 
 @router.get("/orders/by-number/{order_number}", response_model=schemas.OrderPickerRow)
 async def resolve_order_by_number(

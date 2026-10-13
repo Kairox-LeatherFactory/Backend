@@ -23,8 +23,8 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
 
-from app.core.enums import DrawerPart, DrawerState, ScreenContext
-from app.modules.drawers.service import DrawerService
+from app.core.enums import StorePart, StoreState, DrawerPart, DrawerState, ScreenContext
+from app.modules.store.service import StoreService
 from app.modules.production.models import ProductionEvent
 from app.modules.production.service import ProductionService
 
@@ -51,7 +51,7 @@ async def _cut(db, cutting_mgr, cutter, piece, lot, qty=10.0):
 @pytest.mark.asyncio
 async def test_the_cut_screen_fixes_the_stage(db, operations, pieces, cutter,
                                               cutting_mgr, leather_lot):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     res = await _cut(db, cutting_mgr, cutter, piece, leather_lot)
     assert res["stage"] == "LEATHER_CUTTING"
     assert res["count_logged"] == 1 and res["logged"] == [piece.code]
@@ -62,7 +62,7 @@ async def test_pipeline_infers_the_next_stage_from_the_pieces_own_history(
     db, operations, pieces, cutter, cutting_mgr, stitching_mgr, leather_lot
 ):
     """Cut → the next PIPELINE scan is FUSING, not 'whatever was sent'."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
 
     res = await _log(db, stitching_mgr, cutter, [piece.id])
@@ -73,7 +73,7 @@ async def test_pipeline_infers_the_next_stage_from_the_pieces_own_history(
 async def test_a_second_scan_at_the_same_stage_is_rework_not_a_duplicate(
     db, operations, pieces, cutter, cutting_mgr, leather_lot
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
     again = await _cut(db, cutting_mgr, cutter, piece, leather_lot)
 
@@ -90,7 +90,7 @@ async def test_a_second_scan_at_the_same_stage_is_rework_not_a_duplicate(
 async def test_the_role_gate_403s_the_whole_request(
     db, operations, pieces, cutter, stitching_mgr, leather_lot
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     with pytest.raises(HTTPException) as exc:
         await _log(db, stitching_mgr, cutter, [piece.id],
                    screen=ScreenContext.LEATHER_CUT,
@@ -110,7 +110,7 @@ async def test_the_stitching_manager_owns_fusing_not_the_cutting_manager(
     LEATHER_CUTTING and never infers FUSING. The grant's only live effect was to
     403 the stitching manager — the one role that CAN reach the stage.
     """
-    piece, _ = pieces[0]
+    piece = pieces[0]
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
 
     # the cutting manager is now refused the stage outright
@@ -127,7 +127,7 @@ async def test_the_stitching_manager_owns_fusing_not_the_cutting_manager(
 @pytest.mark.asyncio
 async def test_md_and_dm_bypass_the_role_gate(db, operations, pieces, cutter,
                                               md, leather_lot):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     res = await _log(db, md, cutter, [piece.id], screen=ScreenContext.LEATHER_CUT,
                      leather_lot_id=leather_lot.id, consumption_qty=10.0)
     assert res["count_logged"] == 1
@@ -138,7 +138,7 @@ async def test_md_and_dm_bypass_the_role_gate(db, operations, pieces, cutter,
 async def test_a_wrong_skill_warns_but_still_logs(
     db, operations, pieces, paster, cutting_mgr, leather_lot
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     res = await _log(db, cutting_mgr, paster, [piece.id],
                      screen=ScreenContext.LEATHER_CUT,
                      leather_lot_id=leather_lot.id, consumption_qty=10.0)
@@ -155,8 +155,8 @@ async def test_one_out_of_sequence_piece_does_not_lose_the_good_ones(
 ):
     """THE per-piece promise: piece 1 is cut and ready for FUSING; piece 2 was
     never cut. One batch → piece 1 logs, piece 2 lands in sequence_blocked."""
-    ready, _ = pieces[0]
-    skipped, _ = pieces[1]
+    ready = pieces[0]
+    skipped = pieces[1]
     await _cut(db, cutting_mgr, cutter, ready, leather_lot)
 
     res = await _log(db, stitching_mgr, cutter, [ready.id, skipped.id])
@@ -172,7 +172,7 @@ async def test_line_stitching_is_blocked_until_the_drawer_is_sended(
     db, operations, pieces, cutter, paster, cutting_mgr, stitching_mgr,
     leather_lot, ready_for_store
 ):
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
     await _log(db, stitching_mgr, cutter, [piece.id])          # FUSING
     await _log(db, stitching_mgr, paster, [piece.id])          # PASTING
@@ -182,15 +182,14 @@ async def test_line_stitching_is_blocked_until_the_drawer_is_sended(
     assert blocked["merge_blocked"] == [piece.code]
     assert blocked["count_logged"] == 0
 
-    drawers = DrawerService(db)
-    await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                             part=DrawerPart.LEATHER)
+    store = StoreService(db)
+    await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                             part=StorePart.LEATHER)
     # The lining half may only go in once the lining is actually cut.
     await ready_for_store(piece, leather=False)
-    await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                             part=DrawerPart.LINING)
-    await drawers.transition(drawer.id, "RECEIVED", actor_id=None)
-    await drawers.transition(drawer.id, "SENDED", actor_id=None)
+    await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                             part=StorePart.LINING)
+    await store.send(piece_ids=[piece.id], actor_user_id=None)
 
     released = await _log(db, stitching_mgr, paster, [piece.id])
     assert released["stage"] == "LINE_STITCHING"
@@ -203,7 +202,7 @@ async def test_stock_is_decremented_once_per_batch_not_once_per_piece(
     db, operations, pieces, cutter, cutting_mgr, leather_lot
 ):
     before = float(leather_lot.on_hand)
-    ids = [p.id for p, _ in pieces[:3]]
+    ids = [p.id for p in pieces[:3]]
     res = await _log(db, cutting_mgr, cutter, ids,
                      screen=ScreenContext.LEATHER_CUT,
                      leather_lot_id=leather_lot.id, consumption_qty=15.0)
@@ -227,7 +226,7 @@ async def test_stock_is_decremented_once_per_batch_not_once_per_piece(
 async def test_a_cut_without_consumption_or_a_lot_is_422(
     db, operations, pieces, cutter, cutting_mgr, leather_lot
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     with pytest.raises(HTTPException) as exc:
         await _log(db, cutting_mgr, cutter, [piece.id],
                    screen=ScreenContext.LEATHER_CUT, leather_lot_id=leather_lot.id)
@@ -250,7 +249,7 @@ async def test_rework_at_a_cut_stage_does_not_double_charge_the_lot(
     db, operations, pieces, cutter, cutting_mgr, leather_lot
 ):
     """fresh_cut_count drives the decrement, so a rework scan consumes nothing."""
-    piece, _ = pieces[0]
+    piece = pieces[0]
     await _cut(db, cutting_mgr, cutter, piece, leather_lot, qty=15.0)
     await db.refresh(leather_lot)
     after_first = float(leather_lot.on_hand)
@@ -266,7 +265,7 @@ async def test_rework_at_a_cut_stage_does_not_double_charge_the_lot(
 async def test_an_absent_worker_cannot_be_logged(
     db, operations, pieces, absent_worker, cutting_mgr, leather_lot
 ):
-    piece, _ = pieces[0]
+    piece = pieces[0]
     with pytest.raises(HTTPException) as exc:
         await _log(db, cutting_mgr, absent_worker[0], [piece.id],
                    screen=ScreenContext.LEATHER_CUT,
@@ -280,7 +279,7 @@ async def test_unknown_pieces_are_bucketed_not_fatal(
     db, operations, pieces, cutter, cutting_mgr, leather_lot
 ):
     import uuid as _uuid
-    piece, _ = pieces[0]
+    piece = pieces[0]
     ghost = _uuid.uuid4()
     res = await _log(db, cutting_mgr, cutter, [piece.id, ghost],
                      screen=ScreenContext.LEATHER_CUT,
@@ -297,33 +296,36 @@ async def test_an_empty_batch_is_400(db, operations, cutter, cutting_mgr):
 
 
 @pytest.mark.asyncio
-async def test_package_export_recycles_the_drawer(
+async def test_package_export_takes_the_garment_out_of_the_store(
     db, operations, pieces, cutter, paster, tailor, cutting_mgr, stitching_mgr,
     md, leather_lot, ready_for_store
 ):
     """The ONLY point a drawer frees: the piece has shipped."""
-    piece, drawer = pieces[0]
-    drawers = DrawerService(db)
+    piece = pieces[0]
+    store = StoreService(db)
 
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
     await _log(db, stitching_mgr, cutter, [piece.id])           # FUSING
     await _log(db, stitching_mgr, paster, [piece.id])           # PASTING
-    await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                             part=DrawerPart.LEATHER)
+    await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                             part=StorePart.LEATHER)
     await ready_for_store(piece, leather=False)                 # the lining cut
-    await drawers.store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                             part=DrawerPart.LINING)
-    await drawers.transition(drawer.id, "RECEIVED", actor_id=None)
-    await drawers.transition(drawer.id, "SENDED", actor_id=None)
+    await store.store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                             part=StorePart.LINING)
+    await store.send(piece_ids=[piece.id], actor_user_id=None)
 
     for expected in ("LINE_STITCHING", "SHELL_STITCHING", "FINAL_FINISH",
                      "FINAL_INSPECTION", "PACKAGE_EXPORT"):
         res = await _log(db, md, tailor, [piece.id])
         assert res["stage"] == expected and res["count_logged"] == 1
 
-    await db.refresh(drawer)
-    assert drawer.state == DrawerState.WAITING.value
-    assert drawer.current_piece_id is None
+    # THE GARMENT LEAVES THE STORE, and that is now the whole of it. A drawer
+    # recycled because the BOX was reused; a garment ships once, so there is no
+    # pool to return anything to. Its parts are cleared with it.
+    await db.refresh(piece)
+    assert piece.store_state == StoreState.WAITING.value
+    assert piece.leather_in is False
+    assert piece.lining_in is False
 
 
 # ══════════════════════════════════════════════════ reads
@@ -335,12 +337,12 @@ async def test_the_piece_checklist_returns_its_envelope(
     """GET /production/skus/{id}/pieces — the STORE-overlay edit dropped this
     function's `return` and mis-unpacked its 4-tuple rows, so the endpoint
     answered `null` (and 500'd on the unpack). The envelope is the contract."""
-    piece, drawer = pieces[0]
+    piece = pieces[0]
     await _cut(db, cutting_mgr, cutter, piece, leather_lot)
     # Cut is not enough to store: the leather side hands off at PASTING.
     await ready_for_store(piece, lining=False)
-    await DrawerService(db).store_scan(drawer_id=drawer.id, piece_id=piece.id,
-                                       part=DrawerPart.LEATHER)
+    await StoreService(db).store_scan(piece_id=piece.id, employee_id=cutter[0].id,
+                                       part=StorePart.LEATHER)
 
     out = await ProductionService(db).list_pieces_for_sku(
         sku_id=order_tree["sku"].id)
@@ -355,7 +357,7 @@ async def test_the_piece_checklist_returns_its_envelope(
     assert first["event_stage"] == "LEATHER_CUTTING"    # the real event
     assert first["current_stage"] == "STORE"            # what the UI shows
     assert first["in_store"] is True
-    assert first["store_status"] == DrawerState.HOLDING_LEATHER.value
+    assert first["store_status"] == StoreState.HOLDING_LEATHER.value
     assert "awaiting lining" in first["current_stage_label"]
 
 
@@ -364,7 +366,7 @@ async def test_the_checklist_marks_eligibility_against_an_operation(
     db, operations, pieces, order_tree, cutter, cutting_mgr, leather_lot,
     ready_for_store,
 ):
-    done_piece, _ = pieces[0]
+    done_piece = pieces[0]
     await _cut(db, cutting_mgr, cutter, done_piece, leather_lot)
 
     out = await ProductionService(db).list_pieces_for_sku(
@@ -389,7 +391,7 @@ async def test_style_progress_404s_for_another_clients_style(
     import uuid as _uuid
 
     style_id = order_tree["style"].id
-    await _cut(db, cutting_mgr, cutter, pieces[0][0], leather_lot)
+    await _cut(db, cutting_mgr, cutter, pieces[0], leather_lot)
     svc = ProductionService(db)
 
     assert (await svc.style_progress(style_id))["LEATHER_CUTTING"] == 1

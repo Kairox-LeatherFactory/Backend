@@ -2,7 +2,9 @@
 ================================================================================
 scripts/load_leather_lots.py — one-shot idempotent loader for clean_leather_lots
 ================================================================================
-Loads clean_leather_lots_finalZZ.csv into material_supplier + material_lot.
+Loads data/clean_leather_lots.csv into material_supplier + material_lot.
+(The default is DEFAULT_CSV below; override it with --csv. This line used to
+name a `clean_leather_lots_finalZZ.csv` that is not in the repo.)
 
 WHY SYNC, NOT ASYNC:
     Mirrors premint.py / the existing seed discipline. Seed scripts use the sync
@@ -48,8 +50,18 @@ import sys
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+# Make `import app...` / `from scripts import ...` work whether this runs as
+# `python -m scripts.<name>` (repo root already on sys.path) or as a bare path
+# `python scripts/<name>.py` (sys.path[0] is scripts/, so neither is importable).
+# Without it the bare-path form died on ModuleNotFoundError, which reads as a
+# broken checkout rather than the wrong invocation.
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 from sqlalchemy import select
 
+from scripts import _dbguard
 from app.core.config import settings          # noqa: F401  (kept for parity/URL logs)
 from app.core.database import SessionLocal
 from app.core.enums import (BarcodeStatus, BarcodeType, MaterialCategory,
@@ -90,7 +102,13 @@ from app.modules.bom import models as _bom                  # noqa: F401,E402
 from app.modules.inventory import models as _inventory      # noqa: F401,E402
 from app.modules.supplier_po import models as _supplier_po  # noqa: F401,E402
 
-DEFAULT_CSV = r"data\clean_leather_lots.csv"
+# Resolved against the REPO ROOT, not the current directory: this is a one-shot
+# loader people run from wherever they happen to be, and a relative default that
+# silently misses is indistinguishable from a CSV with no rows. Forward slashes
+# because pathlib normalises them on Windows and the image this deploys into is
+# Linux (see Dockerfile) — a literal backslash is only correct on one of the two.
+DEFAULT_CSV = str(Path(__file__).resolve().parents[1]
+                  / "data" / "clean_leather_lots.csv")
 
 # ── CSV → enum remaps ───────────────────────────────────────────────────────
 CATEGORY_REMAP = {
@@ -462,7 +480,16 @@ def main() -> None:
     ap.add_argument("--csv", default=DEFAULT_CSV, help="path to the CSV file")
     ap.add_argument("--dry-run", action="store_true",
                     help="validate and report; write nothing")
+    _dbguard.add_argument(ap)
     args = ap.parse_args()
+
+    # Writes rows, so it must be sure WHICH database it is writing to.
+    # ASYNC_DATABASE_URL overrides DATABASE_URL outright
+    # (config.effective_async_url), so the two can silently name
+    # different databases — that is how 42 people reached live Supabase
+    # on 2026-09-28. See scripts/_dbguard.py.
+    _dbguard.assert_one_database("load_leather_lots.py",
+                                 allow_split=args.allow_split_db)
 
     csv_path = Path(args.csv)
     if not csv_path.exists():

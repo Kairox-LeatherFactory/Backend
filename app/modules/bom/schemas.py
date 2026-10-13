@@ -93,6 +93,17 @@ class ColorOut(BaseModel):
     per_size_qty: dict[str, int]
     warnings: list[str] = Field(default_factory=list)
 
+    # UPDATED 2026-09-11 (Hamthan): GET /order-breakdown does
+    # OrderStyleOut.model_validate(order_style_orm_obj), and OrderStyleOut's
+    # own from_attributes=True does NOT cascade to nested submodels in
+    # Pydantic v2 — each model's config governs its own validation. Without
+    # this, building `colors: list[ColorOut]` from the ORM relationship (a
+    # list of OrderStyleColor instances, not dicts) failed with "Input should
+    # be a valid dictionary or instance of ColorOut [type=model_type]" for
+    # every entry. Field names already match OrderStyleColor 1:1, so
+    # from_attributes=True alone fixes it.
+    model_config = {"from_attributes": True}
+
 
 class OrderStyleOut(BaseModel):
     id: uuid.UUID

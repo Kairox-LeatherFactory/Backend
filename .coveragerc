@@ -1,0 +1,215 @@
+# ==============================================================================
+# .coveragerc — what the coverage number is actually ABOUT
+# ==============================================================================
+# THE DENOMINATOR IS THE WHOLE POINT. bom, procurement, supplier_po, inventory
+# and intelligence are roughly 18k lines that this change set does not test and
+# is not responsible for. Left in, they swamp the figure and a real improvement
+# in the Phase-1 services barely moves it; taken out, the number means "how much
+# of the code we own is exercised", which is the only version worth gating on.
+#
+# `source` is therefore the 15 in-scope modules plus core and main, named one by
+# one rather than as `app` minus omissions — so a NEW Phase-2 module does not
+# silently join the denominator by existing.
+# ==============================================================================
+[run]
+branch = True
+source =
+    app/core
+    app/main.py
+    app/modules/analytics
+    app/modules/attendance
+    app/modules/barcode
+    app/modules/clients
+    app/modules/cutting
+    app/modules/dashboard
+    app/modules/drawers
+    app/modules/employees
+    app/modules/imports
+    app/modules/jobwork
+    app/modules/materials
+    app/modules/production
+    app/modules/store
+    app/modules/users
+    app/modules/wages
+
+omit =
+    */__pycache__/*
+    */migrations/*
+    # Not Python source: these modules keep a .txt copy of their own history
+    # beside the code, and the glob below stops those being counted.
+    */*.txt
+    # DEAD CODE, MEASURED AS SUCH. The drawers ROUTER is commented out of
+    # main.py (the store took over when the store state moved onto the piece in
+    # 20260902_store_on_piece), so router.py and schemas.py are unreachable and
+    # measured at exactly 0.0% — 230 statements that can never be covered by any
+    # test because nothing can call them. Counting them means the floor is
+    # permanently held down by code we intend to delete.
+    #
+    # drawers/service.py is NOT omitted: analytics/service.py:803 still imports
+    # DrawerService, so it is live code and belongs in the denominator.
+    #
+    # DELETE THE TWO FILES AND REMOVE THESE LINES. They are here to stop dead
+    # code distorting a number, not to hide it.
+    app/modules/drawers/router.py
+    app/modules/drawers/schemas.py
+    # UNCOMMENT TO STOP COUNTING THE DEAD SERVICE TOO (+1.02 points).
+    # analytics/service.py no longer imports it, so nothing in application
+    # code calls it; only ~8 test files keep it executing. Deleting the
+    # module outright is better than omitting it — see the floor notes.
+    # app/modules/drawers/service.py
+
+[report]
+# A line that only exists for a type checker or a debugger is not logic, and
+# making a test execute it proves nothing.
+exclude_also =
+    if TYPE_CHECKING:
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    @(abc\.)?abstractmethod
+    \.\.\.
+
+precision = 1
+show_missing = True
+skip_covered = False
+
+# ==============================================================================
+# THE FLOOR: 85%  —  CURRENTLY FAILING AT 81.27%
+# ==============================================================================
+#
+#   Last full run (2026-09-20, the whole suite under this exact config):
+#
+#       2,059 passed · 3 failed · 158 skipped
+#       TOTAL  11849 stmts · 1778 miss · 2850 branch · 483 partial · 81.27%
+#       FAIL Required test coverage of 85.0% not reached. Total coverage: 81.27%
+#
+#   So `pytest --cov` exits NON-ZERO today, and CI will too. That is deliberate:
+#   the floor was set to 85 as a target to work toward, not as a description of
+#   where the suite is. Everything below is what stands between the two numbers.
+#
+# ------------------------------------------------------------------------------
+# WHY IT FAILS — the 3.73 points, itemised
+# ------------------------------------------------------------------------------
+#
+# Coverage here counts BOTH statements and branches:
+#
+#       (covered_lines + covered_branches) / (statements + branches)
+#       (10071        + 1875            ) / (11849      + 2850    ) = 81.27%
+#
+# To reach 85% of 14,699 measured items, about 548 MORE must be covered.
+# They fall into three piles, and only the third is ordinary missing tests.
+#
+#   PILE 1 — DEAD CODE, 236 items, worth +1.02 points
+#   ..............................................................................
+#   app/modules/drawers/service.py sits at 51.2% and has NO CALLER IN
+#   APPLICATION CODE. Its router and schemas are already omitted below as dead;
+#   the service stayed in scope only because analytics/service.py imported its
+#   private _needs_lining. That import is gone (it now uses StoreService), and
+#   the three remaining mentions of "drawers/service" in app/ are DOCSTRINGS,
+#   not imports. Roughly eight test files still import it, which is the only
+#   reason it executes at all.
+#
+#   Testing dead code to raise a number is the worst possible use of the effort.
+#   Either omit it here — the line is written out below, commented — or delete
+#   the module and its test imports. Do NOT write tests for it.
+#
+#   PILE 2 — DRIVERS THAT CANNOT RUN IN THIS SUITE, 167 items, worth +0.91
+#   ..............................................................................
+#       app/core/storage.py    33.3%   82 lines missing   S3 / MinIO / Supabase
+#       app/core/notifier.py   17.6%   57 lines missing   email delivery
+#
+#   Only the LOCAL storage backend and a no-op notifier run under pytest. The
+#   others need boto3 against a real or mocked bucket, and an SMTP server. They
+#   are coverable — with `moto` for S3 and a captured-mail fixture for the
+#   notifier — but that is a new dependency and a genuine piece of work, not a
+#   gap someone forgot to fill.
+#
+#   PILE 3 — REAL MISSING TESTS, about 265 items, worth the remaining ~1.8
+#   ..............................................................................
+#   This is the pile that actually matters, ranked by how much is missing:
+#
+#       modules/materials/service.py          69.7%   103 lines, 18 branches
+#       modules/materials/style_spec_service  76.9%    88 lines, 32 branches
+#       modules/analytics/service.py          63.4%    89 lines, 20 branches
+#       modules/imports/breakdown.py          67.2%    74 lines, 30 branches
+#       modules/cutting/service.py            74.2%
+#       modules/imports/load_to_db.py         47.0%
+#       modules/attendance/service.py         63.2%
+#       modules/users/service.py              49.1%
+#
+#   These are error paths, substitution and mismatch branches, and the spec
+#   editing surface — the code that runs when something is WRONG, which is
+#   exactly the code least likely to have been exercised by hand.
+#
+# ------------------------------------------------------------------------------
+# WHAT TO DO — in the order that pays best
+# ------------------------------------------------------------------------------
+#
+#   1. DECIDE ABOUT THE DEAD DRAWERS SERVICE.            81.27% -> 82.29%
+#      Delete app/modules/drawers/ and the ~8 test imports, or uncomment the
+#      omit line below. Deleting is better: an omitted file still sits in the
+#      tree looking live. Either way, stop counting it.
+#
+#   2. COVER THE ERROR PATHS IN MATERIALS AND IMPORTS.   +1.0 to +1.5 points
+#      The densest real gaps, and the highest-value ones: materials/service.py
+#      holds the stock decrement and the receiving/substitution logic, and
+#      imports/breakdown.py holds release. Start with the branches, not the
+#      lines — `--cov-report=term-missing` prints exactly which ones.
+#
+#   3. DECIDE ABOUT THE DRIVERS.                         +0.91 points
+#      Either add `moto` and a mail-capture fixture and test them properly, or
+#      omit them here with a comment saying they are integration-only. Do not
+#      leave them half-covered and unexplained.
+#
+#   4. ONLY THEN consider whether 85 was the right number.
+#      1+2+3 lands around 85-86%. If it stalls at 84 and the remaining lines are
+#      `except Exception` fallbacks and dialect branches, LOWER THE FLOOR to
+#      what the suite honestly reaches. A floor nobody can pass gets bypassed
+#      with `--no-cov`, and then it is protecting nothing.
+#
+# ------------------------------------------------------------------------------
+# HOW TO SEE THIS YOURSELF
+# ------------------------------------------------------------------------------
+#
+#       pytest --cov --cov-report=term-missing     # which LINES are missing
+#       pytest --cov --cov-report=html             # htmlcov/index.html, clickable
+#       pytest --no-cov                            # run without the gate at all
+#
+#   To check a single module while working on it:
+#
+#       pytest tests/ -q --cov=app/modules/materials --cov-report=term-missing
+#
+#   NOTE: coverage makes the suite roughly 2-3x slower (about 4 minutes becomes
+#   8-14). Use --no-cov for ordinary red/green work and take the measurement
+#   when you are done.
+#
+# ------------------------------------------------------------------------------
+# WHY THE FLOOR IS NOT 100
+# ------------------------------------------------------------------------------
+#
+#   A line-coverage target is satisfied by EXECUTING a line, not by asserting
+#   anything about it. At 100 the cheapest way to go green is assertion-free
+#   tests that merely call things — which is worse than no test, because a green
+#   build then tells you nothing. Much of what remains is also defensively
+#   unreachable: `except Exception` fallbacks, `if settings.debug` branches, the
+#   _dummy_hash timing path, SQLite-vs-Postgres dialect splits.
+#
+#   Where 100% genuinely earns its keep is wages (it decides what a person is
+#   paid) and the four gates in production/service.py (they are the floor's
+#   safety rules). Pursue those DIRECTLY, with tests aimed at their branches,
+#   rather than through a global number that cannot tell the difference between
+#   a payslip calculation and a log line.
+#
+# ------------------------------------------------------------------------------
+# A PREVIOUS MISTAKE, SO IT IS NOT REPEATED
+# ------------------------------------------------------------------------------
+#
+#   The floor was once set to 80 from a measured baseline of 82.6%. That 82.6%
+#   had been computed from a coverage JSON produced BEFORE the omit list and the
+#   exclude_also rules existed — a different denominator entirely — and the very
+#   next full run came in at 78.6% and failed. Take the baseline from a run
+#   under THIS file, never from an earlier one.
+#
+fail_under = 85
+
+[html]
+directory = htmlcov

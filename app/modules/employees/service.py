@@ -37,7 +37,7 @@ from app.core.enums import Designation, UserRole, WageType
 from app.modules.employees import schemas
 from app.modules.employees.models import Employee
 from app.modules.employees.repository import EmployeeRepository
-from app.modules.users.schemas import UserCreate
+from app.modules.users.schemas import StaffUserCreate
 from app.modules.users.service import UserService
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,9 @@ class EmployeeService:
 
     async def list_all(self, active_only: bool = True) -> list[Employee]:
         return await self.repo.list_all(active_only)
+
+    async def page_all(self, params, active_only: bool = True) -> tuple[list, int]:
+        return await self.repo.page_all(params, active_only)
 
     async def barcodes_for(self, ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
         """id → ACTIVE card code, for a whole roster in one query.
@@ -168,7 +171,7 @@ class EmployeeService:
                         f"Role '{actor.role.value}' may not create a "
                         f"'{login_role.value}' login.")
             await UserService(self.db).provision_user(
-                UserCreate(
+                StaffUserCreate(
                     name=data["name"], phone=body.phone, email=body.email,
                     role=login_role, password=body.password, employee_id=emp.id,
                 ),
@@ -265,9 +268,9 @@ class EmployeeService:
                     status.HTTP_422_UNPROCESSABLE_ENTITY,
                     "phone is required when creating a staff login")
             await UserService(self.db).provision_user(
-                UserCreate(name=emp.name, phone=emp.phone, email=emp.email,
-                           role=body.role, password=body.password,
-                           employee_id=emp.id),
+                StaffUserCreate(name=emp.name, phone=emp.phone, email=emp.email,
+                                role=body.role, password=body.password,
+                                employee_id=emp.id),
                 must_change_password=True)
         await self.repo.save(emp)
         return emp

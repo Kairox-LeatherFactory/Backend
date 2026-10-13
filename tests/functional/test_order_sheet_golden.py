@@ -26,11 +26,11 @@ from app.modules.imports.import_engine import build_preview
 # exactly how test_importer_v2 and test_johnpeter_import came to skip silently.
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-BOGGI_MAIN = os.path.join(_ROOT, "ORDER BOGGI MAIN SS27 (3).xlsx")
-BOGGI_OUTLET = os.path.join(_ROOT, "ORDINE BOGGI OUTLET SS27 (2).xlsx")
-JOHN_PETER = os.path.join(
-    _ROOT, "data", "Full-data-spec-order", "PTE v2.0", "Client_1_JohnPeter",
-    "ANELE", "DETACH", "John_Peter_Order_Data_Consolidate.xlsx")
+BOGGI_MAIN = os.path.join(_ROOT, "data", "ORDER BOGGI MAIN SS27 (3).xlsx")
+BOGGI_OUTLET = os.path.join(_ROOT, "data", "ORDINE BOGGI OUTLET SS27 (2).xlsx")
+# Copied out of data/Full-data-spec-order/, which is .gitignored — a fixture
+# that only exists on one laptop makes this test skip silently in CI.
+JOHN_PETER = os.path.join(_ROOT, "data", "John_Peter_Order_Data_Consolidate.xlsx")
 
 
 def _need(path):

@@ -50,6 +50,7 @@ import json
 import yaml
 from fastapi import HTTPException
 from sqlalchemy import delete
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
@@ -62,7 +63,7 @@ from app.modules.bom.dcm import (
     estimate_area_dcm,
     style_signature,
 )
-from app.core.enums import DocumentKind
+from app.core.enums import DocumentKind, UserRole
 from app.modules.bom.enums import (
     BomItemCategory,
     BomStatus,
@@ -345,16 +346,36 @@ class BomService:
         )
         
     @staticmethod
+    def _sub_material_role(sub: dict):
+        """(role, category, is_leather) for ONE spec.sub_materials entry, as a FabricRole.
+
+        The extractor files anything that isn't the shell or the declared lining under
+        sub_materials — including lining/pocketing textiles (裏地, スレキ). Stamping those
+        `sub_material` made the DCM resolver ask the DXF for a sub_material area that
+        does not exist (the DXF labels them 裏地/スレーキ → category `lining`), so the
+        line fell through every source to provisional/qty 0. The native CAD term is
+        exactly the vocabulary the fabric lexicon already resolves, so ask it; fall back
+        to sub_material only when it has no opinion."""
+        from app.modules.bom import config_store
+        from app.modules.bom.fabric_roles import FabricRole, resolve_fabric_role
+        native = sub.get("name")
+        hit = resolve_fabric_role(native, config_store.get_fabric_lexicon()) if native else None
+        if hit is not None:
+            return hit
+        name = sub.get("material") or native or ""
+        return FabricRole(role="sub_material", category="sub_material",
+                          is_leather=dcm.species_of(str(name)) != "_default")
+
+    @staticmethod
     def _spec_materials_for(spec_attributes: dict | None) -> list["SpecMaterial"]:
         """Bounded candidate set for DXF-label → material matching. Mirrors
         _build_line_seeds' reading of the flattened spec attributes EXACTLY, so a
         matched label points at the same (category, name) a BOM line carries.
         `aliases` = the native CAD term (sub.name, e.g. VELLUTO/別布) the DXF label
         is actually written in; the BOM line name stays sub.material (e.g. Goat).
-        is_leather: main by definition; sub only when its material names a hide
-        species; lining/interlining never."""
+        is_leather: main by definition; sub via _sub_material_role (the lexicon, then a
+        hide-species fallback); lining/interlining never."""
         from app.modules.bom.attribution import SpecMaterial
-        from app.modules.bom import dcm
         attrs = spec_attributes or {}
         mats: list[SpecMaterial] = []
 
@@ -371,10 +392,10 @@ class BomService:
                 continue
             native = sub.get("name")
             aliases = (str(native),) if native and str(native) != str(name) else ()
+            fr = BomService._sub_material_role(sub)
             mats.append(SpecMaterial(
-                name=str(name), category="sub_material",
-                is_leather=(dcm.species_of(str(name)) != "_default"),
-                role="sub_material", aliases=aliases))
+                name=str(name), category=fr.category, is_leather=fr.is_leather,
+                role=fr.role, aliases=aliases))
 
         lining = attrs.get("lining")
         if lining and "unlined" not in str(lining).lower():
@@ -416,6 +437,33 @@ class BomService:
         else:
             return v if isinstance(v,str) else json.dumps(v)
 
+    # UPDATED 2026-09-12 (Hamthan): a real narrative-tech-pack spec sheet (Client
+    # 1 / CLERMONT's "Spec Sheet CLEREMONT WINTER SUEDE.xlsx") had the LLM extract
+    # an entire paragraph of construction/QC notes into leather_quality (instead
+    # of a short material name) and a whole per-colorway article mapping dict
+    # into primary_color (instead of one colour name) -- BomItem.name is
+    # VARCHAR(200) and material_color is VARCHAR(80), so the INSERT crashed with
+    # StringDataRightTruncationError deep inside generate_bom's flush, after all
+    # the real work (extraction, DXF matching, DCM resolution) had already
+    # succeeded. BomItem.annotation is an unbounded Text column, so cap any
+    # over-length field and preserve its full original text there instead of
+    # losing it or crashing.
+    _NAME_LIMIT = 200
+    _COLOR_LIMIT = 80
+
+    @staticmethod
+    def _capped_field(value, limit: int, annotation: str | None = None) -> tuple[str, str | None]:
+        value = str(value)
+        if len(value) <= limit:
+            return value, annotation
+        full = f"Full extracted text: {value}"
+        annotation = f"{full} | {annotation}" if annotation else full
+        return value[: limit - 3] + "...", annotation
+
+    @staticmethod
+    def _capped_name(name, annotation: str | None = None) -> tuple[str, str | None]:
+        return BomService._capped_field(name, BomService._NAME_LIMIT, annotation)
+
     @staticmethod
     def _build_line_seeds(spec_attributes: dict | None,
                           garment_code: str | None) -> list[LineSeed]:
@@ -427,43 +475,50 @@ class BomService:
 
         leather = attrs.get("leather_quality")
         if leather:
+            name, annotation = BomService._capped_name(leather)
+            color = BomService._scalar(attrs.get("primary_color"))
+            if color is not None:
+                color, annotation = BomService._capped_field(color, BomService._COLOR_LIMIT, annotation)
             seeds.append(LineSeed(
-                category=BomItemCategory.MAIN_MATERIAL.value, name=str(leather),
-                material_color=BomService._scalar(attrs.get("primary_color")), uom="dmÂ²",
-                source_ref="spec.attributes.leather_quality"))
+                category=BomItemCategory.MAIN_MATERIAL.value, name=name,
+                material_color=color, uom="dmÂ²",
+                annotation=annotation, source_ref="spec.attributes.leather_quality"))
 
         # Secondary leathers/fabrics (e.g. a contrast panel 'åˆ¥å¸ƒ') â†’ own DCM line.
         for sub in attrs.get("sub_materials") or []:
             if not isinstance(sub, dict):
                 continue
-            name = sub.get("material") or sub.get("name")
-            if not name:
+            raw_name = sub.get("material") or sub.get("name")
+            if not raw_name:
                 continue
+            name, annotation = BomService._capped_name(raw_name, sub.get("name"))
             seeds.append(LineSeed(
-                category=BomItemCategory.SUB_MATERIAL.value, name=str(name),
-                uom="dmÂ²", annotation=sub.get("name"),
+                category=BomService._sub_material_role(sub).category, name=name,
+                uom="dmÂ²", annotation=annotation,
                 source_ref="spec.attributes.sub_materials"))
 
         lining = attrs.get("lining")
         if lining and "unlined" not in str(lining).lower():
+            name, annotation = BomService._capped_name(lining)
             seeds.append(LineSeed(
-                category=BomItemCategory.LINING.value, name=str(lining), uom="dmÂ²",
-                source_ref="spec.attributes.lining"))
+                category=BomItemCategory.LINING.value, name=name, uom="dmÂ²",
+                annotation=annotation, source_ref="spec.attributes.lining"))
 
         # Interlining (fusible/non-fusible) when the spec names one. DCM-resolved.
         interlining = attrs.get("interlining")
         if isinstance(interlining, dict) and interlining.get("present") is not False:
             il_name = interlining.get("material")
             if il_name:
+                name, annotation = BomService._capped_name(il_name, interlining.get("placement"))
                 seeds.append(LineSeed(
-                    category=BomItemCategory.INTERLINING.value, name=str(il_name),
-                    uom="dmÂ²", annotation=interlining.get("placement"),
+                    category=BomItemCategory.INTERLINING.value, name=name,
+                    uom="dmÂ²", annotation=annotation,
                     source_ref="spec.attributes.interlining"))
 
         for acc in attrs.get("accessories") or []:
             if not isinstance(acc, dict):
                 continue
-            name = acc.get("spec") or acc.get("type") or "accessory"
+            raw_name = acc.get("spec") or acc.get("type") or "accessory"
             # qty per garment from the spec (two rear zippers â†’ 2); default 1 only when
             # the document/extractor gave no usable count.
             try:
@@ -472,10 +527,14 @@ class BomService:
                 qty = 1
             if qty < 1:
                 qty = 1
+            name, annotation = BomService._capped_name(raw_name)
+            finish = acc.get("finish")
+            if finish is not None:
+                finish, annotation = BomService._capped_field(finish, BomService._COLOR_LIMIT, annotation)
             seeds.append(LineSeed(
-                category=BomItemCategory.ACCESSORY.value, name=str(name),
-                material_color=acc.get("finish"), uom="pc", qty_per_garment=qty,
-                supplied_by=acc.get("supplied_by"),
+                category=BomItemCategory.ACCESSORY.value, name=name,
+                material_color=finish, uom="pc", qty_per_garment=qty,
+                supplied_by=acc.get("supplied_by"), annotation=annotation,
                 source_ref="spec.attributes.accessories"))
 
         from app.modules.bom import config_store
@@ -622,8 +681,16 @@ class BomService:
                                         key=lambda d: d.filename)
             if spec_doc is not None:
                 row.spec_document_id, row.spec_match_status = spec_doc.id, "suggested"
+            # UPDATED 2026-09-11 (Hamthan): candidates_dxf now comes back as
+            # PatternExtraction rows (repo.patterns_for_client fix — it used
+            # to query the unrelated PatternReference table). That model has
+            # no `source_name` field at all, so this fallback would have
+            # raised AttributeError on every candidate the instant
+            # candidates_dxf was ever non-empty. style_signature is
+            # PatternExtraction's non-nullable identity field, so it's the
+            # only key needed here.
             pat = self._suggest_by_name(sb.style_key, candidates_dxf,
-                                   key=lambda p: p.style_signature or p.source_name)
+                                   key=lambda p: p.style_signature)
             if pat is not None:
                 row.pattern_reference_id, row.dxf_match_status = pat.id, "suggested"
             rows.append(row)
@@ -695,7 +762,40 @@ class BomService:
         await self.db.flush()                      # populate spec_sheet.id, no commit
 
         identity = self._identity_from_breakdown(row)
-        result = await self.generate_bom(
+        # UPDATED 2026-09-17 (Hamthan): the `row.bom_id is not None` replay above is a
+        # check-then-act, and generation runs in Celery — pressing "generate" twice for
+        # the same style enqueues two tasks that both read bom_id=None before either
+        # commits, so the loser's INSERT hits uq_bom_submission_style and the whole task
+        # died with an unhandled IntegrityError traceback. The unique constraint IS the
+        # correct arbiter; this just teaches the loser to read the winner's BOM and
+        # return the same idempotent replay the fast path returns, so a double-click is
+        # indistinguishable from a single one.
+        try:
+            result = await self._generate_style_bom(user, row, spec_sheet, spec_bytes,
+                                                    spec_name, identity)
+        except IntegrityError:
+            await self.repo.rollback()
+            existing = await self.repo.get_bom_by_submission(
+                row.submission_id, style_signature=row.style_signature)
+            if existing is None:
+                raise
+            logger.info("generate_bom_for_style: style=%s lost the generation race, "
+                        "replaying bom=%s", order_style_id, existing.id)
+            fresh = await self.repo.get_order_style(order_style_id)
+            if fresh is not None and fresh.bom_id is None:
+                fresh.bom_id = existing.id          # heal the link the loser never wrote
+                await self.repo.commit()
+            return self._replay_response(existing)
+        row.bom_id = uuid.UUID(result["bom"]["id"])   # return shape is {"bom": {"id": ...}}
+        await self.repo.commit()
+        return result
+
+    async def _generate_style_bom(self, user, row, spec_sheet, spec_bytes: bytes,
+                                  spec_name: str, identity: "StyleIdentity") -> dict:
+        """The generate_bom call for ONE breakdown style. Split out of
+        generate_bom_for_style (2026-09-17) purely so the caller can wrap it in the
+        unique-violation replay guard without burying it in a 25-line try block."""
+        return await self.generate_bom(
             user,
             spec_sheet=spec_sheet,
             spec_bytes=spec_bytes,
@@ -711,10 +811,14 @@ class BomService:
             extra_warnings=(["spec_pending"] if not spec_bytes else [])
                            + list(row.warnings or []),
             commit=False,                          # single commit below, with the link
+            # UPDATED 2026-09-11 (Hamthan): only a human-CONFIRMED attachment
+            # overrides the auto-match — a merely "suggested" one (never
+            # clicked through) stays advisory only, same posture as
+            # build_order_breakdown's own "SUGGEST, never silently bind"
+            # comment for spec/DXF matching.
+            confirmed_pattern_id=(row.pattern_reference_id
+                                  if row.dxf_match_status == "confirmed" else None),
         )
-        row.bom_id = uuid.UUID(result["bom"]["id"])   # return shape is {"bom": {"id": ...}}
-        await self.repo.commit()
-        return result
 
     _CODE_RE = re.compile(r"[A-Z]{1,4}[- ]?\d{3,6}(?:[- ]?[A-Z0-9]{1,4})?")
 
@@ -780,8 +884,13 @@ class BomService:
         style_signature_str: str | None = None,
         order_identity_extra: dict | None = None,
         extra_warnings: list[str] | None = None,
-        commit: bool = True
-        
+        commit: bool = True,
+        # UPDATED 2026-09-11 (Hamthan): a human-confirmed PatternExtraction id
+        # (OrderStyle.pattern_reference_id, once dxf_match_status="confirmed")
+        # takes priority over the (style_signature, client_id) auto-match
+        # below — see the comment on repo.get_pattern_by_id for why the
+        # auto-match alone was silently missing confirmed patterns.
+        confirmed_pattern_id: uuid.UUID | None = None,
     ) -> dict:
         from app.modules.bom.pattern import effective_dxf_yields
         logger.info("generate_bom start: order=%s style=%s spec_type=%s client_match=%s seeds=%s",
@@ -837,7 +946,9 @@ class BomService:
         if order_identity_extra:                                  # ← ADD (colors etc.)
             bom.order_identity = {**(bom.order_identity or {}), **order_identity_extra}
         
-        pattern = await self.repo.get_current_pattern(sig, client_id=identity.client_id)
+        pattern = (await self.repo.get_pattern_by_id(confirmed_pattern_id)
+                  if confirmed_pattern_id
+                  else await self.repo.get_current_pattern(sig, client_id=identity.client_id))
         attr_by_label = await self._enrich_attribution(
             pattern, spec_sheet.attributes, identity, user) if pattern else {}
         dxf_yields = effective_dxf_yields(
@@ -862,6 +973,21 @@ class BomService:
             "pattern_reference": pr_block,
         }
         flags = checks_mod.run_checks(client_match_code, ctx, checks_cfg)
+
+        # A material line that resolved to nothing used to be readable only by noticing a
+        # 0 among the numbers — the BOM otherwise looked generated. Name them.
+        unattributed = [i for i in items
+                        if i.dcm_source == DcmSource.PROVISIONAL.value
+                        and not i.qty_per_garment]
+        if unattributed:
+            flags = [{
+                "code": "dcm_unattributed",
+                "severity": "warning",
+                "message": ("No pattern area could be attributed to these material lines; "
+                            "their consumption stays 0 until it is confirmed."),
+                "details": [{"name": i.name, "category": i.category,
+                             "annotation": i.annotation} for i in unattributed],
+            }] + flags
 
         if manual_entry_required:
             flags = [{
@@ -967,8 +1093,12 @@ class BomService:
             term = p.source_term or ""
             code = pom_dict.resolve(term, _term_language(term))
             if not code:
+                # UPDATED 2026-09-11 (Hamthan): suggest_pom_code's own signature
+                # (service.py:165) names this kwarg llm_json_call, not llm_json —
+                # this call site was passing the wrong name, so every fallback to
+                # the LLM suggester crashed with TypeError instead of running.
                 sug, conf = await run_in_threadpool(functools.partial(
-                    suggest_pom_code, term, llm_json=self._groq_json))
+                    suggest_pom_code, term, llm_json_call=self._groq_json))
                 if sug:
                     await self.repo.upsert_pom_mapping(
                         language=_term_language(term) or "en", source_term=term,
@@ -1080,12 +1210,71 @@ class BomService:
                     or ref.resolved_style_id is not None}
         return pattern_template_id, pr_block
 
+    @staticmethod
+    def _shared_material_categories(line_seeds) -> set[str]:
+        """Material categories carrying MORE THAN ONE line. Every DCM source is keyed by
+        category, so with siblings each one would be handed the same category total —
+        only these need the per-label split. A single-line category keeps the full
+        source ladder untouched."""
+        counts: dict[str, int] = {}
+        for s in line_seeds:
+            if s.category in MATERIAL_DCM_CATEGORIES:
+                counts[s.category] = counts.get(s.category, 0) + 1
+        return {c for c, n in counts.items() if n > 1}
+
+    @staticmethod
+    def _labels_for_seed(seed, pattern, attr_by_label) -> list[str]:
+        """The DXF labels THIS line owns, when several lines share its category. Two
+        independent links, because a label resolved by the lexicon carries no
+        matched_material: the line's own native CAD term (its annotation — compared the
+        chōon-insensitive way the lexicon itself compares, so the spec's スレキ binds to
+        the DXF's スレーキ and 表生地 still binds to 表生地(本体)), and an attribution that
+        resolved the label to this line's material."""
+        from app.modules.bom.fabric_roles import _norm_fabric_match
+        if pattern is None:
+            return []
+        labels = list((pattern.fabric_roles or {}).keys()) or list(
+            {f for m in (pattern.fabric_matrix or {}).values() for f in m if f})
+        native = _norm_fabric_match(seed.annotation or seed.name or "")
+        owned = []
+        for label in labels:
+            lab = _norm_fabric_match(label)
+            attr = (attr_by_label or {}).get(label)
+            if (native and lab and (native in lab or lab in native)) or (
+                    attr is not None and attr.matched_material
+                    and attr.matched_material == seed.name):
+                owned.append(label)
+        return owned
+
+    @classmethod
+    def _labels_by_seed(cls, line_seeds, shared, pattern, attr_by_label) -> dict[int, list[str]]:
+        """Per-line label ownership for every line in a shared category, indexed by the
+        line's position in line_seeds.
+
+        A label two lines both claim is AMBIGUOUS, and handing it to each of them would
+        re-introduce the very over-count the split exists to prevent — just through a
+        different door. So a contested label is withdrawn from both; they fall to
+        provisional and say so, rather than silently double-counting its area."""
+        owned = {i: cls._labels_for_seed(s, pattern, attr_by_label)
+                 for i, s in enumerate(line_seeds) if s.category in shared}
+        claims: dict[str, int] = {}
+        for labels in owned.values():
+            for label in labels:
+                claims[label] = claims.get(label, 0) + 1
+        contested = {label for label, n in claims.items() if n > 1}
+        if contested:
+            owned = {i: [l for l in labels if l not in contested]
+                     for i, labels in owned.items()}
+        return owned
+
     async def _build_items(self, line_seeds, *, identity, sig, gt, gt_id, base_size,
                            poms_for_size, pattern_template_id, pattern=None, attr_by_label=None, dxf_yields=None):
         """Step 6: turn seeds into BomItems, DCM-resolving leather AREA lines (Â§2) and
         carrying given qty/price on the rest."""
         items: list[BomItem] = []
-        for seed in line_seeds:
+        shared = self._shared_material_categories(line_seeds)
+        owned_labels = self._labels_by_seed(line_seeds, shared, pattern, attr_by_label)
+        for seed_ix, seed in enumerate(line_seeds):
             # Buyer/client supplied materials are never costed.
             price = Decimal("0")
 
@@ -1105,12 +1294,15 @@ class BomService:
             attribution_confidence = None
             attribution_status = None
             if seed.category in MATERIAL_DCM_CATEGORIES:
+                # [] (owns nothing -> provisional), never None (which means "sole line in
+                # this category, use the full source ladder") — fail toward the flag.
+                seed_labels = owned_labels.get(seed_ix, []) if seed.category in shared else None
                 dcm_val, src = await self._resolve_dcm(
                     client_id=identity.client_id, style_signature=sig, garment_type_id=gt_id,
                     garment_type_row=gt, material_category=seed.category, size=base_size,
                     poms_for_size=poms_for_size, pattern_template_id=pattern_template_id,
                     pattern=pattern, line_species=dcm.species_of(seed.name),
-                    dxf_yields=dxf_yields)
+                    dxf_yields=dxf_yields, seed_labels=seed_labels)
                 if dcm_val is not None:
                     qpg = dcm_val                              # F1: dcm_val, NOT the `dcm` module
                     dcm_source = src.value
@@ -1163,7 +1355,21 @@ class BomService:
     async def _resolve_dcm(self, *, client_id, style_signature, garment_type_id,
                            garment_type_row, material_category, size, poms_for_size,
                            pattern_template_id, pattern=None, line_species="_default",
-                           dxf_yields=None):
+                           dxf_yields=None, seed_labels=None):
+        # seed_labels is not None => this line SHARES its category with other lines, so
+        # every category-keyed source below (template, similar style, POM estimate) would
+        # hand each sibling the same value and multiply the order's real consumption. The
+        # only sound source here is the measured area of the DXF labels this line owns;
+        # owning none leaves it provisional for a human to confirm, never a sibling's area.
+        if seed_labels is not None:
+            if not seed_labels or pattern is None:
+                return None, None
+            from app.modules.bom.pattern import dcm_for_labels
+            dxf_dcm = dcm_for_labels(pattern, labels=seed_labels, category=material_category,
+                                     size=size, species=line_species, yields=dxf_yields or {})
+            if dxf_dcm is None:
+                return None, None
+            return Decimal(str(dxf_dcm)), DcmSource.DXF
         size_key = size if size is not None else ""
         # Source 1 â€” the DCM memory (exact, confirmed)
         tmpl = await self.repo.find_consumption_template(
@@ -1232,19 +1438,54 @@ class BomService:
         and commits. Idempotent on (style_signature, sha256)."""
         import hashlib
         from starlette.concurrency import run_in_threadpool
+        from sqlalchemy.exc import IntegrityError
         sha = hashlib.sha256(data).hexdigest()
         # store the raw bytes first so the pattern can be re-derived; pass the KEY to the repo
         key = f"patterns/{(style_signature or 'unknown').upper()}/{sha}.dxf"
         await run_in_threadpool(get_storage().put, key, data)
-        row, unknown = await self.repo.persist_dxf(
-            data, style_signature=style_signature, client_id=client_id, storage_key=key)
-        await self.repo.commit()
+        try:
+            row, unknown = await self.repo.persist_dxf(
+                data, style_signature=style_signature, client_id=client_id, storage_key=key)
+            await self.repo.commit()
+        except IntegrityError:
+            # UPDATED 2026-09-11 (Hamthan): persist_dxf's docstring documents
+            # (style_signature, sha256) as the idempotency key and says a
+            # duplicate should be "caught upstream as a 409/no-op" — nobody
+            # upstream did, so a byte-identical re-upload of the same style's
+            # DXF hit uq_pattern_extraction_file as a raw IntegrityError,
+            # which Celery's parse_pattern_dxf retried twice (pointlessly,
+            # since the same file always hashes the same) before permanently
+            # failing. Roll back the poisoned transaction and return the row
+            # that's already there instead of crashing — that's what
+            # "idempotent" was supposed to mean here.
+            await self.db.rollback()
+            row = await self.repo.get_pattern_by_signature_and_sha(style_signature or "", sha)
+            if row is None:
+                raise
+            unknown = []
         return {"pattern_id": str(row.id), "style_signature": row.style_signature,
                 "n_pieces": row.n_pieces, "unknown_fabrics": unknown, "warnings": row.warnings}
 
     
     _EDIT_FIELDS = {"dcm", "qty_per_garment", "unit_price"}
     _EDITABLE_STATES = {BomStatus.DRAFT.value, BomStatus.READY_FOR_REVIEW.value}
+
+    # UPDATED 2026-09-17 (Hamthan): per-role narrowing of _EDIT_FIELDS. Every caller of
+    # PATCH /boms/{id}/items could previously write every field, so the cutting manager
+    # — whose job on this screen is to check the BOM and sign it off — could also rewrite
+    # the consumption figures the DM prepared. The cutting manager is now limited to
+    # `unit_price`; DM/MD keep the full set. A role that is absent from this map is
+    # unrestricted, which keeps service-level callers that pass a bare object (and the
+    # cross-module callers that pass no real user) working exactly as before.
+    _ROLE_EDIT_FIELDS: dict[str, set[str]] = {
+        UserRole.CUTTING_MANAGER.value: {"unit_price"},
+    }
+
+    @classmethod
+    def _editable_fields_for(cls, user) -> set[str]:
+        role = getattr(user, "role", None)
+        role = role.value if hasattr(role, "value") else role
+        return cls._ROLE_EDIT_FIELDS.get(role, cls._EDIT_FIELDS)
 
     async def edit_bom_items(self, user, bom_id: uuid.UUID, base_revision: int,
                              edits: list[dict]) -> dict:
@@ -1262,6 +1503,7 @@ class BomService:
 
         before = self._bom_snapshot(bom)
         by_id = {str(i.id): i for i in bom.items}
+        allowed_fields = self._editable_fields_for(user)
         dcm_changed = False
         for e in edits:
             item = by_id.get(str(e.get("bom_item_id")))
@@ -1271,6 +1513,15 @@ class BomService:
             field_ = e.get("field")
             if field_ not in self._EDIT_FIELDS:
                 raise HTTPException(422, detail={"error": "unsupported_field", "field": field_})
+            # A real field, just not one this role may write — 403, not 422: the request
+            # is well formed, the caller simply is not allowed to make this change.
+            if field_ not in allowed_fields:
+                raise HTTPException(403, detail={
+                    "error": "field_not_permitted_for_role",
+                    "field": field_,
+                    "allowed_fields": sorted(allowed_fields),
+                    "message": (f"Your role may only edit {', '.join(sorted(allowed_fields))} "
+                                f"on a BOM line.")})
             try:
                 value = Decimal(str(e.get("value")))
             except (InvalidOperation, TypeError, ValueError):
@@ -1320,36 +1571,94 @@ class BomService:
                 "error": "invalid_state_for_confirmation",
                 "current_status": bom.status,
                 "message": "Cutting confirmation is only allowed on a draft BOM."})
+        # UPDATED 2026-09-17 (Hamthan): READY_FOR_REVIEW was accepted above, so posting
+        # confirm-cutting a second time on the SAME BOM went straight through — it
+        # re-stamped cutting_confirmed_by/at over the first confirmation, re-ran the §10
+        # template back-fill, re-recorded the DXF yield observations, and raised a
+        # SECOND round of review notifications at the MD for a BOM already sitting in
+        # their queue. Confirmation is a signature, not a toggle: once it is on the row,
+        # the only ways off it are an edit that changes a DCM (edit_bom_items clears it)
+        # or reopen_bom after a rejection. READY_FOR_REVIEW stays in the tuple above so
+        # those paths, which leave cutting_confirmed_at NULL, can still confirm.
+        if bom.cutting_confirmed_at is not None:
+            raise HTTPException(409, detail={
+                "error": "already_confirmed",
+                "current_status": bom.status,
+                "cutting_confirmed_at": bom.cutting_confirmed_at.isoformat(),
+                "cutting_confirmed_by": (str(bom.cutting_confirmed_by)
+                                         if bom.cutting_confirmed_by else None),
+                "message": ("This BOM is already confirmed for cutting. Edit a "
+                            "consumption figure, or reopen it after a rejection, to "
+                            "confirm again.")})
         now = datetime.now(timezone.utc)
         bom.cutting_confirmed_by = getattr(user, "id", None)
         bom.cutting_confirmed_at = now
         bom.status = BomStatus.READY_FOR_REVIEW.value
+        # UPDATED 2026-09-17 (Hamthan): snapshot the four item fields this method needs
+        # BEFORE repo.save(). save() ends in db.refresh(bom); Bom.items is mapped
+        # cascade="all, delete-orphan", and "all" includes refresh-expire, so that
+        # refresh expired the collection AND every BomItem in it. The loop below then
+        # touched an expired attribute, triggering an implicit lazy load on an async
+        # session and killing the whole request with sqlalchemy.exc.MissingGreenlet.
+        # (expire_on_commit=False on both session factories does NOT cover this — it is
+        # refresh(), not the commit, doing the expiring.) The §10 consumption-template
+        # back-fill and the DXF yield observations below are the entire point of
+        # confirm-cutting, and neither had ever run. Holding plain values rather than
+        # ORM rows is what makes this safe: nothing here can be re-expired.
+        # test_bom_regression.py::test_r8 documented this as a live bug, left unfixed on
+        # purpose so its traceback WAS the bug report; both it and
+        # test_confirm_cutting_moves_draft_to_ready_for_review now pass.
+        items = [(i.category, i.qty_per_garment, i.uom, i.name) for i in bom.items]
         await self.repo.save(bom)
 
         if identity is None:
             identity = await self._resolve_identity(bom)
         backfilled = 0
+        # UPDATED 2026-09-17 (Hamthan): `sig` can legitimately come back None —
+        # style_signature() returns None when the identity carries no customer_ref, no
+        # internal_ref and no name, which is every BOM whose order sheet did not extract
+        # (the "manual_entry_required" path). style_consumption_template.style_signature
+        # is NOT NULL, so the back-fill below then died with an IntegrityError and took
+        # the whole confirmation down with it. This was invisible until the
+        # refresh-expire bug above was fixed, because the loop never reached an INSERT.
+        #
+        # Fall back to bom.style_signature — the column the BOM was generated with
+        # ('tower', 'clermont', ...), which is exactly the key the per-style flow wants
+        # — and if there is still nothing, skip the back-fill. A template keyed on no
+        # style is one that nothing could ever look up again, so writing it is
+        # pointless; refusing the CONFIRMATION over it would be far worse, since that is
+        # the cutting manager's sign-off and the gate the MD's approval waits on. The
+        # skip is surfaced in the response (`warnings`) rather than passing silently.
+        skipped_reason = None
         if identity is not None:
             sig = style_signature(customer_ref=identity.customer_ref,
-                                  internal_ref=identity.internal_ref, name=identity.name)
+                                  internal_ref=identity.internal_ref,
+                                  name=identity.name) or bom.style_signature
+            if not sig:
+                skipped_reason = "no_style_signature"
+                logger.warning("confirm_cutting: bom=%s has no resolvable style "
+                               "signature — consumption-template back-fill skipped",
+                               bom.id)
+                identity = None
+        if identity is not None:
             pattern = await self.repo.get_current_pattern(sig, client_id=identity.client_id)
             base_size = bom.dcm_base_size
             gt_id = bom.garment_type_id
-            for item in bom.items:
-                if item.category in MATERIAL_DCM_CATEGORIES and item.qty_per_garment is not None:
+            for category, qty_per_garment, uom, name in items:
+                if category in MATERIAL_DCM_CATEGORIES and qty_per_garment is not None:
                     await self.repo.upsert_consumption_template(
                         client_id=identity.client_id, style_signature=sig,
-                        garment_type_id=gt_id, material_category=item.category,
-                        size=base_size or "", dcm_value=item.qty_per_garment,
-                        uom=item.uom, confirmed_by=getattr(user, "id", None),
+                        garment_type_id=gt_id, material_category=category,
+                        size=base_size or "", dcm_value=qty_per_garment,
+                        uom=uom, confirmed_by=getattr(user, "id", None),
                         confirmed_at=now, source_bom_id=bom.id,
                     )
                     backfilled += 1
-                    if pattern is not None and item.category in (
+                    if pattern is not None and category in (
                             BomItemCategory.MAIN_MATERIAL.value, BomItemCategory.SUB_MATERIAL.value):
-                        obs = learn_yield(pattern, category=item.category, size=bom.dcm_base_size,
-                                        species=dcm.species_of(item.name),
-                                        confirmed_dcm_sf=item.qty_per_garment)
+                        obs = learn_yield(pattern, category=category, size=base_size,
+                                        species=dcm.species_of(name),
+                                        confirmed_dcm_sf=qty_per_garment)
                         if obs:
                             await self.repo.add_yield_observation(
                                 obs, source_bom_id=bom.id, confirmed_by=getattr(user,"id",None), confirmed_at=now)
@@ -1368,7 +1677,8 @@ class BomService:
         return {"bom_id": str(bom.id), "status": bom.status,
                 "cutting_confirmed_at": now.isoformat(),
                 "templates_backfilled": backfilled,
-                "notifications_created": len(notes)}
+                "notifications_created": len(notes),
+                "warnings": [skipped_reason] if skipped_reason else []}
 
     async def approve_bom(self, user, bom_id: uuid.UUID, *, lock: bool = False) -> dict:
         """Stage-3 MD approve/lock. REFUSES a BOM whose cutting_confirmed_at is null."""
@@ -1377,6 +1687,29 @@ class BomService:
             raise HTTPException(409, detail={
                 "error": "cutting_confirmation_required",
                 "message": "The cutting manager must confirm the BOM before approval."})
+        # UPDATED 2026-09-17 (Hamthan): approve checked ONLY cutting_confirmed_at, never
+        # bom.status — so unlike its mirror image reject_bom (which gates on
+        # READY_FOR_REVIEW and refuses anything approved/locked/exported), approve
+        # accepted a BOM in ANY state that still carried a confirmation stamp. That
+        # meant: re-approving an already-approved BOM (re-stamping approved_by/at,
+        # re-running the inventory check and the production-board advance), approving a
+        # BOM the MD had just REJECTED without anyone reopening it, and approving one
+        # already EXPORTED. The two endpoints are supposed to be a matched pair — one
+        # decision, taken once, on a BOM that is waiting for a decision — so approve now
+        # enforces exactly the entry condition reject already did.
+        if bom.status == BomStatus.REJECTED.value:
+            raise HTTPException(409, detail={
+                "error": "bom_rejected",
+                "current_status": bom.status,
+                "rejection_reason": bom.rejection_reason,
+                "message": "Reopen the rejected BOM before approving it."})
+        if bom.status != BomStatus.READY_FOR_REVIEW.value:
+            raise HTTPException(409, detail={
+                "error": "not_ready_for_review",
+                "current_status": bom.status,
+                "approved_at": bom.approved_at.isoformat() if bom.approved_at else None,
+                "message": ("Only a BOM awaiting review can be approved; this one is "
+                            f"already '{bom.status}'.")})
         before = self._bom_snapshot(bom)
         now = datetime.now(timezone.utc)
         await self._materialize_breakdown(user, bom)
@@ -1508,9 +1841,19 @@ class BomService:
         if bom.status == BomStatus.EXPORTED.value and bom.export_document_id is not None:
             doc = await self.repo.get_document(bom.export_document_id)
             if doc is not None:
+                # UPDATED 2026-09-17 (Hamthan): this replay already re-used the stored
+                # PDF rather than rendering a new one, but its response was
+                # byte-for-byte what a FIRST export returns — so posting /export twice
+                # looked exactly like the BOM had been exported twice, with nothing in
+                # the payload to say otherwise. The flags below make the replay legible:
+                # `replay` says no new document was produced, `exported_at` is the
+                # ORIGINAL export's timestamp (unchanged by this call), and no second
+                # BOM_EXPORT audit row is written.
                 return {"bom_id": str(bom.id), "status": bom.status,
                         "export_document_id": str(doc.id), "sha256": doc.sha256,
-                        "mime": doc.mime, "storage_url": doc.storage_url}
+                        "mime": doc.mime, "storage_url": doc.storage_url,
+                        "replay": True,
+                        "exported_at": bom.exported_at.isoformat() if bom.exported_at else None}
 
         view = self._bom_view(bom)
         identity = await self._resolve_identity(bom)
@@ -1558,7 +1901,8 @@ class BomService:
                                  "mime": mime})
         return {"bom_id": str(bom.id), "status": bom.status,
                 "export_document_id": str(doc.id), "sha256": sha,
-                "mime": mime, "storage_url": doc.storage_url}
+                "mime": mime, "storage_url": doc.storage_url,
+                "replay": False, "exported_at": now.isoformat()}
 
     async def get_bom(self, bom_id: uuid.UUID) -> dict:
         return self._bom_view(await self._load_bom(bom_id))

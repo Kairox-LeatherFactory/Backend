@@ -38,7 +38,6 @@ class BarcodeAnalyticsMixin:
         from fastapi import HTTPException, status
         from sqlalchemy import func, select
 
-        from app.modules.barcode.models import Drawer
         from app.modules.clients.models import SKU, Client, ClientOrder, Style
         from app.modules.employees.models import Employee
         from app.modules.production.models import Operation, Piece, ProductionEvent
@@ -82,30 +81,29 @@ class BarcodeAnalyticsMixin:
                 "leather_consumption_dcm": float(cons) if cons is not None else None,
             })
 
-        drawer_code = drawer_state = None
-        if getattr(piece, "drawer_id", None):
-            d = await self.db.get(Drawer, piece.drawer_id)
-            if d:
-                drawer_code, drawer_state = d.code, d.state
+        # WHERE IT STANDS IN THE STORE, off the garment's own row. This used to
+        # be a `db.get(Drawer, piece.drawer_id)` — a second query, and one that
+        # answered nothing at all for a piece the drawer pool never had room for.
+        store_state = getattr(piece, "store_state", None)
         current = stages[-1]["stage"] if stages else None
         return {
             "piece_code": piece.code, "style_name": style.name,
             "colour": sku.color_name or sku.color_code, "size": sku.size,
             "order_number": order_number, "client": client,
-            "current_stage": current, "drawer_code": drawer_code,
-            "drawer_state": drawer_state,
-            "awaiting": self._awaiting_text(current, drawer_state,
+            "current_stage": current,
+            "store_state": store_state,
+            "awaiting": self._awaiting_text(current, store_state,
                                             bool(getattr(piece, "needs_lining", True))),
             "stages": stages,
         }
 
     @staticmethod
-    def _awaiting_text(current, drawer_state, needs_lining):
-        if drawer_state == "holding_leather" and needs_lining:
-            return "in drawer, awaiting lining"
-        if drawer_state == "holding_lining":     # F07: lining stored, leather not yet
-            return "in drawer, awaiting leather"
-        if drawer_state in ("merged", "waiting"):
+    def _awaiting_text(current, store_state, needs_lining):
+        if store_state == "holding_leather" and needs_lining:
+            return "in the store, awaiting lining"
+        if store_state == "holding_lining":     # F07: lining stored, leather not yet
+            return "in the store, awaiting leather"
+        if store_state in ("merged", "waiting"):
             return "awaiting storage"
         if current == "FINAL_INSPECTION":
             return "awaiting inspection sign-off"

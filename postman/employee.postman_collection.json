@@ -1,0 +1,242 @@
+{
+  "info": {
+    "name": "KairoX \u00b7 Employee",
+    "description": "The roster and one worker. Shop-floor workers get NO login \u2014 creating one needs only a name, a designation and a wage type, and the response carries the barcode so the card can be printed immediately.\n\nSETUP\n  1. Import the whole folder and SELECT the KairoX environment\n     (top-right). That is what shares one token across every\n     collection \u2014 a collection variable is visible only to the\n     collection that set it.\n  2. Run `user` \u2192 Login. Its test script stores `access_token` for\n     you; there is nothing to copy and paste.\n  3. Every request here inherits bearer auth from that token.\n\n`base_url` defaults to http://127.0.0.1:8000.\n\nOptional query params are present but DISABLED, so each request runs\nas-is. File uploads are real form-data rows \u2014 click Select Files on\nthe `file` row. Generated from the app's own OpenAPI schema by\n`python scripts/make_postman_per_service.py` \u2014 re-run it after changing\nroutes rather than editing requests by hand.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Create Employee",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/employees",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "employees"
+          ]
+        },
+        "description": "Create an employee. A linked login is minted ONLY when `role` names a\nstaff role (managers/HR/security are created HERE now, except DM/MD).\n\nA plain worker needs name + designation + wage_type and nothing else: no\nphone, no email, no password, no app_user row. They get an employee barcode\nback so their card can be printed and scanned at the gate.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"\",\n  \"designation\": \"\",\n  \"wage_type\": \"monthly\",\n  \"monthly_salary\": 0,\n  \"phone\": \"\",\n  \"email\": \"\",\n  \"password\": \"\",\n  \"role\": \"managing_director\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Delete Employee",
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/employees/{{employee_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "employees",
+            "{{employee_id}}"
+          ],
+          "variable": [
+            {
+              "key": "employee_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "SOFT-delete an employee (is_active=False) + retire their barcode. DM/MD\nonly \u2014 HR can edit but not remove. History is preserved."
+      },
+      "response": []
+    },
+    {
+      "name": "Employee Barcode Action",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/employees/{{employee_id}}/barcode",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "employees",
+            "{{employee_id}}",
+            "barcode"
+          ],
+          "variable": [
+            {
+              "key": "employee_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Reissue a card (damaged/lost) or deactivate it (worker left). Deactivation\nNEVER deletes the employee or their history \u2014 it retires the scannable code.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"action\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Get Employee",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/employees/{{employee_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "employees",
+            "{{employee_id}}"
+          ],
+          "variable": [
+            {
+              "key": "employee_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "ONE employee. The read the CRUD set was missing.\n\nEvery other operation on an employee existed \u2014 list, create, update,\ndelete \u2014 but opening one required fetching the whole roster and filtering\nclient-side, which is wrong on a factory with several hundred workers and\nimpossible once the list is paged.\n\nSALARY IS STILL HR/DM/MD ONLY, the same rule the list follows: the response\nmodel widens to EmployeeReadWithPay for those roles and stays EmployeeRead\nfor everyone else, so this route cannot become a side door to pay data."
+      },
+      "response": []
+    },
+    {
+      "name": "List Employees",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/employees",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "employees"
+          ],
+          "query": [
+            {
+              "key": "active_only",
+              "value": "True",
+              "description": "",
+              "disabled": true
+            },
+            {
+              "key": "limit",
+              "value": "50",
+              "description": "Rows to return (1-200).",
+              "disabled": false
+            },
+            {
+              "key": "offset",
+              "value": "0",
+              "description": "Rows to skip before returning `limit` rows.",
+              "disabled": false
+            }
+          ]
+        },
+        "description": "F37: salary is returned ONLY to HR / DM / MD.\n\nH3: the roster itself is internal. EmployeeRead still carries phone and\nemail (schemas.py:27-28), so redacting salary alone was not enough \u2014 a\nCLIENT token was receiving staff PII."
+      },
+      "response": []
+    },
+    {
+      "name": "Update Employee",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/employees/{{employee_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "employees",
+            "{{employee_id}}"
+          ],
+          "variable": [
+            {
+              "key": "employee_id",
+              "value": "00000000-0000-0000-0000-000000000000"
+            }
+          ]
+        },
+        "description": "Edit an employee (name/designation/wage_type/salary/contact/active).\nReaches the existing service.update() (was unreachable \u2014 F89).",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"\",\n  \"designation\": \"\",\n  \"wage_type\": \"monthly\",\n  \"monthly_salary\": 0,\n  \"phone\": \"\",\n  \"email\": \"\",\n  \"is_active\": false,\n  \"role\": \"managing_director\",\n  \"password\": \"\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    }
+  ]
+}

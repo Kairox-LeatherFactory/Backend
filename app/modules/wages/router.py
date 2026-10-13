@@ -38,6 +38,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.pagination import Page, PageParams
 from app.core.enums import UserRole
 from app.modules.users.deps import require_roles
 from app.modules.users.models import User
@@ -46,16 +47,26 @@ from app.modules.wages.service import WageService
 
 router = APIRouter(prefix="/wages", tags=["Wages"])
 
-# Who may look at labour costs at all.
-# Who may look at payroll.
+# WHO MAY *READ* PAYROLL. CLAUDE.md s10: "Wages visible only to HR / DM / MD".
 _PAYROLL_READERS = require_roles(UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR, UserRole.HR)
+
+# WHO MAY *WRITE* PAYROLL. Visibility is not authority: HR reads payslips, it does
+# not decide what a person is paid. Setting a rate, starting a run, recomputing one
+# and deleting one are all money decisions and belong to DM/MD only.
+#
+# These two used to be one dependency. Every mutating route below was guarded by
+# _PAYROLL_READERS, so HR could set piece rates, start a payroll run and DELETE a
+# completed run. Only /reopen and /close were gated correctly. If you add a route
+# here, pick the gate by what the route DOES, not by who wants to see the page.
+_PAYROLL_WRITERS = require_roles(UserRole.DIRECT_MANAGER, UserRole.MANAGING_DIRECTOR)
 
 
 # ── order / style pickers ───────────────────────────────────────────────────
-@router.get("/orders", response_model=list[schemas.OrderRateCard])
+@router.get("/orders", response_model=Page[schemas.OrderRateCard])
 async def list_orders(
     on: date | None = Query(None, description="Coverage as of this date. Default today."),
     unpriced_only: bool = Query(False, description="Only orders with unpriced styles."),
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_PAYROLL_READERS),
 ):
@@ -67,10 +78,14 @@ async def list_orders(
 
     `styles_priced / styles` is the card's badge, the same "n of m priced" idea as
     the style card one level up."""
-    return await WageService(db).list_orders(on=on, unpriced_only=unpriced_only)
+    rows, total = await WageService(db).page_orders(
+        params, on=on, unpriced_only=unpriced_only)
+    return Page[schemas.OrderRateCard].of(
+        [schemas.OrderRateCard.model_validate(r) for r in rows],
+        total=total, params=params)
 
 
-@router.get("/styles", response_model=list[schemas.StyleRateOption])
+@router.get("/styles", response_model=Page[schemas.StyleRateOption])
 async def list_styles(
     order_number: str | None = Query(None, description="Filter to one order."),
     client_id: uuid.UUID | None = Query(None, description="Filter to one client."),
@@ -78,6 +93,7 @@ async def list_styles(
         False, description="Only styles with at least one unpriced operation."
     ),
     on: date | None = Query(None, description="Coverage as of this date. Default today."),
+    params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_PAYROLL_READERS),
 ):
@@ -87,12 +103,16 @@ async def list_styles(
     rated_operations/total_operations so unpriced styles are visible before payroll
     runs and silently pays zero for them.
     """
-    return await WageService(db).list_styles(
+    rows, total = await WageService(db).page_styles(
+        params,
         order_number=order_number,
         client_id=client_id,
         unpriced_only=unpriced_only,
         on=on,
     )
+    return Page[schemas.StyleRateOption].of(
+        [schemas.StyleRateOption.model_validate(r) for r in rows],
+        total=total, params=params)
 
 
 # ── rates ───────────────────────────────────────────────────────────────────
@@ -118,21 +138,21 @@ async def rate_history(
     return await WageService(db).rate_history(style_code, operation_code)
 
 
-@router.post("/rates")
+@router.post("/rates", response_model=schemas.RateSetResult)
 async def set_rate(
     body: schemas.RateSet,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(_PAYROLL_READERS),
+    _: User = Depends(_PAYROLL_WRITERS),
 ):
     """Single-cell save. Prefer /rates/bulk when saving a whole sheet."""
     return await WageService(db).set_rate(body)
 
 
-@router.post("/rates/bulk")
+@router.post("/rates/bulk", response_model=schemas.RateBulkResult)
 async def set_rates_bulk(
     body: schemas.RateBulkSet,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(_PAYROLL_READERS),
+    _: User = Depends(_PAYROLL_WRITERS),
 ):
     """Save an edited rate sheet in one transaction. All codes resolved first."""
     return await WageService(db).set_rates_bulk(body)
@@ -186,7 +206,7 @@ async def list_runs(
 async def compute_run(
     body: schemas.RunRequest,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(_PAYROLL_READERS),
+    _: User = Depends(_PAYROLL_WRITERS),
 ):
     """COMMAND. Computes ONE payroll for the window the manager typed.
 
@@ -228,7 +248,7 @@ async def delete_run(
     run_id: uuid.UUID,
     body: schemas.DeleteRunRequest | None = None,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(_PAYROLL_READERS),
+    user: User = Depends(_PAYROLL_WRITERS),
 ):
     """COMMAND. Delete a run and its lines outright.
 
@@ -258,7 +278,7 @@ async def recompute_run(
     run_id: uuid.UUID,
     body: schemas.RecomputeRequest | None = None,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(_PAYROLL_READERS),
+    user: User = Depends(_PAYROLL_WRITERS),
 ):
     """COMMAND. Discards a run's lines and rebuilds them from current production
     events and rates, for the SAME window and the SAME scope.

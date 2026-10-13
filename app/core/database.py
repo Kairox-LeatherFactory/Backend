@@ -34,15 +34,18 @@ DEPENDENCY USAGE (in routers)
     block even if the handler raises.
 ================================================================================
 """
+import uuid
 from collections.abc import AsyncGenerator, Generator
 
 from sqlalchemy import MetaData, create_engine
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 
@@ -82,11 +85,65 @@ class Base(DeclarativeBase):
 # Engine construction helpers
 # ──────────────────────────────────────────────────────────────────────────
 def _engine_kwargs(url: str) -> dict:
-    """Pooling args only make sense for Postgres; SQLite rejects them."""
+    """Pooling args only make sense for Postgres; SQLite rejects them.
+
+    EVERY VALUE COMES FROM SETTINGS. These were hardcoded pool_size=3 /
+    max_overflow=5, with no pool_timeout and no pool_recycle. Two consequences:
+
+      1. A request holds its connection for its whole lifetime, so the real
+         concurrency ceiling of the service is
+         `workers x (pool_size + max_overflow)` — 12 sustained / 32 burst at
+         WEB_CONCURRENCY=4. That is the first wall a 100-user floor hits, and
+         raising it needed a code change and a redeploy.
+      2. With no pool_timeout, SQLAlchemy's 30s default meant a saturated pool
+         made callers wait half a minute rather than failing fast, and with no
+         pool_recycle the app would eventually hand out a socket that RDS Proxy /
+         PgBouncer had already reaped.
+
+    See the sizing note on Settings.db_pool_size before changing these.
+    """
     if url.startswith("postgresql"):
-        return dict(pool_pre_ping=True, pool_size=3, max_overflow=5)
+        return dict(
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout,
+            pool_recycle=settings.db_pool_recycle,
+            pool_pre_ping=settings.db_pool_pre_ping,
+            **_pooler_kwargs(url),
+        )
     # SQLite (tests/local): a single shared connection, no pool sizing.
     return dict()
+
+
+def behind_transaction_pooler(url: str) -> bool:
+    """True when `url` goes through a transaction-mode pooler — see
+    Settings.db_transaction_pooler. Auto-detects Supabase's :6543."""
+    if settings.db_transaction_pooler is not None:
+        return settings.db_transaction_pooler
+    try:
+        return make_url(url).port == 6543
+    except Exception:
+        return False
+
+
+def _pooler_kwargs(url: str) -> dict:
+    """asyncpg settings that survive a transaction pooler.
+
+    asyncpg prepares every statement on the server and caches it per
+    connection. Through a transaction pooler the next transaction may land on a
+    different server connection, where that statement does not exist
+    ("prepared statement __asyncpg_stmt_1__ does not exist") or exists with
+    another query ("... already exists"). So: no statement cache, and a unique
+    name per prepared statement so two clients can never collide on one.
+    psycopg2 does not prepare statements, so the sync engine needs nothing.
+    """
+    if "+asyncpg" not in url or not behind_transaction_pooler(url):
+        return {}
+    return {"connect_args": {
+        "statement_cache_size": 0,
+        "prepared_statement_cache_size": 0,
+        "prepared_statement_name_func": lambda: f"__asyncpg_{uuid.uuid4()}__",
+    }}
 
 # ──────────────────────────────────────────────────────────────────────────
 # ASYNC engine + session  (the live API runs on these)
@@ -113,6 +170,39 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             yield session
         finally:
             await session.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# CELERY ASYNC engine + session  (background workers ONLY — see note)
+#
+# UPDATED 2026-09-11 (Hamthan): Celery tasks (modules/bom/tasks.py) drive their
+# async work via asyncio.run() on a FRESH event loop per task, but they used to
+# import the FastAPI AsyncSessionLocal above, whose engine is a POOLED engine
+# built for one long-lived event loop. asyncpg connections are bound to the
+# loop that opened them, so a connection returned to that pool by task N would
+# get handed to task N+1 on a DIFFERENT (new) loop; pool_pre_ping's own ping
+# then failed with "RuntimeError: Event loop is closed" instead of
+# transparently reconnecting (seen in worker logs: task 1 succeeded on a cold
+# pool, task 2 crashed on checkout of the stale connection 13 min later).
+# NullPool opens a brand-new connection on every checkout and closes it on
+# checkin, so no connection ever outlives the event loop that created it —
+# this sidesteps the cross-loop reuse entirely. Only Celery tasks should use
+# this engine; the FastAPI app keeps using the pooled async_engine above.
+# ──────────────────────────────────────────────────────────────────────────
+celery_async_engine = create_async_engine(
+    settings.effective_async_url,
+    echo=False,
+    future=True,
+    poolclass=NullPool,
+    **_pooler_kwargs(settings.effective_async_url),
+)
+
+CeleryAsyncSessionLocal = async_sessionmaker(
+    bind=celery_async_engine,
+    class_=AsyncSession,
+    autoflush=False,
+    expire_on_commit=False,
+)
 
 # ──────────────────────────────────────────────────────────────────────────
 # SYNC engine + session  (Alembic migrations + scripts/seed.py)

@@ -12,8 +12,12 @@ WHAT YOU GET
     · one folder per tag (Wages, Dashboard, Barcode, …)
     · every operation, with its real path, query params and an example JSON body
       built from the endpoint's own request schema
+    · file-upload endpoints as real form-data rows, the file field typed as a
+      file so Postman shows the picker — an upload with no body 422s on a field
+      the tester cannot see
     · {{base_url}} and {{token}} collection variables, bearer auth inherited by
-      every request, so you log in once and everything is authorised
+      every request; Login CAPTURES its own token into that variable, so there
+      is no copy-paste step to forget
     · path parameters as {{style_code}}-style variables you fill in per request
 
 USAGE
@@ -53,6 +57,17 @@ def _resolve(schema: dict, spec: dict, depth: int = 0) -> dict:
                 if got:
                     return got
     return schema
+
+
+# THE PAGING PARAMS, AND WHY THEY GET A SPECIAL CASE.
+# Every other optional query param is a FILTER — sending an empty or guessed one
+# changes what a request means, so those ship disabled. limit/offset do not:
+# they are the endpoint's own defaults written out, so enabling them changes
+# nothing about the result except that the pager is visibly in play. Shipping
+# them disabled meant nobody ever exercised paging through the collections.
+# A value here also replaces the schema's generic example (integer -> 0), because
+# `limit=0` is a 422 on every route that declares it (PageParams caps at ge=1).
+_PAGING_DEFAULTS = {"limit": 50, "offset": 0, "page": 1, "page_size": 50}
 
 
 def _example(schema: dict, spec: dict, depth: int = 0):
@@ -101,12 +116,21 @@ def _request(path: str, method: str, op: dict, spec: dict) -> dict:
             raw_path = raw_path.replace("{%s}" % name, "{{%s}}" % name)
             variables.append({"key": name, "value": "" if example is None else str(example)})
         elif where == "query":
+            example = _PAGING_DEFAULTS.get(name, example)
             query.append({
                 "key": name,
                 "value": "" if example is None else str(example),
                 "description": p.get("description", ""),
-                # Optional params start disabled so a request runs as-is.
-                "disabled": not p.get("required", False),
+                # Optional params start disabled so a request runs as-is —
+                # EXCEPT the paging ones. A disabled param is not sent at all,
+                # so every collection shipped `limit` and `offset` greyed out,
+                # and anyone who opened a list request, saw the boxes, and
+                # pressed Send got an unpaged response. It read as "pagination
+                # is not working anywhere" when nothing had ever been asked for.
+                # They are safe to send on every request that declares them —
+                # they are the endpoint's own defaults.
+                "disabled": (not p.get("required", False)
+                             and name not in _PAGING_DEFAULTS),
             })
 
     item = {
@@ -128,8 +152,8 @@ def _request(path: str, method: str, op: dict, spec: dict) -> dict:
     if variables:
         item["request"]["url"]["variable"] = variables
 
-    body_schema = (((op.get("requestBody") or {}).get("content") or {})
-                   .get("application/json", {}).get("schema"))
+    content = (op.get("requestBody") or {}).get("content") or {}
+    body_schema = content.get("application/json", {}).get("schema")
     if body_schema:
         item["request"]["header"].append(
             {"key": "Content-Type", "value": "application/json"})
@@ -138,6 +162,65 @@ def _request(path: str, method: str, op: dict, spec: dict) -> dict:
             "raw": json.dumps(_example(body_schema, spec), indent=2),
             "options": {"raw": {"language": "json"}},
         }
+    elif "multipart/form-data" in content:
+        # An upload endpoint used to generate with NO body at all, so the
+        # tester got a 422 that named a field they could not see. FastAPI
+        # describes the form in a `Body_*` schema; turn it into real Postman
+        # form-data rows — file rows as `type: file` so the picker appears.
+        form = _resolve(content["multipart/form-data"].get("schema", {}), spec)
+        rows = []
+        for name, sub in (form.get("properties") or {}).items():
+            resolved = _resolve(sub, spec)
+            is_file = (resolved.get("format") == "binary"
+                       or resolved.get("contentMediaType")
+                       == "application/octet-stream")
+            if is_file:
+                rows.append({"key": name, "type": "file", "src": [],
+                             "description": "Pick a file."})
+            else:
+                value = _example(sub, spec)
+                rows.append({"key": name, "type": "text",
+                             "value": "" if value is None else str(value),
+                             "disabled": name not in (form.get("required") or [])})
+        # Postman sets the multipart boundary itself; a hand-set Content-Type
+        # header here would override it and break the upload.
+        item["request"]["body"] = {"mode": "formdata", "formdata": rows}
+
+    # Login is the one request whose RESULT every other request needs. Copying
+    # the token by hand is the step people skip, and then every 401 looks like
+    # a broken route. Capture it instead.
+    if path.endswith("/auth/login") and method == "post":
+        item["event"] = [{
+            "listen": "test",
+            "script": {"type": "text/javascript", "exec": [
+                "// Stores access_token so you never paste it by hand.",
+                "//",
+                "// It goes into the ENVIRONMENT when one is selected, because a",
+                "// collection variable is only visible to the collection that",
+                "// set it -- log in once in `user` and the other 17 collections",
+                "// would still 401. Select the KairoX environment and one login",
+                "// authorises all of them. The collection variable is written",
+                "// too, so this still works with no environment selected.",
+                "if (pm.response.code === 200) {",
+                "    const body = pm.response.json();",
+                "    if (body.access_token) {",
+                "        pm.collectionVariables.set('token', body.access_token);",
+                "        if (pm.environment.name) {",
+                "            pm.environment.set('token', body.access_token);",
+                "        }",
+                "        console.log('token stored'",
+                "            + (pm.environment.name",
+                "               ? ' in environment ' + pm.environment.name",
+                "               : ' in this collection only -- select the KairoX'",
+                "                 + ' environment to share it'));",
+                "    }",
+                "}",
+                "pm.test('login returns 200 + access_token', function () {",
+                "    pm.response.to.have.status(200);",
+                "    pm.expect(pm.response.json()).to.have.property('access_token');",
+                "});",
+            ]},
+        }]
     return item
 
 

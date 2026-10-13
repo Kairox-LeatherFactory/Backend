@@ -32,7 +32,7 @@ sqlalchemy[asyncio]==2.0.50
 alembic==1.18.4
 asyncpg==0.31.0           # ASYNC Postgres driver (live API)
 psycopg2-binary==2.9.12   # SYNC Postgres driver (Alembic + seed script)
-aiosqlite==0.22.1         # async SQLite (tests / local)
+# aiosqlite -> requirements-dev.txt (tests / local SQLite only)
 
 # ── Config + validation ────────────────────────────────────────────────────
 pydantic==2.13.4
@@ -89,13 +89,13 @@ reportlab==4.2.5         # pure-Python PDF render — the FALLBACK that runs eve
 # weasyprint             # OPTIONAL primary — install in the Docker image (+ cairo/pango)
 # python-magic           # OPTIONAL libmagic MIME sniff; a signature sniffer is the
 #                        # cross-platform fallback (libmagic is absent on Windows).
-# boto3                  # OPTIONAL — only if STORAGE_BACKEND=s3/minio
+boto3==1.43.111          # REQUIRED on AWS — STORAGE_BACKEND=s3 imports it lazily
+                         # (core/storage.py), so a missing boto3 only fails on the
+                         # first upload, in production. Keep it pinned here.
 # supabase               # OPTIONAL — only if STORAGE_BACKEND=supabase (prod)
 
 # ── Tests ──────────────────────────────────────────────────────────────────
-pytest==9.0.3
-pytest-asyncio==1.4.0
-httpx==0.28.1
+# Moved to requirements-dev.txt so they stay out of the production image.
 
 # ── LLM extraction + AI chatbot (LangGraph agent) — verified set (2026-05) ───
 # Two distinct uses share the same providers:
@@ -142,6 +142,13 @@ langchain-google-genai==3.0.1    # Gemini — PRIMARY for BOM extraction (multim
 # Run THREE processes: uvicorn (API), `celery ... worker`, `celery ... beat`.
 celery==5.6.2
 redis==7.3.0             # broker + result backend client (Upstash works: rediss://)
+flower==2.0.1            # Celery monitoring UI — `docker compose --profile monitor up -d flower`
+                         # (http://localhost:5555). Queued/active/failed tasks + tracebacks, which
+                         # is how you see WHY a breakdown produced style_count 0 without tailing logs.
+watchdog==6.0.0          # DEV ONLY: entrypoint.sh runs the worker under `watchmedo auto-restart`
+                         # when CELERY_AUTORELOAD=true. The worker caches your task AND pydantic
+                         # schema code in memory, so without a restart an edit to e.g.
+                         # extraction_schemas.py has no effect and looks like a failed fix.
 
 ezdxf>=1.4,<2.0
 shapely>=2.0,<3.0

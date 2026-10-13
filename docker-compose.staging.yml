@@ -1,6 +1,11 @@
 # STAGING overlay — server, port 8001, migrations ON, seed OFF (seed manually once).
 #   docker compose -p kairox-staging -f docker-compose.yml -f docker-compose.staging.yml \
 #     --env-file .env.staging up -d --build
+#
+# Redis is NOT bundled here — .env.staging must set CELERY_BROKER_URL and
+# CELERY_RESULT_BACKEND at your Upstash / Redis Cloud instance (rediss:// for TLS).
+# Confirm that instance uses maxmemory-policy=noeviction: an evicting broker drops
+# queued BOM jobs silently, and the API has already answered 202 for each one.
 services:
   api:
     environment:
@@ -14,12 +19,19 @@ services:
           cpus: "1.0"
           memory: 1200M
   worker:
+    environment:
+      CELERY_AUTORELOAD: "false"
+      # Gemini extraction is IO-bound, the DXF parse is CPU-bound. With a 1.0-CPU
+      # limit, 2 is the honest number — more just adds context switching.
+      CELERY_CONCURRENCY: "${CELERY_CONCURRENCY:-2}"
     deploy:
       resources:
         limits:
           cpus: "1.0"
           memory: 1200M
   beat:
+    environment:
+      CELERY_AUTORELOAD: "false"
     deploy:
       resources:
         limits:

@@ -92,6 +92,16 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 
+# Make `import app...` / `from scripts import ...` work whether this runs as
+# `python -m scripts.<name>` (repo root already on sys.path) or as a bare path
+# `python scripts/<name>.py` (sys.path[0] is scripts/, so neither is importable).
+# Without it the bare-path form died on ModuleNotFoundError, which reads as a
+# broken checkout rather than the wrong invocation.
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
+from scripts import _dbguard
 from app.core.config import settings          # noqa: F401  (parity with sibling)
 from app.core.database import SessionLocal
 from app.core.enums import MaterialCategory, MaterialSubtype, uom_for
@@ -572,7 +582,16 @@ def main() -> None:
                     help="load just one workbook (substring match, e.g. THREADS)")
     ap.add_argument("--dry-run", action="store_true",
                     help="validate and report; write nothing")
+    _dbguard.add_argument(ap)
     args = ap.parse_args()
+
+    # Writes rows, so it must be sure WHICH database it is writing to.
+    # ASYNC_DATABASE_URL overrides DATABASE_URL outright
+    # (config.effective_async_url), so the two can silently name
+    # different databases — that is how 42 people reached live Supabase
+    # on 2026-09-28. See scripts/_dbguard.py.
+    _dbguard.assert_one_database("load_trims_inventory.py",
+                                 allow_split=args.allow_split_db)
 
     base = Path(args.dir)
     if not base.is_dir():

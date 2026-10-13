@@ -79,7 +79,8 @@ async def test_a_client_login_sees_only_its_own_skus(api_client, as_role,
     r = await api_client.get(f"{API}/production/skus")
     assert r.status_code == 200
 
-    codes = [row.get("sku_code") or row.get("code") for row in r.json()]
+    # /production/skus is paged (core/pagination.py) — rows under `items`.
+    codes = [row.get("sku_code") or row.get("code") for row in r.json()["items"]]
     assert any("ACME" in (c or "") for c in codes), "the caller lost their own data"
     assert not any("RIVAL" in (c or "") for c in codes), (
         f"cross-tenant leak: ACME's token returned RIVAL's SKUs — {codes}")
@@ -136,7 +137,8 @@ async def test_staff_still_read_across_clients(api_client, as_role, two_clients)
     r = await api_client.get(f"{API}/production/skus")
     assert r.status_code == 200
 
-    codes = [row.get("sku_code") or row.get("code") for row in r.json()]
+    # /production/skus is paged (core/pagination.py) — rows under `items`.
+    codes = [row.get("sku_code") or row.get("code") for row in r.json()["items"]]
     assert any("ACME" in (c or "") for c in codes)
     assert any("RIVAL" in (c or "") for c in codes)
 

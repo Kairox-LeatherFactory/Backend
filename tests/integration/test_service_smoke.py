@@ -227,16 +227,6 @@ async def test_employees_service(db):
 
 
 # ────────────────────────────────────────────────────────────── PRODUCTION
-@pytest.mark.xfail(
-    reason="AUDIT F139 (BLOCKER, docs/audit/pass-01-business-logic.md): "
-           "app/modules/production/repository.py:213,222 GROUP/ORDER BY "
-           "Piece.style_id, a column Piece does not have (models.py:71-94); "
-           "the SELECT correctly projects SKU.style_id. Constructing the "
-           "statement raises AttributeError, so EVERY piece-rate wage run "
-           "fails before emitting SQL. Not fixed here: audit rule is that "
-           "application code is never edited to make a test pass. "
-           "Flips to XPASS the moment the two-line fix lands.",
-    raises=AttributeError, strict=False)
 @pytest.mark.asyncio
 async def test_production_service(db):
     cat = await _seed_catalog(db)
@@ -262,11 +252,19 @@ async def test_production_service(db):
     counts = await ps.piece_counts(PAST, PAST)
     assert sum(row[-1] for row in counts) == 40 + 5 + 3 + 30
 
-    # scan rejects unknown codes without writing them
-    res = await ps.scan(user=actor, operation_id=cat["pasting"].id,
-                        employee_id=cat["afzal"].id, work_date=PAST,
-                        piece_codes=["NOPE-1", "NOPE-2"])
-    assert res["count_logged"] == 0 and len(res["not_found"]) == 2
+    # the log rejects unknown pieces without writing them
+    #
+    # THIS USED TO CALL `ps.scan(..., piece_codes=[...])`, which has not existed
+    # since the two-door log replaced it: the router now resolves barcodes to
+    # ids and the service only ever sees ids (CLAUDE.md s8). The call raised
+    # AttributeError, but the test carried an xfail blaming an unrelated finding
+    # (F139), so the whole of the rest of this smoke test was reported as a known
+    # failure and nobody saw that the last four lines had rotted. The marker is
+    # gone; this is the same assertion against the API that exists.
+    res = await ps.log_batch(user=actor, employee_id=cat["afzal"].id,
+                             piece_ids=[uuid.uuid4(), uuid.uuid4()],
+                             work_date=PAST, screen=None)
+    assert len(res["logged"]) == 0 and len(res["not_found"]) == 2
 
 
 # ────────────────────────────────────────────────────────────── ANALYTICS

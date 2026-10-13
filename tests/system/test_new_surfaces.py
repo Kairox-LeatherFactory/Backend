@@ -24,20 +24,15 @@ API = "/api/v1"
 
 
 @pytest.mark.asyncio
-async def test_drawer_list_accepts_pin_codes_and_defaults_to_recent(
-        api_client, as_role):
-    as_role(UserRole.STORE_MANAGER)
-    r = await api_client.get(f"{API}/drawers", params={
-        "pin_codes": ["DRW-0042", "DRW-0117"], "limit": 5})
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert {"total", "count", "items"} <= body.keys()
-    # the contract fields the store screen renders
-    if body["items"]:
-        row = body["items"][0]
-        assert "last_activity_at" in row and "last_activity" in row
-        assert "pinned" in row
+@pytest.mark.skip(reason="The /drawers list is withdrawn; the store list is "
+                         "GET /store/pieces. See tests/integration/test_store_merge.py")
+async def test_drawer_list_accepts_pin_codes_and_defaults_to_recent(api_client, as_role):
+    """RETIRED WITH THE DRAWER SCREEN.
 
+    This asserted the Drawers List's pin-code filter and recent-activity
+    ordering. There is no drawers list: the store is a state on the garment, so
+    the equivalent read is GET /store/pieces?state=... which has nothing to pin.
+    """
 
 @pytest.mark.asyncio
 async def test_wage_run_list_filters_and_delete_route(api_client, as_role):
