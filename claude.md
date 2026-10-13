@@ -768,7 +768,19 @@ pytest tests/ -v                    # all layers
 python verify/run_logic_checks.py   # pure logic, no deps -> PASSED 49 FAILED 0
 ```
 
-- **SQLite proves logic; add a Postgres CI job** to prove the migration + native-enum path.
+- **SQLite proves logic; Postgres proves the constraints.** `TEST_DATABASE_URL=postgresql+asyncpg://…`
+  runs the same fixtures on a real server (`tests/conftest.py`, `engine`). It **wipes that
+  database** — throwaway only; hosted URLs are refused. The CI `postgres` job runs
+  `tests/integration` + `tests/functional` this way, after the migrations and `alembic check`.
+  - Its first run failed **165 tests SQLite had passed**, because SQLite never checks a foreign
+    key. Almost all were actor ids (`FakeUser`, a bare `uuid4()`) with no `app_user` row; on
+    Postgres the harness now provisions any id written into an `app_user` FK column, since
+    production's actor is always a real logged-in user. **Every other FK stays enforced.**
+  - A test that forges a dangling FK on purpose (a "degrades gracefully" read) carries
+    `@pytest.mark.sqlite_only` — Postgres refuses to store the row it needs.
+  - Isolation is **real commits + a wipe of the tables written**, never one rolled-back outer
+    transaction: inside one transaction `now()` is frozen, every `created_at` ties, and
+    time-ordered reads (a piece's history) come back in arbitrary order.
 - `GUID()` degrades to CHAR(32) and `JSON` off Postgres — the feature uses nothing Postgres-only, so
   SQLite is a faithful stand-in for the tests.
 

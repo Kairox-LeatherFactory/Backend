@@ -445,6 +445,7 @@ async def test_release_breakdown_claim_hands_it_back(svc, dm, order_profile):
 
 
 # ══════════════════════════════════════════════════ the bom.service <-> procurement.service edge
+@pytest.mark.sqlite_only
 async def test_link_submission_to_order_sets_the_client_order_id(svc, dm):
     import uuid
     sub = await svc.open_submission(dm, None)

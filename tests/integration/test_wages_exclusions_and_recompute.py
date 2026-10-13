@@ -166,6 +166,7 @@ async def test_a_monthly_worker_with_no_salary_is_reported_not_zeroed(db):
 
 # ══════════════════════════════ H13 · an unrecognised wage_type is surfaced
 @pytest.mark.asyncio
+@pytest.mark.sqlite_only
 async def test_an_out_of_vocabulary_wage_type_crashes_payroll_instead_of_excluding(db):
     """FINDING F148. The H13 safety net does not reach the failure it was built
     for, and the real failure is worse than the one it handles.

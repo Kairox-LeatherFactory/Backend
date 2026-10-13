@@ -50,8 +50,18 @@ RUN dos2unix entrypoint.sh 2>/dev/null || true \
 # it missed; this mkdir keeps the `beat` role working even without that volume.
 RUN mkdir -p /app/var/celerybeat /app/var/procurement-documents
 
+# RUN AS A NON-ROOT USER. A root process that is compromised owns the container.
+# --create-home: sentence-transformers / HuggingFace cache models under ~/.cache.
+# /app/var is the only path the app writes to (local storage + beat schedule).
+# NOTE: a named volume created by an OLDER root image keeps root ownership —
+# on an existing server, `docker volume rm` the celerybeat volume once, or chown it.
+RUN useradd --create-home --uid 1000 app \
+    && chown -R app:app /app/var
+USER app
+
+# 8000 only. Flower (5555) is an opt-in compose profile and must never be
+# published in production — it shows every task's arguments, unauthenticated.
 EXPOSE 8000
-EXPOSE 5555
 
 # UPDATED 2026-09-12 (Hamthan): the image-wide HEALTHCHECK that lived here
 # (curl localhost:8000/health) is GONE. It is baked into every container built

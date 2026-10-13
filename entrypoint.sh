@@ -34,7 +34,7 @@ CMD="${1:-api}"
 
 # Path to the leather-lots CSV INSIDE the image. Override with LEATHER_LOTS_CSV
 # if your filename differs. Must exist in the repo (copied in by `COPY . .`).
-LEATHER_LOTS_CSV="${LEATHER_LOTS_CSV:-data/clean_leather_lots_finalZZ.csv}"
+LEATHER_LOTS_CSV="${LEATHER_LOTS_CSV:-data/clean_leather_lots.csv}"
 
 # ── Celery wiring ────────────────────────────────────────────────────────────
 # CELERY_APP      : the worker's app. app/core/celery.py imports EVERY models.py
@@ -116,10 +116,10 @@ run_migrations() {
 # All three are idempotent, so a re-run is safe, but we still only run this
 # MANUALLY via the `seed` command — never automatically on api boot in prod.
 run_seed() {
-    log "── Seed 1/3: employees + cards + logins ──"
+    log "── Seed 1/2: employees + cards + logins ──"
     python -m scripts.seed_employees || { err "seed_employees failed."; exit 1; }
 
-    log "── Seed 2/3: leather lots (csv=${LEATHER_LOTS_CSV}) ──"
+    log "── Seed 2/2: leather lots (csv=${LEATHER_LOTS_CSV}) ──"
     if [ ! -f "${LEATHER_LOTS_CSV}" ]; then
         err "Leather-lots CSV not found at ${LEATHER_LOTS_CSV}."
         err "Set LEATHER_LOTS_CSV to the correct path, or ensure the file is in the image."
@@ -127,9 +127,7 @@ run_seed() {
     fi
     python -m scripts.load_leather_lots --csv "${LEATHER_LOTS_CSV}" \
         || { err "load_leather_lots failed."; exit 1; }
-
-    log "── Seed 3/3: 200 drawer barcodes ──"
-    python -m scripts.gen_drawer_barcodes || { err "gen_drawer_barcodes failed."; exit 1; }
+    # (The old step 3, gen_drawer_barcodes, went with the drawers — CLAUDE.md §9.)
 
     log "All three seed scripts complete."
 }
