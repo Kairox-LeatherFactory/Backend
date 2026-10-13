@@ -217,7 +217,8 @@ class TestResolve:
     @pytest.mark.parametrize("type_,field", [
         (BarcodeType.PIECE, "piece_id"),
         (BarcodeType.EMPLOYEE, "employee_id"),
-        (BarcodeType.LEATHER_SHEET, "material_sheet_id"),
+        pytest.param(BarcodeType.LEATHER_SHEET, "material_sheet_id",
+                     marks=pytest.mark.sqlite_only),   # forges a dangling sheet id
     ])
     async def test_a_retired_code_of_any_type_is_410_not_404(
             self, db, pieces, cutter, type_, field):
@@ -241,6 +242,7 @@ class TestResolve:
         assert e.value.status_code == 410
         assert "history" in e.value.detail
 
+    @pytest.mark.sqlite_only
     async def test_a_registry_row_pointing_at_nothing_still_answers(self, db):
         """A dangling row must degrade to the code + type, never a 500."""
         await register(db, code="ORPHAN-PIECE", type=BarcodeType.PIECE.value,
@@ -250,6 +252,7 @@ class TestResolve:
         assert out["piece"]["piece_id"] is not None
         assert "code" not in out["piece"]
 
+    @pytest.mark.sqlite_only
     async def test_a_dangling_employee_and_lot_row_degrade_gracefully(self, db):
         await register(db, code="ORPHAN-EMP", type=BarcodeType.EMPLOYEE.value,
                        employee_id=uuid.uuid4())
@@ -274,6 +277,7 @@ class TestResolve:
         assert "drawer" not in out
         assert out["next_expected_scan"] is None
 
+    @pytest.mark.sqlite_only
     async def test_a_sheet_row_pointing_at_no_hide_returns_an_empty_block(self, db):
         await register(db, code="ORPHAN-SHEET",
                        type=BarcodeType.LEATHER_SHEET.value,
@@ -362,7 +366,8 @@ class TestNarrowResolvers:
 
     @pytest.mark.parametrize("method,message", [
         ("resolve_piece_id", "not a known piece barcode"),
-        ("resolve_employee_id", "not a known employee barcode"),
+        pytest.param("resolve_employee_id", "not a known employee barcode",
+                     marks=pytest.mark.sqlite_only),   # forges a dangling lot id
         ("resolve_lot_id", "not a known material-lot barcode"),
     ])
     async def test_a_code_of_the_wrong_type_is_a_404_naming_the_type_wanted(

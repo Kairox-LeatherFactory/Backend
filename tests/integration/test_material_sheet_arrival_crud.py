@@ -120,6 +120,7 @@ class TestGetSheet:
         picker = await svc.list_lots(category="LEATHER")
         assert picker["lots"][0]["barcode"] == sheeted["lot_barcode"]
 
+    @pytest.mark.sqlite_only
     async def test_a_hide_on_a_cutting_row_reports_itself_as_locked(
             self, db, sheeted):
         svc = MaterialService(db)
@@ -238,6 +239,7 @@ class TestUpdateSheet:
                 sheeted["sheets"][0]["sheet_id"], {"dcm": "big"})
         assert e.value.status_code == 422 and "must be a number" in e.value.detail
 
+    @pytest.mark.sqlite_only
     async def test_a_hide_on_a_cutting_row_names_the_row(self, db, sheeted):
         """Changing it underneath the cutter would rewrite what a garment cost."""
         svc = MaterialService(db)
@@ -326,6 +328,7 @@ class TestDeleteSheet:
             AuditLog.action == "MATERIAL_SHEET_DELETED"))
         assert row.after["dcm"] == 30.0 and row.after["code"] == "LS-000004"
 
+    @pytest.mark.sqlite_only
     async def test_a_hide_a_cutter_has_been_given_is_refused(self, db, sheeted):
         svc = MaterialService(db)
         sheet = await svc.repo.get_sheet(sheeted["sheets"][0]["sheet_id"])

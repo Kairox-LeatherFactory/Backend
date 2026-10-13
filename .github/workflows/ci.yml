@@ -1,5 +1,20 @@
 name: CI
-on: [push, pull_request]
+# `on: [push, pull_request]` ran every job twice for a PR's own pushes. Push
+# builds the long-lived branches; pull_request covers everything else.
+on:
+  push:
+    branches: [main, Hamthan-Dev]
+  pull_request:
+
+# A newer push to the same branch makes the running build obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# PYTHON MUST MATCH THE DOCKERFILE (`FROM python:3.13-slim`). CI used to test on
+# 3.12 and ship 3.13 — green here proved nothing about the image.
+env:
+  PYTHON_VERSION: "3.13"
 
 jobs:
   # ── The fast job: logic, boundaries and the published contract ────────────
@@ -8,8 +23,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: pip install -r requirements.txt pytest import-linter
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
 
       - name: Enforce module boundaries
         env: { DATABASE_URL: "sqlite://" }
@@ -87,11 +105,17 @@ jobs:
   #   - row locks — every SELECT ... FOR UPDATE in this codebase is a no-op on
   #     SQLite, so the concurrency protections are untested without this job
   #   - the migration chain against a real server
+  #
+  # It runs the migration chain, its reversibility, model/migration drift, and
+  # then the integration + functional layers ON POSTGRES (TEST_DATABASE_URL —
+  # see the `engine` fixture in tests/conftest.py). The first such run found 165
+  # tests that only passed because SQLite never checks a foreign key.
+  # Not covered yet: two-connection row-lock races — every test uses one session.
   postgres:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: postgres:17     # match the server production runs
         env:
           POSTGRES_USER: factory
           POSTGRES_PASSWORD: factory
@@ -111,16 +135,68 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: pip install -r requirements.txt pytest
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
 
       # The migration chain is the point of this job: it proves the schema can
       # actually be built from empty, on the engine production runs on.
       - name: Run migrations from empty
         run: alembic upgrade head
 
+      # MODELS AND MIGRATIONS MUST AGREE. A model change with no revision
+      # passes every SQLite test (they build from create_all) and then fails in
+      # production on the first query that touches the missing column.
+      # `alembic check` exits non-zero if autogenerate would emit anything.
+      - name: No drift between models and migrations
+        run: alembic check
+
       # And that it is reversible far enough to roll back a bad deploy.
       - name: Migrations are reversible one step
         run: |
           alembic downgrade -1
           alembic upgrade head
+
+      # MUST STAY LAST IN THIS JOB: the harness drops and rebuilds the schema.
+      # `sqlite_only` tests (they forge a dangling FK Postgres refuses) skip here.
+      - name: Integration + functional tests on Postgres
+        env:
+          TEST_DATABASE_URL: "postgresql+asyncpg://factory:factory@localhost:5432/factory"
+        run: pytest -q tests/integration tests/functional
+
+  # ── The image: what actually ships ─────────────────────────────────────────
+  # Nothing above builds the Dockerfile, so a broken COPY, a package missing
+  # from requirements.txt (but present in requirements-dev.txt), or an import
+  # that only fails on the slim base image was found at deploy time.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: kairox:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image imports, runs as non-root, ships no secrets or test data
+        run: |
+          docker run --rm --entrypoint sh \
+            -e SECRET_KEY=ci-docker-smoke-only-not-a-real-signing-key \
+            -e DATABASE_URL=postgresql+psycopg2://u:p@localhost:5432/x \
+            -e ASYNC_DATABASE_URL=postgresql+asyncpg://u:p@localhost:5432/x \
+            kairox:ci -c '
+              set -e
+              python -c "import app.main, boto3, gunicorn; print(\"imports ok\")"
+              test "$(id -u)" != "0" || { echo "image runs as root"; exit 1; }
+              for p in .env tests docs var postman; do
+                test ! -e "/app/$p" || { echo "/app/$p must not be in the image"; exit 1; }
+              done
+              echo "image ok"'
+          docker image ls kairox:ci --format "image size: {{.Size}}"

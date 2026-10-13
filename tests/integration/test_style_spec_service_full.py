@@ -988,6 +988,7 @@ class TestKitSurfaces:
         await svc.replace_spec(draft_style.id, [leather_line()], actor_name=BY)
         assert await svc.kit_required_for_piece(pieces[0].id) is False
 
+    @pytest.mark.sqlite_only
     async def test_a_piece_with_no_parent_style_needs_no_kit(self, db, pieces):
         piece = await orphan_piece(db, pieces[0])
         assert await StyleSpecService(db).kit_required_for_piece(piece.id) is False
@@ -1073,6 +1074,7 @@ class TestMaterialRequirementBlock:
         out = await StyleSpecService(db).material_requirement_block(uuid.uuid4())
         assert out["kit_required"] is False
 
+    @pytest.mark.sqlite_only
     async def test_a_piece_whose_style_is_gone_returns_the_same_shape(
             self, db, pieces):
         piece = await orphan_piece(db, pieces[0])
@@ -1405,6 +1407,7 @@ class TestIssueKit:
         assert "takes none of its" in e.value.detail
         assert "the spec working as written" in e.value.detail
 
+    @pytest.mark.sqlite_only
     async def test_a_piece_with_no_parent_style_is_a_404(self, db, pieces):
         piece = await orphan_piece(db, pieces[0])
         with pytest.raises(HTTPException) as e:
@@ -1567,6 +1570,7 @@ class TestPieceMaterials:
         assert out["issued"][0]["source"] == MaterialIssueSource.MANUAL.value
         assert out["issued"][0]["spec_line_id"] is None
 
+    @pytest.mark.sqlite_only
     async def test_a_piece_with_no_style_returns_the_empty_shape(self, db, pieces):
         piece = await orphan_piece(db, pieces[0])
         out = await StyleSpecService(db).piece_materials(piece.id)

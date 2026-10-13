@@ -32,7 +32,7 @@ sqlalchemy[asyncio]==2.0.50
 alembic==1.18.4
 asyncpg==0.31.0           # ASYNC Postgres driver (live API)
 psycopg2-binary==2.9.12   # SYNC Postgres driver (Alembic + seed script)
-aiosqlite==0.22.1         # async SQLite (tests / local)
+# aiosqlite -> requirements-dev.txt (tests / local SQLite only)
 
 # ── Config + validation ────────────────────────────────────────────────────
 pydantic==2.13.4
@@ -89,19 +89,13 @@ reportlab==4.2.5         # pure-Python PDF render — the FALLBACK that runs eve
 # weasyprint             # OPTIONAL primary — install in the Docker image (+ cairo/pango)
 # python-magic           # OPTIONAL libmagic MIME sniff; a signature sniffer is the
 #                        # cross-platform fallback (libmagic is absent on Windows).
-# boto3                  # OPTIONAL — only if STORAGE_BACKEND=s3/minio
+boto3==1.43.111          # REQUIRED on AWS — STORAGE_BACKEND=s3 imports it lazily
+                         # (core/storage.py), so a missing boto3 only fails on the
+                         # first upload, in production. Keep it pinned here.
 # supabase               # OPTIONAL — only if STORAGE_BACKEND=supabase (prod)
 
 # ── Tests ──────────────────────────────────────────────────────────────────
-pytest==9.0.3
-pytest-asyncio==1.4.0
-httpx==0.28.1
-# Coverage. coverage.py's tracer is a C extension and costs roughly 20-30% on
-# this suite; the equivalent pure-Python line hook (stdlib sys.monitoring) was
-# still running after 10 minutes against a suite that finishes in two, which is
-# why this is a dependency rather than a script. Scoping and the CI floor live
-# in .coveragerc.
-pytest-cov==7.0.0
+# Moved to requirements-dev.txt so they stay out of the production image.
 
 # ── LLM extraction + AI chatbot (LangGraph agent) — verified set (2026-05) ───
 # Two distinct uses share the same providers:

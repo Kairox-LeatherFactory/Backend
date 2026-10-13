@@ -13,7 +13,9 @@ Money/data-integrity paths get the deepest coverage: the merge gate, cutting
 consumption + stock decrement, skill/sequence gates, and barcode retire-without-
 history-loss.
 
-DB: in-memory SQLite via aiosqlite. GUID() degrades to CHAR(32) off Postgres,
+DB: in-memory SQLite via aiosqlite by default; set TEST_DATABASE_URL to run the
+same fixtures on a throwaway Postgres (see `engine` below — it WIPES that DB).
+GUID() degrades to CHAR(32) off Postgres,
 JSON_VARIANT to plain JSON — both already handled by core/models, so the schema
 creates cleanly. Anything Postgres-only (a real ON CONFLICT, JSONB operators) is
 NOT used by the feature, so SQLite is a faithful stand-in for these tests.
@@ -25,13 +27,15 @@ RUN:
     pytest -k merge_gate -v         # a single concern across layers
 """
 import asyncio
+import os
+import re
 import uuid
 from datetime import date, timedelta
 
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool, StaticPool
 
 # Import Base + every model module so metadata is complete before create_all.
 from app.core.database import Base
@@ -77,15 +81,139 @@ def event_loop():
     loop.close()
 
 
+# ── THE SAME SUITE, ON POSTGRES ──────────────────────────────────────────────
+# Unset (the default): in-memory SQLite, a fresh schema per test, as always.
+# Set TEST_DATABASE_URL=postgresql+asyncpg://... to run against a real server.
+# SQLite silently passes what Postgres enforces — the native `user_role` enum,
+# FK delete rules (SQLite ignores FKs), SELECT ... FOR UPDATE (a no-op there),
+# timezone-aware comparisons — and the CI postgres job exists to catch those.
+#
+# THE DATABASE IS WIPED. The schema is dropped and rebuilt once per run, so point
+# this at a throwaway database, NEVER at one holding data. The guard below
+# refuses an obviously-live URL.
+#
+# ISOLATION: REAL COMMITS, THEN A FAST WIPE. Each commit stays a real
+# transaction, as in production. Wrapping the test in one outer transaction and
+# rolling back was tried and rejected: inside one transaction Postgres's now()
+# is frozen, every created_at ties, and anything ordered by time (a piece's
+# history) comes back in arbitrary order — a failure production cannot have.
+# TRUNCATE of ~100 tables costs ~1s per test (25 min for tests/integration), so
+# the wipe is DELETE with FK triggers suspended (session_replication_role, which
+# needs a superuser — CI's postgres service is one); TRUNCATE is the fallback.
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "").strip()
+_pg_schema_built = False
+_pg_fast_wipe = True
+
+
+def pytest_collection_modifyitems(config, items):
+    """`sqlite_only` tests forge a dangling foreign key to prove a read degrades
+    gracefully. Postgres refuses to store that row, so on Postgres the state the
+    test needs cannot exist — skip it rather than report a false failure."""
+    if not TEST_DATABASE_URL:
+        return
+    skip = pytest.mark.skip(reason="forges a dangling FK that Postgres refuses")
+    for item in items:
+        if "sqlite_only" in item.keywords:
+            item.add_marker(skip)
+
+
+def _assert_throwaway(url: str) -> None:
+    lowered = url.lower()
+    if any(h in lowered for h in ("supabase", "rds.amazonaws", "pooler")):
+        raise RuntimeError(
+            "TEST_DATABASE_URL points at a hosted database. The test harness "
+            "drops and truncates every table — use a local throwaway database.")
+
+
+async def _reset_postgres(eng) -> None:
+    """First test of the run: rebuild the schema. Every later test: wipe rows.
+
+    DROP SCHEMA, not drop_all: drop_all walks FK order and trips on the
+    use_alter cycles; a schema drop also clears native enum types."""
+    global _pg_schema_built, _pg_fast_wipe
+    if not _pg_schema_built:
+        async with eng.begin() as conn:
+            await conn.exec_driver_sql("DROP SCHEMA IF EXISTS public CASCADE")
+            await conn.exec_driver_sql("CREATE SCHEMA public")
+            await conn.run_sync(Base.metadata.create_all)
+        _pg_schema_built = True
+        return
+
+    if not _pg_dirty:
+        return
+    from sqlalchemy.exc import DBAPIError
+    quote = eng.dialect.identifier_preparer.quote
+    tables = [quote(t) for t in sorted(_pg_dirty)]
+    _pg_dirty.clear()
+    if _pg_fast_wipe:
+        try:
+            # ONE statement: asyncpg prepares what it sends, and a prepared
+            # statement cannot hold several commands — a DO block is one.
+            async with eng.begin() as conn:
+                await conn.exec_driver_sql(
+                    "DO $wipe$ BEGIN "
+                    "PERFORM set_config('session_replication_role', 'replica', true); "
+                    + " ".join(f"DELETE FROM {t};" for t in tables)
+                    + " END $wipe$")
+            return
+        except DBAPIError:          # not a superuser: fall back, once
+            _pg_fast_wipe = False
+    async with eng.begin() as conn:
+        await conn.exec_driver_sql(
+            f"TRUNCATE {', '.join(tables)} RESTART IDENTITY CASCADE")
+
+
+# Tables written since the last wipe. Filled by an engine hook (below), so it
+# sees ORM flushes, core inserts and the actor-user bridge alike; a test that
+# touches 10 of the ~75 tables pays for 10.
+_pg_dirty: set[str] = set()
+_INSERT_TABLE = re.compile(r'^\s*INSERT\s+INTO\s+"?(\w+)"?', re.IGNORECASE)
+
+
+def _seen_insert(_conn, _cursor, statement, *_args):
+    m = _INSERT_TABLE.match(statement)
+    if m:
+        _pg_dirty.add(m.group(1))
+
+
+def _track_inserts(eng) -> None:
+    from sqlalchemy import event
+    event.listen(eng.sync_engine, "before_cursor_execute", _seen_insert)
+
+
+def _track_app_engines() -> None:
+    """The breakdown release path writes through the APP's own sync
+    `SessionLocal`, not the test session. In the CI postgres job DATABASE_URL
+    is the same database, so those rows need wiping too."""
+    from sqlalchemy import event
+    from app.core import database as appdb
+    for eng in (appdb.engine, appdb.async_engine.sync_engine,
+                appdb.celery_async_engine.sync_engine):
+        if not event.contains(eng, "before_cursor_execute", _seen_insert):
+            event.listen(eng, "before_cursor_execute", _seen_insert)
+
+
+if TEST_DATABASE_URL:
+    _track_app_engines()
+
+
 @pytest_asyncio.fixture
 async def engine():
-    eng = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    if TEST_DATABASE_URL:
+        _assert_throwaway(TEST_DATABASE_URL)
+        # NullPool: pytest-asyncio gives each test its own event loop, and an
+        # asyncpg connection pooled on one loop cannot be used from the next.
+        eng = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool)
+        await _reset_postgres(eng)
+        _track_inserts(eng)
+    else:
+        eng = create_async_engine(
+            "sqlite+aiosqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        async with eng.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
     yield eng
     await eng.dispose()
 
@@ -109,7 +237,59 @@ async def db(engine) -> AsyncSession:
     Session = async_sessionmaker(engine, autoflush=False,
                                 expire_on_commit=False, class_=AsyncSession)
     async with Session() as session:
+        if TEST_DATABASE_URL:
+            _provision_actor_users(session)
         yield session
+
+
+# ── ON POSTGRES, AN ACTOR ID IS A LOGGED-IN USER ─────────────────────────────
+# Tests name the actor with a FakeUser or a bare uuid4() — fine on SQLite, which
+# never checks a foreign key, and a ForeignKeyViolation on Postgres for every
+# audit_log / created_by / received_by row. In production the actor IS always a
+# real app_user (the JWT dependency loads it), so the faithful harness is: any
+# id written into a column that REFERENCES app_user gets that user created just
+# before the flush. Only app_user FKs are bridged — every other foreign key
+# stays fully enforced, which is the point of running on Postgres at all.
+def _actor_fk_columns() -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for table in Base.metadata.sorted_tables:
+        for fk in table.foreign_keys:
+            if fk.column.table.name == "app_user" and table.name != "app_user":
+                out.setdefault(table.name, []).append(fk.parent.name)
+    return out
+
+
+def _provision_actor_users(session: AsyncSession) -> None:
+    from sqlalchemy import event, select
+    from app.modules.users.models import User
+
+    columns = _actor_fk_columns()
+    known: set = set()
+
+    @event.listens_for(session.sync_session, "before_flush")
+    def _before_flush(sess, _ctx, _instances):
+        wanted = set()
+        for obj in list(sess.new) + list(sess.dirty):
+            table = getattr(obj, "__table__", None)
+            if table is None or isinstance(obj, User):
+                continue
+            for col in columns.get(table.name, ()):
+                attr = obj.__mapper__.get_property_by_column(table.c[col]).key
+                value = getattr(obj, attr, None)
+                if value is not None and value not in known:
+                    wanted.add(value)
+        if not wanted:
+            return
+        conn = sess.connection()
+        present = set(conn.execute(
+            select(User.id).where(User.id.in_(wanted))).scalars())
+        for uid in wanted - present:
+            tag = str(uid).replace("-", "")[:12]
+            conn.execute(User.__table__.insert().values(
+                id=uid, name=f"TEST ACTOR {tag}", phone=f"T{tag}",
+                email=None, password_hash="!", role=UserRole.DIRECT_MANAGER,
+                is_active=True, must_change_password=False))
+        known.update(wanted)
 
 
 # ── canonical operations (the pipeline) ──────────────────────────────────────

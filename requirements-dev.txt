@@ -1,0 +1,16 @@
+# Everything production needs, plus the test/CI toolchain.
+# The Docker image installs requirements.txt ONLY.
+#   pip install -r requirements-dev.txt
+-r requirements.txt
+
+aiosqlite==0.22.1         # async SQLite — the test suite's database
+pytest==9.0.3
+pytest-asyncio==1.4.0
+httpx==0.28.1             # FastAPI TestClient / AsyncClient in tests/system
+# Coverage. coverage.py's tracer is a C extension and costs roughly 20-30% on
+# this suite; the equivalent pure-Python line hook (stdlib sys.monitoring) was
+# still running after 10 minutes against a suite that finishes in two, which is
+# why this is a dependency rather than a script. Scoping and the CI floor live
+# in .coveragerc.
+pytest-cov==7.0.0
+import-linter            # `lint-imports` — module boundaries (.importlinter)

@@ -11,29 +11,28 @@ Frontend/
 .env.prod
 .env.staging
 !.env.example
-alembic.txt
-main.txt
-core.txt
-analytics.txt
-attendance.txt
-barcode.txt
-bom.txt
-clients.txt
-dashboard.txt
-drawers.txt
-employees.txt
-inventory.txt
-imports.txt
-materials.txt
-production.txt
-users.txt
-wages.txt
-config/
+
+# Per-module source dumps (pasted into chats) — never source of truth.
+# config/*.yaml is NOT ignored: the app loads it at runtime.
+app/**/*.txt
+alembic/*.txt
+tests/**/*.txt
+_wf.txt
+aws.txt
+
+# Client data and generated output — keep out of git.
 data/Full-data-spec-order
 data/supplier-po-form
-_wf.txt
 var/
-.env.bak.20260820153626
-# Coverage artefacts (the HTML report and the data file are build output)
+/*.xlsx
+/*.xls
+/*.pdf
+/*.dxf
+*.postman_collection.json
+!postman/**
+
+# Runtime / build artefacts
+*.log
+celerybeat-schedule*
 .coverage
 htmlcov/

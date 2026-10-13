@@ -80,6 +80,25 @@ class Settings(BaseSettings):
     # whitelisted tables only). Blank => unused (the agent shares the app session).
     # This is NOT Supabase Auth — just a separate Postgres role connection string.
     ai_reader_database_url: str = ""
+    # ALEMBIC ONLY. Migrations need a real session (DDL, advisory locks, SET), so
+    # when the app runs through a TRANSACTION pooler (Supabase :6543) point this
+    # at the SESSION pooler (:5432) or the direct host. Blank => database_url.
+    migration_database_url: str = ""
+
+    # ── Transaction pooler (Supabase Supavisor :6543, PgBouncer) ──────────────
+    # WHY: Supabase's SESSION pooler (:5432) gives every open client connection
+    # its own server slot — 15 on this plan — for as long as it stays open, idle
+    # or not. Two gunicorn workers x (async + sync pools) x (5 + 5) asks for 40,
+    # and the result was "EMAXCONNSESSION max clients reached" on almost every
+    # restart. The TRANSACTION pooler (:6543) lends a slot only for the length of
+    # a transaction, so idle pooled connections cost nothing.
+    #
+    # The price is asyncpg's prepared statements: they live on ONE server
+    # connection, and the pooler hands the next transaction a different one.
+    # When this is on, database.py turns the statement cache off and gives every
+    # prepared statement a unique name. None = auto (on when the URL's port is
+    # 6543); set DB_TRANSACTION_POOLER=true/false to force it.
+    db_transaction_pooler: bool | None = None
 
     # ── Connection pool (THE concurrency ceiling — tune this, not the CPU) ────
     # An in-flight request holds one pooled connection for its WHOLE lifetime, so
