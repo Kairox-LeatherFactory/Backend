@@ -34,9 +34,11 @@ DEPENDENCY USAGE (in routers)
     block even if the handler raises.
 ================================================================================
 """
+import uuid
 from collections.abc import AsyncGenerator, Generator
 
 from sqlalchemy import MetaData, create_engine
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -107,9 +109,41 @@ def _engine_kwargs(url: str) -> dict:
             pool_timeout=settings.db_pool_timeout,
             pool_recycle=settings.db_pool_recycle,
             pool_pre_ping=settings.db_pool_pre_ping,
+            **_pooler_kwargs(url),
         )
     # SQLite (tests/local): a single shared connection, no pool sizing.
     return dict()
+
+
+def behind_transaction_pooler(url: str) -> bool:
+    """True when `url` goes through a transaction-mode pooler — see
+    Settings.db_transaction_pooler. Auto-detects Supabase's :6543."""
+    if settings.db_transaction_pooler is not None:
+        return settings.db_transaction_pooler
+    try:
+        return make_url(url).port == 6543
+    except Exception:
+        return False
+
+
+def _pooler_kwargs(url: str) -> dict:
+    """asyncpg settings that survive a transaction pooler.
+
+    asyncpg prepares every statement on the server and caches it per
+    connection. Through a transaction pooler the next transaction may land on a
+    different server connection, where that statement does not exist
+    ("prepared statement __asyncpg_stmt_1__ does not exist") or exists with
+    another query ("... already exists"). So: no statement cache, and a unique
+    name per prepared statement so two clients can never collide on one.
+    psycopg2 does not prepare statements, so the sync engine needs nothing.
+    """
+    if "+asyncpg" not in url or not behind_transaction_pooler(url):
+        return {}
+    return {"connect_args": {
+        "statement_cache_size": 0,
+        "prepared_statement_cache_size": 0,
+        "prepared_statement_name_func": lambda: f"__asyncpg_{uuid.uuid4()}__",
+    }}
 
 # ──────────────────────────────────────────────────────────────────────────
 # ASYNC engine + session  (the live API runs on these)
@@ -160,6 +194,7 @@ celery_async_engine = create_async_engine(
     echo=False,
     future=True,
     poolclass=NullPool,
+    **_pooler_kwargs(settings.effective_async_url),
 )
 
 CeleryAsyncSessionLocal = async_sessionmaker(

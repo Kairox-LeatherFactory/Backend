@@ -27,17 +27,19 @@ from app.modules.supplier_po import models as _spo  # noqa
 from app.modules.barcode import models as _bc  # noqa
 
 config = context.config
-db_url = get_settings().database_url
+# MIGRATION_DATABASE_URL wins: when the app runs through a transaction pooler
+# (Supabase :6543) migrations still need a real session — see config.py.
+_settings = get_settings()
+migration_url = _settings.migration_database_url or _settings.database_url
 # Escape % characters in the URL for ConfigParser (it treats % as interpolation)
-db_url = db_url.replace("%", "%%")
-config.set_main_option("sqlalchemy.url", db_url)
+config.set_main_option("sqlalchemy.url", migration_url.replace("%", "%%"))
 if config.config_file_name:
     fileConfig(config.config_file_name)
 target_metadata = Base.metadata
 
 
 def run_migrations_offline():
-    context.configure(url=get_settings().database_url, target_metadata=target_metadata,
+    context.configure(url=migration_url, target_metadata=target_metadata,
                       literal_binds=True, compare_type=True)
     with context.begin_transaction():
         context.run_migrations()
