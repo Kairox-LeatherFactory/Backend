@@ -39,6 +39,25 @@ from app.core.config import settings
 from app.core.database import Base, async_engine
 
 
+class HealthCheckAccessFilter(logging.Filter):
+    """Drop the access-log line of a SUCCESSFUL /health or /ready probe.
+
+    The compose healthcheck curls /health every 15s, so on the server those lines
+    were ~6,000 a day and buried every real request. A probe that FAILS (>= 400)
+    is still logged — that is the one worth seeing. Relies on uvicorn's access
+    record args: (client, method, path_with_query, http_version, status)."""
+
+    _PATHS = frozenset({"/health", "/ready"})
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5:
+            path, status = args[2], args[4]
+            if path in self._PATHS and isinstance(status, int) and status < 400:
+                return False
+        return True
+
+
 def _configure_logging() -> None:
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
@@ -46,6 +65,11 @@ def _configure_logging() -> None:
         force=True,
     )
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+    # On the LOGGER, not a handler: gunicorn's UvicornWorker swaps this logger's
+    # handlers for its own, but leaves its filters alone.
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, HealthCheckAccessFilter) for f in access.filters):
+        access.addFilter(HealthCheckAccessFilter())
 
 
 _configure_logging()

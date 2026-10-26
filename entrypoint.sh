@@ -59,21 +59,49 @@ CELERY_BEAT_SCHEDULE_FILE="${CELERY_BEAT_SCHEDULE_FILE:-/app/var/celerybeat/cele
 log() { echo "[entrypoint] $*"; }
 err() { echo "[entrypoint] ERROR: $*" >&2; }
 
+# SAY WHY. This probe used to swallow the exception (`except: exit(1)` plus
+# 2>/dev/null), so a deploy died with "Postgres unreachable after 60s" and no
+# reason — an empty DATABASE_URL, a wrong password, an IPv6-only host and a full
+# pooler all looked identical. It now names the target (never the password) and
+# prints the driver's own error.
 wait_for_postgres() {
-    log "Waiting for Postgres..."
-    local max="${DB_WAIT_MAX_ATTEMPTS:-60}" n=0
-    until python -c "
-import os,sys
+    if [ -z "${DATABASE_URL:-}" ]; then
+        err "DATABASE_URL is not set. The image ships no .env — set it in the"
+        err "platform's environment (Render: Environment tab; ECS: task secrets)."
+        exit 1
+    fi
+    local target
+    # `|| ...`: under `set -e` a URL that will not parse (a password holding an
+    # unescaped @ # / or :) would otherwise end the script without a word.
+    target="$(python -c "
+import os
+from urllib.parse import urlsplit
+u = urlsplit(os.environ['DATABASE_URL'].replace('postgresql+psycopg2://', 'postgresql://'))
+print(f'{u.hostname}:{u.port or 5432}/{u.path.lstrip(\"/\")} as {u.username}')
+" 2>&1)" || target="an UNPARSEABLE DATABASE_URL (percent-encode special characters in the password)"
+    log "Waiting for Postgres at ${target} ..."
+    local max="${DB_WAIT_MAX_ATTEMPTS:-60}" n=0 why=""
+    until why="$(python -c "
+import os, sys
+import psycopg2
+u = os.environ['DATABASE_URL'].replace('postgresql+psycopg2://', 'postgresql://')
 try:
-    import psycopg2
-    u=os.environ.get('DATABASE_URL','').replace('postgresql+psycopg2://','postgresql://')
-    psycopg2.connect(u, connect_timeout=2).close(); sys.exit(0)
-except Exception: sys.exit(1)
-" 2>/dev/null; do
-        n=$((n+1)); [ "$n" -ge "$max" ] && { err "Postgres unreachable after ${max}s"; exit 1; }
+    psycopg2.connect(u, connect_timeout=int(os.environ.get('DB_WAIT_CONNECT_TIMEOUT', '5'))).close()
+except Exception as e:
+    msg = ' '.join(str(e).split()) or type(e).__name__
+    print(f'{type(e).__name__}: {msg}'[:400]); sys.exit(1)
+" 2>&1)"; do
+        n=$((n+1))
+        # One line every 10 attempts: enough to see the reason, not a wall.
+        [ $((n % 10)) -eq 1 ] && log "  not yet (${n}/${max}): ${why}"
+        if [ "$n" -ge "$max" ]; then
+            err "Postgres unreachable after ${max} attempts at ${target}"
+            err "Last error: ${why}"
+            exit 1
+        fi
         sleep 1
     done
-    log "Postgres ready (${n}s)."
+    log "Postgres ready (${n} retries)."
 }
 
 # Celery fails LOUDLY but slowly against a broker that isn't up yet (it retries
@@ -183,10 +211,12 @@ case "$CMD" in
         # auto-seed on boot. Otherwise seed manually with the `seed` command.
         [ "${RUN_SEED:-false}" = "true" ] && run_seed
         log "Starting Gunicorn (uvicorn workers)..."
+        # ${PORT}: Render (and most PaaS) tell the container which port to bind
+        # (Render: 10000). Unset everywhere else — compose and ECS keep 8000.
         exec gunicorn app.main:app \
             -k uvicorn.workers.UvicornWorker \
             -w "${WEB_CONCURRENCY:-2}" \
-            -b 0.0.0.0:8000 \
+            -b "0.0.0.0:${PORT:-8000}" \
             --timeout "${GUNICORN_TIMEOUT:-120}" \
             --graceful-timeout 30 \
             --access-logfile - \
